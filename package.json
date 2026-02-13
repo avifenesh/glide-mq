@@ -1,0 +1,37 @@
+{
+  "name": "glide-mq",
+  "version": "0.0.1",
+  "description": "High-performance message queue for Node.js built on Valkey/Redis with native NAPI bindings",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/ tests/",
+    "clean": "rm -rf dist"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "speedkey": "file:../speedkey/node"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "vitest": "^3",
+    "@types/node": "^22"
+  },
+  "keywords": [
+    "queue",
+    "job",
+    "message",
+    "valkey",
+    "redis",
+    "streams",
+    "worker",
+    "task"
+  ]
+}

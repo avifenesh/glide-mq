@@ -24,6 +24,7 @@
 
 ## Code Quality
 - Correctness above all. We can afford friction or edge-case failures over incorrectness.
+- Always check the speedkey/valkey-glide API before using it. Read the actual type signatures. Never assume you know the API.
 - Before every commit, review your own code.
 - Commit every logical change separately.
 - Run /deslop before every push (removes dead code, debug logs, ghost code, unnecessary comments).
