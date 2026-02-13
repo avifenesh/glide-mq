@@ -31,8 +31,18 @@
 - speedkey-only (no ioredis/node-redis abstraction)
 - 4 phases: Core -> Advanced -> Flows+Events -> Production Hardening
 
+### Phase 1 complete
+- 9 Lua server functions in glidemq library (FUNCTION LOAD, not EVAL)
+- Connection factory with function loader, consumer group creation
+- Queue: add, addBulk, getJob, pause, resume
+- Worker: XREADGROUP BLOCK poll loop, concurrency, processor dispatch
+- Job: progress, data update, children values, moveToFailed, remove, retry
+- Scheduler: delayed promotion, stalled recovery via XAUTOCLAIM
+- 79 tests passing across 4 suites
+
 ### Next steps
-- Scaffold TypeScript project with speedkey as dependency
-- Implement Phase 1: connection factory, key utils, core Lua functions, Queue, Worker, Job
-- Wait for speedkey CD to finish (arm64-gnu runner still queued)
+- Phase 2: delayed jobs, priorities, retries with backoff, retention, dedup, rate limiting
+- Phase 3: FlowProducer, QueueEvents, job schedulers, metrics
+- Phase 4: graceful shutdown, error recovery, OpenTelemetry, cluster tests
+- speedkey CD: arm64-gnu build still queued, publish blocked on it
 - Rotate NPM token
