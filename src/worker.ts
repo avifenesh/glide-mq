@@ -4,7 +4,7 @@ import { Job } from './job';
 import { buildKeys, calculateBackoff, keyPrefix } from './utils';
 import { createClient, createBlockingClient, ensureFunctionLibrary, createConsumerGroup } from './connection';
 import { CONSUMER_GROUP } from './functions/index';
-import { completeJob, failJob, addJob, rateLimit as rateLimitFn, checkConcurrency } from './functions/index';
+import { completeJob, failJob, addJob, rateLimit as rateLimitFn, checkConcurrency, moveToActive } from './functions/index';
 import { Scheduler } from './scheduler';
 import { withSpan, withChildSpan } from './telemetry';
 export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed';
@@ -263,55 +263,29 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private async processJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
 
-    // Fetch job data from hash
-    const hashData = await this.commandClient.hgetall(this.queueKeys.job(jobId));
-    if (!hashData || hashData.length === 0) {
+    const now = Date.now();
+
+    // Single FCALL: reads job hash, checks revoked, sets state=active + lastActive + processedOn
+    // Replaces: HGETALL + revoked check + HSET lastActive (3 round trips -> 1)
+    const result = await moveToActive(this.commandClient, this.queueKeys, jobId, now);
+
+    if (result === null) {
       // Job hash missing - ACK and skip
       try {
-        await completeJob(
-          this.commandClient,
-          this.queueKeys,
-          jobId,
-          entryId,
-          'null',
-          Date.now(),
-          CONSUMER_GROUP,
-        );
-      } catch {
-        // Best effort
-      }
+        await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', now, CONSUMER_GROUP);
+      } catch {}
       return;
     }
 
-    // Convert HashDataType ({ field, value }[]) to Record<string, string>
-    const hash: Record<string, string> = {};
-    for (const entry of hashData) {
-      hash[String(entry.field)] = String(entry.value);
-    }
-
-    // Check revoked flag before processing (skip the check if revocation is unlikely - saves a branch)
-    if (hash.revoked === '1') {
+    if (result === 'REVOKED') {
       try {
-        await failJob(
-          this.commandClient,
-          this.queueKeys,
-          jobId,
-          entryId,
-          'revoked',
-          Date.now(),
-          0,
-          0,
-          CONSUMER_GROUP,
-        );
-      } catch {
-        // Best effort
-      }
+        await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', now, 0, 0, CONSUMER_GROUP);
+      } catch {}
       return;
     }
 
+    const hash = result;
     const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, jobId, hash);
-
-    // Attach entryId for completion/failure XACK
     (job as any)._entryId = entryId;
 
     // Rate limiting: check before processing
@@ -324,7 +298,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     this.activeAbortControllers.set(jobId, ac);
     (job as any).abortSignal = ac.signal;
 
-    // Start heartbeat for lock renewal: writes lastActive to job hash every lockDuration/2
+    // Start heartbeat for lock renewal (periodic lastActive writes after the initial one set by moveToActive)
     this.startHeartbeat(jobId);
 
     try {
@@ -509,8 +483,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     const interval = this.lockDuration / 2;
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
-    // Write initial lastActive immediately
-    client.hset(jobKey, { lastActive: Date.now().toString() }).catch(() => {});
+    // Initial lastActive already set by moveToActive - heartbeat only for periodic renewal
     const timer = setInterval(() => {
       client.hset(jobKey, { lastActive: Date.now().toString() }).catch(() => {});
     }, interval);

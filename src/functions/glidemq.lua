@@ -732,6 +732,27 @@ end)
 --   ARGS[8] = number of children (N)
 --   Then for each child (8 args each):
 --     childName, childData, childOpts, childDelay, childPriority, childMaxAttempts, childQueuePrefix, childParentQueue
+-- glidemq_moveToActive(KEYS, ARGS)
+-- Single round trip: read job hash, check revoked, set state=active + processedOn + lastActive.
+-- KEYS[1] = job hash key
+-- ARGS[1] = timestamp
+-- Returns: '' if not found, 'REVOKED' if revoked, cjson array of HGETALL fields otherwise
+redis.register_function('glidemq_moveToActive', function(keys, args)
+  local jobKey = keys[1]
+  local timestamp = args[1]
+  local exists = redis.call('EXISTS', jobKey)
+  if exists == 0 then
+    return ''
+  end
+  local revoked = redis.call('HGET', jobKey, 'revoked')
+  if revoked == '1' then
+    return 'REVOKED'
+  end
+  redis.call('HSET', jobKey, 'state', 'active', 'processedOn', timestamp, 'lastActive', timestamp)
+  local fields = redis.call('HGETALL', jobKey)
+  return cjson.encode(fields)
+end)
+
 -- Returns: cjson array [parentId, childId1, childId2, ...]
 redis.register_function('glidemq_addFlow', function(keys, args)
   local parentIdKey = keys[1]

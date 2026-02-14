@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from 'speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '3';
+export const LIBRARY_VERSION = '4';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -470,6 +470,22 @@ redis.register_function('glidemq_checkConcurrency', function(keys, args)
     return 0
   end
   return remaining
+end)
+
+redis.register_function('glidemq_moveToActive', function(keys, args)
+  local jobKey = keys[1]
+  local timestamp = args[1]
+  local exists = redis.call('EXISTS', jobKey)
+  if exists == 0 then
+    return ''
+  end
+  local revoked = redis.call('HGET', jobKey, 'revoked')
+  if revoked == '1' then
+    return 'REVOKED'
+  end
+  redis.call('HSET', jobKey, 'state', 'active', 'processedOn', timestamp, 'lastActive', timestamp)
+  local fields = redis.call('HGETALL', jobKey)
+  return cjson.encode(fields)
 end)
 
 redis.register_function('glidemq_addFlow', function(keys, args)
@@ -963,6 +979,39 @@ export async function checkConcurrency(
     [group],
   );
   return result as number;
+}
+
+/**
+ * Move a job to active state in a single round trip.
+ * Reads the full job hash, checks revoked flag, sets state=active + processedOn + lastActive.
+ * Returns:
+ * - null if job hash doesn't exist
+ * - 'REVOKED' if the job's revoked flag is set
+ * - Record<string, string> with all job fields otherwise
+ *
+ * Replaces: HGETALL + revoked check + HSET lastActive (3 round trips -> 1)
+ */
+export async function moveToActive(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  timestamp: number,
+): Promise<Record<string, string> | 'REVOKED' | null> {
+  const result = await client.fcall(
+    'glidemq_moveToActive',
+    [k.job(jobId)],
+    [timestamp.toString()],
+  );
+  const str = String(result);
+  if (str === '' || str === 'null') return null;
+  if (str === 'REVOKED') return 'REVOKED';
+  // Parse the cjson.encode output: [field1, value1, field2, value2, ...]
+  const arr = JSON.parse(str) as string[];
+  const hash: Record<string, string> = {};
+  for (let i = 0; i < arr.length; i += 2) {
+    hash[String(arr[i])] = String(arr[i + 1]);
+  }
+  return hash;
 }
 
 /**
