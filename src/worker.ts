@@ -4,7 +4,8 @@ import { Job } from './job';
 import { buildKeys, calculateBackoff, keyPrefix } from './utils';
 import { createClient, createBlockingClient, ensureFunctionLibrary, createConsumerGroup } from './connection';
 import { CONSUMER_GROUP } from './functions/index';
-import { completeJob, failJob, addJob, rateLimit as rateLimitFn, checkConcurrency, moveToActive } from './functions/index';
+import { completeJob, completeAndFetchNext, failJob, addJob, rateLimit as rateLimitFn, checkConcurrency, moveToActive } from './functions/index';
+import type { CompleteAndFetchResult } from './functions/index';
 import { Scheduler } from './scheduler';
 import { withSpan, withChildSpan } from './telemetry';
 export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed';
@@ -244,8 +245,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
         if (!jobId) continue;
 
         if (this.concurrency === 1) {
-          // Inline processing for c=1: avoids promise dispatch overhead (~15ms/job)
-          await this.processJob(jobId, String(entryId));
+          // c=1 fast path: process inline, use completeAndFetchNext for 1 RTT/job steady state
+          await this.processJobFastPath(jobId, String(entryId));
         } else {
           this.dispatchJob(jobId, String(entryId));
         }
@@ -266,6 +267,130 @@ export class Worker<D = any, R = any> extends EventEmitter {
     });
 
     this.activePromises.add(promise);
+  }
+
+  /**
+   * Fast path for c=1: processes jobs in a tight loop using completeAndFetchNext.
+   * First job uses moveToActive (2 RTTs). Subsequent jobs use completeAndFetchNext (1 RTT).
+   * Falls back to normal pollOnce when no more jobs are available.
+   */
+  private async processJobFastPath(jobId: string, entryId: string): Promise<void> {
+    if (!this.commandClient) return;
+
+    // First job: moveToActive (since we got it from XREADGROUP, not from completeAndFetchNext)
+    let hash = await moveToActive(this.commandClient, this.queueKeys, jobId, Date.now());
+    if (hash === null) {
+      try { await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', Date.now(), CONSUMER_GROUP); } catch {}
+      return;
+    }
+    if (hash === 'REVOKED') {
+      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch {}
+      return;
+    }
+
+    let currentJobId = jobId;
+    let currentEntryId = entryId;
+    let currentHash = hash as Record<string, string>;
+
+    // Tight loop: process -> completeAndFetchNext -> process -> ...
+    while (this.running && !this.closing) {
+      const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash);
+      (job as any)._entryId = currentEntryId;
+
+      if (this.opts.limiter) await this.waitForRateLimit();
+
+      const ac = new AbortController();
+      this.activeAbortControllers.set(currentJobId, ac);
+      (job as any).abortSignal = ac.signal;
+      this.startHeartbeat(currentJobId);
+
+      let processResult: R | undefined;
+      let processError: Error | undefined;
+
+      try {
+        const timeoutMs = job.opts.timeout;
+        if (timeoutMs && timeoutMs > 0) {
+          processResult = await Promise.race([
+            this.processor(job),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs)),
+          ]);
+        } else {
+          processResult = await this.processor(job);
+        }
+      } catch (err) {
+        processError = err instanceof Error ? err : new Error(String(err));
+      } finally {
+        this.stopHeartbeat(currentJobId);
+        this.activeAbortControllers.delete(currentJobId);
+      }
+
+      if (!this.commandClient) return;
+
+      // Handle failure - use regular failJob (no fetch-next on failure)
+      if (processError || ac.signal.aborted) {
+        const error = ac.signal.aborted ? new Error('revoked') : processError!;
+        if (error instanceof Worker.RateLimitError) {
+          const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
+          this.rateLimitUntil = Date.now() + delayMs;
+          try { await failJob(this.commandClient, this.queueKeys, currentJobId, currentEntryId, 'rate limited', Date.now(), job.attemptsMade + 2, delayMs, CONSUMER_GROUP); } catch (e) { this.emit('error', e); }
+        } else {
+          const maxAttempts = job.opts.attempts ?? 0;
+          let backoffDelay = 0;
+          if (maxAttempts > 0 && job.opts.backoff) {
+            const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
+            backoffDelay = strategyFn
+              ? strategyFn(job.attemptsMade + 1, error)
+              : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, job.attemptsMade + 1, job.opts.backoff.jitter);
+          }
+          const failResult = await failJob(this.commandClient, this.queueKeys, currentJobId, currentEntryId, error.message, Date.now(), maxAttempts, backoffDelay, CONSUMER_GROUP, job.opts.removeOnFail);
+          if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
+            await this.moveToDLQ(job, error);
+          }
+          job.failedReason = error.message;
+          this.emit('failed', job, error);
+        }
+        return; // Back to pollOnce for next XREADGROUP
+      }
+
+      // Success: completeAndFetchNext - 1 RTT for complete + fetch + activate
+      const returnvalue = processResult !== undefined ? JSON.stringify(processResult) : 'null';
+      let parentInfo: Parameters<typeof completeAndFetchNext>[9];
+      if (job.parentId && job.parentQueue) {
+        const parentKeys = buildKeys(job.parentQueue, this.opts.prefix);
+        parentInfo = {
+          depsMember: `${keyPrefix(this.opts.prefix ?? 'glide', this.name)}:${currentJobId}`,
+          parentId: job.parentId,
+          parentKeys,
+        };
+      }
+
+      const fetchResult = await completeAndFetchNext(
+        this.commandClient, this.queueKeys, currentJobId, currentEntryId,
+        returnvalue, Date.now(), CONSUMER_GROUP, this.consumerId,
+        job.opts.removeOnComplete, parentInfo,
+      );
+
+      job.returnvalue = processResult;
+      job.finishedOn = Date.now();
+      this.emit('completed', job, processResult);
+
+      // Check if we got a next job
+      if (fetchResult.next === false) {
+        return; // No more jobs - back to pollOnce for blocking XREADGROUP
+      }
+      if (fetchResult.next === 'REVOKED') {
+        // Next job is revoked - fail it and return to poll
+        if (fetchResult.nextJobId && fetchResult.nextEntryId) {
+          try { await failJob(this.commandClient, this.queueKeys, fetchResult.nextJobId, fetchResult.nextEntryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch {}
+        }
+        return;
+      }
+
+      // Got next job - continue the loop
+      currentJobId = fetchResult.nextJobId!;
+      currentEntryId = fetchResult.nextEntryId!;
+      currentHash = fetchResult.next as unknown as Record<string, string>;
+    }
   }
 
   private async processJob(jobId: string, entryId: string): Promise<void> {

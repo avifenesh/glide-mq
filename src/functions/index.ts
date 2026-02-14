@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from 'speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '4';
+export const LIBRARY_VERSION = '5';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -176,6 +176,104 @@ redis.register_function('glidemq_complete', function(keys, args)
     end
   end
   return 1
+end)
+
+redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
+  local streamKey = keys[1]
+  local completedKey = keys[2]
+  local eventsKey = keys[3]
+  local jobKey = keys[4]
+  local jobId = args[1]
+  local entryId = args[2]
+  local returnvalue = args[3]
+  local timestamp = tonumber(args[4])
+  local group = args[5]
+  local consumer = args[6]
+  local removeMode = args[7] or '0'
+  local removeCount = tonumber(args[8]) or 0
+  local removeAge = tonumber(args[9]) or 0
+  local depsMember = args[10] or ''
+  local parentId = args[11] or ''
+
+  -- Phase 1: Complete current job (same as glidemq_complete)
+  redis.call('XACK', streamKey, group, entryId)
+  redis.call('XDEL', streamKey, entryId)
+  redis.call('ZADD', completedKey, timestamp, jobId)
+  redis.call('HSET', jobKey,
+    'state', 'completed',
+    'returnvalue', returnvalue,
+    'finishedOn', tostring(timestamp)
+  )
+  emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+
+  -- Retention cleanup
+  if removeMode == 'true' then
+    redis.call('ZREM', completedKey, jobId)
+    redis.call('DEL', jobKey)
+  elseif removeMode == 'count' and removeCount > 0 then
+    local total = redis.call('ZCARD', completedKey)
+    if total > removeCount then
+      local excess = redis.call('ZRANGE', completedKey, 0, total - removeCount - 1)
+      for i = 1, #excess do
+        redis.call('DEL', prefix .. 'job:' .. excess[i])
+        redis.call('ZREM', completedKey, excess[i])
+      end
+    end
+  end
+
+  -- Parent deps
+  if depsMember ~= '' and parentId ~= '' and #keys >= 8 then
+    local parentDepsKey = keys[5]
+    local parentJobKey = keys[6]
+    local parentStreamKey = keys[7]
+    local parentEventsKey = keys[8]
+    local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+    local totalDeps = redis.call('SCARD', parentDepsKey)
+    if totalDeps - doneCount <= 0 then
+      redis.call('HSET', parentJobKey, 'state', 'waiting')
+      redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
+      emitEvent(parentEventsKey, 'active', parentId, nil)
+    end
+  end
+
+  -- Phase 2: Fetch next job (non-blocking XREADGROUP)
+  local nextEntries = redis.call('XREADGROUP', 'GROUP', group, consumer, 'COUNT', 1, 'STREAMS', streamKey, '>')
+  if not nextEntries or #nextEntries == 0 then
+    return cjson.encode({completed = jobId, next = false})
+  end
+  local streamData = nextEntries[1]
+  local entries = streamData[2]
+  if not entries or #entries == 0 then
+    return cjson.encode({completed = jobId, next = false})
+  end
+  local nextEntry = entries[1]
+  local nextEntryId = nextEntry[1]
+  local nextFields = nextEntry[2]
+  local nextJobId = nil
+  for i = 1, #nextFields, 2 do
+    if nextFields[i] == 'jobId' then
+      nextJobId = nextFields[i + 1]
+      break
+    end
+  end
+  if not nextJobId then
+    return cjson.encode({completed = jobId, next = false})
+  end
+
+  -- Phase 3: Activate next job (same as moveToActive)
+  local nextJobKey = prefix .. 'job:' .. nextJobId
+  local nextExists = redis.call('EXISTS', nextJobKey)
+  if nextExists == 0 then
+    return cjson.encode({completed = jobId, next = false, nextEntryId = nextEntryId})
+  end
+  local revoked = redis.call('HGET', nextJobKey, 'revoked')
+  if revoked == '1' then
+    return cjson.encode({completed = jobId, next = 'REVOKED', nextJobId = nextJobId, nextEntryId = nextEntryId})
+  end
+  redis.call('HSET', nextJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
+  local nextHash = redis.call('HGETALL', nextJobKey)
+  return cjson.encode({completed = jobId, next = nextHash, nextJobId = nextJobId, nextEntryId = nextEntryId})
 end)
 
 redis.register_function('glidemq_fail', function(keys, args)
@@ -845,6 +943,70 @@ export async function completeJob(
   }
 
   return client.fcall('glidemq_complete', keys, args);
+}
+
+/**
+ * Complete current job AND fetch+activate the next job in a single round trip.
+ * In steady state (jobs available), this reduces per-job overhead from 2 RTTs to 1.
+ *
+ * Returns:
+ * - { completed, next: false } if no more jobs in the stream
+ * - { completed, next: 'REVOKED', nextJobId, nextEntryId } if next job is revoked
+ * - { completed, next: Record<string,string>, nextJobId, nextEntryId } with next job hash fields
+ */
+export interface CompleteAndFetchResult {
+  completed: string;
+  next: false | 'REVOKED' | string[];
+  nextJobId?: string;
+  nextEntryId?: string;
+}
+
+export async function completeAndFetchNext(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  entryId: string,
+  returnvalue: string,
+  timestamp: number,
+  group: string,
+  consumer: string,
+  removeOnComplete?: boolean | number | { age: number; count: number },
+  parentInfo?: { depsMember: string; parentId: string; parentKeys: QueueKeys },
+): Promise<CompleteAndFetchResult> {
+  const { mode, count, age } = encodeRetention(removeOnComplete);
+
+  const keys: string[] = [k.stream, k.completed, k.events, k.job(jobId)];
+  const args: string[] = [
+    jobId, entryId, returnvalue, timestamp.toString(),
+    group, consumer,
+    mode, count.toString(), age.toString(),
+  ];
+
+  if (parentInfo) {
+    const pk = parentInfo.parentKeys;
+    keys.push(pk.deps(parentInfo.parentId), pk.job(parentInfo.parentId), pk.stream, pk.events);
+    args.push(parentInfo.depsMember, parentInfo.parentId);
+  } else {
+    args.push('', '');
+  }
+
+  const raw = await client.fcall('glidemq_completeAndFetchNext', keys, args);
+  const parsed = JSON.parse(String(raw));
+
+  if (!parsed.next || parsed.next === false) {
+    return { completed: parsed.completed, next: false };
+  }
+  if (parsed.next === 'REVOKED') {
+    return { completed: parsed.completed, next: 'REVOKED', nextJobId: parsed.nextJobId, nextEntryId: parsed.nextEntryId };
+  }
+
+  // Parse the HGETALL array into a hash map
+  const arr = parsed.next as string[];
+  const hash: Record<string, string> = {};
+  for (let i = 0; i < arr.length; i += 2) {
+    hash[String(arr[i])] = String(arr[i + 1]);
+  }
+  return { completed: parsed.completed, next: hash as any, nextJobId: parsed.nextJobId, nextEntryId: parsed.nextEntryId };
 }
 
 /**
