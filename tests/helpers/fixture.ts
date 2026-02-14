@@ -34,10 +34,13 @@ export const CLUSTER: ConnectionConfig = {
   clusterMode: true,
 };
 
-const MODES: { name: string; connection: ConnectionConfig }[] = [
-  { name: 'standalone', connection: STANDALONE },
-  { name: 'cluster', connection: CLUSTER },
-];
+// Skip cluster mode if SKIP_CLUSTER env var is set (e.g., in CI without cluster)
+const MODES: { name: string; connection: ConnectionConfig }[] = process.env.SKIP_CLUSTER
+  ? [{ name: 'standalone', connection: STANDALONE }]
+  : [
+      { name: 'standalone', connection: STANDALONE },
+      { name: 'cluster', connection: CLUSTER },
+    ];
 
 /**
  * Run a describe block against both standalone and cluster.

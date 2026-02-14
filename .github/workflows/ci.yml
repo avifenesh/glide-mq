@@ -126,5 +126,4 @@ jobs:
       - name: Run standalone integration tests
         run: npx vitest run tests/integration.test.ts tests/dedup.test.ts tests/delayed.test.ts tests/priority.test.ts tests/retry.test.ts tests/retention.test.ts tests/concurrency.test.ts tests/rate-limit.test.ts
         env:
-          VALKEY_HOST: localhost
-          VALKEY_PORT: 6379
+          SKIP_CLUSTER: "1"
