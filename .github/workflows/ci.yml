@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout speedkey
+        uses: actions/checkout@v4
+        with:
+          repository: avifenesh/speedkey
+          path: speedkey
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build speedkey
+        run: |
+          cd speedkey/node
+          npm ci || npm install
+          npm run build:release
+
+      - name: Create symlink for speedkey
+        run: |
+          ln -s $(pwd)/speedkey/node node_modules/speedkey
+
+      - name: Install glide-mq dependencies
+        run: npm ci || npm install
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+  test-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout speedkey
+        uses: actions/checkout@v4
+        with:
+          repository: avifenesh/speedkey
+          path: speedkey
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build speedkey
+        run: |
+          cd speedkey/node
+          npm ci || npm install
+          npm run build:release
+
+      - name: Install glide-mq dependencies
+        run: npm install
+
+      - name: Create symlink for speedkey
+        run: |
+          ln -s $(pwd)/speedkey/node node_modules/speedkey
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+
+      - name: Run unit tests
+        run: npx vitest run tests/connection.test.ts tests/job.test.ts tests/queue.test.ts tests/worker.test.ts tests/shutdown.test.ts tests/telemetry.test.ts tests/recovery.test.ts tests/api-completeness.test.ts
+
+  test-integration:
+    runs-on: ubuntu-latest
+    services:
+      valkey:
+        image: valkey/valkey:8.0
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout speedkey
+        uses: actions/checkout@v4
+        with:
+          repository: avifenesh/speedkey
+          path: speedkey
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build speedkey
+        run: |
+          cd speedkey/node
+          npm ci || npm install
+          npm run build:release
+
+      - name: Install glide-mq dependencies
+        run: npm install
+
+      - name: Create symlink for speedkey
+        run: |
+          ln -s $(pwd)/speedkey/node node_modules/speedkey
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+
+      - name: Wait for Valkey to be ready
+        run: |
+          for i in {1..30}; do
+            valkey-cli -p 6379 ping && break
+            sleep 1
+          done
+
+      - name: Compile TypeScript
+        run: npx tsc
+
+      - name: Run integration tests
+        run: npx vitest run tests/integration.test.ts tests/dedup.test.ts tests/delayed.test.ts tests/priority.test.ts tests/retry.test.ts tests/retention.test.ts tests/concurrency.test.ts tests/rate-limit.test.ts
