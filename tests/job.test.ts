@@ -233,6 +233,7 @@ describe('Job', () => {
         'glide:{test-queue}:completed',
         'glide:{test-queue}:failed',
         'glide:{test-queue}:events',
+        'glide:{test-queue}:log:8',
       ]);
       expect(call[2]).toEqual(['8']);
     });

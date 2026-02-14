@@ -9,9 +9,18 @@ export interface ConnectionOptions {
   clusterMode?: boolean;
 }
 
+export interface DeadLetterQueueOptions {
+  /** Queue name to use as the dead letter queue. */
+  name: string;
+  /** Max retries before moving to DLQ. If not set, uses the job's own attempts config. */
+  maxRetries?: number;
+}
+
 export interface QueueOptions {
   connection: ConnectionOptions;
   prefix?: string;
+  /** Dead letter queue configuration. Jobs that exhaust retries are moved here. */
+  deadLetterQueue?: DeadLetterQueueOptions;
 }
 
 export interface WorkerOptions extends QueueOptions {
@@ -23,6 +32,11 @@ export interface WorkerOptions extends QueueOptions {
   maxStalledCount?: number;
   promotionInterval?: number;
   limiter?: { max: number; duration: number };
+  backoffStrategies?: Record<string, (attemptsMade: number, err: Error) => number>;
+  /** Lock duration in ms. The worker sends a heartbeat every lockDuration/2.
+   *  Jobs with a recent heartbeat are not reclaimed as stalled.
+   *  Default: 30000 (30s). */
+  lockDuration?: number;
 }
 
 export interface JobOptions {

@@ -217,12 +217,12 @@ describe('ensureFunctionLibrary', () => {
 
   it('should coerce non-string fcall result for version comparison', async () => {
     const mockClient = makeMockClient({
-      // Simulate fcall returning a Buffer or number instead of string
-      fcall: vi.fn().mockResolvedValue(1),
+      // Simulate fcall returning a number instead of string
+      fcall: vi.fn().mockResolvedValue(Number(LIBRARY_VERSION)),
       functionLoad: vi.fn().mockResolvedValue('glidemq'),
     });
 
-    // LIBRARY_VERSION is '1', String(1) === '1' => should NOT load
+    // String(Number(LIBRARY_VERSION)) === LIBRARY_VERSION => should NOT load
     await ensureFunctionLibrary(mockClient as any);
 
     expect(mockClient.functionLoad).not.toHaveBeenCalled();

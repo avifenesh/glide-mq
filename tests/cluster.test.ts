@@ -12,7 +12,7 @@ const { GlideClusterClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE } = require('../dist/functions/index') as typeof import('../src/functions/index');
+const { LIBRARY_SOURCE, LIBRARY_VERSION } = require('../dist/functions/index') as typeof import('../src/functions/index');
 const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 
 const CLUSTER_CONNECTION = {
@@ -64,7 +64,7 @@ describe('Cluster: Function Library', () => {
     // Use a dummy hash-tagged key for deterministic routing to a primary.
     // Never use customCommand when fcall with a dummy key works.
     const result = await cleanupClient.fcall('glidemq_version', ['{glidemq}:_'], []);
-    expect(String(result)).toBe('1');
+    expect(String(result)).toBe(LIBRARY_VERSION);
   });
 });
 

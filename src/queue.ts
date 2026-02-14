@@ -5,7 +5,7 @@ import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, Sched
 import { Job } from './job';
 import { buildKeys, keyPrefix, nextCronOccurrence } from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
-import { addJob, dedup, pause, resume, removeJob, CONSUMER_GROUP } from './functions/index';
+import { addJob, dedup, pause, resume, removeJob, revokeJob, CONSUMER_GROUP } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { LIBRARY_SOURCE } from './functions/index';
 import { withSpan } from './telemetry';
@@ -211,6 +211,18 @@ export class Queue<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Revoke a job by ID.
+   * If the job is waiting/delayed, it is immediately moved to the failed set with reason 'revoked'.
+   * If the job is currently being processed, a revoked flag is set on the hash -
+   * the worker will check this flag cooperatively and fire the AbortSignal.
+   * Returns 'revoked', 'flagged', or 'not_found'.
+   */
+  async revoke(jobId: string): Promise<string> {
+    const client = await this.getClient();
+    return revokeJob(client, this.keys, jobId, Date.now());
+  }
+
+  /**
    * Set the global concurrency limit for this queue.
    * When set, workers will not pick up new jobs if the total number of
    * pending (active) jobs across all workers meets or exceeds this limit.
@@ -347,9 +359,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
     // Scan and delete job hashes and deps sets
     const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
     const jobPattern = `${prefix}:job:*`;
+    const logPattern = `${prefix}:log:*`;
     const depsPattern = `${prefix}:deps:*`;
 
-    for (const pattern of [jobPattern, depsPattern]) {
+    for (const pattern of [jobPattern, logPattern, depsPattern]) {
       await this.scanAndDelete(client, pattern);
     }
   }
@@ -497,6 +510,98 @@ export class Queue<D = any, R = any> extends EventEmitter {
    */
   async getJobCountByTypes(): Promise<JobCounts> {
     return this.getJobCounts();
+  }
+
+  /**
+   * Check if the queue is paused.
+   */
+  async isPaused(): Promise<boolean> {
+    const client = await this.getClient();
+    const val = await client.hget(this.keys.meta, 'paused');
+    return val === '1';
+  }
+
+  /**
+   * Get the count of waiting jobs (stream length).
+   */
+  async count(): Promise<number> {
+    const client = await this.getClient();
+    return client.xlen(this.keys.stream);
+  }
+
+  /**
+   * Get all registered job schedulers (repeatable jobs).
+   */
+  async getRepeatableJobs(): Promise<{ name: string; entry: SchedulerEntry }[]> {
+    const client = await this.getClient();
+    const hashData = await client.hgetall(this.keys.schedulers);
+    if (!hashData || hashData.length === 0) return [];
+    const result: { name: string; entry: SchedulerEntry }[] = [];
+    for (const item of hashData) {
+      result.push({
+        name: String(item.field),
+        entry: JSON.parse(String(item.value)),
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Retrieve log entries for a job by ID.
+   */
+  async getJobLogs(id: string, start = 0, end = -1): Promise<{ logs: string[]; count: number }> {
+    const client = await this.getClient();
+    const logs = await client.lrange(this.keys.log(id), start, end);
+    const count = await client.llen(this.keys.log(id));
+    return {
+      logs: logs.map((l) => String(l)),
+      count,
+    };
+  }
+
+  /**
+   * Retrieve jobs from the dead letter queue configured for this queue.
+   * Returns an empty array if no DLQ is configured.
+   * @param start - Start index (default 0)
+   * @param end - End index (default -1, meaning all)
+   */
+  async getDeadLetterJobs(start = 0, end = -1): Promise<Job<D, R>[]> {
+    if (!this.opts.deadLetterQueue) return [];
+    const client = await this.getClient();
+    const dlqKeys = buildKeys(this.opts.deadLetterQueue.name, this.opts.prefix);
+
+    // DLQ jobs are added via addJob, so they appear in the stream.
+    // Read all entries from the DLQ stream.
+    const { InfBoundary } = await import('speedkey');
+    const entries = await client.xrange(
+      dlqKeys.stream,
+      InfBoundary.NegativeInfinity,
+      InfBoundary.PositiveInfinity,
+      end >= 0 ? { count: end + 1 } : undefined,
+    );
+    if (!entries) return [];
+
+    const jobIds: string[] = [];
+    for (const fieldPairs of Object.values(entries)) {
+      for (const [field, value] of fieldPairs) {
+        if (String(field) === 'jobId') {
+          jobIds.push(String(value));
+        }
+      }
+    }
+
+    const sliced = jobIds.slice(start, end >= 0 ? end + 1 : undefined);
+    const jobs: Job<D, R>[] = [];
+    for (const id of sliced) {
+      const hashData = await client.hgetall(dlqKeys.job(id));
+      if (!hashData || hashData.length === 0) continue;
+      const hash: Record<string, string> = {};
+      for (const entry of hashData) {
+        hash[String(entry.field)] = String(entry.value);
+      }
+      jobs.push(Job.fromHash<D, R>(client, dlqKeys, id, hash));
+    }
+    return jobs;
   }
 
   /**

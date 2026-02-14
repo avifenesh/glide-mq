@@ -10,7 +10,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "bench": "npx tsx benchmarks/run.ts all",
+    "bench:throughput": "npx tsx benchmarks/run.ts throughput",
+    "bench:latency": "npx tsx benchmarks/run.ts latency",
+    "bench:memory": "npx tsx benchmarks/run.ts memory"
   },
   "engines": {
     "node": ">=20"
@@ -20,9 +24,12 @@
     "speedkey": "file:../speedkey/node"
   },
   "devDependencies": {
+    "@types/node": "^22",
+    "bullmq": "^5.69.2",
+    "ioredis": "^5.9.3",
+    "tsx": "^4.21.0",
     "typescript": "^5",
-    "vitest": "^3",
-    "@types/node": "^22"
+    "vitest": "^3"
   },
   "peerDependencies": {
     "@opentelemetry/api": "^1.0.0"

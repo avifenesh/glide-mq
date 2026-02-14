@@ -12,7 +12,7 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { Job } = require('../dist/job') as typeof import('../src/job');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
+const { LIBRARY_SOURCE, LIBRARY_VERSION, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
 const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 
 const CONNECTION = {
@@ -57,7 +57,7 @@ afterAll(async () => {
 describe('Function Library', () => {
   it('glidemq_version returns correct version', async () => {
     const result = await cleanupClient.fcall('glidemq_version', [], []);
-    expect(String(result)).toBe('1');
+    expect(String(result)).toBe(LIBRARY_VERSION);
   });
 });
 

@@ -440,6 +440,18 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
     if jobId then
       local jobKey = prefix .. 'job:' .. jobId
 
+      -- Check if the job has a recent heartbeat (lastActive field).
+      -- If (now - lastActive) < minIdleMs, the job is still being processed
+      -- and should not be reclaimed.
+      local lastActive = tonumber(redis.call('HGET', jobKey, 'lastActive'))
+      if lastActive and (timestamp - lastActive) < minIdleMs then
+        -- Job has a recent heartbeat - skip reclaiming.
+        -- We need to reset the idle time on the PEL entry by re-claiming
+        -- to the same consumer so it doesn't get picked up again next cycle.
+        -- XCLAIM already happened via XAUTOCLAIM, so just skip the stall logic.
+        count = count + 1
+      else
+
       -- Track stall count on the job hash
       local stalledCount = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
 
@@ -463,6 +475,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       end
 
       count = count + 1
+      end -- close lastActive else
     end
   end
 

@@ -548,10 +548,9 @@ describe('Bull compat: Job timeout', () => {
     await flushQueue(Q);
   });
 
-  it('14. job that exceeds timeout is not natively timed out (glide-mq relies on stall detection)', async () => {
-    // NOTE: glide-mq does not implement per-job timeout like Bull.
-    // Instead, it relies on stalled-job detection. This test verifies
-    // that a long-running job completes if no stall detection intervenes.
+  it('14. job that exceeds timeout fails with timeout error', async () => {
+    // glide-mq implements per-job timeout: if the processor takes longer
+    // than opts.timeout, the job fails with 'Job timeout exceeded'.
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const done = new Promise<void>((resolve, reject) => {
@@ -559,21 +558,21 @@ describe('Bull compat: Job timeout', () => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 500));
-          return 'finished';
+          await new Promise(r => setTimeout(r, 2000));
+          return 'should-not-reach';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
       );
       worker.on('error', () => {});
-      worker.on('completed', (_job: any, result: any) => {
-        expect(result).toBe('finished');
+      worker.on('failed', (_job: any, err: Error) => {
+        expect(err.message).toBe('Job timeout exceeded');
         clearTimeout(timeout);
         worker.close(true).then(resolve);
       });
     });
 
     await new Promise(r => setTimeout(r, 500));
-    await queue.add('timeout-job', {}, { timeout: 100 });
+    await queue.add('timeout-job', {}, { timeout: 300 });
     await done;
     await queue.close();
   }, 15000);

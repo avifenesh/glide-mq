@@ -18,6 +18,7 @@ export function keys(prefix: string, queueName: string) {
     rate: `${p}:rate`,
     schedulers: `${p}:schedulers`,
     job: (id: string) => `${p}:job:${id}`,
+    log: (id: string) => `${p}:log:${id}`,
     deps: (id: string) => `${p}:deps:${id}`,
     parent: (id: string) => `${p}:parent:${id}`,
   };

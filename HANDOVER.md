@@ -52,23 +52,26 @@
 - Job schedulers (cron + interval)
 - Cluster mode (all features verified)
 
+## Recently implemented (session 2026-02-14)
+- Lock renewal: heartbeat (lastActive field) prevents stalled reclaim of long-running jobs
+  - Worker.lockDuration option (default 30s), heartbeat fires every lockDuration/2
+  - Lua reclaimStalled checks lastActive before incrementing stalledCount
+- Dead letter queue: QueueOptions.deadLetterQueue config, worker moves exhausted-retry jobs to DLQ
+  - Queue.getDeadLetterJobs() retrieves DLQ entries
+- Workflow primitives: chain(), group(), chord() exported as utility functions
+  - chain: nested parent-child flow, deepest job runs first
+  - group: parent with N children in parallel (uses FlowProducer)
+  - chord: group + callback parent that runs after all children complete
+- Tests: tests/gap-advanced.test.ts (7 tests, all passing)
+
 ## Gaps - not yet implemented
 1. Sandboxed processors (run processor in child process - Bull/BullMQ feature)
-2. Per-job timeout (we use stall detection, not explicit timeouts)
 3. Worker autoscale (Celery scales workers based on CPU/queue depth)
-4. Job revocation (cancel a running task - Celery feature)
-5. Workflow primitives: chains, groups, chords (Celery canvas - we have flows but not these)
 6. Benchmark suite (throughput, latency, memory profiling)
 7. Broker failover tests (Redis Sentinel/cluster failover mid-processing)
 8. Memory leak regression tests (baseline-stress-measure pattern)
-9. Dead letter queue as separate concept (we use failed ZSet)
-10. Lock renewal for long-running jobs (BullMQ renews, we use PEL + XAUTOCLAIM)
 11. Sandboxed processor crash recovery (restart child process)
-12. Job log (append log lines to a job - BullMQ feature)
 13. Job dependencies beyond parent-child (BullMQ waitForJob)
-14. Queue.isPaused(), Queue.count(), Queue.getRepeatableJobs()
-15. Worker.isRunning(), Worker.isPaused()
-16. Backoff custom strategy function (we support fixed/exponential/jitter, not custom fn)
 
 ## Next steps
 - Phase 6: Competitive analysis - full feature comparison, known bugs in others, gap prioritization

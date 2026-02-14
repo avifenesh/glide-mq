@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from 'speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '1';
+export const LIBRARY_VERSION = '3';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -293,6 +293,10 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
     end
     if jobId then
       local jobKey = prefix .. 'job:' .. jobId
+      local lastActive = tonumber(redis.call('HGET', jobKey, 'lastActive'))
+      if lastActive and (timestamp - lastActive) < minIdleMs then
+        count = count + 1
+      else
       local stalledCount = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
       if stalledCount > maxStalledCount then
         redis.call('XACK', streamKey, group, entryId)
@@ -311,6 +315,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
         emitEvent(eventsKey, 'stalled', jobId, nil)
       end
       count = count + 1
+      end
     end
   end
   return count
@@ -594,6 +599,7 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   local completedKey = keys[4]
   local failedKey = keys[5]
   local eventsKey = keys[6]
+  local logKey = keys[7]
   local jobId = args[1]
   local exists = redis.call('EXISTS', jobKey)
   if exists == 0 then
@@ -603,8 +609,51 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
   redis.call('DEL', jobKey)
+  redis.call('DEL', logKey)
   emitEvent(eventsKey, 'removed', jobId, nil)
   return 1
+end)
+
+redis.register_function('glidemq_revoke', function(keys, args)
+  local jobKey = keys[1]
+  local streamKey = keys[2]
+  local scheduledKey = keys[3]
+  local failedKey = keys[4]
+  local eventsKey = keys[5]
+  local jobId = args[1]
+  local timestamp = tonumber(args[2])
+  local group = args[3]
+  local exists = redis.call('EXISTS', jobKey)
+  if exists == 0 then
+    return 'not_found'
+  end
+  redis.call('HSET', jobKey, 'revoked', '1')
+  local state = redis.call('HGET', jobKey, 'state')
+  if state == 'waiting' or state == 'delayed' or state == 'prioritized' then
+    redis.call('ZREM', scheduledKey, jobId)
+    local entries = redis.call('XRANGE', streamKey, '-', '+')
+    for i = 1, #entries do
+      local entryId = entries[i][1]
+      local fields = entries[i][2]
+      for j = 1, #fields, 2 do
+        if fields[j] == 'jobId' and fields[j+1] == jobId then
+          redis.call('XACK', streamKey, group, entryId)
+          redis.call('XDEL', streamKey, entryId)
+          break
+        end
+      end
+    end
+    redis.call('ZADD', failedKey, timestamp, jobId)
+    redis.call('HSET', jobKey,
+      'state', 'failed',
+      'failedReason', 'revoked',
+      'finishedOn', tostring(timestamp)
+    )
+    emitEvent(eventsKey, 'revoked', jobId, nil)
+    return 'revoked'
+  end
+  emitEvent(eventsKey, 'revoked', jobId, nil)
+  return 'flagged'
 end)
 `;
 
@@ -927,10 +976,31 @@ export async function removeJob(
 ): Promise<number> {
   const result = await client.fcall(
     'glidemq_removeJob',
-    [k.job(jobId), k.stream, k.scheduled, k.completed, k.failed, k.events],
+    [k.job(jobId), k.stream, k.scheduled, k.completed, k.failed, k.events, k.log(jobId)],
     [jobId],
   );
   return result as number;
+}
+
+/**
+ * Revoke a job. Sets 'revoked' flag on the job hash.
+ * If the job is waiting/delayed/prioritized, removes from stream/scheduled and moves to failed.
+ * If the job is active (being processed), just sets the flag - worker checks it cooperatively.
+ * Returns 'revoked' (moved to failed), 'flagged' (flag set, job is active), or 'not_found'.
+ */
+export async function revokeJob(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  timestamp: number,
+  group: string = CONSUMER_GROUP,
+): Promise<string> {
+  const result = await client.fcall(
+    'glidemq_revoke',
+    [k.job(jobId), k.stream, k.scheduled, k.failed, k.events],
+    [jobId, timestamp.toString(), group],
+  );
+  return result as string;
 }
 
 /**

@@ -22,9 +22,13 @@ export type {
   SchedulerEntry,
   Metrics,
   JobCounts,
+  DeadLetterQueueOptions,
 } from './types';
 
 export { GlideMQError, ConnectionError, ScriptError } from './errors';
 export { gracefulShutdown } from './graceful-shutdown';
+
+export { chain, group, chord } from './workflows';
+export type { WorkflowJobDef } from './workflows';
 
 export { setTracer, isTracingEnabled } from './telemetry';

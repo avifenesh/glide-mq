@@ -19,6 +19,13 @@ export class Job<D = any, R = any> {
   parentQueue?: string;
 
   /**
+   * AbortSignal that fires when this job is revoked during processing.
+   * The processor should check signal.aborted cooperatively.
+   * Only set when the job is being processed by a Worker.
+   */
+  abortSignal?: AbortSignal;
+
+  /**
    * Stream entry ID assigned when the job was added to the stream.
    * Used by Worker to XACK after processing.
    * @internal
@@ -48,6 +55,13 @@ export class Job<D = any, R = any> {
     this.attemptsMade = 0;
     this.progress = 0;
     this.timestamp = Date.now();
+  }
+
+  /**
+   * Append a log line to this job's log list.
+   */
+  async log(message: string): Promise<void> {
+    await this.client.rpush(this.queueKeys.log(this.id), [message]);
   }
 
   /**
@@ -193,6 +207,14 @@ export class Job<D = any, R = any> {
    */
   async isWaiting(): Promise<boolean> {
     return (await this.getState()) === 'waiting';
+  }
+
+  /**
+   * Check if this job has been revoked.
+   */
+  async isRevoked(): Promise<boolean> {
+    const val = await this.client.hget(this.queueKeys.job(this.id), 'revoked');
+    return val === '1' || String(val) === '1';
   }
 
   /**

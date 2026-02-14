@@ -4,7 +4,7 @@ import { Job } from './job';
 import { buildKeys, calculateBackoff, keyPrefix } from './utils';
 import { createClient, createBlockingClient, ensureFunctionLibrary, createConsumerGroup } from './connection';
 import { CONSUMER_GROUP } from './functions/index';
-import { completeJob, failJob, rateLimit as rateLimitFn, checkConcurrency } from './functions/index';
+import { completeJob, failJob, addJob, rateLimit as rateLimitFn, checkConcurrency } from './functions/index';
 import { Scheduler } from './scheduler';
 import { withSpan, withChildSpan } from './telemetry';
 export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed';
@@ -23,6 +23,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private consumerId: string;
   private activeCount = 0;
   private activePromises: Set<Promise<void>> = new Set();
+  private activeAbortControllers: Map<string, AbortController> = new Map();
   private scheduler: Scheduler | null = null;
   private initPromise: Promise<void>;
   private rateLimitUntil = 0;
@@ -34,6 +35,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private blockTimeout: number;
   private stalledInterval: number;
   private maxStalledCount: number;
+  private lockDuration: number;
+  private heartbeatIntervals: Map<string, ReturnType<typeof setInterval>> = new Map();
 
   constructor(name: string, processor: Processor<D, R>, opts: WorkerOptions) {
     super();
@@ -48,6 +51,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     this.blockTimeout = opts.blockTimeout ?? 5000;
     this.stalledInterval = opts.stalledInterval ?? 30000;
     this.maxStalledCount = opts.maxStalledCount ?? 1;
+    this.lockDuration = opts.lockDuration ?? 30000;
 
     // Auto-init: start the worker immediately
     this.initPromise = this.init();
@@ -283,6 +287,26 @@ export class Worker<D = any, R = any> extends EventEmitter {
       hash[String(entry.field)] = String(entry.value);
     }
 
+    // Check revoked flag before processing
+    if (hash.revoked === '1') {
+      try {
+        await failJob(
+          this.commandClient,
+          this.queueKeys,
+          jobId,
+          entryId,
+          'revoked',
+          Date.now(),
+          0,
+          0,
+          CONSUMER_GROUP,
+        );
+      } catch {
+        // Best effort
+      }
+      return;
+    }
+
     const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, jobId, hash);
 
     // Attach entryId for completion/failure XACK
@@ -293,6 +317,15 @@ export class Worker<D = any, R = any> extends EventEmitter {
       await this.waitForRateLimit();
     }
 
+    // Create AbortController for cooperative revocation during processing
+    const ac = new AbortController();
+    this.activeAbortControllers.set(jobId, ac);
+    (job as any).abortSignal = ac.signal;
+
+    // Start heartbeat for lock renewal: writes lastActive to job hash every lockDuration/2
+    this.startHeartbeat(jobId);
+
+    try {
     await withSpan(
       'glide-mq.worker.process',
       {
@@ -303,7 +336,36 @@ export class Worker<D = any, R = any> extends EventEmitter {
       },
       async () => {
         try {
-          const result = await this.processor(job);
+          let result: R;
+          const timeoutMs = job.opts.timeout;
+          if (timeoutMs && timeoutMs > 0) {
+            result = await Promise.race([
+              this.processor(job),
+              new Promise<never>((_resolve, reject) => {
+                setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs);
+              }),
+            ]);
+          } else {
+            result = await this.processor(job);
+          }
+
+          // Check if revoked during processing
+          if (ac.signal.aborted) {
+            if (!this.commandClient) return;
+            await failJob(
+              this.commandClient,
+              this.queueKeys,
+              jobId,
+              entryId,
+              'revoked',
+              Date.now(),
+              0,
+              0,
+              CONSUMER_GROUP,
+            );
+            return;
+          }
+
           const returnvalue = result !== undefined ? JSON.stringify(result) : 'null';
 
           // Build parent info if this job is a child in a flow
@@ -371,12 +433,17 @@ export class Worker<D = any, R = any> extends EventEmitter {
           let backoffDelay = 0;
 
           if (maxAttempts > 0 && job.opts.backoff) {
-            backoffDelay = calculateBackoff(
-              job.opts.backoff.type,
-              job.opts.backoff.delay,
-              job.attemptsMade + 1,
-              job.opts.backoff.jitter,
-            );
+            const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
+            if (strategyFn) {
+              backoffDelay = strategyFn(job.attemptsMade + 1, error);
+            } else {
+              backoffDelay = calculateBackoff(
+                job.opts.backoff.type,
+                job.opts.backoff.delay,
+                job.attemptsMade + 1,
+                job.opts.backoff.jitter,
+              );
+            }
           }
 
           if (!this.commandClient) {
@@ -385,11 +452,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
             return;
           }
 
+          let failResult: string | undefined;
           await withChildSpan(
             'glide-mq.worker.fail',
             { 'glide-mq.job.id': jobId, 'glide-mq.error': error.message },
             async () => {
-              await failJob(
+              failResult = await failJob(
                 this.commandClient!,
                 this.queueKeys,
                 jobId,
@@ -404,11 +472,84 @@ export class Worker<D = any, R = any> extends EventEmitter {
             },
           );
 
+          // If the job exhausted retries and a DLQ is configured, move it there
+          if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
+            await this.moveToDLQ(job, error);
+          }
+
           job.failedReason = error.message;
           this.emit('failed', job, error);
         }
       },
     );
+    } finally {
+      this.stopHeartbeat(jobId);
+      this.activeAbortControllers.delete(jobId);
+    }
+  }
+
+  /**
+   * Abort a job that is currently being processed by this worker.
+   * The processor receives the abort signal via job.abortSignal and must check it cooperatively.
+   * Returns true if the job was found and aborted, false if not currently active.
+   */
+  abortJob(jobId: string): boolean {
+    const ac = this.activeAbortControllers.get(jobId);
+    if (ac) {
+      ac.abort();
+      return true;
+    }
+    return false;
+  }
+
+  private startHeartbeat(jobId: string): void {
+    if (!this.commandClient) return;
+    const interval = this.lockDuration / 2;
+    const client = this.commandClient;
+    const jobKey = this.queueKeys.job(jobId);
+    // Write initial lastActive immediately
+    client.hset(jobKey, { lastActive: Date.now().toString() }).catch(() => {});
+    const timer = setInterval(() => {
+      client.hset(jobKey, { lastActive: Date.now().toString() }).catch(() => {});
+    }, interval);
+    this.heartbeatIntervals.set(jobId, timer);
+  }
+
+  private stopHeartbeat(jobId: string): void {
+    const timer = this.heartbeatIntervals.get(jobId);
+    if (timer) {
+      clearInterval(timer);
+      this.heartbeatIntervals.delete(jobId);
+    }
+  }
+
+  private async moveToDLQ(job: Job<D, R>, error: Error): Promise<void> {
+    if (!this.commandClient || !this.opts.deadLetterQueue) return;
+    const dlqName = this.opts.deadLetterQueue.name;
+    const dlqKeys = buildKeys(dlqName, this.opts.prefix);
+    try {
+      const dlqData = JSON.stringify({
+        originalQueue: this.name,
+        originalJobId: job.id,
+        data: job.data,
+        failedReason: error.message,
+        attemptsMade: job.attemptsMade,
+      });
+      await addJob(
+        this.commandClient,
+        dlqKeys,
+        job.name,
+        dlqData,
+        JSON.stringify({}),
+        Date.now(),
+        0,
+        0,
+        '',
+        0,
+      );
+    } catch (dlqErr) {
+      this.emit('error', dlqErr);
+    }
   }
 
   /**
@@ -440,6 +581,20 @@ export class Worker<D = any, R = any> extends EventEmitter {
       // Wait for the delay, then re-check
       await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
     }
+  }
+
+  /**
+   * Check if the worker is currently running and not paused.
+   */
+  isRunning(): boolean {
+    return this.running && !this.paused;
+  }
+
+  /**
+   * Check if the worker is currently paused.
+   */
+  isPaused(): boolean {
+    return this.paused;
   }
 
   /**
@@ -527,6 +682,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
     if (!force) {
       await this.waitForActiveJobs();
     }
+
+    // Clear all active heartbeats
+    for (const [, timer] of this.heartbeatIntervals) {
+      clearInterval(timer);
+    }
+    this.heartbeatIntervals.clear();
 
     if (this.commandClient) {
       this.commandClient.close();

@@ -24,6 +24,9 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
   return {
     fcall: vi.fn().mockImplementation((func: string) => {
       if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
+      if (func === 'glidemq_complete') return Promise.resolve(1);
+      if (func === 'glidemq_fail') return Promise.resolve('failed');
+      if (func === 'glidemq_promote') return Promise.resolve(0);
       return Promise.resolve(LIBRARY_VERSION);
     }),
     functionLoad: vi.fn(),
@@ -31,6 +34,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     xreadgroup: vi.fn().mockResolvedValue(null),
     hgetall: vi.fn().mockResolvedValue([]),
     hget: vi.fn().mockResolvedValue(null),
+    hset: vi.fn().mockResolvedValue(1),
     close: vi.fn(),
     ...overrides,
   };
