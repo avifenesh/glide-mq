@@ -1,59 +1,31 @@
 /**
  * Deep tests: per-job timeout edge cases.
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/deep-timeout.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
+const { CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
 const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
-let cleanupClient: InstanceType<typeof GlideClient>;
+describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
+  let cleanupClient: any;
 
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const prefix = `glide:{${queueName}}:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
   });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
 
-afterAll(async () => {
-  cleanupClient.close();
-});
+  afterAll(async () => {
+    cleanupClient.close();
+  });
 
-describe('Per-job timeout - deep edge cases', () => {
   // 1. Job completes before timeout - normal path
   it('job with timeout=1000ms completes normally when processor is fast', async () => {
     const Q = 'deep-to-ok-' + Date.now();
@@ -81,7 +53,7 @@ describe('Per-job timeout - deep edge cases', () => {
 
     await done;
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 2. Job exceeds timeout - fails with correct message
@@ -112,7 +84,7 @@ describe('Per-job timeout - deep edge cases', () => {
 
     await done;
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 3. Job timeout + retry: times out first attempt, succeeds on 2nd
@@ -165,7 +137,7 @@ describe('Per-job timeout - deep edge cases', () => {
     expect(String(attemptsMade)).toBe('1');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
   // 4. Job timeout + retry: times out all attempts, ends in failed
@@ -217,7 +189,7 @@ describe('Per-job timeout - deep edge cases', () => {
     expect(failedScore).not.toBeNull();
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
   // 5. Job with timeout=0 - no timeout applied
@@ -247,7 +219,7 @@ describe('Per-job timeout - deep edge cases', () => {
 
     await done;
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 6. Job without timeout option - slow processor completes normally
@@ -277,7 +249,7 @@ describe('Per-job timeout - deep edge cases', () => {
 
     await done;
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 7. Edge: timeout=1ms - likely times out
@@ -308,7 +280,7 @@ describe('Per-job timeout - deep edge cases', () => {
 
     await done;
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 8. Timeout error message is exactly 'Job timeout exceeded'
@@ -341,7 +313,7 @@ describe('Per-job timeout - deep edge cases', () => {
     expect(capturedError.message).not.toContain('Timeout');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 9. Timed-out job has correct state, failedReason, attemptsMade in hash
@@ -381,7 +353,7 @@ describe('Per-job timeout - deep edge cases', () => {
     expect(Number(String(attemptsMade))).toBeGreaterThanOrEqual(1);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 10. Timed-out job emits 'failed' event with timeout error
@@ -421,7 +393,7 @@ describe('Per-job timeout - deep edge cases', () => {
     expect(emittedErr.message).toBe('Job timeout exceeded');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 11. Multiple concurrent jobs, one times out, others complete normally
@@ -476,7 +448,7 @@ describe('Per-job timeout - deep edge cases', () => {
     expect(failedIds).toContain(slow.id);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
   // 12. CPU-blocking processor that yields mid-way: timeout can fire during await
@@ -512,7 +484,7 @@ describe('Per-job timeout - deep edge cases', () => {
 
     await done;
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 13. Job with timeout + removeOnFail=true - hash deleted after timeout
@@ -550,7 +522,7 @@ describe('Per-job timeout - deep edge cases', () => {
     expect(exists).toBe(0);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 14. Job with timeout in a flow - child times out, parent stays waiting-children
@@ -614,7 +586,7 @@ describe('Per-job timeout - deep edge cases', () => {
 
     await flow.close();
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
   // 15. Timeout fires for one job, next job in same worker processes fine
@@ -662,7 +634,7 @@ describe('Per-job timeout - deep edge cases', () => {
     expect(processedCount).toBe(2);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
   // 16. Timeout value is read from job opts, not worker opts
@@ -712,7 +684,7 @@ describe('Per-job timeout - deep edge cases', () => {
     expect(failedIds).toContain(job2.id);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
   // 17. Timeout cleanup: no dangling timers after worker close
@@ -746,7 +718,7 @@ describe('Per-job timeout - deep edge cases', () => {
     await new Promise(r => setTimeout(r, 500));
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 18. Timed-out job is in failed ZSet
@@ -783,7 +755,7 @@ describe('Per-job timeout - deep edge cases', () => {
     expect(completedScore).toBeNull();
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 19. Timeout with negative value - treated same as no timeout
@@ -813,7 +785,7 @@ describe('Per-job timeout - deep edge cases', () => {
 
     await done;
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 20. Timeout with processor that rejects on its own - processor error takes precedence when faster
@@ -845,7 +817,7 @@ describe('Per-job timeout - deep edge cases', () => {
     expect(err.message).toBe('processor-error');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   // 21. Timeout with processor that both rejects late and timeout fires first
@@ -877,6 +849,6 @@ describe('Per-job timeout - deep edge cases', () => {
     expect(err.message).toBe('Job timeout exceeded');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 });

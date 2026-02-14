@@ -3,74 +3,41 @@
  * Covers: stall detection, backoff strategies, batch processing, graceful shutdown,
  * health checks, job progress, competing consumers, failed job management, and more.
  *
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server running on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/compat-bee-queue.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { QueueEvents } = require('../dist/queue-events') as typeof import('../src/queue-events');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP, promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
+const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
-
-let cleanupClient: InstanceType<typeof GlideClient>;
-const allQueues: string[] = [];
-
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const prefix = `glide:{${queueName}}:job:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-function uniqueQueue(base: string): string {
-  const name = `bee-${base}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  allQueues.push(name);
-  return name;
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
-
-afterAll(async () => {
-  for (const q of allQueues) {
-    await flushQueue(q);
-  }
-  cleanupClient.close();
-});
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
 // ---------------------------------------------------------------------------
 // 1. Stall detection with many stalled jobs
 // ---------------------------------------------------------------------------
-describe('Bee-Queue: Stall detection', () => {
+describeEachMode('Bee-Queue: Stall detection', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('detects and recovers stalled jobs (50 jobs, worker killed, all recovered)', async () => {
-    const Q = uniqueQueue('stall-recovery');
+    const Q = `bee-stall-recovery-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
     const k = buildKeys(Q);
 
@@ -113,8 +80,6 @@ describe('Bee-Queue: Stall detection', () => {
         Q,
         async (job: any) => {
           completedIds.add(job.id);
-          // Check if we've recovered enough - stream might have jobs that were
-          // never picked up by the first worker too
           return { recovered: true };
         },
         {
@@ -152,9 +117,24 @@ describe('Bee-Queue: Stall detection', () => {
 // ---------------------------------------------------------------------------
 // 2. Backoff strategies: immediate, fixed, exponential
 // ---------------------------------------------------------------------------
-describe('Bee-Queue: Backoff strategies', () => {
+describeEachMode('Bee-Queue: Backoff strategies', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('immediate retry (no delay between retries)', async () => {
-    const Q = uniqueQueue('backoff-immediate');
+    const Q = `bee-backoff-immediate-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     let attempts = 0;
@@ -195,7 +175,8 @@ describe('Bee-Queue: Backoff strategies', () => {
   }, 20000);
 
   it('fixed backoff: constant delay between retries', async () => {
-    const Q = uniqueQueue('backoff-fixed');
+    const Q = `bee-backoff-fixed-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const retryTimestamps: number[] = [];
@@ -245,7 +226,8 @@ describe('Bee-Queue: Backoff strategies', () => {
   }, 25000);
 
   it('exponential backoff: increasing delay between retries', async () => {
-    const Q = uniqueQueue('backoff-exp');
+    const Q = `bee-backoff-exp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const retryTimestamps: number[] = [];
@@ -291,9 +273,24 @@ describe('Bee-Queue: Backoff strategies', () => {
 // ---------------------------------------------------------------------------
 // 3. Batch processing: add 50 jobs, worker processes them, verify all completed
 // ---------------------------------------------------------------------------
-describe('Bee-Queue: Batch processing', () => {
+describeEachMode('Bee-Queue: Batch processing', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('processes 50 jobs added via addBulk and all complete', async () => {
-    const Q = uniqueQueue('batch');
+    const Q = `bee-batch-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
     const JOB_COUNT = 50;
 
@@ -344,9 +341,24 @@ describe('Bee-Queue: Batch processing', () => {
 // ---------------------------------------------------------------------------
 // 4. Close queue during processing - verify graceful shutdown
 // ---------------------------------------------------------------------------
-describe('Bee-Queue: Graceful shutdown', () => {
+describeEachMode('Bee-Queue: Graceful shutdown', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('graceful close waits for active job to complete', async () => {
-    const Q = uniqueQueue('graceful-close');
+    const Q = `bee-graceful-close-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     let jobStarted = false;
@@ -389,7 +401,8 @@ describe('Bee-Queue: Graceful shutdown', () => {
   }, 15000);
 
   it('force close does not wait for active job', async () => {
-    const Q = uniqueQueue('force-close');
+    const Q = `bee-force-close-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     let jobStarted = false;
@@ -433,9 +446,24 @@ describe('Bee-Queue: Graceful shutdown', () => {
 // ---------------------------------------------------------------------------
 // 5. Health check: queue reports correct counts
 // ---------------------------------------------------------------------------
-describe('Bee-Queue: Health check / job counts', () => {
+describeEachMode('Bee-Queue: Health check / job counts', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('reports correct waiting, active, completed, failed counts', async () => {
-    const Q = uniqueQueue('health');
+    const Q = `bee-health-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     // Add 5 jobs
@@ -484,7 +512,8 @@ describe('Bee-Queue: Health check / job counts', () => {
   }, 20000);
 
   it('reports delayed jobs correctly', async () => {
-    const Q = uniqueQueue('health-delayed');
+    const Q = `bee-health-delayed-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     await queue.add('delayed-task', { v: 1 }, { delay: 60000 });
@@ -500,9 +529,24 @@ describe('Bee-Queue: Health check / job counts', () => {
 // ---------------------------------------------------------------------------
 // 6. Job.save returns the job with an id
 // ---------------------------------------------------------------------------
-describe('Bee-Queue: Job creation', () => {
+describeEachMode('Bee-Queue: Job creation', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('queue.add returns a job with a valid id', async () => {
-    const Q = uniqueQueue('job-create');
+    const Q = `bee-job-create-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const job = await queue.add('my-task', { key: 'value' });
@@ -516,7 +560,8 @@ describe('Bee-Queue: Job creation', () => {
   }, 10000);
 
   it('job is retrievable by ID after creation', async () => {
-    const Q = uniqueQueue('job-retrieve');
+    const Q = `bee-job-retrieve-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const job = await queue.add('fetch-task', { x: 42 });
@@ -533,9 +578,24 @@ describe('Bee-Queue: Job creation', () => {
 // ---------------------------------------------------------------------------
 // 7. Job progress events flow correctly
 // ---------------------------------------------------------------------------
-describe('Bee-Queue: Job progress events', () => {
+describeEachMode('Bee-Queue: Job progress events', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('progress updates 0 -> 50 -> 100 are emitted correctly', async () => {
-    const Q = uniqueQueue('progress');
+    const Q = `bee-progress-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const progressValues: number[] = [];
@@ -597,9 +657,24 @@ describe('Bee-Queue: Job progress events', () => {
 // ---------------------------------------------------------------------------
 // 8. EagerTimer pattern: short poll intervals don't cause errors
 // ---------------------------------------------------------------------------
-describe('Bee-Queue: Short poll intervals', () => {
+describeEachMode('Bee-Queue: Short poll intervals', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('worker with very short blockTimeout does not error excessively', async () => {
-    const Q = uniqueQueue('eager-timer');
+    const Q = `bee-eager-timer-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const errors: Error[] = [];
@@ -634,9 +709,24 @@ describe('Bee-Queue: Short poll intervals', () => {
 // ---------------------------------------------------------------------------
 // 9. Multiple workers on same queue - no duplicate processing (node-resque)
 // ---------------------------------------------------------------------------
-describe('node-resque: Competing consumers - no duplicates', () => {
+describeEachMode('node-resque: Competing consumers - no duplicates', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('2 workers process 20 jobs with no duplicates', async () => {
-    const Q = uniqueQueue('no-dupes');
+    const Q = `bee-no-dupes-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
     const JOB_COUNT = 20;
 
@@ -697,9 +787,24 @@ describe('node-resque: Competing consumers - no duplicates', () => {
 // ---------------------------------------------------------------------------
 // 10. Worker heartbeat - stalled worker detected and jobs reclaimed (node-resque)
 // ---------------------------------------------------------------------------
-describe('node-resque: Stalled worker heartbeat', () => {
+describeEachMode('node-resque: Stalled worker heartbeat', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('stalled job from dead worker is eventually failed after maxStalledCount exceeded', async () => {
-    const Q = uniqueQueue('heartbeat');
+    const Q = `bee-heartbeat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
     const k = buildKeys(Q);
 
@@ -731,8 +836,6 @@ describe('node-resque: Stalled worker heartbeat', () => {
     await new Promise(r => setTimeout(r, 1000));
 
     // Worker 2: its scheduler will detect the stalled entry via XAUTOCLAIM.
-    // With maxStalledCount=1, the first reclaim sets stalledCount=1 and marks active,
-    // the second reclaim sees stalledCount=2 > maxStalledCount=1 and moves to failed.
     const recoveryWorker = new Worker(
       Q,
       async () => 'ok',
@@ -766,9 +869,24 @@ describe('node-resque: Stalled worker heartbeat', () => {
 // ---------------------------------------------------------------------------
 // 11. Failed job management: list, remove, retry failed jobs (node-resque)
 // ---------------------------------------------------------------------------
-describe('node-resque: Failed job management', () => {
+describeEachMode('node-resque: Failed job management', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('lists failed jobs', async () => {
-    const Q = uniqueQueue('failed-list');
+    const Q = `bee-failed-list-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     // Add 3 jobs that will all fail
@@ -808,7 +926,8 @@ describe('node-resque: Failed job management', () => {
   }, 20000);
 
   it('removes a specific failed job', async () => {
-    const Q = uniqueQueue('failed-remove');
+    const Q = `bee-failed-remove-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const job = await queue.add('removable', { v: 1 });
@@ -843,7 +962,8 @@ describe('node-resque: Failed job management', () => {
   }, 15000);
 
   it('retries a failed job', async () => {
-    const Q = uniqueQueue('failed-retry');
+    const Q = `bee-failed-retry-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     let attempts = 0;
@@ -908,9 +1028,24 @@ describe('node-resque: Failed job management', () => {
 // ---------------------------------------------------------------------------
 // 12. Queue.getJobs returns jobs by state correctly (node-resque)
 // ---------------------------------------------------------------------------
-describe('node-resque: getJobs by state', () => {
+describeEachMode('node-resque: getJobs by state', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('returns waiting, completed, failed, and delayed jobs correctly', async () => {
-    const Q = uniqueQueue('get-jobs');
+    const Q = `bee-get-jobs-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     // Add a delayed job
@@ -966,9 +1101,24 @@ describe('node-resque: getJobs by state', () => {
 // ---------------------------------------------------------------------------
 // 13. Competing consumers: 2 workers, 10 jobs, each processed exactly once (RedisSMQ)
 // ---------------------------------------------------------------------------
-describe('RedisSMQ: Competing consumers exactly-once', () => {
+describeEachMode('RedisSMQ: Competing consumers exactly-once', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('2 workers process 10 jobs, each job processed exactly once', async () => {
-    const Q = uniqueQueue('competing');
+    const Q = `bee-competing-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
     const JOB_COUNT = 10;
 
@@ -1025,9 +1175,24 @@ describe('RedisSMQ: Competing consumers exactly-once', () => {
 // ---------------------------------------------------------------------------
 // 14. Message TTL / job timeout: job with timeout moved to failed (RedisSMQ)
 // ---------------------------------------------------------------------------
-describe('RedisSMQ: Job timeout / TTL', () => {
+describeEachMode('RedisSMQ: Job timeout / TTL', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('job exceeding timeout is failed when stall detection runs', async () => {
-    const Q = uniqueQueue('timeout');
+    const Q = `bee-timeout-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     await queue.add('slow-task', { v: 1 });
@@ -1072,8 +1237,6 @@ describe('RedisSMQ: Job timeout / TTL', () => {
     await cleanupWorker.waitUntilReady();
 
     // Wait for stall detection to run and reclaim+fail the job
-    // maxStalledCount=1 means first stall reclaims, second stall fails
-    // We need two stall cycles
     await new Promise(r => setTimeout(r, 3000));
 
     await cleanupWorker.close();
@@ -1091,9 +1254,24 @@ describe('RedisSMQ: Job timeout / TTL', () => {
 // ---------------------------------------------------------------------------
 // Additional: Queue obliterate
 // ---------------------------------------------------------------------------
-describe('Bee-Queue: Queue cleanup', () => {
+describeEachMode('Bee-Queue: Queue cleanup', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('obliterate removes all queue data', async () => {
-    const Q = uniqueQueue('obliterate');
+    const Q = `bee-obliterate-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     for (let i = 0; i < 5; i++) {
@@ -1116,9 +1294,24 @@ describe('Bee-Queue: Queue cleanup', () => {
 // ---------------------------------------------------------------------------
 // Additional: Job state queries
 // ---------------------------------------------------------------------------
-describe('Bee-Queue: Job state queries', () => {
+describeEachMode('Bee-Queue: Job state queries', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('isCompleted returns true after processing', async () => {
-    const Q = uniqueQueue('state-completed');
+    const Q = `bee-state-completed-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const job = await queue.add('task', { v: 1 });
@@ -1147,7 +1340,8 @@ describe('Bee-Queue: Job state queries', () => {
   }, 15000);
 
   it('isFailed returns true after failure', async () => {
-    const Q = uniqueQueue('state-failed');
+    const Q = `bee-state-failed-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const job = await queue.add('task', { v: 1 });
@@ -1176,7 +1370,8 @@ describe('Bee-Queue: Job state queries', () => {
   }, 15000);
 
   it('isDelayed returns true for delayed job', async () => {
-    const Q = uniqueQueue('state-delayed');
+    const Q = `bee-state-delayed-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const job = await queue.add('task', { v: 1 }, { delay: 60000 });
@@ -1191,9 +1386,24 @@ describe('Bee-Queue: Job state queries', () => {
 // ---------------------------------------------------------------------------
 // Additional: updateData on a job
 // ---------------------------------------------------------------------------
-describe('Bee-Queue: Job data update', () => {
+describeEachMode('Bee-Queue: Job data update', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
   it('updateData replaces job data', async () => {
-    const Q = uniqueQueue('update-data');
+    const Q = `bee-update-data-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const job = await queue.add('task', { original: true });

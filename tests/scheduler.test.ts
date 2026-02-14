@@ -1,67 +1,28 @@
 /**
  * Integration tests for job schedulers (repeatable/cron jobs).
- * Requires: valkey-server running on localhost:6379
- *
- * Run: npx vitest run tests/scheduler.test.ts
+ * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
-
-let cleanupClient: InstanceType<typeof GlideClient>;
-
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const prefix = `glide:{${queueName}}:job:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
-
-afterAll(async () => {
-  cleanupClient.close();
-});
-
-describe('Job schedulers', () => {
+describeEachMode('Job schedulers', (CONNECTION) => {
+  let cleanupClient: any;
   const Q = 'test-scheduler-' + Date.now();
   let queue: InstanceType<typeof Queue>;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
     queue = new Queue(Q, { connection: CONNECTION });
   });
 
   afterAll(async () => {
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('upsertJobScheduler stores config in schedulers hash', async () => {
@@ -144,7 +105,7 @@ describe('Job schedulers', () => {
     expect(processed.length).toBeGreaterThanOrEqual(2);
 
     await localQueue.close();
-    await flushQueue(qName);
+    await flushQueue(cleanupClient, qName);
   }, 15000);
 
   it('upsertJobScheduler rejects missing schedule', async () => {

@@ -1,62 +1,29 @@
 /**
  * Edge-case tests for FlowProducer (parent-child job trees).
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server running on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/edge-flow.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
-const { buildKeys, keyPrefix } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
+const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
-let cleanupClient: InstanceType<typeof GlideClient>;
-
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const prefix = `glide:{${queueName}}:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  await (cleanupClient as any).functionLoad(LIBRARY_SOURCE, { replace: true });
-});
-
-afterAll(async () => {
-  cleanupClient.close();
-});
-
-describe('Edge: Flow with single child', () => {
+describeEachMode('Edge: Flow with single child', (CONNECTION) => {
   const Q = 'edge-flow-single-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('parent completes after single child is processed', async () => {
@@ -112,11 +79,17 @@ describe('Edge: Flow with single child', () => {
   }, 20000);
 });
 
-describe('Edge: Flow child fails all retries', () => {
+describeEachMode('Edge: Flow child fails all retries', (CONNECTION) => {
   const Q = 'edge-flow-fail-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('parent stays in waiting-children when child fails all retries', async () => {
@@ -185,11 +158,17 @@ describe('Edge: Flow child fails all retries', () => {
   }, 15000);
 });
 
-describe('Edge: Flow getChildrenValues with mixed results', () => {
+describeEachMode('Edge: Flow getChildrenValues with mixed results', (CONNECTION) => {
   const Q = 'edge-flow-mixed-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('getChildrenValues returns values only for completed children', async () => {
@@ -265,11 +244,17 @@ describe('Edge: Flow getChildrenValues with mixed results', () => {
   }, 15000);
 });
 
-describe('Edge: FlowProducer.addBulk with 3 independent flows', () => {
+describeEachMode('Edge: FlowProducer.addBulk with 3 independent flows', (CONNECTION) => {
   const Q = 'edge-flow-bulk3-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('creates 3 independent flows with their own parent-child trees', async () => {
@@ -331,11 +316,17 @@ describe('Edge: FlowProducer.addBulk with 3 independent flows', () => {
   });
 });
 
-describe('Edge: Flow with same queueName for parent and children', () => {
+describeEachMode('Edge: Flow with same queueName for parent and children', (CONNECTION) => {
   const Q = 'edge-flow-sameq-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('parent and children on the same queue all complete correctly', async () => {

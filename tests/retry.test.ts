@@ -1,58 +1,29 @@
 /**
  * Integration tests for retry/backoff lifecycle.
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server running on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/retry.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
-let cleanupClient: InstanceType<typeof GlideClient>;
+describeEachMode('Retry lifecycle', (CONNECTION) => {
+  let cleanupClient: any;
 
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const prefix = `glide:{${queueName}}:job:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
   });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
 
-afterAll(async () => {
-  cleanupClient.close();
-});
+  afterAll(async () => {
+    cleanupClient.close();
+  });
 
-describe('Retry lifecycle', () => {
   it('job retries with fixed backoff: fails twice, succeeds on 3rd attempt', async () => {
     const Q = 'test-retry-fixed-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
@@ -86,8 +57,6 @@ describe('Retry lifecycle', () => {
       worker.on('failed', (j: any, err: Error) => {
         failedEvents.push(err.message);
 
-        // After each failure, the job is moved to scheduled ZSet with backoff.
-        // Wait for the backoff delay, then manually promote so the worker picks it up again.
         setTimeout(async () => {
           try {
             await promote(cleanupClient, buildKeys(Q), Date.now());
@@ -106,29 +75,24 @@ describe('Retry lifecycle', () => {
 
     await done;
 
-    // Verify: 2 failures, then 1 success
     expect(failedEvents).toEqual(['fail-attempt-1', 'fail-attempt-2']);
     expect(completedIds).toContain(job.id);
     expect(attemptCount).toBe(3);
 
-    // Verify final state in Valkey
     const finalState = await cleanupClient.hget(k.job(job.id), 'state');
     expect(String(finalState)).toBe('completed');
 
-    // Verify attemptsMade was incremented to 2 (two failures)
     const attemptsMade = await cleanupClient.hget(k.job(job.id), 'attemptsMade');
     expect(String(attemptsMade)).toBe('2');
 
-    // Verify job is in completed ZSet
     const completedScore = await cleanupClient.zscore(k.completed, job.id);
     expect(completedScore).not.toBeNull();
 
-    // Verify job is NOT in failed ZSet
     const failedScore = await cleanupClient.zscore(k.failed, job.id);
     expect(failedScore).toBeNull();
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 25000);
 
   it('job exceeding max attempts moves to failed ZSet permanently', async () => {
@@ -161,14 +125,12 @@ describe('Retry lifecycle', () => {
         failCount++;
 
         if (failCount < 2) {
-          // After the first failure with retry, promote so it gets retried
           setTimeout(async () => {
             try {
               await promote(cleanupClient, buildKeys(Q), Date.now());
             } catch {}
           }, 200);
         } else {
-          // After the second failure (exhausted), clean up
           clearTimeout(timeout);
           setTimeout(() => worker.close(true).then(resolve), 200);
         }
@@ -179,32 +141,26 @@ describe('Retry lifecycle', () => {
 
     await done;
 
-    // attemptsMade should be 2 (both attempts failed)
     const attemptsMade = await cleanupClient.hget(k.job(job.id), 'attemptsMade');
     expect(String(attemptsMade)).toBe('2');
 
-    // Final state should be 'failed'
     const finalState = await cleanupClient.hget(k.job(job.id), 'state');
     expect(String(finalState)).toBe('failed');
 
-    // Should be in failed ZSet
     const failedScore = await cleanupClient.zscore(k.failed, job.id);
     expect(failedScore).not.toBeNull();
 
-    // Should NOT be in completed ZSet
     const completedScore = await cleanupClient.zscore(k.completed, job.id);
     expect(completedScore).toBeNull();
 
-    // Should NOT be in scheduled ZSet
     const scheduledScore = await cleanupClient.zscore(k.scheduled, job.id);
     expect(scheduledScore).toBeNull();
 
-    // failedReason should reflect the last error
     const failedReason = await cleanupClient.hget(k.job(job.id), 'failedReason');
     expect(String(failedReason)).toBe('fail-2');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 25000);
 
   it('exponential backoff increases delay between retries', async () => {
@@ -238,8 +194,6 @@ describe('Retry lifecycle', () => {
       );
 
       worker.on('failed', () => {
-        // Wait a generous amount for the backoff, then promote
-        // Exponential: attempt 1 -> 100ms, attempt 2 -> 200ms, attempt 3 -> 400ms
         const waitTime = Math.pow(2, failCount - 1) * 100 + 100;
         setTimeout(async () => {
           try {
@@ -258,19 +212,16 @@ describe('Retry lifecycle', () => {
 
     await done;
 
-    // Verify we had 4 total processing attempts (3 fails + 1 success)
     expect(failTimestamps).toHaveLength(4);
 
-    // Verify attemptsMade in hash is 3 (three failures)
     const attemptsMade = await cleanupClient.hget(k.job(job.id), 'attemptsMade');
     expect(String(attemptsMade)).toBe('3');
 
-    // Verify final state is completed
     const finalState = await cleanupClient.hget(k.job(job.id), 'state');
     expect(String(finalState)).toBe('completed');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 30000);
 
   it('job with no retry config (attempts=0) goes directly to failed on error', async () => {
@@ -301,24 +252,20 @@ describe('Retry lifecycle', () => {
 
     await done;
 
-    // Should be in failed ZSet immediately (no retry)
     const failedScore = await cleanupClient.zscore(k.failed, job.id);
     expect(failedScore).not.toBeNull();
 
-    // State should be 'failed'
     const finalState = await cleanupClient.hget(k.job(job.id), 'state');
     expect(String(finalState)).toBe('failed');
 
-    // attemptsMade should be 1
     const attemptsMade = await cleanupClient.hget(k.job(job.id), 'attemptsMade');
     expect(String(attemptsMade)).toBe('1');
 
-    // Should NOT be in scheduled ZSet (no retry)
     const scheduledScore = await cleanupClient.zscore(k.scheduled, job.id);
     expect(scheduledScore).toBeNull();
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   it('retry cycle emits correct events in events stream', async () => {
@@ -367,7 +314,6 @@ describe('Retry lifecycle', () => {
 
     await done;
 
-    // Read events stream
     const entries = await cleanupClient.xrange(k.events, '-', '+') as Record<string, [string, string][]>;
     const events: { event: string; jobId: string }[] = [];
     for (const entryId of Object.keys(entries)) {
@@ -381,18 +327,16 @@ describe('Retry lifecycle', () => {
       }
     }
 
-    // Expected event sequence for this job: added -> retrying -> promoted -> completed
     const eventTypes = events.map(e => e.event);
     expect(eventTypes).toContain('added');
     expect(eventTypes).toContain('retrying');
     expect(eventTypes).toContain('completed');
 
-    // 'retrying' should come before 'completed'
     const retryIdx = eventTypes.indexOf('retrying');
     const completeIdx = eventTypes.indexOf('completed');
     expect(retryIdx).toBeLessThan(completeIdx);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 });

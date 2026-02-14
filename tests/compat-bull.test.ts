@@ -2,68 +2,36 @@
  * Bull compatibility tests - adapted from Bull's test_queue.js and test_job.js.
  * Validates that glide-mq handles the same queue/job lifecycle patterns Bull users expect.
  *
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server running on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/compat-bull.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { Job } = require('../dist/job') as typeof import('../src/job');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
 const TS = Date.now();
-let cleanupClient: InstanceType<typeof GlideClient>;
-
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const prefix = `glide:{${queueName}}:job:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
-
-afterAll(async () => {
-  cleanupClient.close();
-});
 
 // ---------------------------------------------------------------------------
 // test_queue.js patterns
 // ---------------------------------------------------------------------------
 
-describe('Bull compat: Queue.close', () => {
+describeEachMode('Bull compat: Queue.close', (CONNECTION) => {
   const Q = `bull-close-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    await flushQueue(cleanupClient, `${Q}-resolve-${TS}`);
+    cleanupClient.close();
   });
 
   it('1. close terminates the client connection (client becomes null)', async () => {
@@ -80,15 +48,20 @@ describe('Bull compat: Queue.close', () => {
     await queue.add('probe', { x: 1 });
     // close() returns a promise that should resolve (not hang or reject)
     await expect(queue.close()).resolves.toBeUndefined();
-    await flushQueue(`${Q}-resolve-${TS}`);
   });
 });
 
-describe('Bull compat: Queue processes a job', () => {
+describeEachMode('Bull compat: Queue processes a job', (CONNECTION) => {
   const Q = `bull-process-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('3. add -> process -> completed', async () => {
@@ -121,11 +94,17 @@ describe('Bull compat: Queue processes a job', () => {
   }, 15000);
 });
 
-describe('Bull compat: Serial processing', () => {
+describeEachMode('Bull compat: Serial processing', (CONNECTION) => {
   const Q = `bull-serial-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('4. processes 10 jobs serially with concurrency=1, verifying order', async () => {
@@ -165,11 +144,17 @@ describe('Bull compat: Serial processing', () => {
   }, 25000);
 });
 
-describe('Bull compat: Custom data types', () => {
+describeEachMode('Bull compat: Custom data types', (CONNECTION) => {
   const Q = `bull-data-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('5. processes jobs with object, array, and nested data', async () => {
@@ -207,11 +192,18 @@ describe('Bull compat: Custom data types', () => {
   }, 15000);
 });
 
-describe('Bull compat: Retry on failure', () => {
+describeEachMode('Bull compat: Retry on failure', (CONNECTION) => {
   const Q = `bull-retry-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    await flushQueue(cleanupClient, `bull-retry-backoff-${TS}`);
+    cleanupClient.close();
   });
 
   it('6. retries a job that fails (attempts=3, verify attemptsMade)', async () => {
@@ -287,15 +279,20 @@ describe('Bull compat: Retry on failure', () => {
       expect(timestamps[i] - timestamps[i - 1]).toBeGreaterThanOrEqual(200);
     }
     await queue.close();
-    await flushQueue(Q2);
   }, 25000);
 });
 
-describe('Bull compat: removeOnComplete', () => {
+describeEachMode('Bull compat: removeOnComplete', (CONNECTION) => {
   const Q = `bull-roc-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('8. removes job hash after completion when removeOnComplete=true', async () => {
@@ -328,11 +325,18 @@ describe('Bull compat: removeOnComplete', () => {
   }, 15000);
 });
 
-describe('Bull compat: completed/failed events', () => {
+describeEachMode('Bull compat: completed/failed events', (CONNECTION) => {
   const Q = `bull-events-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    await flushQueue(cleanupClient, `bull-failed-ev-${TS}`);
+    cleanupClient.close();
   });
 
   it('9. emits completed event with return value', async () => {
@@ -389,15 +393,20 @@ describe('Bull compat: completed/failed events', () => {
     expect(failedError).toBeDefined();
     expect(failedError!.message).toBe('boom');
     await queue.close();
-    await flushQueue(Q2);
   }, 15000);
 });
 
-describe('Bull compat: Stalled job recovery', () => {
+describeEachMode('Bull compat: Stalled job recovery', (CONNECTION) => {
   const Q = `bull-stalled-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('11. stalled jobs are re-enqueued (kill worker mid-processing, verify recovery)', async () => {
@@ -455,11 +464,17 @@ describe('Bull compat: Stalled job recovery', () => {
   }, 20000);
 });
 
-describe('Bull compat: FIFO ordering', () => {
+describeEachMode('Bull compat: FIFO ordering', (CONNECTION) => {
   const Q = `bull-fifo-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('12. add 10 jobs, verify FIFO processing order', async () => {
@@ -496,11 +511,17 @@ describe('Bull compat: FIFO ordering', () => {
   }, 20000);
 });
 
-describe('Bull compat: Delayed jobs', () => {
+describeEachMode('Bull compat: Delayed jobs', (CONNECTION) => {
   const Q = `bull-delayed-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('13. delayed job is not processed until delay expires', async () => {
@@ -541,11 +562,17 @@ describe('Bull compat: Delayed jobs', () => {
   }, 20000);
 });
 
-describe('Bull compat: Job timeout', () => {
+describeEachMode('Bull compat: Job timeout', (CONNECTION) => {
   const Q = `bull-timeout-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('14. job that exceeds timeout fails with timeout error', async () => {
@@ -582,17 +609,20 @@ describe('Bull compat: Job timeout', () => {
 // test_job.js patterns
 // ---------------------------------------------------------------------------
 
-describe('Bull compat: Job.remove', () => {
+describeEachMode('Bull compat: Job.remove', (CONNECTION) => {
   const Q = `bull-job-remove-${TS}`;
   let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
     queue = new Queue(Q, { connection: CONNECTION });
   });
 
   afterAll(async () => {
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('15. removes the job from all sets', async () => {
@@ -611,17 +641,20 @@ describe('Bull compat: Job.remove', () => {
   });
 });
 
-describe('Bull compat: Job.progress', () => {
+describeEachMode('Bull compat: Job.progress', (CONNECTION) => {
   const Q = `bull-job-progress-${TS}`;
   let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
     queue = new Queue(Q, { connection: CONNECTION });
   });
 
   afterAll(async () => {
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('16. updates and persists progress', async () => {
@@ -639,17 +672,20 @@ describe('Bull compat: Job.progress', () => {
   });
 });
 
-describe('Bull compat: Job.updateData', () => {
+describeEachMode('Bull compat: Job.updateData', (CONNECTION) => {
   const Q = `bull-job-update-${TS}`;
   let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
     queue = new Queue(Q, { connection: CONNECTION });
   });
 
   afterAll(async () => {
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('17. changes job data in place', async () => {
@@ -664,11 +700,17 @@ describe('Bull compat: Job.updateData', () => {
   });
 });
 
-describe('Bull compat: Job.retry', () => {
+describeEachMode('Bull compat: Job.retry', (CONNECTION) => {
   const Q = `bull-job-retry-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('18. re-queues a failed job', async () => {
@@ -715,11 +757,18 @@ describe('Bull compat: Job.retry', () => {
   }, 15000);
 });
 
-describe('Bull compat: Job.getState', () => {
+describeEachMode('Bull compat: Job.getState', (CONNECTION) => {
   const Q = `bull-job-state-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    await flushQueue(cleanupClient, `bull-job-state-fail-${TS}`);
+    cleanupClient.close();
   });
 
   it('19. returns correct state at each lifecycle point', async () => {
@@ -784,15 +833,20 @@ describe('Bull compat: Job.getState', () => {
     expect(state).toBe('failed');
 
     await queue.close();
-    await flushQueue(Q2);
   }, 15000);
 });
 
-describe('Bull compat: Job completion tracking', () => {
+describeEachMode('Bull compat: Job completion tracking', (CONNECTION) => {
   const Q = `bull-finished-${TS}`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('20. completed job has returnvalue persisted and retrievable', async () => {

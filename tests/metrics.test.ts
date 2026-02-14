@@ -1,67 +1,27 @@
 /**
  * Integration tests for getMetrics and getJobCounts.
- * Requires: valkey-server running on localhost:6379
- *
- * Run: npx vitest run tests/metrics.test.ts
+ * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
-
-let cleanupClient: InstanceType<typeof GlideClient>;
-
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const prefix = `glide:{${queueName}}:job:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
-
-afterAll(async () => {
-  cleanupClient.close();
-});
-
-describe('Queue metrics', () => {
+describeEachMode('Queue metrics', (CONNECTION) => {
+  let cleanupClient: any;
   const Q = 'test-metrics-' + Date.now();
   let queue: InstanceType<typeof Queue>;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
     queue = new Queue(Q, { connection: CONNECTION });
   });
 
   afterAll(async () => {
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('getMetrics returns zero counts on empty queue', async () => {
@@ -76,18 +36,15 @@ describe('Queue metrics', () => {
     expect(counts.completed).toBe(0);
     expect(counts.failed).toBe(0);
     expect(counts.delayed).toBe(0);
-    // waiting might be 0 even though stream doesn't exist yet
     expect(counts.waiting).toBe(0);
   });
 
   it('getJobCounts reflects waiting jobs after add', async () => {
-    // Add some waiting jobs
     await queue.add('job-a', { val: 1 });
     await queue.add('job-b', { val: 2 });
     await queue.add('job-c', { val: 3 });
 
     const counts = await queue.getJobCounts();
-    // These are in the stream but not claimed yet => waiting
     expect(counts.waiting).toBeGreaterThanOrEqual(3);
     expect(counts.active).toBe(0);
   });
@@ -103,12 +60,10 @@ describe('Queue metrics', () => {
     const qName = Q + '-complete';
     const localQueue = new Queue(qName, { connection: CONNECTION });
 
-    // Add 3 jobs
     await localQueue.add('m1', { x: 1 });
     await localQueue.add('m2', { x: 2 });
     await localQueue.add('m3', { x: 3 });
 
-    // Process all 3
     let processedCount = 0;
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
@@ -131,7 +86,6 @@ describe('Queue metrics', () => {
 
     await done;
 
-    // Check completed metrics
     const metrics = await localQueue.getMetrics('completed');
     expect(metrics.count).toBe(3);
 
@@ -140,7 +94,7 @@ describe('Queue metrics', () => {
     expect(counts.waiting).toBe(0);
 
     await localQueue.close();
-    await flushQueue(qName);
+    await flushQueue(cleanupClient, qName);
   }, 15000);
 
   it('getMetrics reflects failed jobs', async () => {
@@ -174,6 +128,6 @@ describe('Queue metrics', () => {
     expect(counts.failed).toBe(1);
 
     await localQueue.close();
-    await flushQueue(qName);
+    await flushQueue(cleanupClient, qName);
   }, 15000);
 });

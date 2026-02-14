@@ -1,65 +1,31 @@
 /**
  * Deep tests: Job revocation functionality
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/deep-revocation.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { Job } = require('../dist/job') as typeof import('../src/job');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
-
-let cleanupClient: InstanceType<typeof GlideClient>;
-
-async function flushQueue(queueName: string, prefix = 'glide') {
-  const k = buildKeys(queueName, prefix);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const pfx = `${prefix}:{${queueName}}:`;
-  for (const pattern of [`${pfx}job:*`, `${pfx}log:*`, `${pfx}deps:*`]) {
-    let cursor = '0';
-    do {
-      const result = await cleanupClient.scan(cursor, { match: pattern, count: 100 });
-      cursor = result[0] as string;
-      const keys = result[1] as string[];
-      if (keys.length > 0) await cleanupClient.del(keys);
-    } while (cursor !== '0');
-  }
-}
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
 function uid() {
   return `revoke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
-
-afterAll(async () => {
-  cleanupClient.close();
-});
-
-describe('Job Revocation', () => {
+describeEachMode('Job Revocation', (CONNECTION) => {
+  let cleanupClient: any;
   let queueName: string;
   let queue: InstanceType<typeof Queue>;
   let worker: InstanceType<typeof Worker>;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterEach(async () => {
     if (worker) {
@@ -68,7 +34,11 @@ describe('Job Revocation', () => {
     if (queue) {
       try { await queue.close(); } catch {}
     }
-    if (queueName) await flushQueue(queueName);
+    if (queueName) await flushQueue(cleanupClient, queueName);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
   });
 
   it('revoke waiting job returns "revoked"', async () => {
@@ -142,18 +112,11 @@ describe('Job Revocation', () => {
     queueName = uid();
     queue = new Queue(queueName, { connection: CONNECTION });
 
-    // Add a job, then manually set its state to 'active' to simulate
-    // a job that has been reclaimed by the stalled recovery mechanism
-    // (reclaimStalled sets state='active' on the hash).
-    // The worker does NOT write state='active' on pickup, so the Lua
-    // revoke function sees whatever state the hash has.
     const job = await queue.add('active-revoke', { x: 1 });
     const k = buildKeys(queueName);
     await cleanupClient.hset(k.job(job!.id), { state: 'active' });
 
     const result = await queue.revoke(job!.id);
-    // Lua sees state='active' which is NOT waiting/delayed/prioritized,
-    // so it just sets revoked=1 flag and returns 'flagged'
     expect(result).toBe('flagged');
   });
 
@@ -193,7 +156,6 @@ describe('Job Revocation', () => {
       stalledInterval: 60000,
     });
 
-    // Wait enough time for worker to pick it up if it were in the stream
     await new Promise(r => setTimeout(r, 1000));
     expect(processed).toBe(false);
   });
@@ -202,7 +164,6 @@ describe('Job Revocation', () => {
     queueName = uid();
     queue = new Queue(queueName, { connection: CONNECTION });
 
-    // Add job, then manually set revoked flag before worker starts
     const job = await queue.add('pre-revoked', { x: 1 });
     const k = buildKeys(queueName);
     await cleanupClient.hset(k.job(job!.id), { revoked: '1' });
@@ -220,7 +181,6 @@ describe('Job Revocation', () => {
 
     await new Promise(r => setTimeout(r, 1500));
 
-    // The job should not appear in 'processed' events
     expect(events).not.toContain('processed');
     expect(events).not.toContain('completed');
   });
@@ -274,7 +234,6 @@ describe('Job Revocation', () => {
     queue = new Queue(queueName, { connection: CONNECTION });
     const job = await queue.add('prio-revoke', { x: 1 }, { priority: 5 });
     const result = await queue.revoke(job!.id);
-    // Prioritized jobs are in the scheduled set, same as delayed
     expect(result).toBe('revoked');
   });
 
@@ -283,26 +242,22 @@ describe('Job Revocation', () => {
     queue = new Queue(queueName, { connection: CONNECTION });
     const job = await queue.add('double-revoke', { x: 1 });
     const r1 = await queue.revoke(job!.id);
-    // Second revoke on already-failed job - should be flagged since state is now 'failed'
     const r2 = await queue.revoke(job!.id);
     expect(r1).toBe('revoked');
-    // Second call sees it's already in failed state (not waiting/delayed), so it flags
     expect(r2).toBe('flagged');
   });
 
-  it('revoked job is removed from waiting stream', async () => {
+  it('revoked waiting job is removed from waiting stream', async () => {
     queueName = uid();
     queue = new Queue(queueName, { connection: CONNECTION });
     const job = await queue.add('stream-remove', { x: 1 });
 
-    // Verify it's in the stream before revoke
     const k = buildKeys(queueName);
     const beforeLen = await cleanupClient.xlen(k.stream);
     expect(beforeLen).toBeGreaterThan(0);
 
     await queue.revoke(job!.id);
 
-    // Check stream: the job entry should be gone
     const entries = await cleanupClient.xrange(k.stream, '-', '+');
     let foundJob = false;
     if (entries) {
@@ -322,7 +277,6 @@ describe('Job Revocation', () => {
     queue = new Queue(queueName, { connection: CONNECTION });
     await queue.add('counts-revoke', { x: 1 });
     const before = await queue.getJobCounts();
-    // Either waiting > 0 or delayed > 0
     expect(before.waiting + before.delayed).toBeGreaterThan(0);
 
     const jobs = await queue.getJobs('waiting');

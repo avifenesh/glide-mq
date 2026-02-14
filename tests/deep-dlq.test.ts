@@ -1,67 +1,33 @@
 /**
  * Deep tests: Dead Letter Queue (DLQ) functionality
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/deep-dlq.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { Job } = require('../dist/job') as typeof import('../src/job');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
-
-let cleanupClient: InstanceType<typeof GlideClient>;
-
-async function flushQueue(queueName: string, prefix = 'glide') {
-  const k = buildKeys(queueName, prefix);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const pfx = `${prefix}:{${queueName}}:`;
-  for (const pattern of [`${pfx}job:*`, `${pfx}log:*`, `${pfx}deps:*`]) {
-    let cursor = '0';
-    do {
-      const result = await cleanupClient.scan(cursor, { match: pattern, count: 100 });
-      cursor = result[0] as string;
-      const keys = result[1] as string[];
-      if (keys.length > 0) await cleanupClient.del(keys);
-    } while (cursor !== '0');
-  }
-}
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
 function uid() {
   return `dlq-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
-
-afterAll(async () => {
-  cleanupClient.close();
-});
-
-describe('Dead Letter Queue', () => {
+describeEachMode('Dead Letter Queue', (CONNECTION) => {
+  let cleanupClient: any;
   let queueName: string;
   let dlqName: string;
   let queue: InstanceType<typeof Queue>;
   let dlqQueue: InstanceType<typeof Queue>;
   let worker: InstanceType<typeof Worker>;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterEach(async () => {
     if (worker) {
@@ -73,8 +39,12 @@ describe('Dead Letter Queue', () => {
     if (dlqQueue) {
       try { await dlqQueue.close(); } catch {}
     }
-    if (queueName) await flushQueue(queueName);
-    if (dlqName) await flushQueue(dlqName);
+    if (queueName) await flushQueue(cleanupClient, queueName);
+    if (dlqName) await flushQueue(cleanupClient, dlqName);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
   });
 
   it('moves job to DLQ after exhausting retries', async () => {
@@ -106,12 +76,10 @@ describe('Dead Letter Queue', () => {
 
     await failedPromise;
 
-    // Check the DLQ has the job
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
     const dlqJobs = await dlqQueue.getJobs('waiting');
     expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
     const dlqJob = dlqJobs[0];
-    // data is already parsed by Job.fromHash
     const dlqData = dlqJob.data as any;
     expect(dlqData.originalQueue).toBe(queueName);
     expect(dlqData.originalJobId).toBe(job!.id);
@@ -180,7 +148,6 @@ describe('Dead Letter Queue', () => {
     const dlqJobs = await dlqQueue.getJobs('waiting');
     expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
     const dlqData = dlqJobs[0].data as any;
-    // attemptsMade should be the number of attempts the worker saw (at least 2 since the last fail increments it)
     expect(dlqData.attemptsMade).toBeGreaterThanOrEqual(2);
   });
 
@@ -221,7 +188,6 @@ describe('Dead Letter Queue', () => {
     dlqName = `${queueName}-dlq`;
     queue = new Queue(queueName, {
       connection: CONNECTION,
-      // no deadLetterQueue
     });
 
     await queue.add('no-dlq', { x: 1 }, { attempts: 1 });
@@ -231,7 +197,6 @@ describe('Dead Letter Queue', () => {
         throw new Error('no dlq configured');
       }, {
         connection: CONNECTION,
-        // no deadLetterQueue
         stalledInterval: 60000,
       });
       worker.on('failed', () => setTimeout(resolve, 200));
@@ -239,7 +204,6 @@ describe('Dead Letter Queue', () => {
 
     await failedPromise;
 
-    // Verify that the DLQ stream does not exist
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
     const dlqK = buildKeys(dlqName);
     const streamLen = await cleanupClient.xlen(dlqK.stream);
@@ -294,7 +258,6 @@ describe('Dead Letter Queue', () => {
       deadLetterQueue: { name: dlqName },
     });
 
-    // Add 3 jobs that will all fail
     for (let i = 0; i < 3; i++) {
       await queue.add('dlq-page', { i }, { attempts: 1 });
     }
@@ -316,7 +279,6 @@ describe('Dead Letter Queue', () => {
 
     await allFailed;
 
-    // Get only first 2
     const page = await queue.getDeadLetterJobs(0, 1);
     expect(page.length).toBe(2);
   });
@@ -381,7 +343,6 @@ describe('Dead Letter Queue', () => {
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
     const dlqJobs = await dlqQueue.getJobs('waiting');
     expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
-    // The DLQ job preserves the original job's name
     expect(dlqJobs[0].name).toBe('special-name');
   });
 

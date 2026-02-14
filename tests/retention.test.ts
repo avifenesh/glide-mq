@@ -1,60 +1,26 @@
 /**
  * Integration tests for job retention (removeOnComplete / removeOnFail).
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server running on localhost:6379 and cluster on :7000-7005
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
-let cleanupClient: InstanceType<typeof GlideClient>;
-
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const prefix = `glide:{${queueName}}:job:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  // Force reload the library to pick up updated complete/fail functions with retention
-  await cleanupClient.functionLoad(LIBRARY_SOURCE, { replace: true });
-});
-
-afterAll(async () => {
-  cleanupClient.close();
-});
-
-describe('removeOnComplete: true', () => {
+describeEachMode('removeOnComplete: true', (CONNECTION) => {
   const Q = 'test-ret-true-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('removes completed job hash and ZSet entry immediately', async () => {
@@ -80,11 +46,9 @@ describe('removeOnComplete: true', () => {
 
     await done;
 
-    // Job hash should be deleted
     const exists = await cleanupClient.exists([k.job(job!.id)]);
     expect(exists).toBe(0);
 
-    // Not in completed ZSet
     const score = await cleanupClient.zscore(k.completed, job!.id);
     expect(score).toBeNull();
 
@@ -92,11 +56,17 @@ describe('removeOnComplete: true', () => {
   }, 15000);
 });
 
-describe('removeOnComplete: count', () => {
+describeEachMode('removeOnComplete: count', (CONNECTION) => {
   const Q = 'test-ret-count-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('keeps only N most recent completed jobs', async () => {
@@ -132,10 +102,8 @@ describe('removeOnComplete: count', () => {
 
     await done;
 
-    // Wait a bit for all Lua retention cleanup to finish
     await new Promise(r => setTimeout(r, 200));
 
-    // Should have at most KEEP entries in the completed ZSet
     const completedCount = await cleanupClient.zcard(k.completed);
     expect(completedCount).toBeLessThanOrEqual(KEEP);
 
@@ -143,11 +111,17 @@ describe('removeOnComplete: count', () => {
   }, 20000);
 });
 
-describe('removeOnFail: true', () => {
+describeEachMode('removeOnFail: true', (CONNECTION) => {
   const Q = 'test-ret-fail-true-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('removes failed job hash and ZSet entry immediately', async () => {
@@ -175,11 +149,9 @@ describe('removeOnFail: true', () => {
 
     await done;
 
-    // Job hash should be deleted
     const exists = await cleanupClient.exists([k.job(job!.id)]);
     expect(exists).toBe(0);
 
-    // Not in failed ZSet
     const score = await cleanupClient.zscore(k.failed, job!.id);
     expect(score).toBeNull();
 
@@ -187,11 +159,17 @@ describe('removeOnFail: true', () => {
   }, 15000);
 });
 
-describe('removeOnFail: count', () => {
+describeEachMode('removeOnFail: count', (CONNECTION) => {
   const Q = 'test-ret-fail-count-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('keeps only N most recent failed jobs', async () => {

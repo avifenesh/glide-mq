@@ -2,73 +2,44 @@
  * Compatibility tests: Celery/Sidekiq reliability and operational patterns.
  * Adapted from cross-language queue system test patterns.
  *
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server running on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/compat-reliability.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
 const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 const { gracefulShutdown } = require('../dist/graceful-shutdown') as typeof import('../src/graceful-shutdown');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
-
-let cleanupClient: InstanceType<typeof GlideClient>;
-const allQueues: string[] = [];
-
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const prefix = `glide:{${queueName}}:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-function uniqueQueue(prefix: string): string {
-  const name = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  allQueues.push(name);
-  return name;
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
-
-afterAll(async () => {
-  for (const q of allQueues) {
-    await flushQueue(q);
-  }
-  cleanupClient.close();
-});
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
 // ---------------------------------------------------------------------------
 // STALLED JOB RECOVERY (from BullMQ/Celery patterns)
 // ---------------------------------------------------------------------------
-describe('Stalled job recovery', () => {
+describeEachMode('Stalled job recovery', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
+  function uniqueQueue(prefix: string): string {
+    const name = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(name);
+    return name;
+  }
+
   it('worker crashes mid-processing - stalled job detected and state updated', async () => {
     const Q = uniqueQueue('stall-reclaim');
     const queue = new Queue(Q, { connection: CONNECTION });
@@ -97,9 +68,6 @@ describe('Stalled job recovery', () => {
     await worker1.close(true);
 
     // Worker 2: has short stalledInterval - should detect the stalled job
-    // XAUTOCLAIM reclaims the entry and increments stalledCount in the hash.
-    // The recovery worker's scheduler runs reclaimStalled which either sets
-    // state to 'active' (if stalledCount <= maxStalledCount) or 'failed'.
     const stalledIds: string[] = [];
     const worker2 = new Worker(
       Q,
@@ -123,8 +91,6 @@ describe('Stalled job recovery', () => {
     await queue.close();
 
     const state = await cleanupClient.hget(k.job(job.id), 'state');
-    // After stall recovery: 'active' (reclaimed but not re-processed via pollLoop),
-    // 'completed' (if the reclaim resulted in a re-read), or 'failed' (if maxStalledCount exceeded)
     expect(['completed', 'active', 'failed', 'waiting'].includes(String(state))).toBe(true);
 
     // Verify stalledCount was incremented in the job hash
@@ -157,15 +123,10 @@ describe('Stalled job recovery', () => {
     await new Promise(r => setTimeout(r, 2000));
     await worker1.close(true);
 
-    // Recovery worker with maxStalledCount=1 - reclaimStalled will XAUTOCLAIM
-    // the entry, increment stalledCount to 1, which is <= maxStalledCount(1), so state='active'.
-    // On the NEXT stalled check, stalledCount increments to 2 > maxStalledCount(1), so state='failed'.
+    // Recovery worker with maxStalledCount=1
     const worker2 = new Worker(
       Q,
       async () => {
-        // This processor will never actually run for the stalled entry because
-        // XAUTOCLAIM reclaims it but pollLoop only reads '>'.
-        // The entry sits idle in the PEL, so the next stalled check reclaims again.
         await new Promise(r => setTimeout(r, 60000));
         return 'never';
       },
@@ -322,7 +283,27 @@ describe('Stalled job recovery', () => {
 // ---------------------------------------------------------------------------
 // RETRY EXHAUSTION (from Sidekiq patterns)
 // ---------------------------------------------------------------------------
-describe('Retry exhaustion', () => {
+describeEachMode('Retry exhaustion', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
+  function uniqueQueue(prefix: string): string {
+    const name = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(name);
+    return name;
+  }
+
   it('job exhausts all retries - ends in failed state with correct error', async () => {
     const Q = uniqueQueue('retry-exhaust');
     const queue = new Queue(Q, { connection: CONNECTION });
@@ -388,8 +369,6 @@ describe('Retry exhaustion', () => {
       backoff: { type: 'fixed', delay: 100 },
     });
 
-    // Use a single worker that fails twice then succeeds.
-    // After each failure, manually promote so the worker picks it up again.
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
 
@@ -407,7 +386,6 @@ describe('Retry exhaustion', () => {
       worker.on('error', () => {});
 
       worker.on('failed', () => {
-        // Promote after the backoff delay to move job back to stream
         setTimeout(async () => {
           try { await promote(cleanupClient, buildKeys(Q), Date.now()); } catch {}
         }, 200);
@@ -425,11 +403,9 @@ describe('Retry exhaustion', () => {
     const attempts = await cleanupClient.hget(k.job(job.id), 'attemptsMade');
     expect(String(attempts)).toBe('2');
 
-    // The count persists in the hash - a new worker reading this job would see attemptsMade=2
     const state = await cleanupClient.hget(k.job(job.id), 'state');
     expect(String(state)).toBe('completed');
 
-    // Verify the job went through 3 processing attempts total
     expect(attemptCount).toBe(3);
 
     await queue.close();
@@ -529,7 +505,6 @@ describe('Retry exhaustion', () => {
       );
 
       worker.on('failed', () => {
-        // Wait enough for the backoff delay + jitter, then promote
         setTimeout(async () => {
           try { await promote(cleanupClient, buildKeys(Q), Date.now()); } catch {}
         }, 500);
@@ -557,7 +532,27 @@ describe('Retry exhaustion', () => {
 // ---------------------------------------------------------------------------
 // GRACEFUL SHUTDOWN (from Celery patterns)
 // ---------------------------------------------------------------------------
-describe('Graceful shutdown', () => {
+describeEachMode('Graceful shutdown', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
+  function uniqueQueue(prefix: string): string {
+    const name = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(name);
+    return name;
+  }
+
   it('Worker.close(false) waits for active job to finish', async () => {
     const Q = uniqueQueue('shutdown-graceful');
     const queue = new Queue(Q, { connection: CONNECTION });
@@ -700,7 +695,27 @@ describe('Graceful shutdown', () => {
 // ---------------------------------------------------------------------------
 // OPERATIONAL (from Celery/Sidekiq patterns)
 // ---------------------------------------------------------------------------
-describe('Operational patterns', () => {
+describeEachMode('Operational patterns', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
+  function uniqueQueue(prefix: string): string {
+    const name = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(name);
+    return name;
+  }
+
   it('getJobCounts returns accurate numbers after add/process/fail', async () => {
     const Q = uniqueQueue('op-counts');
     const queue = new Queue(Q, { connection: CONNECTION });
@@ -902,7 +917,27 @@ describe('Operational patterns', () => {
 // ---------------------------------------------------------------------------
 // MEMORY/RESOURCE (from Celery patterns)
 // ---------------------------------------------------------------------------
-describe('Memory and resource management', () => {
+describeEachMode('Memory and resource management', (CONNECTION) => {
+  let cleanupClient: any;
+  const localQueues: string[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    for (const q of localQueues) {
+      await flushQueue(cleanupClient, q);
+    }
+    cleanupClient.close();
+  });
+
+  function uniqueQueue(prefix: string): string {
+    const name = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    localQueues.push(name);
+    return name;
+  }
+
   it('100 rapid add+process cycles - activePromises set stays bounded', async () => {
     const Q = uniqueQueue('mem-rapid');
     const queue = new Queue(Q, { connection: CONNECTION });

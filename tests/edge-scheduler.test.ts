@@ -1,61 +1,28 @@
 /**
  * Edge-case tests for job schedulers (repeatable/cron jobs).
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server running on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/edge-scheduler.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
-let cleanupClient: InstanceType<typeof GlideClient>;
-
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const prefix = `glide:{${queueName}}:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
-
-afterAll(async () => {
-  cleanupClient.close();
-});
-
-describe('Edge: Cron scheduler fires on schedule', () => {
+describeEachMode('Edge: Cron scheduler fires on schedule', (CONNECTION) => {
   const Q = 'edge-sched-cron-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('cron scheduler with every-minute pattern creates jobs via worker', async () => {
@@ -118,11 +85,17 @@ describe('Edge: Cron scheduler fires on schedule', () => {
   }, 15000);
 });
 
-describe('Edge: Remove scheduler while running', () => {
+describeEachMode('Edge: Remove scheduler while running', (CONNECTION) => {
   const Q = 'edge-sched-remove-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('stops creating jobs after scheduler is removed', async () => {
@@ -176,11 +149,17 @@ describe('Edge: Remove scheduler while running', () => {
   }, 15000);
 });
 
-describe('Edge: Upsert scheduler with changed interval', () => {
+describeEachMode('Edge: Upsert scheduler with changed interval', (CONNECTION) => {
   const Q = 'edge-sched-upsert-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('updates interval when upserting an existing scheduler', async () => {
@@ -244,11 +223,17 @@ describe('Edge: Upsert scheduler with changed interval', () => {
   }, 15000);
 });
 
-describe('Edge: Two schedulers on same queue', () => {
+describeEachMode('Edge: Two schedulers on same queue', (CONNECTION) => {
   const Q = 'edge-sched-two-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('both schedulers fire independently', async () => {

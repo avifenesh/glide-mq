@@ -1,64 +1,26 @@
 /**
  * Flow (parent-child job trees) integration tests.
- * Requires: valkey-server running on localhost:6379
- *
- * Run: npx vitest run tests/flow.test.ts
+ * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
-const { buildKeys, keyPrefix } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
+const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
-
-let cleanupClient: InstanceType<typeof GlideClient>;
-
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  // Clean job hashes + deps
-  const prefix = `glide:{${queueName}}:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  // Force reload the library to ensure new functions are available
-  await (cleanupClient as any).functionLoad(LIBRARY_SOURCE, { replace: true });
-});
-
-afterAll(async () => {
-  cleanupClient.close();
-});
-
-describe('FlowProducer', () => {
+describeEachMode('FlowProducer', (CONNECTION) => {
+  let cleanupClient: any;
   const Q = 'test-flow-' + Date.now();
 
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('creates parent in waiting-children state with children in waiting state', async () => {
@@ -147,7 +109,7 @@ describe('FlowProducer', () => {
     expect(completedJobs).toContain('parent');
 
     await flow.close();
-    await flushQueue(qName);
+    await flushQueue(cleanupClient, qName);
   }, 20000);
 
   it('nested flow (grandchild)', async () => {
@@ -206,7 +168,7 @@ describe('FlowProducer', () => {
     expect(completedNames.indexOf('parent-child')).toBeLessThan(completedNames.indexOf('grandparent'));
 
     await flow.close();
-    await flushQueue(qName);
+    await flushQueue(cleanupClient, qName);
   }, 25000);
 
   it('parent getChildrenValues returns all child results', async () => {
@@ -263,7 +225,7 @@ describe('FlowProducer', () => {
     expect(doubled).toEqual([20, 40]);
 
     await flow.close();
-    await flushQueue(qName);
+    await flushQueue(cleanupClient, qName);
   }, 20000);
 
   it('addBulk creates multiple flows', async () => {
@@ -296,6 +258,6 @@ describe('FlowProducer', () => {
     expect(nodes[1].children).toHaveLength(1);
 
     await flow.close();
-    await flushQueue(qName);
+    await flushQueue(cleanupClient, qName);
   });
 });

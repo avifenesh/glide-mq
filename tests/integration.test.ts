@@ -1,77 +1,50 @@
 /**
  * Integration tests against a real Valkey instance.
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server running on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/integration.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-// Import from compiled output to avoid speedkey TS source resolution issues
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { Job } = require('../dist/job') as typeof import('../src/job');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, LIBRARY_VERSION, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
+const { LIBRARY_VERSION, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
-let cleanupClient: InstanceType<typeof GlideClient>;
+describeEachMode('Function Library', (CONNECTION) => {
+  let cleanupClient: any;
 
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  // Clean job hashes
-  const prefix = `glide:{${queueName}}:job:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
   });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
 
-afterAll(async () => {
-  cleanupClient.close();
-});
+  afterAll(async () => {
+    cleanupClient.close();
+  });
 
-describe('Function Library', () => {
   it('glidemq_version returns correct version', async () => {
     const result = await cleanupClient.fcall('glidemq_version', [], []);
     expect(String(result)).toBe(LIBRARY_VERSION);
   });
 });
 
-describe('Queue.add + getJob', () => {
+describeEachMode('Queue.add + getJob', (CONNECTION) => {
   const Q = 'test-add-' + Date.now();
   let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
     queue = new Queue(Q, { connection: CONNECTION });
   });
 
   afterAll(async () => {
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('adds a job and retrieves it by ID', async () => {
@@ -118,17 +91,20 @@ describe('Queue.add + getJob', () => {
   });
 });
 
-describe('Queue pause/resume', () => {
+describeEachMode('Queue pause/resume', (CONNECTION) => {
   const Q = 'test-pause-' + Date.now();
   let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
     queue = new Queue(Q, { connection: CONNECTION });
   });
 
   afterAll(async () => {
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('pause sets meta.paused=1, resume sets it to 0', async () => {
@@ -140,11 +116,17 @@ describe('Queue pause/resume', () => {
   });
 });
 
-describe('Worker processes jobs', () => {
+describeEachMode('Worker processes jobs', (CONNECTION) => {
   const Q = 'test-worker-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterAll(async () => {
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('worker picks up and completes a job', async () => {
@@ -174,7 +156,6 @@ describe('Worker processes jobs', () => {
 
     expect(processed).toContain(job.id);
 
-    // Verify completed in Valkey
     const k = buildKeys(Q);
     const score = await cleanupClient.zscore(k.completed, job.id);
     expect(score).not.toBeNull();
@@ -221,21 +202,24 @@ describe('Worker processes jobs', () => {
     expect(maxConcurrent).toBeGreaterThanOrEqual(2);
 
     await queue.close();
-    await flushQueue(qName);
+    await flushQueue(cleanupClient, qName);
   }, 15000);
 });
 
-describe('Job operations', () => {
+describeEachMode('Job operations', (CONNECTION) => {
   const Q = 'test-jobops-' + Date.now();
   let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
     queue = new Queue(Q, { connection: CONNECTION });
   });
 
   afterAll(async () => {
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('updateProgress persists to hash', async () => {
@@ -269,24 +253,26 @@ describe('Job operations', () => {
   });
 });
 
-describe('Events stream', () => {
+describeEachMode('Events stream', (CONNECTION) => {
   const Q = 'test-events-' + Date.now();
   let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
     queue = new Queue(Q, { connection: CONNECTION });
   });
 
   afterAll(async () => {
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('adding a job emits an added event', async () => {
     const job = await queue.add('ev-test', { x: 1 });
     const k = buildKeys(Q);
 
-    // xrange returns Record<entryId, [field, value][]>
     const entries = await cleanupClient.xrange(k.events, '-', '+') as Record<string, [string, string][]>;
     const entryIds = Object.keys(entries);
     expect(entryIds.length).toBeGreaterThan(0);

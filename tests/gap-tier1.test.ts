@@ -1,66 +1,34 @@
 /**
  * Tier 1 gap tests: per-job timeout, job log, convenience methods,
  * worker state getters, custom backoff.
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/gap-tier1.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { Job } = require('../dist/job') as typeof import('../src/job');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
-let cleanupClient: InstanceType<typeof GlideClient>;
+describeEachMode('Gap Tier 1', (CONNECTION) => {
+  let cleanupClient: any;
 
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  // Clean job hashes and log keys
-  for (const suffix of ['job:', 'log:', 'deps:']) {
-    const prefix = `glide:{${queueName}}:${suffix}`;
-    let cursor = '0';
-    do {
-      const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-      cursor = result[0] as string;
-      const keys = result[1] as string[];
-      if (keys.length > 0) {
-        await cleanupClient.del(keys);
-      }
-    } while (cursor !== '0');
-  }
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
   });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
 
-afterAll(async () => {
-  cleanupClient.close();
-});
+  afterAll(async () => {
+    cleanupClient.close();
+  });
 
-// ---- Gap #2: Per-job timeout ----
+  // ---- Gap #2: Per-job timeout ----
 
-describe('Per-job timeout', () => {
-  it('fails a job that exceeds its timeout', async () => {
+  it('timeout: fails a job that exceeds its timeout', async () => {
     const Q = 'test-timeout-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
@@ -74,7 +42,6 @@ describe('Per-job timeout', () => {
       const worker = new Worker(
         Q,
         async () => {
-          // Simulate a slow processor that takes longer than timeout
           await new Promise((r) => setTimeout(r, 3000));
           return 'should-not-reach';
         },
@@ -99,10 +66,10 @@ describe('Per-job timeout', () => {
     expect(failedJobs[0].error.message).toBe('Job timeout exceeded');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('completes a job that finishes before its timeout', async () => {
+  it('timeout: completes a job that finishes before its timeout', async () => {
     const Q = 'test-timeout-ok-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
@@ -139,10 +106,10 @@ describe('Per-job timeout', () => {
     expect(completedJobs[0].returnvalue).toBe('fast-result');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('retries a timed-out job when attempts are configured', async () => {
+  it('timeout: retries a timed-out job when attempts are configured', async () => {
     const Q = 'test-timeout-retry-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
@@ -163,11 +130,9 @@ describe('Per-job timeout', () => {
         async () => {
           attemptCount++;
           if (attemptCount === 1) {
-            // First attempt: exceed timeout
             await new Promise((r) => setTimeout(r, 2000));
             return 'should-not-reach';
           }
-          // Second attempt: succeed quickly
           return 'retry-success';
         },
         { connection: CONNECTION, stalledInterval: 60000, promotionInterval: 200 },
@@ -187,14 +152,12 @@ describe('Per-job timeout', () => {
     expect(completedJobs[0].returnvalue).toBe('retry-success');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
-});
 
-// ---- Gap #12: Job log ----
+  // ---- Gap #12: Job log ----
 
-describe('Job log', () => {
-  it('adds log entries and retrieves them via Queue.getJobLogs', async () => {
+  it('job log: adds log entries and retrieves them via Queue.getJobLogs', async () => {
     const Q = 'test-joblog-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
@@ -231,15 +194,14 @@ describe('Job log', () => {
     expect(count).toBe(3);
     expect(logs).toEqual(['Step 1: starting', 'Step 2: processing', 'Step 3: done']);
 
-    // Test partial range
     const partial = await queue.getJobLogs(job!.id, 1, 1);
     expect(partial.logs).toEqual(['Step 2: processing']);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('returns empty logs for a job with no logs', async () => {
+  it('job log: returns empty logs for a job with no logs', async () => {
     const Q = 'test-joblog-empty-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
@@ -250,13 +212,12 @@ describe('Job log', () => {
     expect(logs).toEqual([]);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('log key is removed when job is removed', async () => {
+  it('job log: log key is removed when job is removed', async () => {
     const Q = 'test-joblog-remove-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
-    const k = buildKeys(Q);
 
     const job = await queue.add('log-remove-task', { x: 1 });
 
@@ -280,27 +241,22 @@ describe('Job log', () => {
 
     await done;
 
-    // Verify log exists
     const beforeRemove = await queue.getJobLogs(job!.id);
     expect(beforeRemove.count).toBe(1);
 
-    // Remove the job
     const fetched = await queue.getJob(job!.id);
     await fetched!.remove();
 
-    // Log key should be gone
     const afterRemove = await queue.getJobLogs(job!.id);
     expect(afterRemove.count).toBe(0);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
-});
 
-// ---- Gap #14: Convenience methods ----
+  // ---- Gap #14: Convenience methods ----
 
-describe('Queue convenience methods', () => {
-  it('isPaused() returns correct state', async () => {
+  it('convenience: isPaused() returns correct state', async () => {
     const Q = 'test-ispaused-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
@@ -313,10 +269,10 @@ describe('Queue convenience methods', () => {
     expect(await queue.isPaused()).toBe(false);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('count() returns waiting job count', async () => {
+  it('convenience: count() returns waiting job count', async () => {
     const Q = 'test-count-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
@@ -329,18 +285,16 @@ describe('Queue convenience methods', () => {
     expect(await queue.count()).toBe(3);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('getRepeatableJobs() returns registered schedulers', async () => {
+  it('convenience: getRepeatableJobs() returns registered schedulers', async () => {
     const Q = 'test-repeatables-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
-    // Initially empty
     const empty = await queue.getRepeatableJobs();
     expect(empty).toEqual([]);
 
-    // Add schedulers
     await queue.upsertJobScheduler('daily-cleanup', { pattern: '0 0 * * *' });
     await queue.upsertJobScheduler('frequent-check', { every: 5000 });
 
@@ -357,14 +311,12 @@ describe('Queue convenience methods', () => {
     expect(frequentJob!.entry.every).toBe(5000);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
-});
 
-// ---- Gap #15: Worker state getters ----
+  // ---- Gap #15: Worker state getters ----
 
-describe('Worker state getters', () => {
-  it('isRunning() and isPaused() reflect correct state', async () => {
+  it('worker state: isRunning() and isPaused() reflect correct state', async () => {
     const Q = 'test-worker-state-' + Date.now();
 
     const worker = new Worker(
@@ -374,32 +326,26 @@ describe('Worker state getters', () => {
     );
     await worker.waitUntilReady();
 
-    // After init: running, not paused
     expect(worker.isRunning()).toBe(true);
     expect(worker.isPaused()).toBe(false);
 
-    // After pause
     await worker.pause(true);
     expect(worker.isRunning()).toBe(false);
     expect(worker.isPaused()).toBe(true);
 
-    // After resume
     await worker.resume();
     expect(worker.isRunning()).toBe(true);
     expect(worker.isPaused()).toBe(false);
 
-    // After close
     await worker.close(true);
     expect(worker.isRunning()).toBe(false);
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
-});
 
-// ---- Gap #16: Custom backoff function ----
+  // ---- Gap #16: Custom backoff function ----
 
-describe('Custom backoff function', () => {
-  it('uses registered custom backoff strategy', async () => {
+  it('custom backoff: uses registered custom backoff strategy', async () => {
     const Q = 'test-custom-backoff-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
@@ -452,16 +398,15 @@ describe('Custom backoff function', () => {
     expect(completedJobs.length).toBe(1);
     expect(completedJobs[0].returnvalue).toBe('custom-backoff-done');
 
-    // Verify custom backoff was called with correct attempts
     expect(backoffDelays.length).toBe(2);
-    expect(backoffDelays[0]).toBe(200); // attemptsMade=1
-    expect(backoffDelays[1]).toBe(400); // attemptsMade=2
+    expect(backoffDelays[0]).toBe(200);
+    expect(backoffDelays[1]).toBe(400);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('falls back to built-in backoff when no custom strategy matches', async () => {
+  it('custom backoff: falls back to built-in backoff when no custom strategy matches', async () => {
     const Q = 'test-builtin-fallback-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
@@ -490,7 +435,7 @@ describe('Custom backoff function', () => {
           stalledInterval: 60000,
           promotionInterval: 200,
           backoffStrategies: {
-            custom: () => 999, // registered but not used by this job
+            custom: () => 999,
           },
         },
       );
@@ -508,6 +453,6 @@ describe('Custom backoff function', () => {
     expect(completedJobs.length).toBe(1);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 });

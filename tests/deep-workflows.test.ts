@@ -1,91 +1,63 @@
 /**
  * Deep tests: Workflow primitives - chain, group, chord.
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/deep-workflows.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { chain, group, chord } = require('../dist/workflows') as typeof import('../src/workflows');
-const { buildKeys, keyPrefix } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
+const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
-let cleanupClient: InstanceType<typeof GlideClient>;
+describeEachMode('Workflows', (CONNECTION) => {
+  let cleanupClient: any;
 
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
+  /** Helper: create a worker that processes jobs, resolves when targetJobId completes. */
+  function createTestWorker(
+    queueName: string,
+    processor: (job: any) => Promise<any>,
+    targetJobId: string,
+    timeoutMs = 15000,
+  ): { promise: Promise<void>; workerRef: { w: any } } {
+    const ref: { w: any } = { w: null };
+    const promise = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout waiting for ' + targetJobId)), timeoutMs);
+      const worker = new Worker(queueName, processor, {
+        connection: CONNECTION,
+        concurrency: 3,
+        blockTimeout: 500,
+        promotionInterval: 500,
+      });
+      ref.w = worker;
+      worker.on('completed', (job: any) => {
+        if (job.id === targetJobId) {
+          clearTimeout(timeout);
+          setTimeout(() => worker.close(true).then(resolve), 200);
+        }
+      });
+      worker.on('error', () => {});
+    });
+    return { promise, workerRef: ref };
   }
-  const prefix = `glide:{${queueName}}:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
 
-/** Helper: create a worker that processes jobs, resolves when targetJobId completes. */
-function createTestWorker(
-  queueName: string,
-  processor: (job: any) => Promise<any>,
-  targetJobId: string,
-  timeoutMs = 15000,
-): { promise: Promise<void>; workerRef: { w: any } } {
-  const ref: { w: any } = { w: null };
-  const promise = new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('timeout waiting for ' + targetJobId)), timeoutMs);
-    const worker = new Worker(queueName, processor, {
-      connection: CONNECTION,
-      concurrency: 3,
-      blockTimeout: 500,
-      promotionInterval: 500,
-    });
-    ref.w = worker;
-    worker.on('completed', (job: any) => {
-      if (job.id === targetJobId) {
-        clearTimeout(timeout);
-        setTimeout(() => worker.close(true).then(resolve), 200);
-      }
-    });
-    worker.on('error', () => {});
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
   });
-  return { promise, workerRef: ref };
-}
 
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
+  afterAll(async () => {
+    cleanupClient.close();
   });
-  await (cleanupClient as any).functionLoad(LIBRARY_SOURCE, { replace: true });
-});
 
-afterAll(async () => {
-  cleanupClient.close();
-});
+  // ---------------------------------------------------------------------------
+  // chain()
+  // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// chain()
-// ---------------------------------------------------------------------------
-describe('chain()', () => {
-  it('single-job chain returns a leaf node', async () => {
+  it('chain: single-job chain returns a leaf node', async () => {
     const Q = 'deep-chain-single-' + Date.now();
     const node = await chain(Q, [{ name: 'only', data: { v: 1 } }], CONNECTION);
 
@@ -93,14 +65,14 @@ describe('chain()', () => {
     expect(node.job.name).toBe('only');
     expect(node.children).toBeUndefined();
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('rejects empty jobs array', async () => {
+  it('chain: rejects empty jobs array', async () => {
     await expect(chain('q', [], CONNECTION)).rejects.toThrow('at least one job');
   });
 
-  it('two-job chain creates parent-child relationship', async () => {
+  it('chain: two-job chain creates parent-child relationship', async () => {
     const Q = 'deep-chain-2-' + Date.now();
     const node = await chain(
       Q,
@@ -111,20 +83,18 @@ describe('chain()', () => {
       CONNECTION,
     );
 
-    // step-A is root (runs last), step-B is child (runs first)
     expect(node.job.name).toBe('step-A');
     expect(node.children).toHaveLength(1);
     expect(node.children![0].job.name).toBe('step-B');
 
-    // Verify parent is waiting-children in Valkey
     const k = buildKeys(Q);
     const parentState = await cleanupClient.hget(k.job(node.job.id), 'state');
     expect(String(parentState)).toBe('waiting-children');
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('three-job chain nests correctly: A -> B -> C (C runs first)', async () => {
+  it('chain: three-job chain nests correctly: A -> B -> C (C runs first)', async () => {
     const Q = 'deep-chain-3-' + Date.now();
     const node = await chain(
       Q,
@@ -142,10 +112,10 @@ describe('chain()', () => {
     expect(node.children![0].children).toHaveLength(1);
     expect(node.children![0].children![0].job.name).toBe('C');
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('chain executes jobs in order (deepest child first)', async () => {
+  it('chain: executes jobs in order (deepest child first)', async () => {
     const Q = 'deep-chain-exec-' + Date.now();
     const order: string[] = [];
 
@@ -174,10 +144,10 @@ describe('chain()', () => {
     expect(order.indexOf('first')).toBeLessThan(order.indexOf('middle'));
     expect(order.indexOf('middle')).toBeLessThan(order.indexOf('last'));
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
-  it('chain root receives children values via getChildrenValues()', async () => {
+  it('chain: root receives children values via getChildrenValues()', async () => {
     const Q = 'deep-chain-values-' + Date.now();
 
     const node = await chain(
@@ -211,10 +181,10 @@ describe('chain()', () => {
     expect(vals).toHaveLength(1);
     expect(vals[0].doubled).toBe(84);
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
-  it('chain with job options (delay, priority) preserves opts', async () => {
+  it('chain: job options (delay, priority) preserved', async () => {
     const Q = 'deep-chain-opts-' + Date.now();
     const node = await chain(
       Q,
@@ -234,10 +204,10 @@ describe('chain()', () => {
     expect(pParsed.priority).toBe(5);
     expect(cParsed.priority).toBe(10);
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('long chain (5 jobs) completes end-to-end', async () => {
+  it('chain: long chain (5 jobs) completes end-to-end', async () => {
     const Q = 'deep-chain-5-' + Date.now();
     const jobs = Array.from({ length: 5 }, (_, i) => ({
       name: `step-${i}`,
@@ -260,24 +230,22 @@ describe('chain()', () => {
 
     await promise;
 
-    // step-4 should run first (deepest), step-0 last (root)
     expect(processed.indexOf('step-4')).toBeLessThan(processed.indexOf('step-3'));
     expect(processed.indexOf('step-1')).toBeLessThan(processed.indexOf('step-0'));
     expect(processed).toHaveLength(5);
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 30000);
-});
 
-// ---------------------------------------------------------------------------
-// group()
-// ---------------------------------------------------------------------------
-describe('group()', () => {
-  it('rejects empty jobs array', async () => {
+  // ---------------------------------------------------------------------------
+  // group()
+  // ---------------------------------------------------------------------------
+
+  it('group: rejects empty jobs array', async () => {
     await expect(group('q', [], CONNECTION)).rejects.toThrow('at least one job');
   });
 
-  it('single-job group creates __group__ parent with one child', async () => {
+  it('group: single-job group creates __group__ parent with one child', async () => {
     const Q = 'deep-group-single-' + Date.now();
     const node = await group(Q, [{ name: 'only', data: { v: 1 } }], CONNECTION);
 
@@ -285,10 +253,10 @@ describe('group()', () => {
     expect(node.children).toHaveLength(1);
     expect(node.children![0].job.name).toBe('only');
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('group creates parent waiting-children with N children in waiting', async () => {
+  it('group: creates parent waiting-children with N children in waiting', async () => {
     const Q = 'deep-group-state-' + Date.now();
     const node = await group(
       Q,
@@ -310,14 +278,13 @@ describe('group()', () => {
       expect(String(childParentId)).toBe(node.job.id);
     }
 
-    // deps set should have 3 members
     const deps = await cleanupClient.smembers(k.deps(node.job.id));
     expect(deps.size).toBe(3);
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('group children run in parallel and parent completes after all', async () => {
+  it('group: children run in parallel and parent completes after all', async () => {
     const Q = 'deep-group-exec-' + Date.now();
     const startTimes: Record<string, number> = {};
 
@@ -332,7 +299,6 @@ describe('group()', () => {
     );
 
     const parentId = node.job.id;
-    const completed: string[] = [];
 
     const { promise } = createTestWorker(
       Q,
@@ -348,15 +314,14 @@ describe('group()', () => {
 
     await promise;
 
-    // Verify parent is completed
     const k = buildKeys(Q);
     const parentState = await cleanupClient.hget(k.job(parentId), 'state');
     expect(String(parentState)).toBe('completed');
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
-  it('group parent getChildrenValues returns all child results', async () => {
+  it('group: parent getChildrenValues returns all child results', async () => {
     const Q = 'deep-group-values-' + Date.now();
 
     const node = await group(
@@ -390,10 +355,10 @@ describe('group()', () => {
     const doubled = vals.map((v: any) => v.doubled).sort((a: number, b: number) => a - b);
     expect(doubled).toEqual([20, 40]);
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
-  it('group with many children (8) completes', async () => {
+  it('group: many children (8) completes', async () => {
     const Q = 'deep-group-many-' + Date.now();
     const jobs = Array.from({ length: 8 }, (_, i) => ({
       name: `item-${i}`,
@@ -416,26 +381,24 @@ describe('group()', () => {
 
     await promise;
 
-    // All 8 children + 1 parent = 9 jobs processed
     expect(processed).toHaveLength(9);
     expect(processed).toContain('__group__');
     for (let i = 0; i < 8; i++) {
       expect(processed).toContain(`item-${i}`);
     }
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 30000);
-});
 
-// ---------------------------------------------------------------------------
-// chord()
-// ---------------------------------------------------------------------------
-describe('chord()', () => {
-  it('rejects empty group jobs array', async () => {
+  // ---------------------------------------------------------------------------
+  // chord()
+  // ---------------------------------------------------------------------------
+
+  it('chord: rejects empty group jobs array', async () => {
     await expect(chord('q', [], { name: 'cb', data: {} }, CONNECTION)).rejects.toThrow('at least one group job');
   });
 
-  it('chord creates callback parent with group jobs as children', async () => {
+  it('chord: creates callback parent with group jobs as children', async () => {
     const Q = 'deep-chord-struct-' + Date.now();
     const node = await chord(
       Q,
@@ -456,10 +419,10 @@ describe('chord()', () => {
     const parentState = await cleanupClient.hget(k.job(node.job.id), 'state');
     expect(String(parentState)).toBe('waiting-children');
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('chord callback runs after all group jobs complete', async () => {
+  it('chord: callback runs after all group jobs complete', async () => {
     const Q = 'deep-chord-exec-' + Date.now();
     const order: string[] = [];
 
@@ -489,14 +452,13 @@ describe('chord()', () => {
 
     await promise;
 
-    // aggregate must come after both fetch-a and fetch-b
     expect(order.indexOf('aggregate')).toBeGreaterThan(order.indexOf('fetch-a'));
     expect(order.indexOf('aggregate')).toBeGreaterThan(order.indexOf('fetch-b'));
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
-  it('chord callback receives children results', async () => {
+  it('chord: callback receives children results', async () => {
     const Q = 'deep-chord-values-' + Date.now();
 
     const node = await chord(
@@ -528,13 +490,12 @@ describe('chord()', () => {
 
     await promise;
 
-    // 5^2 + 10^2 = 25 + 100 = 125
     expect(callbackResult).toEqual({ sum: 125 });
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
-  it('chord with single group job works', async () => {
+  it('chord: single group job works', async () => {
     const Q = 'deep-chord-single-' + Date.now();
 
     const node = await chord(
@@ -565,10 +526,10 @@ describe('chord()', () => {
     expect(vals).toHaveLength(1);
     expect(vals[0].result).toBe(8);
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
-  it('chord callback opts are preserved', async () => {
+  it('chord: callback opts are preserved', async () => {
     const Q = 'deep-chord-opts-' + Date.now();
 
     const node = await chord(
@@ -583,15 +544,14 @@ describe('chord()', () => {
     const parsed = JSON.parse(String(optsRaw));
     expect(parsed.priority).toBe(3);
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
-});
 
-// ---------------------------------------------------------------------------
-// FlowProducer.addBulk
-// ---------------------------------------------------------------------------
-describe('FlowProducer.addBulk()', () => {
-  it('creates multiple independent flows', async () => {
+  // ---------------------------------------------------------------------------
+  // FlowProducer.addBulk
+  // ---------------------------------------------------------------------------
+
+  it('FlowProducer.addBulk creates multiple independent flows', async () => {
     const Q = 'deep-bulk-' + Date.now();
     const flow = new FlowProducer({ connection: CONNECTION });
 
@@ -619,7 +579,6 @@ describe('FlowProducer.addBulk()', () => {
     expect(nodes[0].children).toHaveLength(1);
     expect(nodes[1].children).toHaveLength(2);
 
-    // Verify distinct IDs
     const allIds = [
       nodes[0].job.id,
       nodes[0].children![0].job.id,
@@ -630,10 +589,10 @@ describe('FlowProducer.addBulk()', () => {
     expect(new Set(allIds).size).toBe(5);
 
     await flow.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
-  it('addBulk flows complete independently via worker', async () => {
+  it('FlowProducer.addBulk flows complete independently via worker', async () => {
     const Q = 'deep-bulk-exec-' + Date.now();
     const flow = new FlowProducer({ connection: CONNECTION });
 
@@ -692,14 +651,13 @@ describe('FlowProducer.addBulk()', () => {
     expect(processed).toContain('p2');
 
     await flow.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 25000);
-});
 
-// ---------------------------------------------------------------------------
-// Mixed / edge cases
-// ---------------------------------------------------------------------------
-describe('workflow edge cases', () => {
+  // ---------------------------------------------------------------------------
+  // Mixed / edge cases
+  // ---------------------------------------------------------------------------
+
   it('chain where child fails - parent stays in waiting-children', async () => {
     const Q = 'deep-chain-fail-' + Date.now();
 
@@ -739,11 +697,10 @@ describe('workflow edge cases', () => {
 
     await done;
 
-    // Parent should still be waiting-children (child failed, not completed)
     const parentState = await cleanupClient.hget(k.job(parentId), 'state');
     expect(String(parentState)).toBe('waiting-children');
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   it('FlowProducer leaf job (no children) creates standalone job', async () => {
@@ -759,13 +716,12 @@ describe('workflow edge cases', () => {
     expect(node.job.id).toBeTruthy();
     expect(node.children).toBeUndefined();
 
-    // Should be in stream (waiting)
     const k = buildKeys(Q);
     const state = await cleanupClient.hget(k.job(node.job.id), 'state');
     expect(String(state)).toBe('waiting');
 
     await flow.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   });
 
   it('chord where one group job fails - callback stays waiting-children', async () => {
@@ -783,7 +739,6 @@ describe('workflow edge cases', () => {
 
     const callbackId = node.job.id;
     const k = buildKeys(Q);
-    const processed: string[] = [];
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
@@ -792,7 +747,6 @@ describe('workflow edge cases', () => {
       const worker = new Worker(
         Q,
         async (job: any) => {
-          processed.push(job.name);
           if (job.name === 'fail-task') {
             throw new Error('deliberate fail');
           }
@@ -820,10 +774,9 @@ describe('workflow edge cases', () => {
 
     await done;
 
-    // callback should remain in waiting-children because fail-task did not complete
     const cbState = await cleanupClient.hget(k.job(callbackId), 'state');
     expect(String(cbState)).toBe('waiting-children');
 
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 });

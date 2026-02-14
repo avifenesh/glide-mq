@@ -1,60 +1,29 @@
 /**
  * Deep tests: Custom backoff strategies.
- * Requires: valkey-server running on localhost:6379
- *
- * Tests the backoffStrategies option on Worker, which allows users to register
- * custom backoff functions by name that are looked up in processJob's catch block.
+ * Requires: valkey-server on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/deep-backoff.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
+const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
-let cleanupClient: InstanceType<typeof GlideClient>;
+describeEachMode('Custom backoff strategies', (CONNECTION) => {
+  let cleanupClient: any;
 
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const prefix = `glide:{${queueName}}:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
   });
-  await (cleanupClient as any).functionLoad(LIBRARY_SOURCE, { replace: true });
-});
 
-afterAll(async () => {
-  cleanupClient.close();
-});
+  afterAll(async () => {
+    cleanupClient.close();
+  });
 
-describe('Custom backoff strategies', () => {
   it('custom strategy is invoked with attemptsMade and error', async () => {
     const Q = 'deep-backoff-invoke-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
@@ -114,7 +83,7 @@ describe('Custom backoff strategies', () => {
     expect(strategyArgs[1]).toEqual({ attempt: 2, message: 'fail-2' });
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 25000);
 
   it('custom strategy controls actual backoff delay', async () => {
@@ -167,12 +136,11 @@ describe('Custom backoff strategies', () => {
 
     await done;
 
-    // Verify the job ended in completed state
     const state = await cleanupClient.hget(k.job(job.id), 'state');
     expect(String(state)).toBe('completed');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
   it('custom strategy returning 0 retries immediately (no backoff delay)', async () => {
@@ -233,7 +201,7 @@ describe('Custom backoff strategies', () => {
     expect(String(finalState)).toBe('completed');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
   it('falls back to built-in calculateBackoff when strategy name is unregistered', async () => {
@@ -263,7 +231,6 @@ describe('Custom backoff strategies', () => {
           concurrency: 1,
           blockTimeout: 500,
           promotionInterval: 500,
-          // Register a custom strategy under a DIFFERENT name - the job uses 'fixed'
           backoffStrategies: {
             'my-custom': () => 9999,
           },
@@ -290,7 +257,7 @@ describe('Custom backoff strategies', () => {
     expect(String(state)).toBe('completed');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
   it('custom strategy that depends on error type', async () => {
@@ -348,12 +315,10 @@ describe('Custom backoff strategies', () => {
 
     await done;
 
-    // First failure was TRANSIENT -> 200ms delay
-    // Second failure was FATAL -> 2000ms delay
     expect(delays).toEqual([200, 2000]);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 25000);
 
   it('custom strategy with exponential-like formula', async () => {
@@ -410,11 +375,10 @@ describe('Custom backoff strategies', () => {
 
     await done;
 
-    // 3^0 * 50 = 50, 3^1 * 50 = 150, 3^2 * 50 = 450
     expect(computedDelays).toEqual([50, 150, 450]);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 25000);
 
   it('custom strategy is not called when no attempts configured', async () => {
@@ -425,7 +389,6 @@ describe('Custom backoff strategies', () => {
     let strategyCalled = false;
 
     const job = await queue.add('task', {}, {
-      // No attempts configured (defaults to 0 = no retries)
       backoff: { type: 'should-not-run', delay: 100 },
     });
 
@@ -463,7 +426,7 @@ describe('Custom backoff strategies', () => {
     expect(String(state)).toBe('failed');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 15000);
 
   it('custom strategy is not called when no backoff option on job', async () => {
@@ -475,7 +438,6 @@ describe('Custom backoff strategies', () => {
 
     const job = await queue.add('task', {}, {
       attempts: 3,
-      // No backoff configured
     });
 
     let failCount = 0;
@@ -522,7 +484,7 @@ describe('Custom backoff strategies', () => {
     expect(strategyCalled).toBe(false);
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
   it('multiple custom strategies can coexist on one worker', async () => {
@@ -532,7 +494,6 @@ describe('Custom backoff strategies', () => {
 
     const usedStrategies: string[] = [];
 
-    // Add two jobs with different backoff strategies
     const jobA = await queue.add('jobA', { strategy: 'alpha' }, {
       attempts: 2,
       backoff: { type: 'alpha', delay: 100 },
@@ -587,12 +548,11 @@ describe('Custom backoff strategies', () => {
 
     await done;
 
-    // Both strategies should have been called
     expect(usedStrategies).toContain('alpha');
     expect(usedStrategies).toContain('beta');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 25000);
 
   it('custom strategy returning large delay still retries after promote', async () => {
@@ -623,16 +583,14 @@ describe('Custom backoff strategies', () => {
           blockTimeout: 500,
           promotionInterval: 500,
           backoffStrategies: {
-            'very-slow': () => 60000, // 60 seconds - we will force-promote
+            'very-slow': () => 60000,
           },
         },
       );
 
       worker.on('failed', () => {
-        // Force promote after a short delay despite the 60s backoff
         setTimeout(async () => {
           try {
-            // Use a future timestamp to force promotion
             await promote(cleanupClient, k, Date.now() + 120000);
           } catch {}
         }, 300);
@@ -652,7 +610,7 @@ describe('Custom backoff strategies', () => {
     expect(String(state)).toBe('completed');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 
   it('exhausted retries with custom strategy moves to failed', async () => {
@@ -712,6 +670,6 @@ describe('Custom backoff strategies', () => {
     expect(String(failedReason)).toBe('always-fail');
 
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
   }, 20000);
 });

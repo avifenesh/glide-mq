@@ -1,68 +1,32 @@
 /**
  * Integration tests for priority job lifecycle.
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server running on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/priority.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
-let cleanupClient: InstanceType<typeof GlideClient>;
-
-async function flushQueue(queueName: string) {
-  const k = buildKeys(queueName);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const prefix = `glide:{${queueName}}:job:`;
-  let cursor = '0';
-  do {
-    const result = await cleanupClient.scan(cursor, { match: `${prefix}*`, count: 100 });
-    cursor = result[0] as string;
-    const keys = result[1] as string[];
-    if (keys.length > 0) {
-      await cleanupClient.del(keys);
-    }
-  } while (cursor !== '0');
-}
-
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
-
-afterAll(async () => {
-  cleanupClient.close();
-});
-
-describe('Priority jobs', () => {
+describeEachMode('Priority jobs', (CONNECTION) => {
   const Q = 'test-priority-' + Date.now();
   let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
     queue = new Queue(Q, { connection: CONNECTION });
   });
 
   afterAll(async () => {
     await queue.close();
-    await flushQueue(Q);
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
   });
 
   it('prioritized job goes to scheduled ZSet with correct score encoding', async () => {
@@ -72,12 +36,10 @@ describe('Priority jobs', () => {
     const score = await cleanupClient.zscore(k.scheduled, job.id);
     expect(score).not.toBeNull();
 
-    // Score should be priority * 2^42 + 0 (no delay, timestamp component is 0)
     const PRIORITY_SHIFT = 2 ** 42;
     const expectedScore = 3 * PRIORITY_SHIFT;
     expect(Number(score)).toBe(expectedScore);
 
-    // State should be 'prioritized'
     const state = await cleanupClient.hget(k.job(job.id), 'state');
     expect(String(state)).toBe('prioritized');
   });
@@ -87,17 +49,14 @@ describe('Priority jobs', () => {
     const localQueue = new Queue(qName, { connection: CONNECTION });
     const k = buildKeys(qName);
 
-    // Add jobs with priorities 3, 1, 2
     const jobP3 = await localQueue.add('p3', { prio: 3 }, { priority: 3 });
     const jobP1 = await localQueue.add('p1', { prio: 1 }, { priority: 1 });
     const jobP2 = await localQueue.add('p2', { prio: 2 }, { priority: 2 });
 
-    // All should be in scheduled ZSet
     expect(await cleanupClient.zscore(k.scheduled, jobP3.id)).not.toBeNull();
     expect(await cleanupClient.zscore(k.scheduled, jobP1.id)).not.toBeNull();
     expect(await cleanupClient.zscore(k.scheduled, jobP2.id)).not.toBeNull();
 
-    // Start worker first so the consumer group and poll loop are ready
     const processedPrios: number[] = [];
     const allDone = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
@@ -118,21 +77,17 @@ describe('Priority jobs', () => {
       worker.on('error', () => {});
     });
 
-    // Wait for worker to initialize and start polling
     await new Promise(r => setTimeout(r, 500));
 
-    // Now promote - priority scores exceed Date.now(), so use a large timestamp
     const promoted = await promote(cleanupClient, buildKeys(qName), Number.MAX_SAFE_INTEGER);
     expect(promoted).toBe(3);
 
     await allDone;
 
-    // ZRANGEBYSCORE returns in ascending score order: prio 1, prio 2, prio 3
-    // They enter the stream in that order, worker processes FIFO
     expect(processedPrios).toEqual([1, 2, 3]);
 
     await localQueue.close();
-    await flushQueue(qName);
+    await flushQueue(cleanupClient, qName);
   }, 15000);
 
   it('priority + delay: combined score respects both priority and delay', async () => {
@@ -140,21 +95,16 @@ describe('Priority jobs', () => {
     const localQueue = new Queue(qName, { connection: CONNECTION });
     const k = buildKeys(qName);
 
-    // Same priority, different delays: within the same priority band,
-    // the job with the shorter delay has a lower score and promotes first.
     const jobShort = await localQueue.add('short', { label: 'short' }, { priority: 2, delay: 200 });
     const jobLong = await localQueue.add('long', { label: 'long' }, { priority: 2, delay: 600 });
 
-    // Both in scheduled ZSet
     expect(await cleanupClient.zscore(k.scheduled, jobShort.id)).not.toBeNull();
     expect(await cleanupClient.zscore(k.scheduled, jobLong.id)).not.toBeNull();
 
-    // Score for short delay should be less than score for long delay (same priority)
     const scoreShort = Number(await cleanupClient.zscore(k.scheduled, jobShort.id));
     const scoreLong = Number(await cleanupClient.zscore(k.scheduled, jobLong.id));
     expect(scoreShort).toBeLessThan(scoreLong);
 
-    // Start worker first
     const processedLabels: string[] = [];
     const allDone = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
@@ -175,19 +125,16 @@ describe('Priority jobs', () => {
       worker.on('error', () => {});
     });
 
-    // Wait for worker to be ready
     await new Promise(r => setTimeout(r, 500));
 
-    // Force-promote all
     const promoted = await promote(cleanupClient, buildKeys(qName), Number.MAX_SAFE_INTEGER);
     expect(promoted).toBe(2);
 
     await allDone;
-    // Short delay has lower score -> promoted first -> processed first
     expect(processedLabels).toEqual(['short', 'long']);
 
     await localQueue.close();
-    await flushQueue(qName);
+    await flushQueue(cleanupClient, qName);
   }, 15000);
 
   it('non-prioritized job (priority=0) goes directly to stream, bypassing scheduled ZSet', async () => {
@@ -197,15 +144,13 @@ describe('Priority jobs', () => {
 
     const job = await localQueue.add('normal', { x: 1 });
 
-    // Should NOT be in scheduled ZSet
     const score = await cleanupClient.zscore(k.scheduled, job.id);
     expect(score).toBeNull();
 
-    // State should be 'waiting' (directly in stream)
     const state = await cleanupClient.hget(k.job(job.id), 'state');
     expect(String(state)).toBe('waiting');
 
     await localQueue.close();
-    await flushQueue(qName);
+    await flushQueue(cleanupClient, qName);
   });
 });

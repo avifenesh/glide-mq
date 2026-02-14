@@ -1,65 +1,31 @@
 /**
  * Deep tests: Job logging functionality
- * Requires: valkey-server running on localhost:6379
+ * Requires: valkey-server on localhost:6379 and cluster on :7000-7005
  *
  * Run: npx vitest run tests/deep-joblog.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 
-const { GlideClient } = require('speedkey') as typeof import('speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { Job } = require('../dist/job') as typeof import('../src/job');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_SOURCE, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { ensureFunctionLibrary } = require('../dist/connection') as typeof import('../src/connection');
 
-const CONNECTION = {
-  addresses: [{ host: 'localhost', port: 6379 }],
-};
-
-let cleanupClient: InstanceType<typeof GlideClient>;
-
-async function flushQueue(queueName: string, prefix = 'glide') {
-  const k = buildKeys(queueName, prefix);
-  const keysToDelete = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
-  ];
-  for (const key of keysToDelete) {
-    try { await cleanupClient.del([key]); } catch {}
-  }
-  const pfx = `${prefix}:{${queueName}}:`;
-  for (const pattern of [`${pfx}job:*`, `${pfx}log:*`, `${pfx}deps:*`]) {
-    let cursor = '0';
-    do {
-      const result = await cleanupClient.scan(cursor, { match: pattern, count: 100 });
-      cursor = result[0] as string;
-      const keys = result[1] as string[];
-      if (keys.length > 0) await cleanupClient.del(keys);
-    } while (cursor !== '0');
-  }
-}
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
 function uid() {
   return `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-beforeAll(async () => {
-  cleanupClient = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
-  });
-  await ensureFunctionLibrary(cleanupClient, LIBRARY_SOURCE);
-});
-
-afterAll(async () => {
-  cleanupClient.close();
-});
-
-describe('Job Logging', () => {
+describeEachMode('Job Logging', (CONNECTION) => {
+  let cleanupClient: any;
   let queueName: string;
   let queue: InstanceType<typeof Queue>;
   let worker: InstanceType<typeof Worker>;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
 
   afterEach(async () => {
     if (worker) {
@@ -68,7 +34,11 @@ describe('Job Logging', () => {
     if (queue) {
       try { await queue.close(); } catch {}
     }
-    if (queueName) await flushQueue(queueName);
+    if (queueName) await flushQueue(cleanupClient, queueName);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
   });
 
   it('job.log appends a single log entry', async () => {
@@ -167,7 +137,6 @@ describe('Job Logging', () => {
     const job = await queue.add('persist-log', { x: 1 });
     await completed;
 
-    // Close worker and query logs independently
     await worker.close(true);
     worker = null as any;
 
@@ -219,9 +188,8 @@ describe('Job Logging', () => {
     const job = await queue.add('paginate', { x: 1 });
     await completed;
 
-    // Get entries 2-4 (0-indexed)
     const { logs, count } = await queue.getJobLogs(job!.id, 2, 4);
-    expect(count).toBe(10); // total count is always full
+    expect(count).toBe(10);
     expect(logs).toEqual(['entry-2', 'entry-3', 'entry-4']);
   });
 
@@ -369,15 +337,12 @@ describe('Job Logging', () => {
     const job = await queue.add('remove-log', { x: 1 });
     await completed;
 
-    // Verify logs exist
     const before = await queue.getJobLogs(job!.id);
     expect(before.count).toBe(1);
 
-    // Remove the job
     const fetched = await queue.getJob(job!.id);
     await fetched!.remove();
 
-    // Log key should be deleted
     const k = buildKeys(queueName);
     const len = await cleanupClient.llen(k.log(job!.id));
     expect(len).toBe(0);
@@ -461,7 +426,6 @@ describe('Job Logging', () => {
     const job = await queue.add('tail-log', { x: 1 });
     await completed;
 
-    // Get last 2 entries
     const { logs } = await queue.getJobLogs(job!.id, -2, -1);
     expect(logs).toEqual(['msg-3', 'msg-4']);
   });
@@ -510,7 +474,6 @@ describe('Job Logging', () => {
 
     const { logs } = await queue.getJobLogs(job!.id);
     expect(logs[0]).toBe(jsonMsg);
-    // Can parse it back
     const parsed = JSON.parse(logs[0]);
     expect(parsed.level).toBe('info');
   });
