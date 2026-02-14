@@ -98,26 +98,23 @@ export class Worker<D = any, R = any> extends EventEmitter {
    * Respects concurrency limits by only requesting (prefetch - activeCount) entries.
    * On connection errors, uses exponential backoff (1s, 2s, 4s, 8s, max 30s) and reconnects.
    */
-  private pollLoop(): void {
-    if (!this.running || this.paused || this.closing) return;
-
-    this.pollOnce()
-      .then(() => {
-        // Successful poll resets backoff
+  private async pollLoop(): Promise<void> {
+    while (this.running && !this.paused && !this.closing) {
+      try {
+        await this.pollOnce();
         this.reconnectBackoff = 0;
-        this.pollLoop();
-      })
-      .catch((err) => {
+      } catch (err) {
         if (this.running && !this.closing) {
           this.emit('error', err);
-          // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
           const delay = this.reconnectBackoff === 0
             ? 1000
             : Math.min(this.reconnectBackoff * 2, 30000);
           this.reconnectBackoff = delay;
-          setTimeout(() => this.reconnectAndResume(), delay);
+          await this.reconnectAndResume();
+          return; // reconnectAndResume restarts the loop
         }
-      });
+      }
+    }
   }
 
   /**
@@ -239,8 +236,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
         if (!jobId) continue;
 
-        // Dispatch the job for processing (non-blocking)
-        this.dispatchJob(jobId, String(entryId));
+        if (this.concurrency === 1) {
+          // Inline processing for c=1: avoids promise dispatch overhead (~15ms/job)
+          await this.processJob(jobId, String(entryId));
+        } else {
+          this.dispatchJob(jobId, String(entryId));
+        }
       }
     }
   }
@@ -266,198 +267,99 @@ export class Worker<D = any, R = any> extends EventEmitter {
     const now = Date.now();
 
     // Single FCALL: reads job hash, checks revoked, sets state=active + lastActive + processedOn
-    // Replaces: HGETALL + revoked check + HSET lastActive (3 round trips -> 1)
-    const result = await moveToActive(this.commandClient, this.queueKeys, jobId, now);
+    const moveResult = await moveToActive(this.commandClient, this.queueKeys, jobId, now);
 
-    if (result === null) {
-      // Job hash missing - ACK and skip
-      try {
-        await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', now, CONSUMER_GROUP);
-      } catch {}
+    if (moveResult === null) {
+      try { await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', now, CONSUMER_GROUP); } catch {}
+      return;
+    }
+    if (moveResult === 'REVOKED') {
+      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', now, 0, 0, CONSUMER_GROUP); } catch {}
       return;
     }
 
-    if (result === 'REVOKED') {
-      try {
-        await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', now, 0, 0, CONSUMER_GROUP);
-      } catch {}
-      return;
-    }
-
-    const hash = result;
-    const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, jobId, hash);
+    const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, jobId, moveResult);
     (job as any)._entryId = entryId;
 
-    // Rate limiting: check before processing
-    if (this.opts.limiter) {
-      await this.waitForRateLimit();
-    }
+    if (this.opts.limiter) await this.waitForRateLimit();
 
-    // Create AbortController for cooperative revocation during processing
     const ac = new AbortController();
     this.activeAbortControllers.set(jobId, ac);
     (job as any).abortSignal = ac.signal;
-
-    // Start heartbeat for lock renewal (periodic lastActive writes after the initial one set by moveToActive)
     this.startHeartbeat(jobId);
 
     try {
-    await withSpan(
-      'glide-mq.worker.process',
-      {
-        'glide-mq.queue': this.name,
-        'glide-mq.job.id': jobId,
-        'glide-mq.job.name': job.name,
-        'glide-mq.job.attemptsMade': job.attemptsMade,
-      },
-      async () => {
-        try {
-          let result: R;
-          const timeoutMs = job.opts.timeout;
-          if (timeoutMs && timeoutMs > 0) {
-            result = await Promise.race([
-              this.processor(job),
-              new Promise<never>((_resolve, reject) => {
-                setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs);
-              }),
-            ]);
-          } else {
-            result = await this.processor(job);
-          }
-
-          // Check if revoked during processing
-          if (ac.signal.aborted) {
-            if (!this.commandClient) return;
-            await failJob(
-              this.commandClient,
-              this.queueKeys,
-              jobId,
-              entryId,
-              'revoked',
-              Date.now(),
-              0,
-              0,
-              CONSUMER_GROUP,
-            );
-            return;
-          }
-
-          const returnvalue = result !== undefined ? JSON.stringify(result) : 'null';
-
-          // Build parent info if this job is a child in a flow
-          let parentInfo: Parameters<typeof completeJob>[8];
-          if (job.parentId && job.parentQueue) {
-            const parentKeys = buildKeys(job.parentQueue, this.opts.prefix);
-            const childQueuePrefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
-            parentInfo = {
-              depsMember: `${childQueuePrefix}:${jobId}`,
-              parentId: job.parentId,
-              parentKeys,
-            };
-          }
-
-          if (!this.commandClient) return;
-          await withChildSpan(
-            'glide-mq.worker.complete',
-            { 'glide-mq.job.id': jobId },
-            async () => {
-              await completeJob(
-                this.commandClient!,
-                this.queueKeys,
-                jobId,
-                entryId,
-                returnvalue,
-                Date.now(),
-                CONSUMER_GROUP,
-                job.opts.removeOnComplete,
-                parentInfo,
-              );
-            },
-          );
-
-          job.returnvalue = result;
-          job.finishedOn = Date.now();
-
-          this.emit('completed', job, result);
-        } catch (err) {
-          // If the processor threw RateLimitError, apply manual rate limit delay
-          // and re-queue the job as delayed instead of failing it.
-          if (err instanceof Worker.RateLimitError) {
-            const delayMs = (err as any).delayMs || (this.opts.limiter?.duration ?? 1000);
-            this.rateLimitUntil = Date.now() + delayMs;
-            if (!this.commandClient) return;
-            try {
-              await failJob(
-                this.commandClient,
-                this.queueKeys,
-                jobId,
-                entryId,
-                'rate limited',
-                Date.now(),
-                job.attemptsMade + 2,
-                delayMs,
-                CONSUMER_GROUP,
-              );
-            } catch (failErr) {
-              this.emit('error', failErr);
-            }
-            return;
-          }
-
-          const error = err instanceof Error ? err : new Error(String(err));
-          const maxAttempts = job.opts.attempts ?? 0;
-          let backoffDelay = 0;
-
-          if (maxAttempts > 0 && job.opts.backoff) {
-            const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
-            if (strategyFn) {
-              backoffDelay = strategyFn(job.attemptsMade + 1, error);
-            } else {
-              backoffDelay = calculateBackoff(
-                job.opts.backoff.type,
-                job.opts.backoff.delay,
-                job.attemptsMade + 1,
-                job.opts.backoff.jitter,
-              );
-            }
-          }
-
-          if (!this.commandClient) {
-            job.failedReason = error.message;
-            this.emit('failed', job, error);
-            return;
-          }
-
-          let failResult: string | undefined;
-          await withChildSpan(
-            'glide-mq.worker.fail',
-            { 'glide-mq.job.id': jobId, 'glide-mq.error': error.message },
-            async () => {
-              failResult = await failJob(
-                this.commandClient!,
-                this.queueKeys,
-                jobId,
-                entryId,
-                error.message,
-                Date.now(),
-                maxAttempts,
-                backoffDelay,
-                CONSUMER_GROUP,
-                job.opts.removeOnFail,
-              );
-            },
-          );
-
-          // If the job exhausted retries and a DLQ is configured, move it there
-          if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
-            await this.moveToDLQ(job, error);
-          }
-
-          job.failedReason = error.message;
-          this.emit('failed', job, error);
+      try {
+        let processResult: R;
+        const timeoutMs = job.opts.timeout;
+        if (timeoutMs && timeoutMs > 0) {
+          processResult = await Promise.race([
+            this.processor(job),
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs)),
+          ]);
+        } else {
+          processResult = await this.processor(job);
         }
-      },
-    );
+
+        if (ac.signal.aborted) {
+          if (!this.commandClient) return;
+          await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP);
+          return;
+        }
+
+        const returnvalue = processResult !== undefined ? JSON.stringify(processResult) : 'null';
+
+        let parentInfo: Parameters<typeof completeJob>[8];
+        if (job.parentId && job.parentQueue) {
+          const parentKeys = buildKeys(job.parentQueue, this.opts.prefix);
+          parentInfo = {
+            depsMember: `${keyPrefix(this.opts.prefix ?? 'glide', this.name)}:${jobId}`,
+            parentId: job.parentId,
+            parentKeys,
+          };
+        }
+
+        if (!this.commandClient) return;
+        await completeJob(
+          this.commandClient, this.queueKeys, jobId, entryId, returnvalue,
+          Date.now(), CONSUMER_GROUP, job.opts.removeOnComplete, parentInfo,
+        );
+
+        job.returnvalue = processResult;
+        job.finishedOn = Date.now();
+        this.emit('completed', job, processResult);
+      } catch (err) {
+        if (err instanceof Worker.RateLimitError) {
+          const delayMs = (err as any).delayMs || (this.opts.limiter?.duration ?? 1000);
+          this.rateLimitUntil = Date.now() + delayMs;
+          if (!this.commandClient) return;
+          try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'rate limited', Date.now(), job.attemptsMade + 2, delayMs, CONSUMER_GROUP); } catch (e) { this.emit('error', e); }
+          return;
+        }
+
+        const error = err instanceof Error ? err : new Error(String(err));
+        const maxAttempts = job.opts.attempts ?? 0;
+        let backoffDelay = 0;
+        if (maxAttempts > 0 && job.opts.backoff) {
+          const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
+          backoffDelay = strategyFn
+            ? strategyFn(job.attemptsMade + 1, error)
+            : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, job.attemptsMade + 1, job.opts.backoff.jitter);
+        }
+
+        if (!this.commandClient) { job.failedReason = error.message; this.emit('failed', job, error); return; }
+
+        const failResult = await failJob(
+          this.commandClient, this.queueKeys, jobId, entryId, error.message,
+          Date.now(), maxAttempts, backoffDelay, CONSUMER_GROUP, job.opts.removeOnFail,
+        );
+
+        if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
+          await this.moveToDLQ(job, error);
+        }
+        job.failedReason = error.message;
+        this.emit('failed', job, error);
+      }
     } finally {
       this.stopHeartbeat(jobId);
       this.activeAbortControllers.delete(jobId);
