@@ -1,0 +1,402 @@
+{
+  "topic": "Bee-Queue and other Node.js queue library test suites - test cases and behavioral expectations",
+  "slug": "bee-queue-and-others-test-cases",
+  "generated": "2026-02-14T00:00:00Z",
+  "depth": "medium",
+  "totalSources": 25,
+  "sources": [
+    {
+      "url": "https://github.com/bee-queue/bee-queue/tree/master/test",
+      "title": "Bee-Queue test directory listing",
+      "qualityScore": 95,
+      "authority": 10,
+      "recency": 7,
+      "depth": 8,
+      "examples": 10,
+      "uniqueness": 10,
+      "keyInsights": ["5 test files: queue-test.js, job-test.js, delay-test.js, eager-timer-test.js, helpers-test.js"]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/bee-queue/bee-queue/master/test/queue-test.js",
+      "title": "Bee-Queue queue-test.js - Main test suite (~95 tests)",
+      "qualityScore": 100,
+      "authority": 10,
+      "recency": 7,
+      "depth": 10,
+      "examples": 10,
+      "uniqueness": 10,
+      "keyInsights": [
+        "Close/connection lifecycle: 17 tests covering graceful shutdown, double-close, quit errors, timeout",
+        "Constructor: 7 tests for default/custom redis, isWorker, autoConnect",
+        "Job CRUD: 4 add/remove, 7 health, 12 getJobs, 5 getJob, 4 saveAll, 2 removeJob",
+        "Processing: 15 tests covering success/fail/retry/timeout/concurrency restrictions",
+        "Processing many: 4 tests for sequential, concurrent, multi-queue no-duplication",
+        "Backoff: 6 tests for fixed/immediate/exponential/custom strategies",
+        "Stall detection: 7 tests including 1000+ stalled jobs, multi-queue recovery",
+        "Startup: 2 tests for pre-existing jobs and no double-processing",
+        "Pub/Sub events: 8 tests for succeeded/failed/progress/retrying/enable-disable",
+        "Destroy: 3 tests for cleanup",
+        "Init: 3 tests for ready state"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/bee-queue/bee-queue/master/test/job-test.js",
+      "title": "Bee-Queue job-test.js - Job class tests (18 tests)",
+      "qualityScore": 90,
+      "authority": 10,
+      "recency": 7,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 8,
+      "keyInsights": [
+        "Job creation with/without data",
+        "Chaining API: retries, delayUntil, timeout with validation",
+        "Progress reporting with data objects",
+        "Job removal and retrieval by ID",
+        "Invalid input rejection: negative retries, invalid delays, negative timeout"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/bee-queue/bee-queue/master/test/delay-test.js",
+      "title": "Bee-Queue delay-test.js - Delayed job tests (5 tests)",
+      "qualityScore": 85,
+      "authority": 10,
+      "recency": 7,
+      "depth": 7,
+      "examples": 8,
+      "uniqueness": 9,
+      "keyInsights": [
+        "Basic delayed job processing",
+        "Proximal delays batched together (debounce window)",
+        "Distant future delays with timer scheduling",
+        "Cross-worker delayed job processing",
+        "Duplicate ID honors original delay"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/bee-queue/bee-queue/master/test/eager-timer-test.js",
+      "title": "Bee-Queue eager-timer-test.js - Timer scheduling tests (17 tests)",
+      "qualityScore": 85,
+      "authority": 10,
+      "recency": 7,
+      "depth": 9,
+      "examples": 8,
+      "uniqueness": 10,
+      "keyInsights": [
+        "Timer scheduling with max delay cap",
+        "Timer overwrite logic: earlier replaces later, not vice versa",
+        "Edge cases: null, undefined, NaN, negative timestamps all default to max delay",
+        "Past timestamps trigger immediately",
+        "Stop prevents all future scheduling",
+        "Invalid max delay validation (negative, non-integer, infinite)"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/bee-queue/bee-queue/master/test/helpers-test.js",
+      "title": "Bee-Queue helpers-test.js - finallyRejectsWithInitial tests (~8 tests)",
+      "qualityScore": 75,
+      "authority": 10,
+      "recency": 7,
+      "depth": 7,
+      "examples": 7,
+      "uniqueness": 6,
+      "keyInsights": [
+        "Promise error precedence: original error preferred over callback error",
+        "Synchronous exception handling in finally-like pattern",
+        "Waits for returned Promise before resolving"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/core/queue.ts",
+      "title": "node-resque queue.ts - Queue operations (40 tests)",
+      "qualityScore": 95,
+      "authority": 9,
+      "recency": 8,
+      "depth": 10,
+      "examples": 9,
+      "uniqueness": 9,
+      "keyInsights": [
+        "Enqueue: normal, delayed (enqueueAt/enqueueIn), string timestamp conversion, duplicate prevention",
+        "Inspection: queue length, job retrieval, scheduled job lookup",
+        "Deletion: specific job, by class, delayed jobs, clean removal",
+        "Argument handling: auto-array wrapping, omitted args support",
+        "Lock management: get/remove locks",
+        "Failed job management: count, body content, remove by payload, re-enqueue, invalid retry error",
+        "Delayed status: timestamps, per-timestamp jobs, full hash",
+        "Worker status: running workers, idle/active status, stuck worker removal, forceClean, retryStuckJobs"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/core/worker.ts",
+      "title": "node-resque worker.ts - Worker tests (15 tests)",
+      "qualityScore": 90,
+      "authority": 9,
+      "recency": 8,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 8,
+      "keyInsights": [
+        "Inline job execution (sync and async)",
+        "Plugin afterPerform hook on error",
+        "Wildcard queue auto-discovery",
+        "Heartbeat ping during slow jobs",
+        "Error emit instead of unhandled rejection on shutdown"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/core/scheduler.ts",
+      "title": "node-resque scheduler.ts - Scheduler tests (8 tests)",
+      "qualityScore": 90,
+      "authority": 9,
+      "recency": 8,
+      "depth": 8,
+      "examples": 8,
+      "uniqueness": 9,
+      "keyInsights": [
+        "Leader election with automatic failover",
+        "Scheduled job promotion (past-due moved to active)",
+        "Future jobs stay in scheduler",
+        "Stuck worker detection and job failure"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/core/multiWorker.ts",
+      "title": "node-resque multiWorker.ts - Auto-scaling worker tests (4 tests)",
+      "qualityScore": 85,
+      "authority": 9,
+      "recency": 8,
+      "depth": 7,
+      "examples": 8,
+      "uniqueness": 10,
+      "keyInsights": [
+        "Minimum worker count guarantee",
+        "CPU-aware scaling: max workers with I/O jobs, min workers with CPU jobs",
+        "Event propagation from child workers"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/core/connection.ts",
+      "title": "node-resque connection.ts - Connection tests (11 tests)",
+      "qualityScore": 80,
+      "authority": 9,
+      "recency": 8,
+      "depth": 7,
+      "examples": 7,
+      "uniqueness": 7,
+      "keyInsights": [
+        "Namespace key generation (default, custom, array)",
+        "Lua command loading verification",
+        "ioredis transparent key prefix",
+        "Redis DB selection",
+        "Event listener cleanup on end"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/core/connectionError.ts",
+      "title": "node-resque connectionError.ts - Connection error test (1 test)",
+      "qualityScore": 70,
+      "authority": 9,
+      "recency": 8,
+      "depth": 5,
+      "examples": 6,
+      "uniqueness": 6,
+      "keyInsights": ["Connection failure emits error event with ENOTFOUND/ETIMEDOUT/ECONNREFUSED"]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/plugins/retry.ts",
+      "title": "node-resque plugins/retry.ts - Retry plugin tests (7 tests)",
+      "qualityScore": 85,
+      "authority": 9,
+      "recency": 8,
+      "depth": 8,
+      "examples": 8,
+      "uniqueness": 8,
+      "keyInsights": [
+        "Retry limit honored then failure queue",
+        "Custom retry counts and delay arrays",
+        "Re-enqueue during retry window (not failure queue)",
+        "Retry counter and metadata stored in Redis"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/plugins/jobLock.ts",
+      "title": "node-resque plugins/jobLock.ts - Job lock plugin tests (5 tests)",
+      "qualityScore": 80,
+      "authority": 9,
+      "recency": 8,
+      "depth": 7,
+      "examples": 7,
+      "uniqueness": 8,
+      "keyInsights": [
+        "Same-args jobs serialized, different-args run in parallel",
+        "Custom lock key function",
+        "reEnqueue=false discards blocked job"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/plugins/queueLock.ts",
+      "title": "node-resque plugins/queueLock.ts - Queue lock plugin tests (6 tests)",
+      "qualityScore": 80,
+      "authority": 9,
+      "recency": 8,
+      "depth": 7,
+      "examples": 7,
+      "uniqueness": 8,
+      "keyInsights": [
+        "Queue-level dedup by args",
+        "Lock TTL configuration and expiry",
+        "Lock cleanup on completion or plugin skip"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/plugins/delayedQueueLock.ts",
+      "title": "node-resque plugins/delayedQueueLock.ts (2 tests)",
+      "qualityScore": 70,
+      "authority": 9,
+      "recency": 8,
+      "depth": 5,
+      "examples": 6,
+      "uniqueness": 7,
+      "keyInsights": ["Delayed queue dedup: same args prevented, different args allowed"]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/plugins/noop.ts",
+      "title": "node-resque plugins/noop.ts (2 tests)",
+      "qualityScore": 65,
+      "authority": 9,
+      "recency": 8,
+      "depth": 5,
+      "examples": 5,
+      "uniqueness": 7,
+      "keyInsights": ["Noop plugin logs errors but prevents failure queue storage"]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/integration/ioredis.ts",
+      "title": "node-resque integration/ioredis.ts - End-to-end integration (6 tests)",
+      "qualityScore": 80,
+      "authority": 9,
+      "recency": 8,
+      "depth": 7,
+      "examples": 8,
+      "uniqueness": 6,
+      "keyInsights": ["Full lifecycle: create queue/scheduler/worker, enqueue, promote, process"]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/actionhero/node-resque/main/__tests__/integration/ioredis-mock.ts",
+      "title": "node-resque integration/ioredis-mock.ts - Mock Redis integration (6 tests)",
+      "qualityScore": 75,
+      "authority": 9,
+      "recency": 8,
+      "depth": 6,
+      "examples": 7,
+      "uniqueness": 8,
+      "keyInsights": ["Same integration tests running against ioredis-mock for CI without Redis"]
+    },
+    {
+      "url": "https://github.com/weyoss/redis-smq/tree/master/packages/redis-smq/tests/tests",
+      "title": "RedisSMQ test directory listing - 25 test directories",
+      "qualityScore": 85,
+      "authority": 8,
+      "recency": 8,
+      "depth": 8,
+      "examples": 8,
+      "uniqueness": 9,
+      "keyInsights": [
+        "25 test directories covering: consuming-messages (32 files), exchanges, priority-queuing, rate-limit, dead-letter, health-check, namespace, pub-sub, workers, and more",
+        "Monorepo structure with shared test utilities"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/weyoss/redis-smq/master/packages/redis-smq/tests/tests/consuming-messages/",
+      "title": "RedisSMQ consuming-messages tests (multiple files fetched)",
+      "qualityScore": 90,
+      "authority": 8,
+      "recency": 8,
+      "depth": 9,
+      "examples": 9,
+      "uniqueness": 9,
+      "keyInsights": [
+        "LIFO queue ordering verification",
+        "Message TTL and dead-lettering",
+        "Consumer crash recovery with requeue",
+        "Competing consumers: single delivery guarantee",
+        "Retry delay enforcement with tolerance window",
+        "Multi-queue crash recovery",
+        "Queue name normalization (case-insensitive)",
+        "Single consumer multiple queues with cancel/re-subscribe",
+        "Message audit configuration (enable/disable per state)",
+        "Producing without exchange throws error"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/weyoss/redis-smq/master/packages/redis-smq/tests/tests/exchanges/test00001.test.ts",
+      "title": "RedisSMQ exchange tests - Direct exchange routing",
+      "qualityScore": 85,
+      "authority": 8,
+      "recency": 8,
+      "depth": 8,
+      "examples": 8,
+      "uniqueness": 10,
+      "keyInsights": [
+        "Routing key binding/matching/unbinding",
+        "Namespace isolation enforcement",
+        "Routing key validation (alphanumeric, hyphens, underscores, dots)",
+        "Idempotent binding",
+        "Deletion constraints (cannot delete with bound queues)"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/agenda/agenda/main/packages/agenda/test/unit.test.ts",
+      "title": "Agenda unit.test.ts - Unit tests (~80 tests)",
+      "qualityScore": 95,
+      "authority": 9,
+      "recency": 9,
+      "depth": 10,
+      "examples": 9,
+      "uniqueness": 9,
+      "keyInsights": [
+        "Configuration: processEvery, name, maxConcurrency, lockLimit, defaultLockLifetime",
+        "Method chaining validation",
+        "Job methods: repeatAt, repeatEvery, schedule, priority (string parsing), computeNextRunAt",
+        "computeJobState: 13-case state machine",
+        "Logging configuration with per-definition override",
+        "Priority string parsing: lowest=-20 through highest=20"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/agenda/agenda/main/packages/agenda/test/shared/",
+      "title": "Agenda shared test suites (12 files, ~150 tests)",
+      "qualityScore": 95,
+      "authority": 9,
+      "recency": 9,
+      "depth": 10,
+      "examples": 9,
+      "uniqueness": 9,
+      "keyInsights": [
+        "agenda-test-suite: scheduling, querying, canceling, disable/enable, processing, locking, concurrency, priority, lock limits, purge, unique constraints, async/callback handling, events, drain, repeating, error handling, notification channel, fork mode",
+        "jobprocessor-test-suite: getRunningStats, concurrency filling, timeout/touch, new jobs filling queue",
+        "retry-test-suite: retry via nextRunAt and schedule(), failCount tracking",
+        "backoff-test-suite: constant/linear/exponential/combine/when strategies, jitter, presets, auto-retry",
+        "debounce-test-suite: trailing/leading, maxWait, independent per unique key",
+        "removeoncomplete-test-suite: global/per-job override, recurring exception, event ordering",
+        "repository-test-suite: saveJob, getJobById, queryJobs, removeJobs, locking, getNextJobToRun, saveJobState"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/agenda/agenda/main/packages/agenda/test/date-constraints.test.ts",
+      "title": "Agenda date-constraints.test.ts - Date utility tests (~20 tests)",
+      "qualityScore": 80,
+      "authority": 9,
+      "recency": 9,
+      "depth": 7,
+      "examples": 8,
+      "uniqueness": 9,
+      "keyInsights": [
+        "shouldSkipDay: weekday/weekend logic with timezone handling",
+        "applySkipDays: date advancement across consecutive skip days, all-days-skipped returns null",
+        "applyDateRangeConstraints: before/after/within range logic",
+        "Combined constraint application"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,363 @@
+{
+  "topic": "Bull (legacy) test suite - complete catalog of test cases and behavioral expectations",
+  "slug": "bull-test-cases",
+  "generated": "2026-02-14T00:00:00Z",
+  "depth": "medium",
+  "totalSources": 22,
+  "sources": [
+    {
+      "url": "https://github.com/OptimalBits/bull/tree/develop/test",
+      "title": "Bull test directory listing",
+      "qualityScore": 95,
+      "authority": 10,
+      "recency": 7,
+      "depth": 8,
+      "examples": 10,
+      "uniqueness": 10,
+      "keyInsights": [
+        "14 test files in total",
+        "Fixtures directory with 13 processor files",
+        "Utility file with test helpers"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_queue.js",
+      "title": "Bull test_queue.js - Core queue operation tests",
+      "qualityScore": 100,
+      "authority": 10,
+      "recency": 7,
+      "depth": 10,
+      "examples": 10,
+      "uniqueness": 10,
+      "keyInsights": [
+        "Largest test file with ~100 test cases",
+        "Covers: close, instantiation, processing, stalled jobs, retries, backoffs, cleaning, drain",
+        "1 skipped test for lock renewal (#397)",
+        "Dynamic test generation via testRemoveOnFinish helper",
+        "Comprehensive backoff strategy testing including custom and promise-based"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_job.js",
+      "title": "Bull test_job.js - Job lifecycle tests",
+      "qualityScore": 98,
+      "authority": 10,
+      "recency": 7,
+      "depth": 10,
+      "examples": 10,
+      "uniqueness": 9,
+      "keyInsights": [
+        "42 test cases covering full job lifecycle",
+        "Tests job.create, createBulk, update, remove, retry, locking, progress, log, promote, finished, fromJSON",
+        "Tests state transitions: moveToCompleted, moveToFailed",
+        "Validates error cases: removed job updates, locked job removal",
+        "Tests priority queue ordering after removal"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_events.js",
+      "title": "Bull test_events.js - Event system tests",
+      "qualityScore": 90,
+      "authority": 10,
+      "recency": 7,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 8,
+      "keyInsights": [
+        "12 test cases for event emission",
+        "Tests both local and global event variants",
+        "Covers: waiting, stalled, failed, active, drained, lock-extension-failed",
+        "Global events pass job ID instead of Job instance"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_pause.js",
+      "title": "Bull test_pause.js - Pause/resume tests",
+      "qualityScore": 92,
+      "authority": 10,
+      "recency": 7,
+      "depth": 9,
+      "examples": 9,
+      "uniqueness": 8,
+      "keyInsights": [
+        "12 test cases covering global and local pause",
+        "Tests doNotWaitActive option",
+        "Validates blocking client lazy initialization",
+        "Tests pause interaction with delayed jobs"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_repeat.js",
+      "title": "Bull test_repeat.js - Repeatable job tests",
+      "qualityScore": 93,
+      "authority": 10,
+      "recency": 7,
+      "depth": 9,
+      "examples": 9,
+      "uniqueness": 9,
+      "keyInsights": [
+        "23 test cases for repeatable/cron jobs",
+        "Tests cron expressions, every-ms intervals, startDate, endDate, limit",
+        "Tests removal by name, by key, with custom IDs",
+        "Validates mutual exclusion of cron and every options",
+        "Tests priority ordering with repeatable jobs"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_rate_limiter.js",
+      "title": "Bull test_rate_limiter.js - Rate limiting tests",
+      "qualityScore": 82,
+      "authority": 10,
+      "recency": 7,
+      "depth": 7,
+      "examples": 8,
+      "uniqueness": 8,
+      "keyInsights": [
+        "7 test cases (1 skipped for priority)",
+        "Tests validation of required options",
+        "Tests delayed queue behavior when rate limited",
+        "Tests discard option and group-based rate limiting"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_getters.js",
+      "title": "Bull test_getters.js - Job retrieval tests",
+      "qualityScore": 88,
+      "authority": 10,
+      "recency": 7,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 7,
+      "keyInsights": [
+        "16 test cases for job retrieval methods",
+        "Tests all job states: waiting, paused, active, completed, failed",
+        "Tests pagination with positive/negative ranges and overflow",
+        "Tests multi-type queries",
+        "Tests getCountsPerPriority including paused state"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_child-pool.js",
+      "title": "Bull test_child-pool.js - Child process pool tests",
+      "qualityScore": 85,
+      "authority": 10,
+      "recency": 7,
+      "depth": 8,
+      "examples": 8,
+      "uniqueness": 8,
+      "keyInsights": [
+        "9 test cases for child process management",
+        "Tests pool reuse, creation, and replacement",
+        "Tests shared vs non-shared child pool singleton pattern"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_connection.js",
+      "title": "Bull test_connection.js - Redis connection tests",
+      "qualityScore": 87,
+      "authority": 10,
+      "recency": 7,
+      "depth": 8,
+      "examples": 8,
+      "uniqueness": 8,
+      "keyInsights": [
+        "7 test cases for connection lifecycle",
+        "Tests recovery from connection loss",
+        "Tests external connection preservation",
+        "Tests ioredis query string options"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_metrics.js",
+      "title": "Bull test_metrics.js - Metrics collection tests",
+      "qualityScore": 78,
+      "authority": 10,
+      "recency": 8,
+      "depth": 6,
+      "examples": 7,
+      "uniqueness": 7,
+      "keyInsights": [
+        "4 test cases for metrics",
+        "Tests completed and failed job metric gathering",
+        "Tests maxDataPoints retention limit",
+        "Tests pagination for metric retrieval"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_obliterate.js",
+      "title": "Bull test_obliterate.js - Queue obliteration tests",
+      "qualityScore": 85,
+      "authority": 10,
+      "recency": 7,
+      "depth": 8,
+      "examples": 8,
+      "uniqueness": 8,
+      "keyInsights": [
+        "7 test cases for obliterate operation",
+        "Tests empty queue, multi-status jobs, active job protection",
+        "Tests force option, repeatable cleanup, log removal",
+        "Tests high volume obliteration"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_sandboxed_process.js",
+      "title": "Bull test_sandboxed_process.js - Sandboxed processor tests",
+      "qualityScore": 92,
+      "authority": 10,
+      "recency": 7,
+      "depth": 9,
+      "examples": 9,
+      "uniqueness": 9,
+      "keyInsights": [
+        "20 test cases for file-based processors",
+        "Tests process crash, exit, and broken file scenarios",
+        "Tests child pool sharing across queues",
+        "Tests graceful shutdown with active sandboxed jobs",
+        "Tests discard functionality from sandboxed context"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_worker.js",
+      "title": "Bull test_worker.js - Worker discovery test",
+      "qualityScore": 60,
+      "authority": 10,
+      "recency": 7,
+      "depth": 3,
+      "examples": 5,
+      "uniqueness": 5,
+      "keyInsights": [
+        "Single test case for getWorkers()",
+        "Validates worker registration and discovery"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/test_when_current_jobs_finished.js",
+      "title": "Bull test_when_current_jobs_finished.js - Graceful shutdown tests",
+      "qualityScore": 83,
+      "authority": 10,
+      "recency": 7,
+      "depth": 7,
+      "examples": 8,
+      "uniqueness": 7,
+      "keyInsights": [
+        "5 test cases for whenCurrentJobsFinished()",
+        "Tests edge cases: no processor, no jobs, single job, multiple jobs, failing jobs"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/test/utils.js",
+      "title": "Bull test utilities",
+      "qualityScore": 80,
+      "authority": 10,
+      "recency": 7,
+      "depth": 7,
+      "examples": 7,
+      "uniqueness": 6,
+      "keyInsights": [
+        "Queue building and cleanup utilities",
+        "Redis flush before each test",
+        "simulateDisconnect helper for failure testing",
+        "Preserves original setTimeout for sleep function"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/PATTERNS.md",
+      "title": "Bull behavioral patterns documentation",
+      "qualityScore": 90,
+      "authority": 10,
+      "recency": 6,
+      "depth": 9,
+      "examples": 8,
+      "uniqueness": 9,
+      "keyInsights": [
+        "Connection reuse contract: bclient must be new instance",
+        "Custom backoff: return ms delay, 0 for immediate, -1 for fail",
+        "Lock duration default 30 seconds",
+        "Redis Cluster requires hash tag prefix"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/OptimalBits/bull/develop/REFERENCE.md",
+      "title": "Bull API reference documentation",
+      "qualityScore": 95,
+      "authority": 10,
+      "recency": 6,
+      "depth": 10,
+      "examples": 9,
+      "uniqueness": 9,
+      "keyInsights": [
+        "Full API surface: Queue, Job, Events, Options",
+        "KeepJobs interface with age and count",
+        "Global events pass job ID not Job instance",
+        "Advanced settings: lockDuration, stalledInterval, maxStalledCount",
+        "empty() only removes waiting/delayed jobs"
+      ]
+    },
+    {
+      "url": "https://github.com/OptimalBits/bull/issues?q=is%3Aissue+is%3Aopen+label%3Abug",
+      "title": "Bull open bug issues",
+      "qualityScore": 85,
+      "authority": 9,
+      "recency": 8,
+      "depth": 7,
+      "examples": 5,
+      "uniqueness": 9,
+      "keyInsights": [
+        "15 open bugs as of 2026-02-14",
+        "Key issues: #1304 infinite loop, #1371 finished() never resolves, #1389 failed event per attempt",
+        "Multiple Redis Cluster-related bugs",
+        "Connection handling edge cases"
+      ]
+    },
+    {
+      "url": "https://github.com/OptimalBits/bull/issues/1304",
+      "title": "Issue #1304: Possible infinite loop if BRPOPLPUSH fails",
+      "qualityScore": 88,
+      "authority": 9,
+      "recency": 7,
+      "depth": 9,
+      "examples": 7,
+      "uniqueness": 9,
+      "keyInsights": [
+        "OOM error causes infinite retry in getNextJob()",
+        "Error suppression too broad in queue loop",
+        "Fixed via PR #1674: narrowed to 'Connection is closed' only",
+        "Could generate 1GB logs in minutes"
+      ]
+    },
+    {
+      "url": "https://github.com/OptimalBits/bull/issues/1371",
+      "title": "Issue #1371: Job#finished never resolves when job is removed",
+      "qualityScore": 90,
+      "authority": 9,
+      "recency": 7,
+      "depth": 9,
+      "examples": 7,
+      "uniqueness": 9,
+      "keyInsights": [
+        "PRIO 1 bug: finished() relies on pub/sub events",
+        "removeOnComplete prevents completion events from firing",
+        "Race condition: event listener registered after status check",
+        "Missing global:removed event (TODO in codebase)",
+        "Unfixed in Bull 3.x; BullMQ uses XSTREAMS instead"
+      ]
+    },
+    {
+      "url": "https://github.com/OptimalBits/bull/blob/develop/CHANGELOG.md",
+      "title": "Bull changelog - behavioral changes and fixes",
+      "qualityScore": 82,
+      "authority": 10,
+      "recency": 8,
+      "depth": 7,
+      "examples": 5,
+      "uniqueness": 7,
+      "keyInsights": [
+        "v4.12.x: Added state validation for retry, moveToFinished, moveToDelayed",
+        "v4.12.5: Job existence validation for logging",
+        "v4.12.6: Stalled job detection respects removeOnFail",
+        "v4.13.1: getCountsPerPriority considers paused state",
+        "v4.16.x: Metrics improvements and dependency CVE fixes"
+      ]
+    }
+  ]
+}

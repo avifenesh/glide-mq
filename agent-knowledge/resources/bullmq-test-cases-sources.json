@@ -1,0 +1,424 @@
+{
+  "topic": "BullMQ Test Suite Catalog",
+  "slug": "bullmq-test-cases",
+  "generated": "2026-02-14T00:00:00Z",
+  "depth": "medium",
+  "totalSources": 26,
+  "sources": [
+    {
+      "url": "https://github.com/taskforcesh/bullmq/tree/master/tests",
+      "title": "BullMQ Tests Directory",
+      "qualityScore": 95,
+      "authority": 10,
+      "recency": 10,
+      "depth": 9,
+      "examples": 10,
+      "uniqueness": 6,
+      "keyInsights": [
+        "31 test files covering queue, worker, job, flow, events, rate limiter, stalled jobs, repeat",
+        "Organized by feature domain with clear separation of concerns",
+        "Tests cover integration, unit, and edge cases"
+      ]
+    },
+    {
+      "url": "https://github.com/taskforcesh/bullmq",
+      "title": "BullMQ Main Repository",
+      "qualityScore": 92,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "Version 5.69.2 released February 14, 2026",
+        "Rock solid stability and atomicity focus",
+        "Supports Node.js, Python, Elixir, PHP",
+        "3,218 commits, 793 releases"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/queue.test.ts",
+      "title": "queue.test.ts",
+      "qualityScore": 88,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~33 tests covering queue operations",
+        "Parent-child flows in same and different queues",
+        "drain(), retryJobs(), promoteJobs() validation",
+        "Queue naming validation edge cases"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/worker.test.ts",
+      "title": "worker.test.ts",
+      "qualityScore": 90,
+      "authority": 10,
+      "recency": 10,
+      "depth": 9,
+      "examples": 10,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~200-250 tests - largest test file",
+        "LIFO/FIFO processing, concurrency limits",
+        "Progress tracking with multiple data types",
+        "Lock renewal, backoff strategies, crash recovery"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/job.test.ts",
+      "title": "job.test.ts",
+      "qualityScore": 87,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~80-90 tests covering job lifecycle",
+        "create(), update(), remove(), state transitions",
+        "Size limit validation with ASCII and non-ASCII",
+        "Invalid option combination validation"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/flow.test.ts",
+      "title": "flow.test.ts",
+      "qualityScore": 89,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 6,
+      "keyInsights": [
+        "~45-50 tests for parent-child dependencies",
+        "Failure propagation patterns",
+        "removeOnComplete/removeOnFail with children",
+        "Runtime job chaining validation"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/events.test.ts",
+      "title": "events.test.ts",
+      "qualityScore": 85,
+      "authority": 10,
+      "recency": 10,
+      "depth": 7,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~23 tests for event system",
+        "Global vs local events, custom events",
+        "Event trimming with maxLen",
+        "autorun: false pattern validation"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/rate_limiter.test.ts",
+      "title": "rate_limiter.test.ts",
+      "qualityScore": 86,
+      "authority": 10,
+      "recency": 10,
+      "depth": 7,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~15+ tests for rate limiting",
+        "Global and per-job limits",
+        "Dynamic rate changes",
+        "Jobs NOT entering delayed queue when limited"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/stalled_jobs.test.ts",
+      "title": "stalled_jobs.test.ts",
+      "qualityScore": 87,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~14 tests for stalled job detection",
+        "maxStalledCount enforcement",
+        "Lock extension prevention",
+        "Parent propagation when child stalls"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/repeat.test.ts",
+      "title": "repeat.test.ts",
+      "qualityScore": 86,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~45-50 tests for repeatable jobs",
+        "Cron pattern parsing and execution",
+        "endDate enforcement, clock drift handling",
+        "Custom cron strategies"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/metrics.test.ts",
+      "title": "metrics.test.ts",
+      "qualityScore": 82,
+      "authority": 10,
+      "recency": 10,
+      "depth": 6,
+      "examples": 8,
+      "uniqueness": 5,
+      "keyInsights": [
+        "4 tests for metrics collection",
+        "maxDataPoints enforcement",
+        "Pagination for large metric sets",
+        "Completed and failed job tracking"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/getters.test.ts",
+      "title": "getters.test.ts",
+      "qualityScore": 85,
+      "authority": 10,
+      "recency": 10,
+      "depth": 7,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~40 tests for job retrieval APIs",
+        "Prometheus metrics export",
+        "Worker and QueueEvent getters",
+        "Pagination with range overflow handling"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/sandboxed_process.test.ts",
+      "title": "sandboxed_process.test.ts",
+      "qualityScore": 87,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 6,
+      "keyInsights": [
+        "~50+ tests for sandboxed execution",
+        "Child processes vs worker threads",
+        ".cjs, .mjs, URL-based processors",
+        "SIGKILL handling, UnrecoverableError propagation"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/delay.test.ts",
+      "title": "delay.test.ts",
+      "qualityScore": 84,
+      "authority": 10,
+      "recency": 10,
+      "depth": 7,
+      "examples": 8,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~12 tests for delayed jobs",
+        "FIFO ordering with same timestamps",
+        "Priority vs delay interaction",
+        "Jobs don't process before delay expires"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/concurrency.test.ts",
+      "title": "concurrency.test.ts",
+      "qualityScore": 85,
+      "authority": 10,
+      "recency": 10,
+      "depth": 7,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~11 tests for concurrency management",
+        "Max concurrency enforcement",
+        "Dynamic limits, drained events",
+        "Lock expiration with active jobs"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/pause.test.ts",
+      "title": "pause.test.ts",
+      "qualityScore": 84,
+      "authority": 10,
+      "recency": 10,
+      "depth": 7,
+      "examples": 8,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~11 tests for pause/resume",
+        "Global vs local pause",
+        "Waits for active jobs before pausing",
+        "Fast pause when queue drained"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/clean.test.ts",
+      "title": "clean.test.ts",
+      "qualityScore": 86,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~40+ tests for job cleanup",
+        "Grace period enforcement",
+        "State-specific cleaning",
+        "Flow cleanup with parent-child"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/bulk.test.ts",
+      "title": "bulk.test.ts",
+      "qualityScore": 80,
+      "authority": 10,
+      "recency": 10,
+      "depth": 6,
+      "examples": 8,
+      "uniqueness": 4,
+      "keyInsights": [
+        "4 tests for bulk operations",
+        "Parent option in bulk adds",
+        "Worker load distribution",
+        "Custom job IDs in bulk"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/deduplication.test.ts",
+      "title": "deduplication.test.ts",
+      "qualityScore": 86,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 6,
+      "keyInsights": [
+        "~25-30 tests for deduplication",
+        "Debouncing with/without TTL",
+        "Deduplication blocks duplicates",
+        "Key removal on job finish vs manual"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/job_cancellation.test.ts",
+      "title": "job_cancellation.test.ts",
+      "qualityScore": 88,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 6,
+      "keyInsights": [
+        "~24 tests for job cancellation",
+        "AbortSignal integration",
+        "Cancel via event vs polling",
+        "Lock renewal failure handling"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/obliterate.test.ts",
+      "title": "obliterate.test.ts",
+      "qualityScore": 84,
+      "authority": 10,
+      "recency": 10,
+      "depth": 7,
+      "examples": 8,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~13 tests for queue obliteration",
+        "Force obliterate with active jobs",
+        "Flow cleanup with dependencies",
+        "Repeatable job removal"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/cluster.test.ts",
+      "title": "cluster.test.ts",
+      "qualityScore": 87,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 6,
+      "keyInsights": [
+        "~21 tests for Redis Cluster support",
+        "Authenticated cluster connections",
+        "Worker fetching from all nodes",
+        "Parallel processing validation"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/job_scheduler.test.ts",
+      "title": "job_scheduler.test.ts",
+      "qualityScore": 86,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~80-90 tests for job scheduling",
+        "Upsert patterns, cron strategies",
+        "endDate validation",
+        "Clock drift handling"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/taskforcesh/bullmq/master/tests/connection.test.ts",
+      "title": "connection.test.ts",
+      "qualityScore": 85,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 8,
+      "uniqueness": 5,
+      "keyInsights": [
+        "~35 tests for connection management",
+        "Blocking vs non-blocking connections",
+        "Shared connection reuse",
+        "maxmemory-policy validation"
+      ]
+    },
+    {
+      "url": "https://docs.bullmq.io",
+      "title": "BullMQ Official Documentation",
+      "qualityScore": 90,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "Fast and robust queue system on Redis",
+        "Exactly-once delivery goal, at-least-once guarantee",
+        "Polling-free architecture",
+        "LIFO/FIFO, priority, delayed, scheduled, retry support"
+      ]
+    },
+    {
+      "url": "https://docs.bullmq.io/guide/workers",
+      "title": "BullMQ Workers Documentation",
+      "qualityScore": 88,
+      "authority": 10,
+      "recency": 10,
+      "depth": 8,
+      "examples": 9,
+      "uniqueness": 5,
+      "keyInsights": [
+        "Async processor functions with progress tracking",
+        "autorun: false option for delayed start",
+        "completed/failed/progress/error events",
+        "AbortSignal support for cancellation"
+      ]
+    }
+  ]
+}
