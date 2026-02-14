@@ -6,75 +6,45 @@
 - speedkey@0.1.0 published on npm
 - 6 targets: linux x64/arm64 (gnu+musl), darwin arm64, win32 x64
 - Repo: github.com/avifenesh/speedkey (public)
-- Intel Mac (x86_64-apple-darwin) skipped - rustup install fails on macos-15 ARM cross-compile
-- Post-publish RC tests broken (still reference old package name in utils/)
-- NPM token needs rotation (was shared in conversation)
+- NPM token needs rotation
 
-### glide-mq - 347 tests, 31 files, all passing
-- Valkey standalone on :6379, cluster on :7000-7005 (WSL)
+### glide-mq
+- Repo: github.com/avifenesh/glide-mq (public)
+- 700+ test executions (standalone + cluster parameterized)
 - speedkey linked as file dependency (file:../speedkey/node)
 
-### Completed phases
-- Phase 1: Core Queue/Worker/Job, 15 Lua server functions, connection factory
-- Phase 2: Dedup (3 modes), rate limiting, retention, global concurrency
-- Phase 3: FlowProducer, QueueEvents, job schedulers (cron+interval), metrics
-- Phase 4: Graceful shutdown, connection recovery, OpenTelemetry, API completeness
-- Phase 5: Compatibility tests from Bull, Bee-Queue, Celery, Sidekiq patterns (66 tests)
-- Edge case tests: worker resilience, queue ops, advanced features, cluster (66 tests)
+### Performance (no-op processor benchmark)
+- c=1: 4,376 jobs/s (BullMQ: 2,041 - we're 2.1x faster)
+- c=10: 20,979 jobs/s (BullMQ: ~2,000 - we're 10x faster)
+- c=50: 44,643 jobs/s
+- Key optimization: completeAndFetchNext FCALL (1 RTT/job steady state)
 
-### Research
-- agent-knowledge/nodejs-queue-libs-redis-valkey.md (42 sources)
-- agent-knowledge/valkey-glide-nodejs-client.md (40 sources)
-- agent-knowledge/bullmq-test-cases.md (800+ tests cataloged)
-- agent-knowledge/bull-test-cases.md (265 tests cataloged)
-- agent-knowledge/bee-queue-and-others-test-cases.md (500+ tests cataloged)
-- agent-knowledge/celery-and-cross-lang-test-cases.md (cross-lang patterns)
-
-## Proven compatible (347 tests)
-- FIFO ordering, serial + concurrent processing
-- Retry with fixed/exponential/jitter backoff
-- Retry exhaustion to permanent failure
-- Stalled job detection and recovery (batch)
-- Competing consumers (no duplicates)
-- Graceful + force shutdown
-- Delayed job promotion
-- Job progress, state queries, updateData
-- Queue inspection (accurate counts)
-- Obliterate, drain, getJobs
-- removeOnComplete/removeOnFail
-- Failed job list, remove, retry
-- Resource bounds (no leak after 100 jobs)
+### Implemented features
+- Queue, Worker, Job, QueueEvents, FlowProducer
+- 15 Valkey Functions (FUNCTION LOAD, not EVAL scripts)
+- Streams-first (XREADGROUP + PEL + XAUTOCLAIM)
+- Cluster-native (hash tags on all keys)
 - Deduplication (simple, throttle, debounce)
 - Rate limiting (sliding window)
-- Global concurrency enforcement
-- Parent-child flows (nested)
-- Events stream (added, completed, failed, retrying, stalled)
+- Global concurrency
+- Job retention (removeOnComplete/removeOnFail)
+- Per-job timeout
+- Job log
+- Lock renewal (heartbeat)
+- Dead letter queue
+- Workflow primitives (chain, group, chord)
+- Job revocation (cooperative abort)
 - Job schedulers (cron + interval)
-- Cluster mode (all features verified)
+- Metrics (getJobCounts, getMetrics)
+- OpenTelemetry (optional peer dep)
+- Graceful shutdown + connection recovery
+- Custom backoff strategies
 
-## Recently implemented (session 2026-02-14)
-- Lock renewal: heartbeat (lastActive field) prevents stalled reclaim of long-running jobs
-  - Worker.lockDuration option (default 30s), heartbeat fires every lockDuration/2
-  - Lua reclaimStalled checks lastActive before incrementing stalledCount
-- Dead letter queue: QueueOptions.deadLetterQueue config, worker moves exhausted-retry jobs to DLQ
-  - Queue.getDeadLetterJobs() retrieves DLQ entries
-- Workflow primitives: chain(), group(), chord() exported as utility functions
-  - chain: nested parent-child flow, deepest job runs first
-  - group: parent with N children in parallel (uses FlowProducer)
-  - chord: group + callback parent that runs after all children complete
-- Tests: tests/gap-advanced.test.ts (7 tests, all passing)
+### Skipped (by design)
+- Sandboxed processors (container isolation preferred over child_process)
+- Worker autoscale (k8s HPA preferred over in-process scaling)
 
-## Gaps - not yet implemented
-1. Sandboxed processors (run processor in child process - Bull/BullMQ feature)
-3. Worker autoscale (Celery scales workers based on CPU/queue depth)
-6. Benchmark suite (throughput, latency, memory profiling)
-7. Broker failover tests (Redis Sentinel/cluster failover mid-processing)
-8. Memory leak regression tests (baseline-stress-measure pattern)
-11. Sandboxed processor crash recovery (restart child process)
-13. Job dependencies beyond parent-child (BullMQ waitForJob)
-
-## Next steps
-- Phase 6: Competitive analysis - full feature comparison, known bugs in others, gap prioritization
-- Decide which gaps to implement vs skip
-- Benchmark suite against BullMQ
-- Publish glide-mq to npm
+### Next steps
+- Publish glide-mq to npm (switch speedkey from file: to npm dep)
+- Update benchmarks to reflect latest numbers
+- README for glide-mq
