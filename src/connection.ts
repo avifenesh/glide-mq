@@ -66,8 +66,11 @@ export async function ensureFunctionLibrary(
   try {
     const result = await client.fcall('glidemq_version', [], []);
     if (String(result) === LIBRARY_VERSION) return;
-  } catch {
-    // Function not found - need to load
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes('Function not loaded') && !msg.includes('No matching script') && !msg.includes('NOSCRIPT')) {
+      throw err;
+    }
   }
 
   await (client as GlideClient).functionLoad(librarySource, {

@@ -114,41 +114,9 @@ export class FlowProducer {
     for (let i = 0; i < flow.children.length; i++) {
       const child = flow.children[i];
       if (child.children && child.children.length > 0) {
-        // This child is itself a sub-flow. Add it recursively first.
-        // The returned node's job becomes a leaf child of the current parent.
-        // But wait - we need the child to be created as part of THIS parent's
-        // deps set. For nested flows, the child becomes a parent of its own
-        // sub-children, and simultaneously a child of the current parent.
-        // We handle this by: adding the sub-flow first (child becomes
-        // waiting-children), then adding it as a direct child of current parent.
-        // Actually, the clean approach: we add the sub-flow's children first,
-        // then the current flow treats the sub-flow as a direct child that
-        // itself is waiting-children. But glidemq_addFlow creates the parent,
-        // so we can't pre-create it.
-        //
-        // Simplest correct approach: process nested flows bottom-up.
-        // For the nested child, add its own sub-flow first. Then the nested
-        // child becomes a direct child of the current parent with its own
-        // children already created. We just need to make sure the nested
-        // child gets added with parentId pointing to current parent.
-        //
-        // Implementation: We add the nested child's children as a sub-flow,
-        // creating the nested child as a parent (waiting-children). Then
-        // we record that nested child's ID. When building the current parent's
-        // flow, we need to manually set parentId on the nested child and
-        // add it to the current parent's deps.
-        //
-        // This gets complex. For now, flatten: nested children's children
-        // become direct children of the top-level parent.
-        // This matches BullMQ's approach where deeply nested flows are supported
-        // but each level creates its own parent-child relationship.
-
-        // Recursive approach: add sub-flow first
+        // Sub-flow: add bottom-up recursively, then wire as dep of current parent.
         const subNode = await this.addFlowRecursive(client, child);
         childNodeMap.set(i, subNode);
-        // The sub-flow's parent job is now created. We need to add it as a
-        // dependency of the current parent. We'll handle this after the
-        // main addFlow call.
       }
       directChildren.push(child);
     }

@@ -3,7 +3,7 @@ import { InfBoundary } from 'speedkey';
 import type { GlideClient, GlideClusterClient } from 'speedkey';
 import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts } from './types';
 import { Job } from './job';
-import { buildKeys, keyPrefix, nextCronOccurrence } from './utils';
+import { buildKeys, keyPrefix, keyPrefixPattern, nextCronOccurrence } from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
 import { addJob, dedup, pause, resume, removeJob, revokeJob, CONSUMER_GROUP } from './functions/index';
 import type { QueueKeys } from './functions/index';
@@ -71,6 +71,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const parentId = opts?.parent ? opts.parent.id : '';
         const maxAttempts = opts?.attempts ?? 0;
 
+        // Payload size validation - prevent DoS via oversized jobs
+        const serialized = JSON.stringify(data);
+        if (serialized.length > 1_048_576) {
+          throw new Error(`Job data exceeds maximum size (${serialized.length} bytes > 1MB). Use smaller payloads or store large data externally.`);
+        }
+
         let jobId: string;
 
         if (opts?.deduplication) {
@@ -82,7 +88,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             dedupOpts.ttl ?? 0,
             dedupOpts.mode ?? 'simple',
             name,
-            JSON.stringify(data),
+            serialized,
             JSON.stringify(opts),
             timestamp,
             delay,
@@ -99,7 +105,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             client,
             this.keys,
             name,
-            JSON.stringify(data),
+            serialized,
             JSON.stringify(opts ?? {}),
             timestamp,
             delay,
@@ -357,10 +363,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
     await client.del(staticKeys);
 
     // Scan and delete job hashes and deps sets
-    const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
-    const jobPattern = `${prefix}:job:*`;
-    const logPattern = `${prefix}:log:*`;
-    const depsPattern = `${prefix}:deps:*`;
+    // Use escaped prefix to prevent glob injection from queue names containing * ? [ ]
+    const pfx = keyPrefixPattern(this.opts.prefix ?? 'glide', this.name);
+    const jobPattern = `${pfx}:job:*`;
+    const logPattern = `${pfx}:log:*`;
+    const depsPattern = `${pfx}:deps:*`;
 
     for (const pattern of [jobPattern, logPattern, depsPattern]) {
       await this.scanAndDelete(client, pattern);
@@ -496,10 +503,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
       }
     }
 
-    // Fetch job hashes for each ID
+    // Fetch job hashes in parallel (avoids N+1 serial HGETALL)
     const jobs: Job<D, R>[] = [];
-    for (const id of jobIds) {
-      const job = await this.getJob(id);
+    const fetches = jobIds.map(id => this.getJob(id));
+    const results = await Promise.all(fetches);
+    for (const job of results) {
       if (job) jobs.push(job);
     }
     return jobs;

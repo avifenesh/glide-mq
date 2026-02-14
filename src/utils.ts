@@ -1,7 +1,21 @@
 const DEFAULT_PREFIX = 'glide';
 
+// Valkey SCAN glob special characters that must be escaped in key patterns
+const GLOB_SPECIAL = /[*?\[\]\\]/g;
+
+export function escapeGlob(str: string): string {
+  return str.replace(GLOB_SPECIAL, '\\$&');
+}
+
 export function keyPrefix(prefix: string, queueName: string): string {
   return `${prefix}:{${queueName}}`;
+}
+
+/**
+ * Returns an escaped key prefix safe for use in SCAN MATCH patterns.
+ */
+export function keyPrefixPattern(prefix: string, queueName: string): string {
+  return `${escapeGlob(prefix)}:{${escapeGlob(queueName)}}`;
 }
 
 export function keys(prefix: string, queueName: string) {
@@ -20,7 +34,6 @@ export function keys(prefix: string, queueName: string) {
     job: (id: string) => `${p}:job:${id}`,
     log: (id: string) => `${p}:log:${id}`,
     deps: (id: string) => `${p}:deps:${id}`,
-    parent: (id: string) => `${p}:parent:${id}`,
   };
 }
 
@@ -113,6 +126,9 @@ function parseCronField(field: string, min: number, max: number): number[] {
   return [...values].sort((a, b) => a - b);
 }
 
+// Maximum iterations when searching for next cron match (1 year of minutes)
+const MAX_CRON_ITERATIONS = 525960;
+
 /**
  * Compute the next occurrence of a cron pattern after `afterMs` (epoch ms).
  * Supports standard 5-field cron: minute hour dayOfMonth month dayOfWeek.
@@ -135,11 +151,10 @@ export function nextCronOccurrence(pattern: string, afterMs: number): number {
   start.setSeconds(0, 0);
   start.setMinutes(start.getMinutes() + 1);
 
-  // Search up to 2 years ahead to find a match
-  const limit = afterMs + 2 * 365 * 24 * 60 * 60 * 1000;
   const d = new Date(start);
+  let iterations = 0;
 
-  while (d.getTime() < limit) {
+  while (iterations < MAX_CRON_ITERATIONS) {
     if (
       months.includes(d.getMonth() + 1) &&
       daysOfMonth.includes(d.getDate()) &&
@@ -152,7 +167,8 @@ export function nextCronOccurrence(pattern: string, afterMs: number): number {
 
     // Advance by 1 minute
     d.setMinutes(d.getMinutes() + 1);
+    iterations++;
   }
 
-  throw new Error(`No cron match found within 2 years for pattern: ${pattern}`);
+  throw new Error(`No cron match found within ${MAX_CRON_ITERATIONS} iterations for pattern: ${pattern}`);
 }

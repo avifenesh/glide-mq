@@ -25,7 +25,7 @@ export type {
   DeadLetterQueueOptions,
 } from './types';
 
-export { GlideMQError, ConnectionError, ScriptError } from './errors';
+export { GlideMQError, ConnectionError } from './errors';
 export { gracefulShutdown } from './graceful-shutdown';
 
 export { chain, group, chord } from './workflows';

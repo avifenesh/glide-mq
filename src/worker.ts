@@ -280,11 +280,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
     // First job: moveToActive (since we got it from XREADGROUP, not from completeAndFetchNext)
     let hash = await moveToActive(this.commandClient, this.queueKeys, jobId, Date.now());
     if (hash === null) {
-      try { await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', Date.now(), CONSUMER_GROUP); } catch {}
+      try { await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', Date.now(), CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
       return;
     }
     if (hash === 'REVOKED') {
-      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch {}
+      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
       return;
     }
 
@@ -295,13 +295,13 @@ export class Worker<D = any, R = any> extends EventEmitter {
     // Tight loop: process -> completeAndFetchNext -> process -> ...
     while (this.running && !this.closing) {
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash);
-      (job as any)._entryId = currentEntryId;
+      job.entryId = currentEntryId;
 
       if (this.opts.limiter) await this.waitForRateLimit();
 
       const ac = new AbortController();
       this.activeAbortControllers.set(currentJobId, ac);
-      (job as any).abortSignal = ac.signal;
+      job.abortSignal = ac.signal;
       this.startHeartbeat(currentJobId);
 
       let processResult: R | undefined;
@@ -381,7 +381,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       if (fetchResult.next === 'REVOKED') {
         // Next job is revoked - fail it and return to poll
         if (fetchResult.nextJobId && fetchResult.nextEntryId) {
-          try { await failJob(this.commandClient, this.queueKeys, fetchResult.nextJobId, fetchResult.nextEntryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch {}
+          try { await failJob(this.commandClient, this.queueKeys, fetchResult.nextJobId, fetchResult.nextEntryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
         }
         return;
       }
@@ -402,22 +402,22 @@ export class Worker<D = any, R = any> extends EventEmitter {
     const moveResult = await moveToActive(this.commandClient, this.queueKeys, jobId, now);
 
     if (moveResult === null) {
-      try { await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', now, CONSUMER_GROUP); } catch {}
+      try { await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', now, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
       return;
     }
     if (moveResult === 'REVOKED') {
-      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', now, 0, 0, CONSUMER_GROUP); } catch {}
+      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', now, 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
       return;
     }
 
     const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, jobId, moveResult);
-    (job as any)._entryId = entryId;
+    job.entryId = entryId;
 
     if (this.opts.limiter) await this.waitForRateLimit();
 
     const ac = new AbortController();
     this.activeAbortControllers.set(jobId, ac);
-    (job as any).abortSignal = ac.signal;
+    job.abortSignal = ac.signal;
     this.startHeartbeat(jobId);
 
     try {

@@ -76,13 +76,15 @@ export class Scheduler {
     this.promoteDelayed()
       .then(() => this.runSchedulers())
       .catch(() => {
-        // Swallow errors in background promotion loop
+        // Scheduler has no EventEmitter - errors are transient connection issues
+        // that self-heal on the next interval tick. Worker reconnect handles the rest.
       });
   }
 
   private runStalledRecovery(): void {
     this.reclaimStalledJobs().catch(() => {
-      // Swallow errors in background stalled recovery loop
+      // Scheduler has no EventEmitter - errors are transient connection issues
+      // that self-heal on the next interval tick. Worker reconnect handles the rest.
     });
   }
 
@@ -148,7 +150,7 @@ export class Scheduler {
         jobData,
         jobOpts,
         now,
-        0, // no delay — scheduler jobs go directly to stream
+        0, // no delay - scheduler jobs go directly to stream
         priority,
         '', // no parent
         maxAttempts,
@@ -161,7 +163,7 @@ export class Scheduler {
       } else if (config.every) {
         nextRun = now + config.every;
       } else {
-        // No repeat config — remove the scheduler entry
+        // No repeat config - remove the scheduler entry
         await this.client.hdel(this.queueKeys.schedulers, [schedulerName]);
         fired++;
         continue;

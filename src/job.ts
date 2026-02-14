@@ -252,19 +252,19 @@ export class Job<D = any, R = any> {
     id: string,
     hash: Record<string, string>,
   ): Job<D, R> {
-    const job = new Job<D, R>(
-      client,
-      queueKeys,
-      id,
-      hash.name || '',
-      JSON.parse(hash.data || '{}'),
-      JSON.parse(hash.opts || '{}'),
-    );
+    let data: D;
+    let opts: JobOptions;
+    let returnvalue: R | undefined;
+    try { data = JSON.parse(hash.data || '{}'); } catch { data = {} as D; }
+    try { opts = JSON.parse(hash.opts || '{}'); } catch { opts = {}; }
+    try { returnvalue = hash.returnvalue ? JSON.parse(hash.returnvalue) : undefined; } catch { returnvalue = undefined; }
+
+    const job = new Job<D, R>(client, queueKeys, id, hash.name || '', data, opts);
     job.attemptsMade = parseInt(hash.attemptsMade || '0', 10);
     job.timestamp = parseInt(hash.timestamp || '0', 10);
     job.processedOn = hash.processedOn ? parseInt(hash.processedOn, 10) : undefined;
     job.finishedOn = hash.finishedOn ? parseInt(hash.finishedOn, 10) : undefined;
-    job.returnvalue = hash.returnvalue ? JSON.parse(hash.returnvalue) : undefined;
+    job.returnvalue = returnvalue;
     job.failedReason = hash.failedReason || undefined;
     job.parentId = hash.parentId || undefined;
     job.parentQueue = hash.parentQueue || undefined;
