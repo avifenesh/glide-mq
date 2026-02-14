@@ -226,6 +226,23 @@ export class Job<D = any, R = any> {
   }
 
   /**
+   * Wait until the job reaches a terminal state (completed or failed).
+   * Polls the job hash state at the given interval.
+   * Returns the final state.
+   */
+  async waitUntilFinished(pollIntervalMs = 500, timeoutMs = 30000): Promise<'completed' | 'failed'> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const state = await this.getState();
+      if (state === 'completed' || state === 'failed') {
+        return state;
+      }
+      await new Promise<void>((r) => setTimeout(r, pollIntervalMs));
+    }
+    throw new Error(`Job ${this.id} did not finish within ${timeoutMs}ms`);
+  }
+
+  /**
    * Construct a Job instance from a hash returned by HGETALL.
    * @internal
    */

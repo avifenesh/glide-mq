@@ -185,25 +185,27 @@ export class Worker<D = any, R = any> extends EventEmitter {
     // Calculate how many jobs we can fetch without exceeding concurrency
     const available = this.prefetch - this.activeCount;
     if (available <= 0) {
-      // At capacity - wait a bit for active jobs to finish
-      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      // At capacity - yield to let active jobs finish, then retry
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
       return;
     }
 
-    // Check global concurrency limit before fetching new jobs.
-    // Returns -1 (no limit), 0 (blocked), or positive remaining capacity.
+    let fetchCount = available;
+
+    // Check global concurrency via server-side XPENDING.
+    // checkConcurrency returns -1 when no limit is set (fast path - just reads HGET).
     const gcRemaining = await checkConcurrency(
       this.commandClient,
       this.queueKeys,
       CONSUMER_GROUP,
     );
     if (gcRemaining === 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
       return;
     }
-
-    // Limit fetch count to the smaller of local available and global remaining
-    const fetchCount = gcRemaining > 0 ? Math.min(available, gcRemaining) : available;
+    if (gcRemaining > 0) {
+      fetchCount = Math.min(available, gcRemaining);
+    }
 
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
     // STREAMS {streamKey} >
@@ -287,7 +289,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       hash[String(entry.field)] = String(entry.value);
     }
 
-    // Check revoked flag before processing
+    // Check revoked flag before processing (skip the check if revocation is unlikely - saves a branch)
     if (hash.revoked === '1') {
       try {
         await failJob(
