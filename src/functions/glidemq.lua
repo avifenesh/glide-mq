@@ -162,6 +162,9 @@ end)
 -- ARGS[3] = return value (JSON string)
 -- ARGS[4] = timestamp (ms)
 -- ARGS[5] = consumer group name
+-- ARGS[6] = removeMode ('0'|'true'|'count'|'age_count')
+-- ARGS[7] = removeCount (number)
+-- ARGS[8] = removeAge (seconds)
 -- Returns: 1 on success
 redis.register_function('glidemq_complete', function(keys, args)
   local streamKey = keys[1]
@@ -174,6 +177,9 @@ redis.register_function('glidemq_complete', function(keys, args)
   local returnvalue = args[3]
   local timestamp = tonumber(args[4])
   local group = args[5]
+  local removeMode = args[6] or '0'
+  local removeCount = tonumber(args[7]) or 0
+  local removeAge = tonumber(args[8]) or 0
 
   -- Acknowledge the stream entry
   redis.call('XACK', streamKey, group, entryId)
@@ -194,6 +200,44 @@ redis.register_function('glidemq_complete', function(keys, args)
   -- Emit event
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
 
+  -- Retention cleanup
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  if removeMode == 'true' then
+    redis.call('ZREM', completedKey, jobId)
+    redis.call('DEL', jobKey)
+  elseif removeMode == 'count' and removeCount > 0 then
+    local total = redis.call('ZCARD', completedKey)
+    if total > removeCount then
+      local excess = redis.call('ZRANGE', completedKey, 0, total - removeCount - 1)
+      for i = 1, #excess do
+        local oldId = excess[i]
+        redis.call('DEL', prefix .. 'job:' .. oldId)
+        redis.call('ZREM', completedKey, oldId)
+      end
+    end
+  elseif removeMode == 'age_count' then
+    if removeAge > 0 then
+      local cutoff = timestamp - (removeAge * 1000)
+      local old = redis.call('ZRANGEBYSCORE', completedKey, '0', tostring(cutoff))
+      for i = 1, #old do
+        local oldId = old[i]
+        redis.call('DEL', prefix .. 'job:' .. oldId)
+        redis.call('ZREM', completedKey, oldId)
+      end
+    end
+    if removeCount > 0 then
+      local total = redis.call('ZCARD', completedKey)
+      if total > removeCount then
+        local excess = redis.call('ZRANGE', completedKey, 0, total - removeCount - 1)
+        for i = 1, #excess do
+          local oldId = excess[i]
+          redis.call('DEL', prefix .. 'job:' .. oldId)
+          redis.call('ZREM', completedKey, oldId)
+        end
+      end
+    end
+  end
+
   return 1
 end)
 
@@ -211,6 +255,9 @@ end)
 -- ARGS[5] = max attempts (0 = no retry)
 -- ARGS[6] = backoff delay (ms, 0 = no backoff)
 -- ARGS[7] = consumer group name
+-- ARGS[8] = removeMode ('0'|'true'|'count'|'age_count')
+-- ARGS[9] = removeCount (number)
+-- ARGS[10] = removeAge (seconds)
 -- Returns: "failed" | "retrying"
 redis.register_function('glidemq_fail', function(keys, args)
   local streamKey = keys[1]
@@ -226,6 +273,9 @@ redis.register_function('glidemq_fail', function(keys, args)
   local maxAttempts = tonumber(args[5]) or 0
   local backoffDelay = tonumber(args[6]) or 0
   local group = args[7]
+  local removeMode = args[8] or '0'
+  local removeCount = tonumber(args[9]) or 0
+  local removeAge = tonumber(args[10]) or 0
 
   -- Acknowledge the stream entry
   redis.call('XACK', streamKey, group, entryId)
@@ -265,6 +315,44 @@ redis.register_function('glidemq_fail', function(keys, args)
     )
 
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
+
+    -- Retention cleanup
+    local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+    if removeMode == 'true' then
+      redis.call('ZREM', failedKey, jobId)
+      redis.call('DEL', jobKey)
+    elseif removeMode == 'count' and removeCount > 0 then
+      local total = redis.call('ZCARD', failedKey)
+      if total > removeCount then
+        local excess = redis.call('ZRANGE', failedKey, 0, total - removeCount - 1)
+        for i = 1, #excess do
+          local oldId = excess[i]
+          redis.call('DEL', prefix .. 'job:' .. oldId)
+          redis.call('ZREM', failedKey, oldId)
+        end
+      end
+    elseif removeMode == 'age_count' then
+      if removeAge > 0 then
+        local cutoff = timestamp - (removeAge * 1000)
+        local old = redis.call('ZRANGEBYSCORE', failedKey, '0', tostring(cutoff))
+        for i = 1, #old do
+          local oldId = old[i]
+          redis.call('DEL', prefix .. 'job:' .. oldId)
+          redis.call('ZREM', failedKey, oldId)
+        end
+      end
+      if removeCount > 0 then
+        local total = redis.call('ZCARD', failedKey)
+        if total > removeCount then
+          local excess = redis.call('ZRANGE', failedKey, 0, total - removeCount - 1)
+          for i = 1, #excess do
+            local oldId = excess[i]
+            redis.call('DEL', prefix .. 'job:' .. oldId)
+            redis.call('ZREM', failedKey, oldId)
+          end
+        end
+      end
+    end
 
     return 'failed'
   end
@@ -381,6 +469,206 @@ redis.register_function('glidemq_resume', function(keys, args)
   emitEvent(eventsKey, 'resumed', '0', nil)
 
   return 1
+end)
+
+-- glidemq_dedup(KEYS, ARGS)
+-- Deduplication: check dedup hash and either skip or add a new job.
+-- KEYS[1] = dedup hash key
+-- KEYS[2] = id counter key
+-- KEYS[3] = stream key
+-- KEYS[4] = scheduled zset key
+-- KEYS[5] = events stream key
+-- ARGS[1] = dedup_id
+-- ARGS[2] = ttl_ms (0 = no TTL, used by throttle mode)
+-- ARGS[3] = mode ("simple" | "throttle" | "debounce")
+-- ARGS[4] = job name
+-- ARGS[5] = job data (JSON string)
+-- ARGS[6] = job opts (JSON string)
+-- ARGS[7] = timestamp (ms)
+-- ARGS[8] = delay (ms, 0 = no delay)
+-- ARGS[9] = priority (0 = no priority)
+-- ARGS[10] = parentId (empty string = no parent)
+-- ARGS[11] = maxAttempts (0 = no retry)
+-- Returns: "skipped" if deduplicated, otherwise the new job ID (string)
+redis.register_function('glidemq_dedup', function(keys, args)
+  local dedupKey = keys[1]
+  local idKey = keys[2]
+  local streamKey = keys[3]
+  local scheduledKey = keys[4]
+  local eventsKey = keys[5]
+
+  local dedupId = args[1]
+  local ttlMs = tonumber(args[2]) or 0
+  local mode = args[3]
+  local jobName = args[4]
+  local jobData = args[5]
+  local jobOpts = args[6]
+  local timestamp = tonumber(args[7])
+  local delay = tonumber(args[8]) or 0
+  local priority = tonumber(args[9]) or 0
+  local parentId = args[10] or ''
+  local maxAttempts = tonumber(args[11]) or 0
+
+  local prefix = string.sub(idKey, 1, #idKey - 2) -- strip ":id"
+
+  -- Check existing dedup entry: value is "jobId:timestamp"
+  local existing = redis.call('HGET', dedupKey, dedupId)
+
+  if mode == 'simple' then
+    -- Simple: skip if dedup_id exists and job is not completed/failed
+    if existing then
+      local sep = string.find(existing, ':')
+      if sep then
+        local existingJobId = string.sub(existing, 1, sep - 1)
+        local jobKey = prefix .. 'job:' .. existingJobId
+        local state = redis.call('HGET', jobKey, 'state')
+        if state and state ~= 'completed' and state ~= 'failed' then
+          return 'skipped'
+        end
+      end
+    end
+  elseif mode == 'throttle' then
+    -- Throttle: skip if (now - stored_timestamp) < ttl
+    if existing and ttlMs > 0 then
+      local sep = string.find(existing, ':')
+      if sep then
+        local storedTs = tonumber(string.sub(existing, sep + 1))
+        if storedTs and (timestamp - storedTs) < ttlMs then
+          return 'skipped'
+        end
+      end
+    end
+  elseif mode == 'debounce' then
+    -- Debounce: if exists and job is delayed, remove old job and replace with new one
+    if existing then
+      local sep = string.find(existing, ':')
+      if sep then
+        local existingJobId = string.sub(existing, 1, sep - 1)
+        local jobKey = prefix .. 'job:' .. existingJobId
+        local state = redis.call('HGET', jobKey, 'state')
+        if state == 'delayed' or state == 'prioritized' then
+          -- Remove old job from scheduled ZSet and delete hash
+          redis.call('ZREM', scheduledKey, existingJobId)
+          redis.call('DEL', jobKey)
+          emitEvent(eventsKey, 'removed', existingJobId, nil)
+        elseif state and state ~= 'completed' and state ~= 'failed' then
+          -- Job is waiting or active - skip (can't debounce non-delayed)
+          return 'skipped'
+        end
+      end
+    end
+  end
+
+  -- Add the new job (same logic as glidemq_addJob)
+  local jobId = redis.call('INCR', idKey)
+  local jobIdStr = tostring(jobId)
+  local jobKey = prefix .. 'job:' .. jobIdStr
+
+  local hashFields = {
+    'id', jobIdStr,
+    'name', jobName,
+    'data', jobData,
+    'opts', jobOpts,
+    'timestamp', tostring(timestamp),
+    'attemptsMade', '0',
+    'delay', tostring(delay),
+    'priority', tostring(priority),
+    'maxAttempts', tostring(maxAttempts)
+  }
+
+  if parentId ~= '' then
+    hashFields[#hashFields + 1] = 'parentId'
+    hashFields[#hashFields + 1] = parentId
+  end
+
+  if delay > 0 or priority > 0 then
+    hashFields[#hashFields + 1] = 'state'
+    hashFields[#hashFields + 1] = delay > 0 and 'delayed' or 'prioritized'
+  else
+    hashFields[#hashFields + 1] = 'state'
+    hashFields[#hashFields + 1] = 'waiting'
+  end
+
+  redis.call('HSET', jobKey, unpack(hashFields))
+
+  if delay > 0 then
+    local score = priority * PRIORITY_SHIFT + (timestamp + delay)
+    redis.call('ZADD', scheduledKey, score, jobIdStr)
+  elseif priority > 0 then
+    local score = priority * PRIORITY_SHIFT
+    redis.call('ZADD', scheduledKey, score, jobIdStr)
+  else
+    redis.call('XADD', streamKey, '*', 'jobId', jobIdStr)
+  end
+
+  -- Store dedup entry: field=dedup_id, value=jobId:timestamp
+  redis.call('HSET', dedupKey, dedupId, jobIdStr .. ':' .. tostring(timestamp))
+
+  emitEvent(eventsKey, 'added', jobIdStr, {'name', jobName})
+
+  return jobIdStr
+end)
+
+-- glidemq_rateLimit(KEYS, ARGS)
+-- Checks and enforces a sliding-window rate limit.
+-- KEYS[1] = rate hash key (glide:{q}:rate)
+-- KEYS[2] = meta key (glide:{q}:meta)
+-- ARGS[1] = max per window
+-- ARGS[2] = window duration (ms)
+-- ARGS[3] = current timestamp (ms)
+-- Returns: 0 if allowed, positive number = ms to wait before retrying
+redis.register_function('glidemq_rateLimit', function(keys, args)
+  local rateKey = keys[1]
+  local metaKey = keys[2]
+
+  local maxPerWindow = tonumber(args[1])
+  local windowDuration = tonumber(args[2])
+  local now = tonumber(args[3])
+
+  local windowStart = tonumber(redis.call('HGET', rateKey, 'windowStart')) or 0
+  local count = tonumber(redis.call('HGET', rateKey, 'count')) or 0
+
+  -- If the current window has expired, reset
+  if now - windowStart >= windowDuration then
+    redis.call('HSET', rateKey, 'windowStart', tostring(now), 'count', '1')
+    return 0
+  end
+
+  -- Window still active: check count
+  if count >= maxPerWindow then
+    -- Rate limited: return ms until window resets
+    local delayMs = windowDuration - (now - windowStart)
+    return delayMs
+  end
+
+  -- Allowed: increment count
+  redis.call('HSET', rateKey, 'count', tostring(count + 1))
+  return 0
+end)
+
+-- glidemq_checkConcurrency(KEYS, ARGS)
+-- Checks global concurrency limit.
+-- KEYS[1] = meta hash key
+-- KEYS[2] = stream key
+-- ARGS[1] = consumer group name
+-- Returns: -1 if no limit set, 0 if blocked, or positive remaining capacity
+redis.register_function('glidemq_checkConcurrency', function(keys, args)
+  local metaKey = keys[1]
+  local streamKey = keys[2]
+  local group = args[1]
+
+  local gc = tonumber(redis.call('HGET', metaKey, 'globalConcurrency')) or 0
+  if gc <= 0 then
+    return -1
+  end
+
+  local pending = redis.call('XPENDING', streamKey, group)
+  local pendingCount = tonumber(pending[1]) or 0
+  local remaining = gc - pendingCount
+  if remaining <= 0 then
+    return 0
+  end
+  return remaining
 end)
 
 -- glidemq_removeJob(KEYS, ARGS)

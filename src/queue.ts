@@ -2,7 +2,7 @@ import type { QueueOptions, JobOptions, Client } from './types';
 import { Job } from './job';
 import { buildKeys } from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
-import { addJob, pause, resume, removeJob } from './functions/index';
+import { addJob, dedup, pause, resume, removeJob } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { LIBRARY_SOURCE } from './functions/index';
 
@@ -36,7 +36,7 @@ export class Queue<D = any, R = any> {
    * Uses the glidemq_addJob server function to atomically create the job hash
    * and enqueue it to the stream (or scheduled ZSet if delayed/prioritized).
    */
-  async add(name: string, data: D, opts?: JobOptions): Promise<Job<D, R>> {
+  async add(name: string, data: D, opts?: JobOptions): Promise<Job<D, R> | null> {
     const client = await this.getClient();
     const timestamp = Date.now();
     const delay = opts?.delay ?? 0;
@@ -44,18 +44,43 @@ export class Queue<D = any, R = any> {
     const parentId = opts?.parent ? opts.parent.id : '';
     const maxAttempts = opts?.attempts ?? 0;
 
-    const jobId = await addJob(
-      client,
-      this.keys,
-      name,
-      JSON.stringify(data),
-      JSON.stringify(opts ?? {}),
-      timestamp,
-      delay,
-      priority,
-      parentId,
-      maxAttempts,
-    );
+    let jobId: string;
+
+    if (opts?.deduplication) {
+      const dedupOpts = opts.deduplication;
+      const result = await dedup(
+        client,
+        this.keys,
+        dedupOpts.id,
+        dedupOpts.ttl ?? 0,
+        dedupOpts.mode ?? 'simple',
+        name,
+        JSON.stringify(data),
+        JSON.stringify(opts),
+        timestamp,
+        delay,
+        priority,
+        parentId,
+        maxAttempts,
+      );
+      if (result === 'skipped') {
+        return null;
+      }
+      jobId = result;
+    } else {
+      jobId = await addJob(
+        client,
+        this.keys,
+        name,
+        JSON.stringify(data),
+        JSON.stringify(opts ?? {}),
+        timestamp,
+        delay,
+        priority,
+        parentId,
+        maxAttempts,
+      );
+    }
 
     const job = new Job<D, R>(
       client,
@@ -152,6 +177,17 @@ export class Queue<D = any, R = any> {
   async resume(): Promise<void> {
     const client = await this.getClient();
     await resume(client, this.keys);
+  }
+
+  /**
+   * Set the global concurrency limit for this queue.
+   * When set, workers will not pick up new jobs if the total number of
+   * pending (active) jobs across all workers meets or exceeds this limit.
+   * Set to 0 to remove the limit.
+   */
+  async setGlobalConcurrency(n: number): Promise<void> {
+    const client = await this.getClient();
+    await client.hset(this.keys.meta, { globalConcurrency: n.toString() });
   }
 
   /**

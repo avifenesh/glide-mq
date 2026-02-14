@@ -22,7 +22,10 @@ vi.mock('speedkey', () => {
 
 function makeMockClient(overrides: Record<string, unknown> = {}) {
   return {
-    fcall: vi.fn().mockResolvedValue(LIBRARY_VERSION),
+    fcall: vi.fn().mockImplementation((func: string) => {
+      if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
+      return Promise.resolve(LIBRARY_VERSION);
+    }),
     functionLoad: vi.fn(),
     xgroupCreate: vi.fn().mockResolvedValue('OK'),
     xreadgroup: vi.fn().mockResolvedValue(null),
