@@ -37,6 +37,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private maxStalledCount: number;
   private lockDuration: number;
   private heartbeatIntervals: Map<string, ReturnType<typeof setInterval>> = new Map();
+  private globalConcurrencyEnabled = false;
 
   constructor(name: string, processor: Processor<D, R>, opts: WorkerOptions) {
     super();
@@ -79,6 +80,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
       this.queueKeys.stream,
       CONSUMER_GROUP,
     );
+
+    // Check if global concurrency is configured (read once, avoid per-poll FCALL)
+    const gcVal = await this.commandClient.hget(this.queueKeys.meta, 'globalConcurrency');
+    this.globalConcurrencyEnabled = gcVal != null && Number(gcVal) > 0;
 
     // Start the internal scheduler for delayed promotion + stalled recovery
     this.scheduler = new Scheduler(this.commandClient, this.queueKeys, {
@@ -189,19 +194,21 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     let fetchCount = available;
 
-    // Check global concurrency via server-side XPENDING.
-    // checkConcurrency returns -1 when no limit is set (fast path - just reads HGET).
-    const gcRemaining = await checkConcurrency(
-      this.commandClient,
-      this.queueKeys,
-      CONSUMER_GROUP,
-    );
-    if (gcRemaining === 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
-      return;
-    }
-    if (gcRemaining > 0) {
-      fetchCount = Math.min(available, gcRemaining);
+    // Only check global concurrency if configured. Skipping this FCALL entirely
+    // saves one Valkey round trip per poll cycle (~0.2ms).
+    if (this.globalConcurrencyEnabled) {
+      const gcRemaining = await checkConcurrency(
+        this.commandClient,
+        this.queueKeys,
+        CONSUMER_GROUP,
+      );
+      if (gcRemaining === 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        return;
+      }
+      if (gcRemaining > 0) {
+        fetchCount = Math.min(available, gcRemaining);
+      }
     }
 
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
@@ -382,10 +389,14 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
   private startHeartbeat(jobId: string): void {
     if (!this.commandClient) return;
+    // Only start periodic heartbeat for long lockDurations where stall detection matters.
+    // moveToActive already writes the initial lastActive - protects against immediate stall reclaim.
+    // For the default 30s lockDuration with 30s stalledInterval, the heartbeat fires at 15s.
+    // Skip entirely if lockDuration >= stalledInterval (initial write is sufficient for one cycle).
+    if (this.lockDuration >= this.stalledInterval) return;
     const interval = this.lockDuration / 2;
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
-    // Initial lastActive already set by moveToActive - heartbeat only for periodic renewal
     const timer = setInterval(() => {
       client.hset(jobKey, { lastActive: Date.now().toString() }).catch(() => {});
     }, interval);
