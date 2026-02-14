@@ -47,8 +47,14 @@
 - Full lifecycle integration tests: delayed promotion, priority ordering, retry with backoff
 - 144 tests passing (79 unit + 65 integration, standalone + cluster)
 
+### Phase 3 complete
+- FlowProducer: atomic parent-child job trees, recursive nested flows, auto completeChild on worker
+- QueueEvents: XREAD BLOCK loop on events stream, typed event emission
+- Job schedulers: cron + fixed interval, Scheduler.runSchedulers()
+- Metrics: Queue.getMetrics, Queue.getJobCounts
+- 164 tests passing (17 files)
+
 ### Next steps
-- Phase 3: FlowProducer, QueueEvents, job schedulers, metrics
 - Phase 4: graceful shutdown, error recovery, OpenTelemetry
 - speedkey CD: arm64-gnu build still queued on GitHub (ubuntu-24.04-arm runner)
 - Rotate NPM token
