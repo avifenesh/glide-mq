@@ -161,6 +161,49 @@ export class Job<D = any, R = any> {
   }
 
   /**
+   * Check if this job is in the completed state.
+   */
+  async isCompleted(): Promise<boolean> {
+    return (await this.getState()) === 'completed';
+  }
+
+  /**
+   * Check if this job is in the failed state.
+   */
+  async isFailed(): Promise<boolean> {
+    return (await this.getState()) === 'failed';
+  }
+
+  /**
+   * Check if this job is in the delayed state.
+   */
+  async isDelayed(): Promise<boolean> {
+    return (await this.getState()) === 'delayed';
+  }
+
+  /**
+   * Check if this job is in the active state.
+   */
+  async isActive(): Promise<boolean> {
+    return (await this.getState()) === 'active';
+  }
+
+  /**
+   * Check if this job is in the waiting state.
+   */
+  async isWaiting(): Promise<boolean> {
+    return (await this.getState()) === 'waiting';
+  }
+
+  /**
+   * Read the current state from the job hash.
+   */
+  async getState(): Promise<string> {
+    const state = await this.client.hget(this.queueKeys.job(this.id), 'state');
+    return state ? String(state) : 'unknown';
+  }
+
+  /**
    * Construct a Job instance from a hash returned by HGETALL.
    * @internal
    */

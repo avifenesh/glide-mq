@@ -310,26 +310,18 @@ describe('Queue', () => {
       await queue.close();
     });
 
-    it('should create a new client after close and re-use', async () => {
-      const mockClient2 = makeMockClient();
+    it('should reject operations after close', async () => {
       mockClient.fcall
         .mockResolvedValueOnce(LIBRARY_VERSION)
         .mockResolvedValueOnce('1');
-      mockClient2.fcall
-        .mockResolvedValueOnce(LIBRARY_VERSION)
-        .mockResolvedValueOnce('2');
-
-      vi.mocked(GlideClient.createClient)
-        .mockResolvedValueOnce(mockClient as any)
-        .mockResolvedValueOnce(mockClient2 as any);
 
       const queue = new Queue('test-queue', connOpts);
 
       await queue.add('job1', {});
       await queue.close();
-      await queue.add('job2', {});
 
-      expect(GlideClient.createClient).toHaveBeenCalledTimes(2);
+      // After close, getClient should throw
+      await expect(queue.add('job2', {})).rejects.toThrow('Queue is closing');
     });
   });
 

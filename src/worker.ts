@@ -6,7 +6,8 @@ import { createClient, createBlockingClient, ensureFunctionLibrary, createConsum
 import { CONSUMER_GROUP } from './functions/index';
 import { completeJob, failJob, rateLimit as rateLimitFn, checkConcurrency } from './functions/index';
 import { Scheduler } from './scheduler';
-export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled';
+import { withSpan, withChildSpan } from './telemetry';
+export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed';
 
 export class Worker<D = any, R = any> extends EventEmitter {
   readonly name: string;
@@ -17,6 +18,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private running = false;
   private paused = false;
   private closing = false;
+  private closed = false;
   private queueKeys: ReturnType<typeof buildKeys>;
   private consumerId: string;
   private activeCount = 0;
@@ -24,6 +26,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private scheduler: Scheduler | null = null;
   private initPromise: Promise<void>;
   private rateLimitUntil = 0;
+  private reconnectBackoff = 0;
 
   // Configurable defaults
   private concurrency: number;
@@ -89,22 +92,87 @@ export class Worker<D = any, R = any> extends EventEmitter {
   /**
    * Main poll loop: XREADGROUP BLOCK on the stream, dispatch jobs to the processor.
    * Respects concurrency limits by only requesting (prefetch - activeCount) entries.
+   * On connection errors, uses exponential backoff (1s, 2s, 4s, 8s, max 30s) and reconnects.
    */
   private pollLoop(): void {
     if (!this.running || this.paused || this.closing) return;
 
     this.pollOnce()
       .then(() => {
-        // Continue polling
+        // Successful poll resets backoff
+        this.reconnectBackoff = 0;
         this.pollLoop();
       })
       .catch((err) => {
         if (this.running && !this.closing) {
           this.emit('error', err);
-          // Back off slightly on errors, then retry
-          setTimeout(() => this.pollLoop(), 1000);
+          // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
+          const delay = this.reconnectBackoff === 0
+            ? 1000
+            : Math.min(this.reconnectBackoff * 2, 30000);
+          this.reconnectBackoff = delay;
+          setTimeout(() => this.reconnectAndResume(), delay);
         }
       });
+  }
+
+  /**
+   * Attempt to reconnect clients and resume polling after a connection error.
+   */
+  private async reconnectAndResume(): Promise<void> {
+    if (!this.running || this.closing) return;
+
+    try {
+      // Close stale clients
+      if (this.commandClient) {
+        try { this.commandClient.close(); } catch { /* ignore */ }
+        this.commandClient = null;
+      }
+      if (this.blockingClient) {
+        try { this.blockingClient.close(); } catch { /* ignore */ }
+        this.blockingClient = null;
+      }
+
+      // Recreate clients
+      this.commandClient = await createClient(this.opts.connection);
+      this.blockingClient = await createBlockingClient(this.opts.connection);
+      await ensureFunctionLibrary(
+        this.commandClient,
+        undefined,
+        this.opts.connection.clusterMode ?? false,
+      );
+
+      // Re-ensure consumer group
+      await createConsumerGroup(
+        this.commandClient,
+        this.queueKeys.stream,
+        CONSUMER_GROUP,
+      );
+
+      // Restart scheduler with the new client
+      if (this.scheduler) {
+        this.scheduler.stop();
+      }
+      this.scheduler = new Scheduler(this.commandClient, this.queueKeys, {
+        promotionInterval: this.opts.promotionInterval,
+        stalledInterval: this.stalledInterval,
+        maxStalledCount: this.maxStalledCount,
+        consumerId: this.consumerId,
+      });
+      this.scheduler.start();
+
+      this.reconnectBackoff = 0;
+      this.pollLoop();
+    } catch (err) {
+      if (this.running && !this.closing) {
+        this.emit('error', err);
+        const delay = this.reconnectBackoff === 0
+          ? 1000
+          : Math.min(this.reconnectBackoff * 2, 30000);
+        this.reconnectBackoff = delay;
+        setTimeout(() => this.reconnectAndResume(), delay);
+      }
+    }
   }
 
   private async pollOnce(): Promise<void> {
@@ -225,95 +293,122 @@ export class Worker<D = any, R = any> extends EventEmitter {
       await this.waitForRateLimit();
     }
 
-    try {
-      const result = await this.processor(job);
-      const returnvalue = result !== undefined ? JSON.stringify(result) : 'null';
-
-      // Build parent info if this job is a child in a flow
-      let parentInfo: Parameters<typeof completeJob>[8];
-      if (job.parentId && job.parentQueue) {
-        const parentKeys = buildKeys(job.parentQueue, this.opts.prefix);
-        const childQueuePrefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
-        parentInfo = {
-          depsMember: `${childQueuePrefix}:${jobId}`,
-          parentId: job.parentId,
-          parentKeys,
-        };
-      }
-
-      await completeJob(
-        this.commandClient,
-        this.queueKeys,
-        jobId,
-        entryId,
-        returnvalue,
-        Date.now(),
-        CONSUMER_GROUP,
-        job.opts.removeOnComplete,
-        parentInfo,
-      );
-
-      job.returnvalue = result;
-      job.finishedOn = Date.now();
-
-      this.emit('completed', job, result);
-    } catch (err) {
-      // If the processor threw RateLimitError, apply manual rate limit delay
-      // and re-queue the job as delayed instead of failing it.
-      if (err instanceof Worker.RateLimitError) {
-        const delayMs = (err as any).delayMs || (this.opts.limiter?.duration ?? 1000);
-        this.rateLimitUntil = Date.now() + delayMs;
+    await withSpan(
+      'glide-mq.worker.process',
+      {
+        'glide-mq.queue': this.name,
+        'glide-mq.job.id': jobId,
+        'glide-mq.job.name': job.name,
+        'glide-mq.job.attemptsMade': job.attemptsMade,
+      },
+      async () => {
         try {
-          await failJob(
-            this.commandClient,
-            this.queueKeys,
-            jobId,
-            entryId,
-            'rate limited',
-            Date.now(),
-            job.attemptsMade + 2, // ensure retry: after HINCRBY, attemptsMade+1 < attemptsMade+2
-            delayMs,
-            CONSUMER_GROUP,
+          const result = await this.processor(job);
+          const returnvalue = result !== undefined ? JSON.stringify(result) : 'null';
+
+          // Build parent info if this job is a child in a flow
+          let parentInfo: Parameters<typeof completeJob>[8];
+          if (job.parentId && job.parentQueue) {
+            const parentKeys = buildKeys(job.parentQueue, this.opts.prefix);
+            const childQueuePrefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+            parentInfo = {
+              depsMember: `${childQueuePrefix}:${jobId}`,
+              parentId: job.parentId,
+              parentKeys,
+            };
+          }
+
+          if (!this.commandClient) return;
+          await withChildSpan(
+            'glide-mq.worker.complete',
+            { 'glide-mq.job.id': jobId },
+            async () => {
+              await completeJob(
+                this.commandClient!,
+                this.queueKeys,
+                jobId,
+                entryId,
+                returnvalue,
+                Date.now(),
+                CONSUMER_GROUP,
+                job.opts.removeOnComplete,
+                parentInfo,
+              );
+            },
           );
-        } catch (failErr) {
-          this.emit('error', failErr);
+
+          job.returnvalue = result;
+          job.finishedOn = Date.now();
+
+          this.emit('completed', job, result);
+        } catch (err) {
+          // If the processor threw RateLimitError, apply manual rate limit delay
+          // and re-queue the job as delayed instead of failing it.
+          if (err instanceof Worker.RateLimitError) {
+            const delayMs = (err as any).delayMs || (this.opts.limiter?.duration ?? 1000);
+            this.rateLimitUntil = Date.now() + delayMs;
+            if (!this.commandClient) return;
+            try {
+              await failJob(
+                this.commandClient,
+                this.queueKeys,
+                jobId,
+                entryId,
+                'rate limited',
+                Date.now(),
+                job.attemptsMade + 2,
+                delayMs,
+                CONSUMER_GROUP,
+              );
+            } catch (failErr) {
+              this.emit('error', failErr);
+            }
+            return;
+          }
+
+          const error = err instanceof Error ? err : new Error(String(err));
+          const maxAttempts = job.opts.attempts ?? 0;
+          let backoffDelay = 0;
+
+          if (maxAttempts > 0 && job.opts.backoff) {
+            backoffDelay = calculateBackoff(
+              job.opts.backoff.type,
+              job.opts.backoff.delay,
+              job.attemptsMade + 1,
+              job.opts.backoff.jitter,
+            );
+          }
+
+          if (!this.commandClient) {
+            job.failedReason = error.message;
+            this.emit('failed', job, error);
+            return;
+          }
+
+          await withChildSpan(
+            'glide-mq.worker.fail',
+            { 'glide-mq.job.id': jobId, 'glide-mq.error': error.message },
+            async () => {
+              await failJob(
+                this.commandClient!,
+                this.queueKeys,
+                jobId,
+                entryId,
+                error.message,
+                Date.now(),
+                maxAttempts,
+                backoffDelay,
+                CONSUMER_GROUP,
+                job.opts.removeOnFail,
+              );
+            },
+          );
+
+          job.failedReason = error.message;
+          this.emit('failed', job, error);
         }
-        return;
-      }
-
-      const error = err instanceof Error ? err : new Error(String(err));
-      const maxAttempts = job.opts.attempts ?? 0;
-      let backoffDelay = 0;
-
-      if (maxAttempts > 0 && job.opts.backoff) {
-        backoffDelay = calculateBackoff(
-          job.opts.backoff.type,
-          job.opts.backoff.delay,
-          job.attemptsMade + 1,
-          job.opts.backoff.jitter,
-        );
-      }
-
-      try {
-        await failJob(
-          this.commandClient,
-          this.queueKeys,
-          jobId,
-          entryId,
-          error.message,
-          Date.now(),
-          maxAttempts,
-          backoffDelay,
-          CONSUMER_GROUP,
-          job.opts.removeOnFail,
-        );
-      } catch (failErr) {
-        this.emit('error', failErr);
-      }
-
-      job.failedReason = error.message;
-      this.emit('failed', job, error);
-    }
+      },
+    );
   }
 
   /**
@@ -375,11 +470,54 @@ export class Worker<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Process all remaining jobs in the queue, then stop gracefully.
+   * Keeps polling until both the stream and scheduled ZSet are empty,
+   * then closes the worker.
+   */
+  async drain(): Promise<void> {
+    await this.initPromise;
+
+    // Poll until everything is empty
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      if (!this.commandClient) break;
+
+      // Wait for active jobs to complete
+      await this.waitForActiveJobs();
+
+      // Check if stream and scheduled set are both empty
+      const streamLen = await this.commandClient.xlen(this.queueKeys.stream);
+      const scheduledLen = await this.commandClient.zcard(this.queueKeys.scheduled);
+
+      if (streamLen === 0 && scheduledLen === 0 && this.activeCount === 0) {
+        break;
+      }
+
+      // Small delay before re-checking
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
+
+    await this.close();
+  }
+
+  /**
    * Close the worker. If force=false (default), waits for active jobs to finish.
+   * Idempotent: safe to call multiple times.
    */
   async close(force?: boolean): Promise<void> {
+    if (this.closed) return;
+    if (this.closing) {
+      // Already closing - wait for init to settle, then return
+      await this.initPromise.catch(() => {});
+      return;
+    }
+
     this.closing = true;
     this.running = false;
+    this.emit('closing');
+
+    // Wait for init to complete so clients are available for cleanup
+    await this.initPromise.catch(() => {});
 
     if (this.scheduler) {
       this.scheduler.stop();
@@ -398,6 +536,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
       this.blockingClient.close();
       this.blockingClient = null;
     }
+
+    this.closed = true;
+    this.emit('closed');
   }
 
   private async waitForActiveJobs(): Promise<void> {

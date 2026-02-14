@@ -25,3 +25,6 @@ export type {
 } from './types';
 
 export { GlideMQError, ConnectionError, ScriptError } from './errors';
+export { gracefulShutdown } from './graceful-shutdown';
+
+export { setTracer, isTracingEnabled } from './telemetry';

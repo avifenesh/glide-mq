@@ -9,9 +9,11 @@ export class QueueEvents extends EventEmitter {
   private client: Client | null = null;
   private queueKeys: ReturnType<typeof buildKeys>;
   private running = false;
+  private closing = false;
   private lastId: string;
   private initPromise: Promise<void>;
   private blockTimeout: number;
+  private reconnectBackoff = 0;
 
   constructor(name: string, opts: QueueEventsOptions) {
     super();
@@ -43,18 +45,57 @@ export class QueueEvents extends EventEmitter {
   }
 
   private pollLoop(): void {
-    if (!this.running) return;
+    if (!this.running || this.closing) return;
 
     this.pollOnce()
       .then(() => {
+        this.reconnectBackoff = 0;
         this.pollLoop();
       })
       .catch((err) => {
-        if (this.running) {
+        if (this.running && !this.closing) {
           this.emit('error', err);
-          setTimeout(() => this.pollLoop(), 1000);
+          // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
+          const delay = this.reconnectBackoff === 0
+            ? 1000
+            : Math.min(this.reconnectBackoff * 2, 30000);
+          this.reconnectBackoff = delay;
+          setTimeout(() => this.reconnectAndResume(), delay);
         }
       });
+  }
+
+  /**
+   * Attempt to reconnect the client and resume polling after a connection error.
+   */
+  private async reconnectAndResume(): Promise<void> {
+    if (!this.running || this.closing) return;
+
+    try {
+      if (this.client) {
+        try { this.client.close(); } catch { /* ignore */ }
+        this.client = null;
+      }
+
+      this.client = await createBlockingClient(this.opts.connection);
+      await ensureFunctionLibrary(
+        this.client,
+        undefined,
+        this.opts.connection.clusterMode ?? false,
+      );
+
+      this.reconnectBackoff = 0;
+      this.pollLoop();
+    } catch (err) {
+      if (this.running && !this.closing) {
+        this.emit('error', err);
+        const delay = this.reconnectBackoff === 0
+          ? 1000
+          : Math.min(this.reconnectBackoff * 2, 30000);
+        this.reconnectBackoff = delay;
+        setTimeout(() => this.reconnectAndResume(), delay);
+      }
+    }
   }
 
   private async pollOnce(): Promise<void> {
@@ -102,7 +143,13 @@ export class QueueEvents extends EventEmitter {
     }
   }
 
+  /**
+   * Close the QueueEvents listener.
+   * Idempotent: safe to call multiple times.
+   */
   async close(): Promise<void> {
+    if (this.closing) return;
+    this.closing = true;
     this.running = false;
     // Wait for init to complete so client is available for cleanup
     try {

@@ -5,6 +5,7 @@ import { createClient, ensureFunctionLibrary } from './connection';
 import { addFlow } from './functions/index';
 import { LIBRARY_SOURCE } from './functions/index';
 import type { QueueKeys } from './functions/index';
+import { withSpan } from './telemetry';
 
 export interface JobNode {
   job: Job;
@@ -14,6 +15,7 @@ export interface JobNode {
 export class FlowProducer {
   private opts: FlowProducerOptions;
   private client: Client | null = null;
+  private closing = false;
 
   constructor(opts: FlowProducerOptions) {
     this.opts = opts;
@@ -38,8 +40,18 @@ export class FlowProducer {
    * into multiple addFlow calls (one per level with children).
    */
   async add(flow: FlowJob): Promise<JobNode> {
-    const client = await this.getClient();
-    return this.addFlowRecursive(client, flow);
+    return withSpan(
+      'glide-mq.flow.add',
+      {
+        'glide-mq.queue': flow.queueName,
+        'glide-mq.flow.name': flow.name,
+        'glide-mq.flow.childCount': flow.children?.length ?? 0,
+      },
+      async () => {
+        const client = await this.getClient();
+        return this.addFlowRecursive(client, flow);
+      },
+    );
   }
 
   /**
@@ -299,7 +311,13 @@ export class FlowProducer {
     }
   }
 
+  /**
+   * Close the FlowProducer and release the underlying client connection.
+   * Idempotent: safe to call multiple times.
+   */
   async close(): Promise<void> {
+    if (this.closing) return;
+    this.closing = true;
     if (this.client) {
       this.client.close();
       this.client = null;

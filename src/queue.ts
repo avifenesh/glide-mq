@@ -1,18 +1,24 @@
+import { EventEmitter } from 'events';
+import { InfBoundary } from 'speedkey';
+import type { GlideClient, GlideClusterClient } from 'speedkey';
 import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts } from './types';
 import { Job } from './job';
-import { buildKeys, nextCronOccurrence } from './utils';
+import { buildKeys, keyPrefix, nextCronOccurrence } from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
 import { addJob, dedup, pause, resume, removeJob, CONSUMER_GROUP } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { LIBRARY_SOURCE } from './functions/index';
+import { withSpan } from './telemetry';
 
-export class Queue<D = any, R = any> {
+export class Queue<D = any, R = any> extends EventEmitter {
   readonly name: string;
   private opts: QueueOptions;
   private client: Client | null = null;
+  private closing = false;
   private keys: QueueKeys;
 
   constructor(name: string, opts: QueueOptions) {
+    super();
     this.name = name;
     this.opts = opts;
     this.keys = buildKeys(name, opts.prefix);
@@ -20,13 +26,24 @@ export class Queue<D = any, R = any> {
 
   /** @internal */
   async getClient(): Promise<Client> {
+    if (this.closing) {
+      throw new Error('Queue is closing');
+    }
     if (!this.client) {
-      this.client = await createClient(this.opts.connection);
-      await ensureFunctionLibrary(
-        this.client,
-        LIBRARY_SOURCE,
-        this.opts.connection.clusterMode ?? false,
-      );
+      let client: Client;
+      try {
+        client = await createClient(this.opts.connection);
+        await ensureFunctionLibrary(
+          client,
+          LIBRARY_SOURCE,
+          this.opts.connection.clusterMode ?? false,
+        );
+      } catch (err) {
+        // Don't cache a failed client - next getClient() call will retry
+        this.emit('error', err);
+        throw err;
+      }
+      this.client = client;
     }
     return this.client;
   }
@@ -37,62 +54,76 @@ export class Queue<D = any, R = any> {
    * and enqueue it to the stream (or scheduled ZSet if delayed/prioritized).
    */
   async add(name: string, data: D, opts?: JobOptions): Promise<Job<D, R> | null> {
-    const client = await this.getClient();
-    const timestamp = Date.now();
     const delay = opts?.delay ?? 0;
     const priority = opts?.priority ?? 0;
-    const parentId = opts?.parent ? opts.parent.id : '';
-    const maxAttempts = opts?.attempts ?? 0;
 
-    let jobId: string;
+    return withSpan(
+      'glide-mq.queue.add',
+      {
+        'glide-mq.queue': this.name,
+        'glide-mq.job.name': name,
+        'glide-mq.job.delay': delay,
+        'glide-mq.job.priority': priority,
+      },
+      async (span) => {
+        const client = await this.getClient();
+        const timestamp = Date.now();
+        const parentId = opts?.parent ? opts.parent.id : '';
+        const maxAttempts = opts?.attempts ?? 0;
 
-    if (opts?.deduplication) {
-      const dedupOpts = opts.deduplication;
-      const result = await dedup(
-        client,
-        this.keys,
-        dedupOpts.id,
-        dedupOpts.ttl ?? 0,
-        dedupOpts.mode ?? 'simple',
-        name,
-        JSON.stringify(data),
-        JSON.stringify(opts),
-        timestamp,
-        delay,
-        priority,
-        parentId,
-        maxAttempts,
-      );
-      if (result === 'skipped') {
-        return null;
-      }
-      jobId = result;
-    } else {
-      jobId = await addJob(
-        client,
-        this.keys,
-        name,
-        JSON.stringify(data),
-        JSON.stringify(opts ?? {}),
-        timestamp,
-        delay,
-        priority,
-        parentId,
-        maxAttempts,
-      );
-    }
+        let jobId: string;
 
-    const job = new Job<D, R>(
-      client,
-      this.keys,
-      String(jobId),
-      name,
-      data,
-      opts ?? {},
+        if (opts?.deduplication) {
+          const dedupOpts = opts.deduplication;
+          const result = await dedup(
+            client,
+            this.keys,
+            dedupOpts.id,
+            dedupOpts.ttl ?? 0,
+            dedupOpts.mode ?? 'simple',
+            name,
+            JSON.stringify(data),
+            JSON.stringify(opts),
+            timestamp,
+            delay,
+            priority,
+            parentId,
+            maxAttempts,
+          );
+          if (result === 'skipped') {
+            return null;
+          }
+          jobId = result;
+        } else {
+          jobId = await addJob(
+            client,
+            this.keys,
+            name,
+            JSON.stringify(data),
+            JSON.stringify(opts ?? {}),
+            timestamp,
+            delay,
+            priority,
+            parentId,
+            maxAttempts,
+          );
+        }
+
+        span.setAttribute('glide-mq.job.id', String(jobId));
+
+        const job = new Job<D, R>(
+          client,
+          this.keys,
+          String(jobId),
+          name,
+          data,
+          opts ?? {},
+        );
+        job.timestamp = timestamp;
+        job.parentId = parentId || undefined;
+        return job;
+      },
     );
-    job.timestamp = timestamp;
-    job.parentId = parentId || undefined;
-    return job;
   }
 
   /**
@@ -280,9 +311,201 @@ export class Queue<D = any, R = any> {
   }
 
   /**
+   * Remove all data associated with this queue from the server.
+   * If force=false (default), fails if there are active jobs.
+   * If force=true, deletes everything regardless of active jobs.
+   */
+  async obliterate(opts?: { force?: boolean }): Promise<void> {
+    const client = await this.getClient();
+    const force = opts?.force ?? false;
+
+    // Check for active jobs if not forcing
+    if (!force) {
+      try {
+        const pendingInfo = await client.xpending(this.keys.stream, CONSUMER_GROUP);
+        const activeCount = Number(pendingInfo[0]) || 0;
+        if (activeCount > 0) {
+          throw new Error(`Cannot obliterate queue "${this.name}": ${activeCount} active jobs. Use { force: true } to override.`);
+        }
+      } catch (err) {
+        // If the error is our own active-jobs check, re-throw
+        if (err instanceof Error && err.message.includes('Cannot obliterate')) {
+          throw err;
+        }
+        // Consumer group doesn't exist yet means no active jobs - continue
+      }
+    }
+
+    // Delete all known static keys
+    const staticKeys = [
+      this.keys.id, this.keys.stream, this.keys.scheduled,
+      this.keys.completed, this.keys.failed, this.keys.events,
+      this.keys.meta, this.keys.dedup, this.keys.rate, this.keys.schedulers,
+    ];
+    await client.del(staticKeys);
+
+    // Scan and delete job hashes and deps sets
+    const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+    const jobPattern = `${prefix}:job:*`;
+    const depsPattern = `${prefix}:deps:*`;
+
+    for (const pattern of [jobPattern, depsPattern]) {
+      await this.scanAndDelete(client, pattern);
+    }
+  }
+
+  /**
+   * Scan for keys matching a pattern and delete them in batches.
+   * Handles both standalone (GlideClient) and cluster (GlideClusterClient) scan APIs.
+   * @internal
+   */
+  private async scanAndDelete(client: Client, pattern: string): Promise<void> {
+    if (this.opts.connection.clusterMode) {
+      const { ClusterScanCursor } = await import('speedkey');
+      const clusterClient = client as GlideClusterClient;
+      let cursor = new ClusterScanCursor();
+      while (!cursor.isFinished()) {
+        const [nextCursor, keys] = await clusterClient.scan(cursor, { match: pattern, count: 100 });
+        cursor = nextCursor;
+        if (keys.length > 0) {
+          await client.del(keys);
+        }
+      }
+    } else {
+      let cursor = '0';
+      do {
+        const result = await (client as GlideClient).scan(cursor, { match: pattern, count: 100 });
+        cursor = result[0] as string;
+        const keys = result[1];
+        if (keys.length > 0) {
+          await client.del(keys);
+        }
+      } while (cursor !== '0');
+    }
+  }
+
+  /**
+   * Retrieve jobs by state with optional pagination.
+   * @param type - The job state to query
+   * @param start - Start index for pagination (default 0)
+   * @param end - End index for pagination (default -1, meaning all)
+   */
+  async getJobs(
+    type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed',
+    start = 0,
+    end = -1,
+  ): Promise<Job<D, R>[]> {
+    const client = await this.getClient();
+    let jobIds: string[];
+
+    switch (type) {
+      case 'waiting': {
+        // XRANGE on the stream to get waiting entries, extract jobId fields
+        const entries = await client.xrange(
+          this.keys.stream,
+          InfBoundary.NegativeInfinity,
+          InfBoundary.PositiveInfinity,
+          end >= 0 ? { count: end + 1 } : undefined,
+        );
+        if (!entries) return [];
+        const allIds: string[] = [];
+        for (const fieldPairs of Object.values(entries)) {
+          for (const [field, value] of fieldPairs) {
+            if (String(field) === 'jobId') {
+              allIds.push(String(value));
+            }
+          }
+        }
+        jobIds = allIds.slice(start, end >= 0 ? end + 1 : undefined);
+        break;
+      }
+      case 'active': {
+        // XPENDING extended form to get active job entry IDs, then read jobId from entries
+        try {
+          const pendingEntries = await client.xpendingWithOptions(
+            this.keys.stream,
+            CONSUMER_GROUP,
+            {
+              start: InfBoundary.NegativeInfinity,
+              end: InfBoundary.PositiveInfinity,
+              count: end >= 0 ? end + 1 : 10000,
+            },
+          );
+          const entryIds = pendingEntries.slice(start, end >= 0 ? end + 1 : undefined).map(e => String(e[0]));
+          // Read each entry from the stream to get the jobId
+          jobIds = [];
+          for (const entryId of entryIds) {
+            const entryData = await client.xrange(
+              this.keys.stream,
+              { value: entryId },
+              { value: entryId },
+              { count: 1 },
+            );
+            if (entryData) {
+              for (const fieldPairs of Object.values(entryData)) {
+                for (const [field, value] of fieldPairs) {
+                  if (String(field) === 'jobId') {
+                    jobIds.push(String(value));
+                  }
+                }
+              }
+            }
+          }
+        } catch {
+          // Consumer group may not exist
+          jobIds = [];
+        }
+        break;
+      }
+      case 'delayed': {
+        const members = await client.zrange(
+          this.keys.scheduled,
+          { start: start, end: end >= 0 ? end : -1 },
+        );
+        jobIds = members.map(m => String(m));
+        break;
+      }
+      case 'completed': {
+        const members = await client.zrange(
+          this.keys.completed,
+          { start: start, end: end >= 0 ? end : -1 },
+        );
+        jobIds = members.map(m => String(m));
+        break;
+      }
+      case 'failed': {
+        const members = await client.zrange(
+          this.keys.failed,
+          { start: start, end: end >= 0 ? end : -1 },
+        );
+        jobIds = members.map(m => String(m));
+        break;
+      }
+    }
+
+    // Fetch job hashes for each ID
+    const jobs: Job<D, R>[] = [];
+    for (const id of jobIds) {
+      const job = await this.getJob(id);
+      if (job) jobs.push(job);
+    }
+    return jobs;
+  }
+
+  /**
+   * Get job counts by types. Alias for getJobCounts().
+   */
+  async getJobCountByTypes(): Promise<JobCounts> {
+    return this.getJobCounts();
+  }
+
+  /**
    * Close the queue and release the underlying client connection.
+   * Idempotent: safe to call multiple times.
    */
   async close(): Promise<void> {
+    if (this.closing) return;
+    this.closing = true;
     if (this.client) {
       this.client.close();
       this.client = null;
