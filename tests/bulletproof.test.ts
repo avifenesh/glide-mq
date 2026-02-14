@@ -970,3 +970,732 @@ describeEachMode('Celery chain failure: parent state correct when child fails', 
     await flow.close();
   }, 15000);
 });
+
+// ===========================================================================
+// Sidekiq / Bee-Queue bug tests
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Sidekiq BRPOP loss: Job not lost on worker crash mid-processing
+// ---------------------------------------------------------------------------
+
+describeEachMode('Sidekiq BRPOP loss: job not lost when worker crashes mid-processing', (CONNECTION) => {
+  const Q = 'bp-crash-recover-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('job transitions to failed via stalled recovery after worker crash - not lost', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const MAX_STALLED = 1;
+    const STALL_INTERVAL = 1000;
+
+    // Add a job before starting any worker
+    const job = await queue.add('crash-test', { important: true });
+
+    // Worker 1: starts processing but we force-close it mid-processing
+    let jobPicked = false;
+    const crashWorker = new Worker(
+      Q,
+      async () => {
+        jobPicked = true;
+        await new Promise(r => setTimeout(r, 60000));
+        return 'never-reaches';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 2,
+        blockTimeout: 500,
+        stalledInterval: 60000,
+        lockDuration: 200,
+      },
+    );
+    crashWorker.on('error', () => {});
+
+    // Wait for job to be picked up
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (jobPicked) { clearInterval(check); resolve(); }
+      }, 50);
+      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
+    });
+    expect(jobPicked).toBe(true);
+
+    // Force-close worker 1 (simulates crash - no graceful ACK)
+    await crashWorker.close(true);
+
+    // Wait for PEL entry to age past the stalled interval
+    await new Promise(r => setTimeout(r, STALL_INTERVAL + 500));
+
+    // Recovery worker: its scheduler will reclaim the stalled entry via XAUTOCLAIM.
+    // After maxStalledCount cycles, the job moves to failed.
+    const recoveryWorker = new Worker(
+      Q,
+      async () => 'should-not-process',
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: STALL_INTERVAL,
+        maxStalledCount: MAX_STALLED,
+        lockDuration: 200,
+      },
+    );
+    recoveryWorker.on('error', () => {});
+
+    // Wait for enough stalled recovery cycles to exceed maxStalledCount
+    // stalledCount increments once per cycle, need > MAX_STALLED cycles
+    await new Promise(r => setTimeout(r, STALL_INTERVAL * (MAX_STALLED + 2) + 1000));
+
+    await recoveryWorker.close(true);
+
+    // The job must NOT be lost - it should be in 'failed' state
+    const k = buildKeys(Q);
+    const state = await cleanupClient.hget(k.job(job!.id), 'state');
+    expect(String(state)).toBe('failed');
+
+    // Verify the failed reason references stalling
+    const reason = await cleanupClient.hget(k.job(job!.id), 'failedReason');
+    expect(String(reason)).toContain('stalled');
+
+    // Verify stalledCount was tracked
+    const stalledCount = await cleanupClient.hget(k.job(job!.id), 'stalledCount');
+    expect(Number(stalledCount)).toBeGreaterThan(MAX_STALLED);
+
+    // The job is in the failed ZSet (not lost in limbo)
+    const failedScore = await cleanupClient.zscore(k.failed, job!.id);
+    expect(failedScore).not.toBeNull();
+
+    await queue.close();
+  }, 25000);
+});
+
+// ---------------------------------------------------------------------------
+// Sidekiq dedup lock orphan: dedup lock cleared after job completes
+// ---------------------------------------------------------------------------
+
+describeEachMode('Sidekiq dedup lock orphan: dedup lock not orphaned after completion', (CONNECTION) => {
+  const Q = 'bp-dedup-orphan-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('same dedup ID can be reused after job completes', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const DEDUP_ID = 'unique-task-abc';
+
+    // Add first job with dedup ID
+    const job1 = await queue.add('dedup-test', { run: 1 }, {
+      deduplication: { id: DEDUP_ID, mode: 'simple' },
+    });
+    expect(job1).not.toBeNull();
+
+    // Process the first job to completion
+    const firstDone = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
+      const worker = new Worker(
+        Q,
+        async () => 'done',
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+      );
+      worker.on('completed', () => {
+        clearTimeout(timeout);
+        worker.close(true).then(resolve);
+      });
+      worker.on('error', () => {});
+    });
+    await firstDone;
+
+    // Verify first job is completed
+    const k = buildKeys(Q);
+    const state1 = await cleanupClient.hget(k.job(job1!.id), 'state');
+    expect(String(state1)).toBe('completed');
+
+    // Add second job with the SAME dedup ID - should succeed (not stuck/orphaned)
+    const job2 = await queue.add('dedup-test', { run: 2 }, {
+      deduplication: { id: DEDUP_ID, mode: 'simple' },
+    });
+    expect(job2).not.toBeNull();
+    expect(job2!.id).not.toBe(job1!.id);
+
+    // Process the second job
+    const secondDone = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
+      const worker = new Worker(
+        Q,
+        async () => 'done-again',
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+      );
+      worker.on('completed', () => {
+        clearTimeout(timeout);
+        worker.close(true).then(resolve);
+      });
+      worker.on('error', () => {});
+    });
+    await secondDone;
+
+    const state2 = await cleanupClient.hget(k.job(job2!.id), 'state');
+    expect(String(state2)).toBe('completed');
+
+    await queue.close();
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// Sidekiq retry loss: job is never in limbo during retry cycle
+// ---------------------------------------------------------------------------
+
+describeEachMode('Sidekiq retry loss: job exists in a known state throughout retry cycle', (CONNECTION) => {
+  const Q = 'bp-retry-noloss-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('job fails, retries, succeeds - never lost from all state sets', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    let attemptCount = 0;
+    const stateSnapshots: string[] = [];
+
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 25000);
+      const worker = new Worker(
+        Q,
+        async () => {
+          attemptCount++;
+          if (attemptCount < 3) {
+            throw new Error(`fail-attempt-${attemptCount}`);
+          }
+          return 'success-on-3';
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 500,
+          stalledInterval: 60000,
+          promotionInterval: 300,
+        },
+      );
+      worker.on('completed', () => {
+        clearTimeout(timeout);
+        worker.close(true).then(resolve);
+      });
+      worker.on('error', () => {});
+    });
+
+    await new Promise(r => setTimeout(r, 500));
+    const job = await queue.add('retry-test', { value: 1 }, {
+      attempts: 5,
+      backoff: { type: 'fixed', delay: 200 },
+    });
+
+    // Poll for job state while retrying
+    const pollInterval = setInterval(async () => {
+      try {
+        const k = buildKeys(Q);
+        const s = await cleanupClient.hget(k.job(job!.id), 'state');
+        if (s) stateSnapshots.push(String(s));
+      } catch { /* ignore */ }
+    }, 100);
+
+    await done;
+    clearInterval(pollInterval);
+
+    // Job must have succeeded on attempt 3
+    expect(attemptCount).toBe(3);
+
+    const k = buildKeys(Q);
+    const finalState = await cleanupClient.hget(k.job(job!.id), 'state');
+    expect(String(finalState)).toBe('completed');
+
+    // Every snapshot must be a valid state - never 'unknown' or empty
+    for (const s of stateSnapshots) {
+      expect(['waiting', 'active', 'delayed', 'completed', 'failed']).toContain(s);
+    }
+
+    await queue.close();
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// Sidekiq counter race: job ID counter is monotonically increasing under concurrency
+// ---------------------------------------------------------------------------
+
+describeEachMode('Sidekiq counter race: job IDs are monotonically increasing under concurrent adds', (CONNECTION) => {
+  const Q = 'bp-counter-race-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('50 concurrent adds produce strictly increasing, unique job IDs', async () => {
+    // Use 5 separate Queue instances to simulate real concurrency
+    const queues = Array.from({ length: 5 }, () =>
+      new Queue(Q, { connection: CONNECTION }),
+    );
+
+    const TOTAL = 50;
+    const promises: Promise<any>[] = [];
+    for (let i = 0; i < TOTAL; i++) {
+      const q = queues[i % queues.length];
+      promises.push(q.add(`race-${i}`, { i }));
+    }
+
+    const jobs = await Promise.all(promises);
+
+    // All IDs must be valid
+    const ids = jobs.map(j => {
+      expect(j).not.toBeNull();
+      return parseInt(j!.id, 10);
+    });
+
+    // All IDs must be unique
+    const uniqueIds = new Set(ids);
+    expect(uniqueIds.size).toBe(TOTAL);
+
+    // IDs must form a contiguous range (INCR guarantees no gaps)
+    const sorted = [...ids].sort((a, b) => a - b);
+    for (let i = 1; i < sorted.length; i++) {
+      expect(sorted[i]).toBe(sorted[i - 1] + 1);
+    }
+
+    for (const q of queues) await q.close();
+  }, 20000);
+});
+
+// ---------------------------------------------------------------------------
+// Bee-Queue #106: Repeated stalling doesn't cause infinite loop
+// ---------------------------------------------------------------------------
+
+describeEachMode('Bee-Queue #106: repeated stalling moves job to failed, not infinite loop', (CONNECTION) => {
+  const Q = 'bp-stall-limit-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('job that stalls beyond maxStalledCount moves to failed with stalledCount', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const MAX_STALLED = 1;
+    const STALL_INTERVAL = 1000;
+
+    // Add a job
+    const job = await queue.add('stall-forever', { doomed: true });
+
+    // Worker picks up job, then crashes (force close)
+    let jobPicked = false;
+    const crashWorker = new Worker(
+      Q,
+      async () => {
+        jobPicked = true;
+        await new Promise(() => {}); // hang forever
+        return 'never';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 2,
+        blockTimeout: 500,
+        stalledInterval: 60000,
+        lockDuration: 200,
+      },
+    );
+    crashWorker.on('error', () => {});
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (jobPicked) { clearInterval(check); resolve(); }
+      }, 50);
+      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
+    });
+
+    // Force-close to leave PEL entry orphaned
+    await crashWorker.close(true);
+
+    // Wait for entry to age past the stalled interval
+    await new Promise(r => setTimeout(r, STALL_INTERVAL + 500));
+
+    // Recovery worker: scheduler reclaims the stalled entry via XAUTOCLAIM.
+    // Each cycle increments stalledCount. After exceeding maxStalledCount,
+    // the job is moved to failed - NOT looped infinitely.
+    const recoveryWorker = new Worker(
+      Q,
+      async () => 'should-not-process',
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: STALL_INTERVAL,
+        maxStalledCount: MAX_STALLED,
+        lockDuration: 200,
+      },
+    );
+    recoveryWorker.on('error', () => {});
+
+    // Wait for enough stalled recovery cycles
+    await new Promise(r => setTimeout(r, STALL_INTERVAL * (MAX_STALLED + 2) + 1000));
+
+    await recoveryWorker.close(true);
+
+    // Job must be in failed state - NOT stuck in active forever (Bee-Queue #106 bug)
+    const k = buildKeys(Q);
+    const state = await cleanupClient.hget(k.job(job!.id), 'state');
+    expect(String(state)).toBe('failed');
+
+    // Verify stalledCount exceeds the limit
+    const stalledCount = await cleanupClient.hget(k.job(job!.id), 'stalledCount');
+    expect(Number(stalledCount)).toBeGreaterThan(MAX_STALLED);
+
+    // Verify the failed reason
+    const reason = await cleanupClient.hget(k.job(job!.id), 'failedReason');
+    expect(String(reason)).toContain('stalled');
+
+    await queue.close();
+  }, 25000);
+});
+
+// ---------------------------------------------------------------------------
+// Bee-Queue #584: Queue close during processing doesn't hang
+// ---------------------------------------------------------------------------
+
+describeEachMode('Bee-Queue #584: close(false) with active job returns within timeout', (CONNECTION) => {
+  const Q = 'bp-close-nohang-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('close(false) waits for active job and returns within reasonable time', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    let jobStarted = false;
+
+    // Use concurrency > 1 so jobs go through dispatchJob (tracks activePromises)
+    const worker = new Worker(
+      Q,
+      async () => {
+        jobStarted = true;
+        await new Promise(r => setTimeout(r, 1500));
+        return 'finished-during-close';
+      },
+      { connection: CONNECTION, concurrency: 2, blockTimeout: 500 },
+    );
+    worker.on('error', () => {});
+
+    await worker.waitUntilReady();
+    await new Promise(r => setTimeout(r, 300));
+
+    await queue.add('close-test', { value: 1 });
+
+    // Wait for job to start
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (jobStarted) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 50);
+      setTimeout(() => { clearInterval(check); resolve(); }, 5000);
+    });
+
+    expect(jobStarted).toBe(true);
+
+    // close(false) should wait for active job, not hang
+    const closeStart = Date.now();
+    await worker.close(false);
+    const closeElapsed = Date.now() - closeStart;
+
+    // Must complete within reasonable time (job takes ~1.5s, allow up to 10s)
+    expect(closeElapsed).toBeLessThan(10000);
+
+    await queue.close();
+  }, 20000);
+});
+
+// ---------------------------------------------------------------------------
+// Bee-Queue #147: No NOSCRIPT errors - we use FUNCTION LOAD, not EVAL
+// ---------------------------------------------------------------------------
+
+describeEachMode('Bee-Queue #147: functions persist - no NOSCRIPT errors', (CONNECTION) => {
+  const Q = 'bp-noscript-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('FCALL works without reloading library after fresh client creation', async () => {
+    // Create a queue and add a job (this loads the function library)
+    const queue1 = new Queue(Q, { connection: CONNECTION });
+    const job1 = await queue1.add('persist-test-1', { v: 1 });
+    expect(job1).not.toBeNull();
+    await queue1.close();
+
+    // Create a completely new queue instance (new client connection)
+    // The library should already be on the server from the first load
+    const queue2 = new Queue(Q, { connection: CONNECTION });
+
+    // This FCALL should succeed without NOSCRIPT - library is persistent
+    const job2 = await queue2.add('persist-test-2', { v: 2 });
+    expect(job2).not.toBeNull();
+
+    // Verify version function also works via a routable key
+    const client = await queue2.getClient();
+    const version = await client.fcall('glidemq_version', ['{glidemq}:_'], []);
+    expect(String(version)).toBeTruthy();
+
+    // Process both jobs to verify full function chain works
+    let completed = 0;
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
+      const worker = new Worker(
+        Q,
+        async () => 'ok',
+        { connection: CONNECTION, concurrency: 2, blockTimeout: 500 },
+      );
+      worker.on('completed', () => {
+        completed++;
+        if (completed >= 2) {
+          clearTimeout(timeout);
+          worker.close(true).then(resolve);
+        }
+      });
+      worker.on('error', () => {});
+    });
+
+    await done;
+    expect(completed).toBe(2);
+
+    await queue2.close();
+  }, 20000);
+});
+
+// ---------------------------------------------------------------------------
+// Bee-Queue #885: Event listeners don't accumulate (no MaxListenersExceededWarning)
+// ---------------------------------------------------------------------------
+
+describeEachMode('Bee-Queue #885: processing many jobs does not leak event listeners', (CONNECTION) => {
+  const Q = 'bp-listener-leak-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('QueueEvents + 50 jobs produces no MaxListenersExceededWarning', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const TOTAL = 50;
+    const warnings: string[] = [];
+
+    // Intercept process.emitWarning to catch MaxListenersExceeded
+    const originalWarn = process.emitWarning;
+    process.emitWarning = (warning: any) => {
+      const msg = typeof warning === 'string' ? warning : warning.message || String(warning);
+      warnings.push(msg);
+    };
+
+    try {
+      const { QueueEvents } = require('../dist/queue-events') as typeof import('../src/queue-events');
+      const queueEvents = new QueueEvents(Q, {
+        connection: CONNECTION,
+        lastEventId: '0',
+        blockTimeout: 500,
+      });
+      await queueEvents.waitUntilReady();
+
+      const completedIds: string[] = [];
+      queueEvents.on('completed', (payload: any) => {
+        completedIds.push(payload.jobId);
+      });
+
+      // Process jobs
+      let processed = 0;
+      const done = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('timeout')), 30000);
+        const worker = new Worker(
+          Q,
+          async () => 'ok',
+          { connection: CONNECTION, concurrency: 5, blockTimeout: 500 },
+        );
+        worker.on('completed', () => {
+          processed++;
+          if (processed >= TOTAL) {
+            clearTimeout(timeout);
+            worker.close(true).then(resolve);
+          }
+        });
+        worker.on('error', () => {});
+      });
+
+      await new Promise(r => setTimeout(r, 500));
+      for (let i = 0; i < TOTAL; i++) {
+        await queue.add(`listener-${i}`, { i });
+      }
+
+      await done;
+
+      // Wait for QueueEvents to catch up
+      await new Promise(r => setTimeout(r, 1000));
+      await queueEvents.close();
+
+      // No MaxListenersExceeded warnings
+      const listenerWarnings = warnings.filter(w => w.includes('MaxListeners'));
+      expect(listenerWarnings).toHaveLength(0);
+
+      // QueueEvents should have seen at least some completed events
+      expect(completedIds.length).toBeGreaterThan(0);
+    } finally {
+      process.emitWarning = originalWarn;
+    }
+
+    await queue.close();
+  }, 35000);
+});
+
+// ---------------------------------------------------------------------------
+// Bee-Queue #120: Stalled job recovery works with many stalled jobs
+// ---------------------------------------------------------------------------
+
+describeEachMode('Bee-Queue #120: bulk stalled job recovery reclaims all jobs', (CONNECTION) => {
+  const Q = 'bp-bulk-stall-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('20 stalled jobs all move to failed - none stuck in active', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const TOTAL = 20;
+    const MAX_STALLED = 1;
+    const STALL_INTERVAL = 1000;
+
+    // Add all jobs first
+    const jobIds: string[] = [];
+    for (let i = 0; i < TOTAL; i++) {
+      const j = await queue.add(`bulk-stall-${i}`, { i });
+      jobIds.push(j!.id);
+    }
+
+    // Worker 1: picks up all jobs but hangs (never completes them)
+    let pickedUp = 0;
+    const hangWorker = new Worker(
+      Q,
+      async () => {
+        pickedUp++;
+        await new Promise(() => {}); // hang forever
+        return 'never';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: TOTAL,
+        blockTimeout: 500,
+        stalledInterval: 60000,
+        lockDuration: 200,
+      },
+    );
+    hangWorker.on('error', () => {});
+
+    // Wait for all jobs to be picked up
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (pickedUp >= TOTAL) { clearInterval(check); resolve(); }
+      }, 50);
+      setTimeout(() => { clearInterval(check); resolve(); }, 8000);
+    });
+
+    // Force-close to simulate crash - leaves all PEL entries orphaned
+    await hangWorker.close(true);
+
+    // Wait for entries to age past the stalled interval
+    await new Promise(r => setTimeout(r, STALL_INTERVAL + 500));
+
+    // Recovery worker: its scheduler will reclaim all stalled entries
+    const recoveryWorker = new Worker(
+      Q,
+      async () => 'should-not-process',
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: STALL_INTERVAL,
+        maxStalledCount: MAX_STALLED,
+        lockDuration: 200,
+      },
+    );
+    recoveryWorker.on('error', () => {});
+
+    // Wait for enough cycles: each cycle reclaims all 20 entries.
+    // After MAX_STALLED + 1 cycles, all should move to failed.
+    await new Promise(r => setTimeout(r, STALL_INTERVAL * (MAX_STALLED + 2) + 2000));
+
+    await recoveryWorker.close(true);
+
+    // All 20 jobs must be in failed state - NOT stuck in active (Bee-Queue #120 bug)
+    const k = buildKeys(Q);
+    let failedCount = 0;
+    for (const id of jobIds) {
+      const state = await cleanupClient.hget(k.job(id), 'state');
+      if (String(state) === 'failed') failedCount++;
+    }
+
+    expect(failedCount).toBe(TOTAL);
+
+    // All should be in the failed ZSet
+    const failedZsetCount = await cleanupClient.zcard(k.failed);
+    expect(failedZsetCount).toBeGreaterThanOrEqual(TOTAL);
+
+    await queue.close();
+  }, 30000);
+});
