@@ -54,7 +54,21 @@
 - Metrics: Queue.getMetrics, Queue.getJobCounts
 - 164 tests passing (17 files)
 
+### Phase 4 complete
+- Graceful shutdown: idempotent close, SIGTERM/SIGINT handler, closing/closed events
+- Connection recovery: exponential backoff reconnect, re-ensure function library
+- OpenTelemetry: optional peer dep, spans for Queue.add/Worker.process/FlowProducer.add
+- API completeness: obliterate, drain, getJobs, getJobCountByTypes, Job state methods
+- 281 tests passing (28 files)
+
+### All 4 phases complete
+- Phase 1: Core Queue/Worker/Job with Lua functions
+- Phase 2: Dedup, rate limiting, retention, global concurrency
+- Phase 3: FlowProducer, QueueEvents, schedulers, metrics
+- Phase 4: Shutdown, recovery, OTel, API completeness
+
 ### Next steps
-- Phase 4: graceful shutdown, error recovery, OpenTelemetry
-- speedkey CD: arm64-gnu build still queued on GitHub (ubuntu-24.04-arm runner)
+- speedkey CD: re-triggered with fixed runners (no more self-hosted ephemeral)
 - Rotate NPM token
+- Package and publish glide-mq
+- Benchmarks against BullMQ
