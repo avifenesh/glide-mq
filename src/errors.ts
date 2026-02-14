@@ -11,3 +11,10 @@ export class ConnectionError extends GlideMQError {
     this.name = 'ConnectionError';
   }
 }
+
+export class ScriptError extends GlideMQError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ScriptError';
+  }
+}
