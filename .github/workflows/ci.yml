@@ -25,6 +25,12 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Install and build speedkey
         working-directory: speedkey/node
         run: npm install && npm run build:release
@@ -52,6 +58,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install and build speedkey
         working-directory: speedkey/node
@@ -91,6 +103,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.1"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install and build speedkey
         working-directory: speedkey/node
