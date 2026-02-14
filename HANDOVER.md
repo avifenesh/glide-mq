@@ -38,11 +38,17 @@
 - Worker: XREADGROUP BLOCK poll loop, concurrency, processor dispatch
 - Job: progress, data update, children values, moveToFailed, remove, retry
 - Scheduler: delayed promotion, stalled recovery via XAUTOCLAIM
-- 79 tests passing across 4 suites
+
+### Phase 2 complete
+- Deduplication: 3 modes (simple, throttle, debounce) via glidemq_dedup
+- Rate limiting: sliding window Lua function + Worker integration + manual rateLimit(ms)
+- Job retention: removeOnComplete/removeOnFail (true, count, age+count) in complete/fail Lua functions
+- Global concurrency: glidemq_checkConcurrency via XPENDING, Queue.setGlobalConcurrency(n)
+- Full lifecycle integration tests: delayed promotion, priority ordering, retry with backoff
+- 144 tests passing (79 unit + 65 integration, standalone + cluster)
 
 ### Next steps
-- Phase 2: delayed jobs, priorities, retries with backoff, retention, dedup, rate limiting
 - Phase 3: FlowProducer, QueueEvents, job schedulers, metrics
-- Phase 4: graceful shutdown, error recovery, OpenTelemetry, cluster tests
-- speedkey CD: arm64-gnu build still queued, publish blocked on it
+- Phase 4: graceful shutdown, error recovery, OpenTelemetry
+- speedkey CD: arm64-gnu build still queued on GitHub (ubuntu-24.04-arm runner)
 - Rotate NPM token
