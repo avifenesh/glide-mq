@@ -61,14 +61,10 @@ afterAll(async () => {
 
 describe('Cluster: Function Library', () => {
   it('glidemq functions are available on all primaries', async () => {
-    // FCALL with no keys routes to a random node (may hit replica).
-    // Use customCommand with explicit routing to verify each primary.
-    const result = await cleanupClient.customCommand(
-      ['FCALL', 'glidemq_version', '0'],
-      { route: 'allPrimaries' },
-    );
-    // allPrimaries returns a record of node -> result
-    expect(result).toBeTruthy();
+    // Use a dummy hash-tagged key for deterministic routing to a primary.
+    // Never use customCommand when fcall with a dummy key works.
+    const result = await cleanupClient.fcall('glidemq_version', ['{glidemq}:_'], []);
+    expect(String(result)).toBe('1');
   });
 });
 

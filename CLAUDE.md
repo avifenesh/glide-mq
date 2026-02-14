@@ -2,7 +2,7 @@
 
 - glide-mq: Message queue library for Node.js built on Valkey/Redis using valkey-glide native client
 - Language: TypeScript, Rust core (via NAPI bindings)
-- Status: Research/design phase. No build system yet.
+- Status: Phase 1 complete. Core Queue/Worker/Job implemented with 105 tests.
 - Testing package: speedkey (npm) - extracted from valkey-glide PR #5325 (IPC replacement with direct NAPI)
 - speedkey repo: github.com/avifenesh/speedkey (private)
 - Research guides in agent-knowledge/
@@ -25,6 +25,7 @@
 ## Code Quality
 - Correctness above all. We can afford friction or edge-case failures over incorrectness.
 - Always check the speedkey/valkey-glide API before using it. Read the actual type signatures. Never assume you know the API.
+- Never use `customCommand`. Always use the typed API methods. If FCALL needs deterministic routing in cluster mode, pass a dummy hash-tagged key like `{glidemq}:_` instead of using customCommand with route options.
 - Before every commit, review your own code.
 - Commit every logical change separately.
 - Run /deslop before every push (removes dead code, debug logs, ghost code, unnecessary comments).
@@ -49,10 +50,13 @@
 </critical-rules>
 
 # Commands
-- No build system scaffolded yet. Commands will be documented here when available.
+- `npm run build` - compile TypeScript to dist/
+- `npm test` - run all tests (unit + integration, needs Valkey on :6379 and cluster on :7000-7005)
+- `npx vitest run tests/integration.test.ts` - standalone integration only
+- `npx vitest run tests/cluster.test.ts` - cluster integration only
 
 <end-reminder>
 
-**REMEMBER**: Correctness over speed. Ask when unsure. Fix failures, do not skip them. Keep HANDOVER.md current.
+**REMEMBER**: Correctness over speed. Ask when unsure. Fix failures, do not skip them. Keep HANDOVER.md current. Never use customCommand - use typed API with dummy keys for routing.
 
 </end-reminder>
