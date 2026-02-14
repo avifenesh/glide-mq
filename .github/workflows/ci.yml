@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  NODE_VERSION: "20"
+
 jobs:
   typecheck:
     runs-on: ubuntu-latest
@@ -20,20 +23,17 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: ${{ env.NODE_VERSION }}
 
-      - name: Build speedkey
-        run: |
-          cd speedkey/node
-          npm ci || npm install
-          npm run build:release
-
-      - name: Create symlink for speedkey
-        run: |
-          ln -s $(pwd)/speedkey/node node_modules/speedkey
+      - name: Install and build speedkey
+        working-directory: speedkey/node
+        run: npm install && npm run build:release
 
       - name: Install glide-mq dependencies
-        run: npm ci || npm install
+        run: npm install --ignore-scripts
+
+      - name: Link speedkey into node_modules
+        run: rm -rf node_modules/speedkey && ln -s ${{ github.workspace }}/speedkey/node node_modules/speedkey
 
       - name: Typecheck
         run: npx tsc --noEmit
@@ -51,26 +51,17 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: ${{ env.NODE_VERSION }}
 
-      - name: Build speedkey
-        run: |
-          cd speedkey/node
-          npm ci || npm install
-          npm run build:release
+      - name: Install and build speedkey
+        working-directory: speedkey/node
+        run: npm install && npm run build:release
 
       - name: Install glide-mq dependencies
-        run: npm install
+        run: npm install --ignore-scripts
 
-      - name: Create symlink for speedkey
-        run: |
-          ln -s $(pwd)/speedkey/node node_modules/speedkey
-
-      - name: Cache node_modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+      - name: Link speedkey into node_modules
+        run: rm -rf node_modules/speedkey && ln -s ${{ github.workspace }}/speedkey/node node_modules/speedkey
 
       - name: Run unit tests
         run: npx vitest run tests/connection.test.ts tests/job.test.ts tests/queue.test.ts tests/worker.test.ts tests/shutdown.test.ts tests/telemetry.test.ts tests/recovery.test.ts tests/api-completeness.test.ts
@@ -99,36 +90,23 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: ${{ env.NODE_VERSION }}
 
-      - name: Build speedkey
-        run: |
-          cd speedkey/node
-          npm ci || npm install
-          npm run build:release
+      - name: Install and build speedkey
+        working-directory: speedkey/node
+        run: npm install && npm run build:release
 
       - name: Install glide-mq dependencies
-        run: npm install
+        run: npm install --ignore-scripts
 
-      - name: Create symlink for speedkey
-        run: |
-          ln -s $(pwd)/speedkey/node node_modules/speedkey
-
-      - name: Cache node_modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-
-      - name: Wait for Valkey to be ready
-        run: |
-          for i in {1..30}; do
-            valkey-cli -p 6379 ping && break
-            sleep 1
-          done
+      - name: Link speedkey into node_modules
+        run: rm -rf node_modules/speedkey && ln -s ${{ github.workspace }}/speedkey/node node_modules/speedkey
 
       - name: Compile TypeScript
         run: npx tsc
 
-      - name: Run integration tests
+      - name: Run standalone integration tests
         run: npx vitest run tests/integration.test.ts tests/dedup.test.ts tests/delayed.test.ts tests/priority.test.ts tests/retry.test.ts tests/retention.test.ts tests/concurrency.test.ts tests/rate-limit.test.ts
+        env:
+          VALKEY_HOST: localhost
+          VALKEY_PORT: 6379
