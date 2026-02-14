@@ -67,8 +67,18 @@
 - Phase 3: FlowProducer, QueueEvents, schedulers, metrics
 - Phase 4: Shutdown, recovery, OTel, API completeness
 
-### Next steps
-- speedkey CD: re-triggered with fixed runners (no more self-hosted ephemeral)
+### Phase 5 (in progress): Compatibility test suite
+- 4 learn agents researching test cases from BullMQ, Bull, Bee-Queue, Celery, Sidekiq, and others
+- Goal: catalog every test case and behavioral expectation from competing libraries
+- Build a compatibility test suite proving glide-mq passes the same standards
+- Research output in agent-knowledge/*-test-cases.md
+
+### Phase 6 (planned): Competitive analysis and gap filling
+- Accumulate full feature lists from all competing libraries
+- Catalog known bugs, issues, and limitations in each
+- Identify features glide-mq is missing or does differently
+- Build on top of the gap analysis
+
+### Other
+- speedkey CD: re-triggered with macos-15 cross-compile for x86_64-apple-darwin
 - Rotate NPM token
-- Package and publish glide-mq
-- Benchmarks against BullMQ
