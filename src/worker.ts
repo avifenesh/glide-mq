@@ -59,7 +59,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private async init(): Promise<void> {
     this.commandClient = await createClient(this.opts.connection);
     this.blockingClient = await createBlockingClient(this.opts.connection);
-    await ensureFunctionLibrary(this.commandClient);
+    await ensureFunctionLibrary(
+      this.commandClient,
+      undefined,
+      this.opts.connection.clusterMode ?? false,
+    );
 
     // Create consumer group on the stream (idempotent)
     await createConsumerGroup(

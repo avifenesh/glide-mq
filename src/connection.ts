@@ -51,30 +51,28 @@ export async function ensureFunctionLibrary(
   librarySource: string = LIBRARY_SOURCE,
   clusterMode: boolean = false,
 ): Promise<void> {
-  let needsLoad = false;
-
-  try {
-    const result = await client.fcall('glidemq_version', [], []);
-    if (String(result) !== LIBRARY_VERSION) {
-      needsLoad = true;
-    }
-  } catch {
-    // Function not found or other error - need to load
-    needsLoad = true;
-  }
-
-  if (!needsLoad) return;
-
   if (clusterMode) {
+    // In cluster mode, always load with REPLACE to all primaries.
+    // FUNCTION LOAD REPLACE is idempotent - safe to call every time.
+    // Skipping the version check avoids FCALL routing to replicas (empty keys = random node).
     await (client as GlideClusterClient).functionLoad(librarySource, {
       replace: true,
       route: 'allPrimaries',
     });
-  } else {
-    await (client as GlideClient).functionLoad(librarySource, {
-      replace: true,
-    });
+    return;
   }
+
+  // Standalone: check version first to avoid unnecessary reload
+  try {
+    const result = await client.fcall('glidemq_version', [], []);
+    if (String(result) === LIBRARY_VERSION) return;
+  } catch {
+    // Function not found - need to load
+  }
+
+  await (client as GlideClient).functionLoad(librarySource, {
+    replace: true,
+  });
 }
 
 /**
