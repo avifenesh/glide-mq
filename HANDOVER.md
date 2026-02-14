@@ -79,6 +79,8 @@
 - Identify features glide-mq is missing or does differently
 - Build on top of the gap analysis
 
-### Other
-- speedkey CD: re-triggered with macos-15 cross-compile for x86_64-apple-darwin
+### speedkey published
+- speedkey@0.1.0 live on npm (6 targets: linux x64/arm64 gnu+musl, darwin arm64, win32 x64)
+- Intel Mac (x86_64-apple-darwin) skipped for now
+- Post-publish RC tests need fixing (still reference old package name in utils/)
 - Rotate NPM token
