@@ -456,33 +456,60 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private async processJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
 
-    const moveResult = await moveToActive(this.commandClient, this.queueKeys, jobId, Date.now());
-    if (await this.handleMoveToActiveEdgeCase(moveResult, jobId, entryId)) return;
+    let currentJobId = jobId;
+    let currentEntryId = entryId;
+    let currentHash: Record<string, string> | null = null;
 
-    const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, jobId, moveResult as Record<string, string>);
-    job.entryId = entryId;
+    // Loop: process current job, then chain into next via completeAndFetchNext.
+    // This reuses the same dispatch slot (activeCount) for sequential jobs.
+    while (this.running && !this.closing && this.commandClient) {
+      // Activate the job (skip if we already have a pre-fetched hash from completeAndFetchNext)
+      if (!currentHash) {
+        const moveResult = await moveToActive(this.commandClient, this.queueKeys, currentJobId, Date.now());
+        if (await this.handleMoveToActiveEdgeCase(moveResult, currentJobId, currentEntryId)) return;
+        currentHash = moveResult as Record<string, string>;
+      }
 
-    const { result: processResult, error: processError, aborted } = await this.runProcessor(job, jobId);
+      const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash);
+      job.entryId = currentEntryId;
 
-    if (processError || aborted) {
-      const error = aborted ? new Error('revoked') : processError!;
-      await this.handleJobFailure(job, jobId, entryId, error);
-      return;
+      const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
+
+      if (processError || aborted) {
+        await this.handleJobFailure(job, currentJobId, currentEntryId, aborted ? new Error('revoked') : processError!);
+        return;
+      }
+
+      if (!this.commandClient) return;
+
+      const returnvalue = processResult !== undefined ? JSON.stringify(processResult) : 'null';
+      const parentInfo = this.buildParentInfo(job, currentJobId);
+
+      const fetchResult = await completeAndFetchNext(
+        this.commandClient, this.queueKeys, currentJobId, currentEntryId,
+        returnvalue, Date.now(), CONSUMER_GROUP, this.consumerId,
+        job.opts.removeOnComplete, parentInfo,
+      );
+
+      job.returnvalue = processResult;
+      job.finishedOn = Date.now();
+      this.emit('completed', job, processResult);
+
+      // No next job - return to poll loop
+      if (fetchResult.next === false) return;
+
+      if (fetchResult.next === 'REVOKED') {
+        if (fetchResult.nextJobId && fetchResult.nextEntryId) {
+          try { await failJob(this.commandClient, this.queueKeys, fetchResult.nextJobId, fetchResult.nextEntryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
+        }
+        return;
+      }
+
+      // Chain into the next job within the same dispatch slot
+      currentJobId = fetchResult.nextJobId!;
+      currentEntryId = fetchResult.nextEntryId!;
+      currentHash = fetchResult.next as unknown as Record<string, string>;
     }
-
-    if (!this.commandClient) return;
-
-    const returnvalue = processResult !== undefined ? JSON.stringify(processResult) : 'null';
-    const parentInfo = this.buildParentInfo(job, jobId);
-
-    await completeJob(
-      this.commandClient, this.queueKeys, jobId, entryId, returnvalue,
-      Date.now(), CONSUMER_GROUP, job.opts.removeOnComplete, parentInfo,
-    );
-
-    job.returnvalue = processResult;
-    job.finishedOn = Date.now();
-    this.emit('completed', job, processResult);
   }
 
   /**
