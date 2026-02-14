@@ -16,6 +16,7 @@ export class Job<D = any, R = any> {
   finishedOn: number | undefined;
   processedOn: number | undefined;
   parentId?: string;
+  parentQueue?: string;
 
   /**
    * Stream entry ID assigned when the job was added to the stream.
@@ -82,15 +83,20 @@ export class Job<D = any, R = any> {
    */
   async getChildrenValues(): Promise<Record<string, R>> {
     const depsKey = this.queueKeys.deps(this.id);
-    const childIds = await this.client.smembers(depsKey);
+    const members = await this.client.smembers(depsKey);
     const result: Record<string, R> = {};
-    for (const childId of childIds) {
-      const val = await this.client.hget(
-        this.queueKeys.job(String(childId)),
-        'returnvalue',
-      );
+    for (const member of members) {
+      const memberStr = String(member);
+      // Deps member format: "queuePrefix:childId" e.g. "glide:{q}:3"
+      // Job hash key: "queuePrefix:job:childId" e.g. "glide:{q}:job:3"
+      const lastColon = memberStr.lastIndexOf(':');
+      if (lastColon === -1) continue;
+      const queuePrefix = memberStr.substring(0, lastColon);
+      const childId = memberStr.substring(lastColon + 1);
+      const jobKey = `${queuePrefix}:job:${childId}`;
+      const val = await this.client.hget(jobKey, 'returnvalue');
       if (val != null) {
-        result[String(childId)] = JSON.parse(String(val));
+        result[memberStr] = JSON.parse(String(val));
       }
     }
     return result;
@@ -179,6 +185,7 @@ export class Job<D = any, R = any> {
     job.returnvalue = hash.returnvalue ? JSON.parse(hash.returnvalue) : undefined;
     job.failedReason = hash.failedReason || undefined;
     job.parentId = hash.parentId || undefined;
+    job.parentQueue = hash.parentQueue || undefined;
     if (hash.progress) {
       try {
         job.progress = JSON.parse(hash.progress);

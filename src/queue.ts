@@ -1,8 +1,8 @@
-import type { QueueOptions, JobOptions, Client } from './types';
+import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts } from './types';
 import { Job } from './job';
-import { buildKeys } from './utils';
+import { buildKeys, nextCronOccurrence } from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
-import { addJob, dedup, pause, resume, removeJob } from './functions/index';
+import { addJob, dedup, pause, resume, removeJob, CONSUMER_GROUP } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { LIBRARY_SOURCE } from './functions/index';
 
@@ -188,6 +188,95 @@ export class Queue<D = any, R = any> {
   async setGlobalConcurrency(n: number): Promise<void> {
     const client = await this.getClient();
     await client.hset(this.keys.meta, { globalConcurrency: n.toString() });
+  }
+
+  /**
+   * Upsert a job scheduler (repeatable/cron job).
+   * Stores the scheduler config in the schedulers hash.
+   * Computes the initial nextRun based on the schedule.
+   */
+  async upsertJobScheduler(
+    name: string,
+    schedule: ScheduleOpts,
+    template?: JobTemplate,
+  ): Promise<void> {
+    const client = await this.getClient();
+    const now = Date.now();
+
+    let nextRun: number;
+    if (schedule.pattern) {
+      nextRun = nextCronOccurrence(schedule.pattern, now);
+    } else if (schedule.every) {
+      nextRun = now + schedule.every;
+    } else {
+      throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
+    }
+
+    const entry: SchedulerEntry = {
+      pattern: schedule.pattern,
+      every: schedule.every,
+      template,
+      nextRun,
+    };
+
+    await client.hset(this.keys.schedulers, { [name]: JSON.stringify(entry) });
+  }
+
+  /**
+   * Remove a job scheduler by name.
+   */
+  async removeJobScheduler(name: string): Promise<void> {
+    const client = await this.getClient();
+    await client.hdel(this.keys.schedulers, [name]);
+  }
+
+  /**
+   * Get metrics for completed or failed jobs.
+   * Returns the count of entries in the corresponding ZSet.
+   */
+  async getMetrics(type: 'completed' | 'failed'): Promise<Metrics> {
+    const client = await this.getClient();
+    const key = type === 'completed' ? this.keys.completed : this.keys.failed;
+    const count = await client.zcard(key);
+    return { count };
+  }
+
+  /**
+   * Get job counts by state.
+   * - waiting: stream length minus active (pending) entries
+   * - active: PEL count from XPENDING
+   * - delayed: scheduled ZSet cardinality (includes both delayed and prioritized)
+   * - completed: completed ZSet cardinality
+   * - failed: failed ZSet cardinality
+   */
+  async getJobCounts(): Promise<JobCounts> {
+    const client = await this.getClient();
+
+    const [streamLen, completedCount, failedCount, scheduledCount] = await Promise.all([
+      client.xlen(this.keys.stream),
+      client.zcard(this.keys.completed),
+      client.zcard(this.keys.failed),
+      client.zcard(this.keys.scheduled),
+    ]);
+
+    // XPENDING returns [pendingCount, minId, maxId, consumers[]]
+    let activeCount = 0;
+    try {
+      const pendingInfo = await client.xpending(this.keys.stream, CONSUMER_GROUP);
+      activeCount = Number(pendingInfo[0]) || 0;
+    } catch {
+      // Consumer group may not exist yet
+    }
+
+    const waiting = Math.max(0, streamLen - activeCount);
+
+    return {
+      waiting,
+      active: activeCount,
+      delayed: scheduledCount,
+      completed: completedCount,
+      failed: failedCount,
+    };
   }
 
   /**

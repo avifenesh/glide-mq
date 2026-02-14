@@ -114,6 +114,8 @@ redis.register_function('glidemq_complete', function(keys, args)
   local removeMode = args[6] or '0'
   local removeCount = tonumber(args[7]) or 0
   local removeAge = tonumber(args[8]) or 0
+  local depsMember = args[9] or ''
+  local parentId = args[10] or ''
   redis.call('XACK', streamKey, group, entryId)
   redis.call('XDEL', streamKey, entryId)
   redis.call('ZADD', completedKey, timestamp, jobId)
@@ -157,6 +159,20 @@ redis.register_function('glidemq_complete', function(keys, args)
           redis.call('ZREM', completedKey, oldId)
         end
       end
+    end
+  end
+  if depsMember ~= '' and parentId ~= '' and #keys >= 8 then
+    local parentDepsKey = keys[5]
+    local parentJobKey = keys[6]
+    local parentStreamKey = keys[7]
+    local parentEventsKey = keys[8]
+    local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+    local totalDeps = redis.call('SCARD', parentDepsKey)
+    local remaining = totalDeps - doneCount
+    if remaining <= 0 then
+      redis.call('HSET', parentJobKey, 'state', 'waiting')
+      redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
+      emitEvent(parentEventsKey, 'active', parentId, nil)
     end
   end
   return 1
@@ -451,6 +467,126 @@ redis.register_function('glidemq_checkConcurrency', function(keys, args)
   return remaining
 end)
 
+redis.register_function('glidemq_addFlow', function(keys, args)
+  local parentIdKey = keys[1]
+  local parentStreamKey = keys[2]
+  local parentScheduledKey = keys[3]
+  local parentEventsKey = keys[4]
+  local parentName = args[1]
+  local parentData = args[2]
+  local parentOpts = args[3]
+  local timestamp = tonumber(args[4])
+  local parentDelay = tonumber(args[5]) or 0
+  local parentPriority = tonumber(args[6]) or 0
+  local parentMaxAttempts = tonumber(args[7]) or 0
+  local numChildren = tonumber(args[8])
+  local parentJobId = redis.call('INCR', parentIdKey)
+  local parentJobIdStr = tostring(parentJobId)
+  local parentPrefix = string.sub(parentIdKey, 1, #parentIdKey - 2)
+  local parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
+  local depsKey = parentPrefix .. 'deps:' .. parentJobIdStr
+  local parentHash = {
+    'id', parentJobIdStr,
+    'name', parentName,
+    'data', parentData,
+    'opts', parentOpts,
+    'timestamp', tostring(timestamp),
+    'attemptsMade', '0',
+    'delay', tostring(parentDelay),
+    'priority', tostring(parentPriority),
+    'maxAttempts', tostring(parentMaxAttempts),
+    'state', 'waiting-children'
+  }
+  redis.call('HSET', parentJobKey, unpack(parentHash))
+  local childIds = {}
+  local childArgOffset = 8
+  local childKeyOffset = 4
+  for i = 1, numChildren do
+    local base = childArgOffset + (i - 1) * 8
+    local childName = args[base + 1]
+    local childData = args[base + 2]
+    local childOpts = args[base + 3]
+    local childDelay = tonumber(args[base + 4]) or 0
+    local childPriority = tonumber(args[base + 5]) or 0
+    local childMaxAttempts = tonumber(args[base + 6]) or 0
+    local childQueuePrefix = args[base + 7]
+    local childParentQueue = args[base + 8]
+    local ckBase = childKeyOffset + (i - 1) * 4
+    local childIdKey = keys[ckBase + 1]
+    local childStreamKey = keys[ckBase + 2]
+    local childScheduledKey = keys[ckBase + 3]
+    local childEventsKey = keys[ckBase + 4]
+    local childJobId = redis.call('INCR', childIdKey)
+    local childJobIdStr = tostring(childJobId)
+    local childPrefix = string.sub(childIdKey, 1, #childIdKey - 2)
+    local childJobKey = childPrefix .. 'job:' .. childJobIdStr
+    local childHash = {
+      'id', childJobIdStr,
+      'name', childName,
+      'data', childData,
+      'opts', childOpts,
+      'timestamp', tostring(timestamp),
+      'attemptsMade', '0',
+      'delay', tostring(childDelay),
+      'priority', tostring(childPriority),
+      'maxAttempts', tostring(childMaxAttempts),
+      'parentId', parentJobIdStr,
+      'parentQueue', childParentQueue
+    }
+    if childDelay > 0 or childPriority > 0 then
+      childHash[#childHash + 1] = 'state'
+      childHash[#childHash + 1] = childDelay > 0 and 'delayed' or 'prioritized'
+    else
+      childHash[#childHash + 1] = 'state'
+      childHash[#childHash + 1] = 'waiting'
+    end
+    redis.call('HSET', childJobKey, unpack(childHash))
+    local depsMember = childQueuePrefix .. ':' .. childJobIdStr
+    redis.call('SADD', depsKey, depsMember)
+    if childDelay > 0 then
+      local score = childPriority * PRIORITY_SHIFT + (timestamp + childDelay)
+      redis.call('ZADD', childScheduledKey, score, childJobIdStr)
+    elseif childPriority > 0 then
+      local score = childPriority * PRIORITY_SHIFT
+      redis.call('ZADD', childScheduledKey, score, childJobIdStr)
+    else
+      redis.call('XADD', childStreamKey, '*', 'jobId', childJobIdStr)
+    end
+    emitEvent(childEventsKey, 'added', childJobIdStr, {'name', childName})
+    childIds[#childIds + 1] = childJobIdStr
+  end
+  local extraDepsOffset = childArgOffset + numChildren * 8
+  local numExtraDeps = tonumber(args[extraDepsOffset + 1]) or 0
+  for i = 1, numExtraDeps do
+    local extraMember = args[extraDepsOffset + 1 + i]
+    redis.call('SADD', depsKey, extraMember)
+  end
+  emitEvent(parentEventsKey, 'added', parentJobIdStr, {'name', parentName})
+  local result = {parentJobIdStr}
+  for i = 1, #childIds do
+    result[#result + 1] = childIds[i]
+  end
+  return cjson.encode(result)
+end)
+
+redis.register_function('glidemq_completeChild', function(keys, args)
+  local depsKey = keys[1]
+  local parentJobKey = keys[2]
+  local parentStreamKey = keys[3]
+  local parentEventsKey = keys[4]
+  local depsMember = args[1]
+  local parentId = args[2]
+  local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+  local totalDeps = redis.call('SCARD', depsKey)
+  local remaining = totalDeps - doneCount
+  if remaining <= 0 then
+    redis.call('HSET', parentJobKey, 'state', 'waiting')
+    redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
+    emitEvent(parentEventsKey, 'active', parentId, nil)
+  end
+  return remaining
+end)
+
 redis.register_function('glidemq_removeJob', function(keys, args)
   local jobKey = keys[1]
   local streamKey = keys[2]
@@ -602,6 +738,8 @@ function encodeRetention(
 /**
  * Complete a job: XACK, move to completed ZSet, update job hash, emit event.
  * Optionally applies retention cleanup based on removeOnComplete.
+ * If the job has a parent (depsMember and parentId provided), also handles
+ * the completeChild logic inline: removes from parent deps, re-queues parent when all children done.
  */
 export async function completeJob(
   client: Client,
@@ -612,22 +750,36 @@ export async function completeJob(
   timestamp: number,
   group: string = CONSUMER_GROUP,
   removeOnComplete?: boolean | number | { age: number; count: number },
+  parentInfo?: { depsMember: string; parentId: string; parentKeys: QueueKeys },
 ): Promise<GlideReturnType> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
-  return client.fcall(
-    'glidemq_complete',
-    [k.stream, k.completed, k.events, k.job(jobId)],
-    [
-      jobId,
-      entryId,
-      returnvalue,
-      timestamp.toString(),
-      group,
-      mode,
-      count.toString(),
-      age.toString(),
-    ],
-  );
+
+  const keys: string[] = [k.stream, k.completed, k.events, k.job(jobId)];
+  const args: string[] = [
+    jobId,
+    entryId,
+    returnvalue,
+    timestamp.toString(),
+    group,
+    mode,
+    count.toString(),
+    age.toString(),
+  ];
+
+  if (parentInfo) {
+    const pk = parentInfo.parentKeys;
+    keys.push(
+      pk.deps(parentInfo.parentId),
+      pk.job(parentInfo.parentId),
+      pk.stream,
+      pk.events,
+    );
+    args.push(parentInfo.depsMember, parentInfo.parentId);
+  } else {
+    args.push('', '');
+  }
+
+  return client.fcall('glidemq_complete', keys, args);
 }
 
 /**
@@ -777,6 +929,92 @@ export async function removeJob(
     'glidemq_removeJob',
     [k.job(jobId), k.stream, k.scheduled, k.completed, k.failed, k.events],
     [jobId],
+  );
+  return result as number;
+}
+
+/**
+ * Atomically create a parent job (waiting-children) and its child jobs.
+ * Returns a JSON array: [parentId, childId1, childId2, ...].
+ */
+export async function addFlow(
+  client: Client,
+  parentKeys: QueueKeys,
+  parentName: string,
+  parentData: string,
+  parentOpts: string,
+  timestamp: number,
+  parentDelay: number,
+  parentPriority: number,
+  parentMaxAttempts: number,
+  children: {
+    name: string;
+    data: string;
+    opts: string;
+    delay: number;
+    priority: number;
+    maxAttempts: number;
+    keys: QueueKeys;
+    queuePrefix: string;
+    parentQueueName: string;
+  }[],
+  extraDeps: string[] = [],
+): Promise<string[]> {
+  const keys: string[] = [
+    parentKeys.id,
+    parentKeys.stream,
+    parentKeys.scheduled,
+    parentKeys.events,
+  ];
+  const args: string[] = [
+    parentName,
+    parentData,
+    parentOpts,
+    timestamp.toString(),
+    parentDelay.toString(),
+    parentPriority.toString(),
+    parentMaxAttempts.toString(),
+    children.length.toString(),
+  ];
+
+  for (const child of children) {
+    keys.push(child.keys.id, child.keys.stream, child.keys.scheduled, child.keys.events);
+    args.push(
+      child.name,
+      child.data,
+      child.opts,
+      child.delay.toString(),
+      child.priority.toString(),
+      child.maxAttempts.toString(),
+      child.queuePrefix,
+      child.parentQueueName,
+    );
+  }
+
+  // Extra deps: pre-existing sub-flow children to add to deps set atomically
+  args.push(extraDeps.length.toString());
+  for (const dep of extraDeps) {
+    args.push(dep);
+  }
+
+  const result = await client.fcall('glidemq_addFlow', keys, args);
+  return JSON.parse(result as string) as string[];
+}
+
+/**
+ * Remove a child from the parent's deps set. If all children are done, re-queues the parent.
+ * Returns the number of remaining children (0 means parent was re-queued).
+ */
+export async function completeChild(
+  client: Client,
+  parentKeys: QueueKeys,
+  parentId: string,
+  depsMember: string,
+): Promise<number> {
+  const result = await client.fcall(
+    'glidemq_completeChild',
+    [parentKeys.deps(parentId), parentKeys.job(parentId), parentKeys.stream, parentKeys.events],
+    [depsMember, parentId],
   );
   return result as number;
 }

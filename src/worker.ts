@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import type { WorkerOptions, Processor, Client } from './types';
 import { Job } from './job';
-import { buildKeys, calculateBackoff } from './utils';
+import { buildKeys, calculateBackoff, keyPrefix } from './utils';
 import { createClient, createBlockingClient, ensureFunctionLibrary, createConsumerGroup } from './connection';
 import { CONSUMER_GROUP } from './functions/index';
 import { completeJob, failJob, rateLimit as rateLimitFn, checkConcurrency } from './functions/index';
@@ -75,6 +75,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     // Start the internal scheduler for delayed promotion + stalled recovery
     this.scheduler = new Scheduler(this.commandClient, this.queueKeys, {
+      promotionInterval: this.opts.promotionInterval,
       stalledInterval: this.stalledInterval,
       maxStalledCount: this.maxStalledCount,
       consumerId: this.consumerId,
@@ -228,6 +229,18 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const result = await this.processor(job);
       const returnvalue = result !== undefined ? JSON.stringify(result) : 'null';
 
+      // Build parent info if this job is a child in a flow
+      let parentInfo: Parameters<typeof completeJob>[8];
+      if (job.parentId && job.parentQueue) {
+        const parentKeys = buildKeys(job.parentQueue, this.opts.prefix);
+        const childQueuePrefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+        parentInfo = {
+          depsMember: `${childQueuePrefix}:${jobId}`,
+          parentId: job.parentId,
+          parentKeys,
+        };
+      }
+
       await completeJob(
         this.commandClient,
         this.queueKeys,
@@ -237,6 +250,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
         Date.now(),
         CONSUMER_GROUP,
         job.opts.removeOnComplete,
+        parentInfo,
       );
 
       job.returnvalue = result;

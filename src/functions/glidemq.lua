@@ -153,10 +153,16 @@ end)
 
 -- glidemq_complete(KEYS, ARGS)
 -- Moves a job from active (PEL) to completed.
+-- After completion, if the job has a parent, triggers completeChild logic.
 -- KEYS[1] = stream key
 -- KEYS[2] = completed zset key
 -- KEYS[3] = events stream key
 -- KEYS[4] = job hash key (job:{id})
+-- Optional parent keys (when job has parentId):
+-- KEYS[5] = parent deps key (glide:{parentQueue}:deps:{parentId})
+-- KEYS[6] = parent job hash key (glide:{parentQueue}:job:{parentId})
+-- KEYS[7] = parent stream key (glide:{parentQueue}:stream)
+-- KEYS[8] = parent events key (glide:{parentQueue}:events)
 -- ARGS[1] = job ID
 -- ARGS[2] = stream entry ID (for XACK)
 -- ARGS[3] = return value (JSON string)
@@ -165,6 +171,8 @@ end)
 -- ARGS[6] = removeMode ('0'|'true'|'count'|'age_count')
 -- ARGS[7] = removeCount (number)
 -- ARGS[8] = removeAge (seconds)
+-- ARGS[9] = depsMember (childQueuePrefix:childId, empty string = no parent)
+-- ARGS[10] = parentId (empty string = no parent)
 -- Returns: 1 on success
 redis.register_function('glidemq_complete', function(keys, args)
   local streamKey = keys[1]
@@ -180,6 +188,8 @@ redis.register_function('glidemq_complete', function(keys, args)
   local removeMode = args[6] or '0'
   local removeCount = tonumber(args[7]) or 0
   local removeAge = tonumber(args[8]) or 0
+  local depsMember = args[9] or ''
+  local parentId = args[10] or ''
 
   -- Acknowledge the stream entry
   redis.call('XACK', streamKey, group, entryId)
@@ -235,6 +245,26 @@ redis.register_function('glidemq_complete', function(keys, args)
           redis.call('ZREM', completedKey, oldId)
         end
       end
+    end
+  end
+
+  -- If this job has a parent, handle completeChild inline
+  if depsMember ~= '' and parentId ~= '' and #keys >= 8 then
+    local parentDepsKey = keys[5]
+    local parentJobKey = keys[6]
+    local parentStreamKey = keys[7]
+    local parentEventsKey = keys[8]
+
+    -- Increment completed children counter on parent hash
+    local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+    local totalDeps = redis.call('SCARD', parentDepsKey)
+    local remaining = totalDeps - doneCount
+
+    if remaining <= 0 then
+      -- All children done: move parent to stream
+      redis.call('HSET', parentJobKey, 'state', 'waiting')
+      redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
+      emitEvent(parentEventsKey, 'active', parentId, nil)
     end
   end
 
@@ -668,6 +698,193 @@ redis.register_function('glidemq_checkConcurrency', function(keys, args)
   if remaining <= 0 then
     return 0
   end
+  return remaining
+end)
+
+-- glidemq_addFlow(KEYS, ARGS)
+-- Atomically creates a parent job (waiting-children) and N child jobs.
+-- KEYS[1] = parent id counter key (glide:{parentQueue}:id)
+-- KEYS[2] = parent stream key
+-- KEYS[3] = parent scheduled key
+-- KEYS[4] = parent events key
+-- Remaining KEYS are passed per child: 4 keys each (id, stream, scheduled, events)
+-- ARGS layout:
+--   ARGS[1] = parent job name
+--   ARGS[2] = parent job data (JSON)
+--   ARGS[3] = parent job opts (JSON)
+--   ARGS[4] = timestamp (ms)
+--   ARGS[5] = parent delay (ms)
+--   ARGS[6] = parent priority
+--   ARGS[7] = parent maxAttempts
+--   ARGS[8] = number of children (N)
+--   Then for each child (8 args each):
+--     childName, childData, childOpts, childDelay, childPriority, childMaxAttempts, childQueuePrefix, childParentQueue
+-- Returns: cjson array [parentId, childId1, childId2, ...]
+redis.register_function('glidemq_addFlow', function(keys, args)
+  local parentIdKey = keys[1]
+  local parentStreamKey = keys[2]
+  local parentScheduledKey = keys[3]
+  local parentEventsKey = keys[4]
+
+  local parentName = args[1]
+  local parentData = args[2]
+  local parentOpts = args[3]
+  local timestamp = tonumber(args[4])
+  local parentDelay = tonumber(args[5]) or 0
+  local parentPriority = tonumber(args[6]) or 0
+  local parentMaxAttempts = tonumber(args[7]) or 0
+  local numChildren = tonumber(args[8])
+
+  -- Create parent job ID
+  local parentJobId = redis.call('INCR', parentIdKey)
+  local parentJobIdStr = tostring(parentJobId)
+
+  -- Derive parent prefix from id key: "glide:{q}:id" -> "glide:{q}:"
+  local parentPrefix = string.sub(parentIdKey, 1, #parentIdKey - 2)
+  local parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
+  local depsKey = parentPrefix .. 'deps:' .. parentJobIdStr
+
+  -- Store parent job hash with state=waiting-children
+  local parentHash = {
+    'id', parentJobIdStr,
+    'name', parentName,
+    'data', parentData,
+    'opts', parentOpts,
+    'timestamp', tostring(timestamp),
+    'attemptsMade', '0',
+    'delay', tostring(parentDelay),
+    'priority', tostring(parentPriority),
+    'maxAttempts', tostring(parentMaxAttempts),
+    'state', 'waiting-children'
+  }
+  redis.call('HSET', parentJobKey, unpack(parentHash))
+
+  -- Collect child IDs for result
+  local childIds = {}
+
+  -- Process each child
+  local childArgOffset = 8
+  local childKeyOffset = 4
+  for i = 1, numChildren do
+    local base = childArgOffset + (i - 1) * 8
+    local childName = args[base + 1]
+    local childData = args[base + 2]
+    local childOpts = args[base + 3]
+    local childDelay = tonumber(args[base + 4]) or 0
+    local childPriority = tonumber(args[base + 5]) or 0
+    local childMaxAttempts = tonumber(args[base + 6]) or 0
+    local childQueuePrefix = args[base + 7]
+    local childParentQueue = args[base + 8]
+
+    -- Child keys: use child-specific keys from KEYS array
+    local ckBase = childKeyOffset + (i - 1) * 4
+    local childIdKey = keys[ckBase + 1]
+    local childStreamKey = keys[ckBase + 2]
+    local childScheduledKey = keys[ckBase + 3]
+    local childEventsKey = keys[ckBase + 4]
+
+    -- Create child job ID
+    local childJobId = redis.call('INCR', childIdKey)
+    local childJobIdStr = tostring(childJobId)
+
+    -- Derive child prefix from child id key
+    local childPrefix = string.sub(childIdKey, 1, #childIdKey - 2)
+    local childJobKey = childPrefix .. 'job:' .. childJobIdStr
+
+    -- Store child job hash with parentId and parentQueue
+    local childHash = {
+      'id', childJobIdStr,
+      'name', childName,
+      'data', childData,
+      'opts', childOpts,
+      'timestamp', tostring(timestamp),
+      'attemptsMade', '0',
+      'delay', tostring(childDelay),
+      'priority', tostring(childPriority),
+      'maxAttempts', tostring(childMaxAttempts),
+      'parentId', parentJobIdStr,
+      'parentQueue', childParentQueue
+    }
+
+    if childDelay > 0 or childPriority > 0 then
+      childHash[#childHash + 1] = 'state'
+      childHash[#childHash + 1] = childDelay > 0 and 'delayed' or 'prioritized'
+    else
+      childHash[#childHash + 1] = 'state'
+      childHash[#childHash + 1] = 'waiting'
+    end
+
+    redis.call('HSET', childJobKey, unpack(childHash))
+
+    -- Add child to deps set (using queuePrefix:childId as identifier for cross-queue tracking)
+    local depsMember = childQueuePrefix .. ':' .. childJobIdStr
+    redis.call('SADD', depsKey, depsMember)
+
+    -- Route child job
+    if childDelay > 0 then
+      local score = childPriority * PRIORITY_SHIFT + (timestamp + childDelay)
+      redis.call('ZADD', childScheduledKey, score, childJobIdStr)
+    elseif childPriority > 0 then
+      local score = childPriority * PRIORITY_SHIFT
+      redis.call('ZADD', childScheduledKey, score, childJobIdStr)
+    else
+      redis.call('XADD', childStreamKey, '*', 'jobId', childJobIdStr)
+    end
+
+    emitEvent(childEventsKey, 'added', childJobIdStr, {'name', childName})
+    childIds[#childIds + 1] = childJobIdStr
+  end
+
+  -- Process extra deps members (pre-existing sub-flow children)
+  local extraDepsOffset = childArgOffset + numChildren * 8
+  local numExtraDeps = tonumber(args[extraDepsOffset + 1]) or 0
+  for i = 1, numExtraDeps do
+    local extraMember = args[extraDepsOffset + 1 + i]
+    redis.call('SADD', depsKey, extraMember)
+  end
+
+  emitEvent(parentEventsKey, 'added', parentJobIdStr, {'name', parentName})
+
+  -- Return JSON array: [parentId, child1Id, child2Id, ...]
+  local result = {parentJobIdStr}
+  for i = 1, #childIds do
+    result[#result + 1] = childIds[i]
+  end
+  return cjson.encode(result)
+end)
+
+-- glidemq_completeChild(KEYS, ARGS)
+-- Removes a child from the parent's deps set. If all children are done, re-queues the parent.
+-- KEYS[1] = parent deps key (glide:{parentQueue}:deps:{parentId})
+-- KEYS[2] = parent job hash key (glide:{parentQueue}:job:{parentId})
+-- KEYS[3] = parent stream key (glide:{parentQueue}:stream)
+-- KEYS[4] = parent events key (glide:{parentQueue}:events)
+-- ARGS[1] = deps member string (childQueuePrefix:childId)
+-- ARGS[2] = parent job ID
+-- Returns: number of remaining children (0 = parent re-queued)
+redis.register_function('glidemq_completeChild', function(keys, args)
+  local depsKey = keys[1]
+  local parentJobKey = keys[2]
+  local parentStreamKey = keys[3]
+  local parentEventsKey = keys[4]
+
+  local depsMember = args[1]
+  local parentId = args[2]
+
+  -- Increment completed children counter on parent hash
+  local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+
+  -- Compare with total deps count
+  local totalDeps = redis.call('SCARD', depsKey)
+  local remaining = totalDeps - doneCount
+
+  if remaining <= 0 then
+    -- All children done: move parent to stream (re-queue)
+    redis.call('HSET', parentJobKey, 'state', 'waiting')
+    redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
+    emitEvent(parentEventsKey, 'active', parentId, nil)
+  end
+
   return remaining
 end)
 

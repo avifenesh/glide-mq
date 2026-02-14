@@ -21,6 +21,7 @@ export interface WorkerOptions extends QueueOptions {
   blockTimeout?: number;
   stalledInterval?: number;
   maxStalledCount?: number;
+  promotionInterval?: number;
   limiter?: { max: number; duration: number };
 }
 
@@ -58,4 +59,42 @@ export interface FlowProducerOptions {
 export interface QueueEventsOptions {
   connection: ConnectionOptions;
   prefix?: string;
+  /** Starting stream ID. Defaults to '$' (new events only). Use '0' for historical replay. */
+  lastEventId?: string;
+  /** XREAD BLOCK timeout in milliseconds. Defaults to 5000. */
+  blockTimeout?: number;
+}
+
+export interface ScheduleOpts {
+  /** Cron pattern (5 fields: minute hour dayOfMonth month dayOfWeek) */
+  pattern?: string;
+  /** Repeat interval in milliseconds */
+  every?: number;
+}
+
+export interface JobTemplate {
+  name?: string;
+  data?: any;
+  opts?: Omit<JobOptions, 'delay' | 'deduplication' | 'parent'>;
+}
+
+export interface SchedulerEntry {
+  pattern?: string;
+  every?: number;
+  template?: JobTemplate;
+  lastRun?: number;
+  nextRun: number;
+}
+
+export interface Metrics {
+  /** Total count of completed or failed jobs */
+  count: number;
+}
+
+export interface JobCounts {
+  waiting: number;
+  active: number;
+  delayed: number;
+  completed: number;
+  failed: number;
 }

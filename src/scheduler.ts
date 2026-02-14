@@ -1,7 +1,8 @@
-import type { Client } from './types';
-import { promote, reclaimStalled } from './functions/index';
+import type { Client, SchedulerEntry } from './types';
+import { promote, reclaimStalled, addJob } from './functions/index';
 import { CONSUMER_GROUP } from './functions/index';
 import type { buildKeys } from './utils';
+import { nextCronOccurrence } from './utils';
 
 export interface SchedulerOptions {
   promotionInterval?: number;
@@ -16,6 +17,7 @@ export interface SchedulerOptions {
  * Responsibilities:
  * 1. Promote delayed/priority jobs from scheduled ZSet to stream (via glidemq_promote)
  * 2. Reclaim stalled jobs via XAUTOCLAIM (via glidemq_reclaimStalled)
+ * 3. Fire job schedulers (repeatable/cron) when their nextRun time has passed
  */
 export class Scheduler {
   private client: Client;
@@ -71,9 +73,11 @@ export class Scheduler {
   }
 
   private runPromotion(): void {
-    this.promoteDelayed().catch(() => {
-      // Swallow errors in background promotion loop
-    });
+    this.promoteDelayed()
+      .then(() => this.runSchedulers())
+      .catch(() => {
+        // Swallow errors in background promotion loop
+      });
   }
 
   private runStalledRecovery(): void {
@@ -104,5 +108,71 @@ export class Scheduler {
       Date.now(),
       CONSUMER_GROUP,
     );
+  }
+
+  /**
+   * Check all scheduler entries in the schedulers hash. For any whose nextRun <= now,
+   * create a job from the template and update lastRun/nextRun.
+   */
+  async runSchedulers(): Promise<number> {
+    const now = Date.now();
+    const allEntries = await this.client.hgetall(this.queueKeys.schedulers);
+
+    // hgetall returns { field, value }[] — empty array means no schedulers
+    if (!allEntries || allEntries.length === 0) return 0;
+
+    let fired = 0;
+    for (const entry of allEntries) {
+      const schedulerName = String(entry.field);
+      let config: SchedulerEntry;
+      try {
+        config = JSON.parse(String(entry.value));
+      } catch {
+        continue; // Skip malformed entries
+      }
+
+      if (!config.nextRun || config.nextRun > now) continue;
+
+      // Compute the job name and data from the template
+      const template = config.template ?? {};
+      const jobName = template.name ?? schedulerName;
+      const jobData = template.data !== undefined ? JSON.stringify(template.data) : '{}';
+      const jobOpts = template.opts ? JSON.stringify(template.opts) : '{}';
+      const priority = template.opts?.priority ?? 0;
+      const maxAttempts = template.opts?.attempts ?? 0;
+
+      await addJob(
+        this.client,
+        this.queueKeys,
+        jobName,
+        jobData,
+        jobOpts,
+        now,
+        0, // no delay — scheduler jobs go directly to stream
+        priority,
+        '', // no parent
+        maxAttempts,
+      );
+
+      // Compute next run
+      let nextRun: number;
+      if (config.pattern) {
+        nextRun = nextCronOccurrence(config.pattern, now);
+      } else if (config.every) {
+        nextRun = now + config.every;
+      } else {
+        // No repeat config — remove the scheduler entry
+        await this.client.hdel(this.queueKeys.schedulers, [schedulerName]);
+        fired++;
+        continue;
+      }
+
+      config.lastRun = now;
+      config.nextRun = nextRun;
+      await this.client.hset(this.queueKeys.schedulers, { [schedulerName]: JSON.stringify(config) });
+      fired++;
+    }
+
+    return fired;
   }
 }

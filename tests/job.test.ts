@@ -111,7 +111,7 @@ describe('Job', () => {
     });
 
     it('should fetch return values from child jobs', async () => {
-      mockClient.smembers.mockResolvedValue(new Set(['10', '11']));
+      mockClient.smembers.mockResolvedValue(new Set(['glide:{test-queue}:10', 'glide:{test-queue}:11']));
       mockClient.hget
         .mockResolvedValueOnce('"result-a"')
         .mockResolvedValueOnce('"result-b"');
@@ -119,12 +119,12 @@ describe('Job', () => {
 
       const values = await job.getChildrenValues();
 
-      expect(values['10']).toBe('result-a');
-      expect(values['11']).toBe('result-b');
+      expect(values['glide:{test-queue}:10']).toBe('result-a');
+      expect(values['glide:{test-queue}:11']).toBe('result-b');
     });
 
     it('should skip children with null returnvalue', async () => {
-      mockClient.smembers.mockResolvedValue(new Set(['10', '11']));
+      mockClient.smembers.mockResolvedValue(new Set(['glide:{test-queue}:10', 'glide:{test-queue}:11']));
       mockClient.hget
         .mockResolvedValueOnce('"done"')
         .mockResolvedValueOnce(null);
@@ -132,8 +132,8 @@ describe('Job', () => {
 
       const values = await job.getChildrenValues();
 
-      expect(values['10']).toBe('done');
-      expect(values['11']).toBeUndefined();
+      expect(values['glide:{test-queue}:10']).toBe('done');
+      expect(values['glide:{test-queue}:11']).toBeUndefined();
     });
   });
 

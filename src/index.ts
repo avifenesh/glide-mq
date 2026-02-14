@@ -5,6 +5,7 @@ export { Worker } from './worker';
 export { Job } from './job';
 export { QueueEvents } from './queue-events';
 export { FlowProducer } from './flow-producer';
+export type { JobNode } from './flow-producer';
 
 export type {
   QueueOptions,
@@ -16,6 +17,11 @@ export type {
   FlowProducerOptions,
   QueueEventsOptions,
   ConnectionOptions,
+  ScheduleOpts,
+  JobTemplate,
+  SchedulerEntry,
+  Metrics,
+  JobCounts,
 } from './types';
 
 export { GlideMQError, ConnectionError, ScriptError } from './errors';
