@@ -2,8 +2,7 @@ import type { FlowProducerOptions, FlowJob, Client } from './types';
 import { Job } from './job';
 import { buildKeys, keyPrefix } from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
-import { addFlow } from './functions/index';
-import { LIBRARY_SOURCE } from './functions/index';
+import { LIBRARY_SOURCE, addFlow } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
 

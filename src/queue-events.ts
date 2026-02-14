@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import type { QueueEventsOptions, Client } from './types';
-import { buildKeys } from './utils';
+import { buildKeys, nextReconnectDelay } from './utils';
 import { createBlockingClient, ensureFunctionLibrary } from './connection';
 
 export class QueueEvents extends EventEmitter {
@@ -55,12 +55,8 @@ export class QueueEvents extends EventEmitter {
       .catch((err) => {
         if (this.running && !this.closing) {
           this.emit('error', err);
-          // Exponential backoff: 1s, 2s, 4s, 8s, max 30s
-          const delay = this.reconnectBackoff === 0
-            ? 1000
-            : Math.min(this.reconnectBackoff * 2, 30000);
-          this.reconnectBackoff = delay;
-          setTimeout(() => this.reconnectAndResume(), delay);
+          this.reconnectBackoff = nextReconnectDelay(this.reconnectBackoff);
+          setTimeout(() => this.reconnectAndResume(), this.reconnectBackoff);
         }
       });
   }
@@ -89,11 +85,8 @@ export class QueueEvents extends EventEmitter {
     } catch (err) {
       if (this.running && !this.closing) {
         this.emit('error', err);
-        const delay = this.reconnectBackoff === 0
-          ? 1000
-          : Math.min(this.reconnectBackoff * 2, 30000);
-        this.reconnectBackoff = delay;
-        setTimeout(() => this.reconnectAndResume(), delay);
+        this.reconnectBackoff = nextReconnectDelay(this.reconnectBackoff);
+        setTimeout(() => this.reconnectAndResume(), this.reconnectBackoff);
       }
     }
   }

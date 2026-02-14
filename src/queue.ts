@@ -5,9 +5,17 @@ import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, Sched
 import { Job } from './job';
 import { buildKeys, keyPrefix, keyPrefixPattern, nextCronOccurrence } from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
-import { addJob, dedup, pause, resume, removeJob, revokeJob, CONSUMER_GROUP } from './functions/index';
+import {
+  LIBRARY_SOURCE,
+  CONSUMER_GROUP,
+  addJob,
+  dedup,
+  pause,
+  resume,
+  removeJob,
+  revokeJob,
+} from './functions/index';
 import type { QueueKeys } from './functions/index';
-import { LIBRARY_SOURCE } from './functions/index';
 import { withSpan } from './telemetry';
 
 export class Queue<D = any, R = any> extends EventEmitter {
@@ -477,25 +485,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
         }
         break;
       }
-      case 'delayed': {
-        const members = await client.zrange(
-          this.keys.scheduled,
-          { start: start, end: end >= 0 ? end : -1 },
-        );
-        jobIds = members.map(m => String(m));
-        break;
-      }
-      case 'completed': {
-        const members = await client.zrange(
-          this.keys.completed,
-          { start: start, end: end >= 0 ? end : -1 },
-        );
-        jobIds = members.map(m => String(m));
-        break;
-      }
+      case 'delayed':
+      case 'completed':
       case 'failed': {
+        const zsetKey = type === 'delayed' ? this.keys.scheduled
+          : type === 'completed' ? this.keys.completed
+          : this.keys.failed;
         const members = await client.zrange(
-          this.keys.failed,
+          zsetKey,
           { start: start, end: end >= 0 ? end : -1 },
         );
         jobIds = members.map(m => String(m));
@@ -504,13 +501,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
     }
 
     // Fetch job hashes in parallel (avoids N+1 serial HGETALL)
-    const jobs: Job<D, R>[] = [];
-    const fetches = jobIds.map(id => this.getJob(id));
-    const results = await Promise.all(fetches);
-    for (const job of results) {
-      if (job) jobs.push(job);
-    }
-    return jobs;
+    const results = await Promise.all(jobIds.map(id => this.getJob(id)));
+    return results.filter((job): job is Job<D, R> => job !== null);
   }
 
   /**
@@ -578,9 +570,6 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const client = await this.getClient();
     const dlqKeys = buildKeys(this.opts.deadLetterQueue.name, this.opts.prefix);
 
-    // DLQ jobs are added via addJob, so they appear in the stream.
-    // Read all entries from the DLQ stream.
-    const { InfBoundary } = await import('speedkey');
     const entries = await client.xrange(
       dlqKeys.stream,
       InfBoundary.NegativeInfinity,

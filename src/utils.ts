@@ -18,7 +18,7 @@ export function keyPrefixPattern(prefix: string, queueName: string): string {
   return `${escapeGlob(prefix)}:{${escapeGlob(queueName)}}`;
 }
 
-export function keys(prefix: string, queueName: string) {
+export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
   const p = keyPrefix(prefix, queueName);
   return {
     id: `${p}:id`,
@@ -35,10 +35,6 @@ export function keys(prefix: string, queueName: string) {
     log: (id: string) => `${p}:log:${id}`,
     deps: (id: string) => `${p}:deps:${id}`,
   };
-}
-
-export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
-  return keys(prefix, queueName);
 }
 
 // Priority encoding: (priority * 2^42) + timestamp_ms
@@ -79,6 +75,15 @@ export function calculateBackoff(
 
 export function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Compute the next exponential backoff delay.
+ * Sequence: 0 -> 1000, 1000 -> 2000, 2000 -> 4000, ..., capped at maxMs.
+ */
+export function nextReconnectDelay(currentDelay: number, maxMs = 30000): number {
+  if (currentDelay === 0) return 1000;
+  return Math.min(currentDelay * 2, maxMs);
 }
 
 // ---- Simple 5-field cron parser ----

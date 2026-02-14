@@ -1,6 +1,5 @@
 import type { Client, SchedulerEntry } from './types';
-import { promote, reclaimStalled, addJob } from './functions/index';
-import { CONSUMER_GROUP } from './functions/index';
+import { CONSUMER_GROUP, promote, reclaimStalled, addJob } from './functions/index';
 import type { buildKeys } from './utils';
 import { nextCronOccurrence } from './utils';
 

@@ -1,13 +1,20 @@
 import { EventEmitter } from 'events';
 import type { WorkerOptions, Processor, Client } from './types';
 import { Job } from './job';
-import { buildKeys, calculateBackoff, keyPrefix } from './utils';
+import { buildKeys, calculateBackoff, keyPrefix, nextReconnectDelay } from './utils';
 import { createClient, createBlockingClient, ensureFunctionLibrary, createConsumerGroup } from './connection';
-import { CONSUMER_GROUP } from './functions/index';
-import { completeJob, completeAndFetchNext, failJob, addJob, rateLimit as rateLimitFn, checkConcurrency, moveToActive } from './functions/index';
-import type { CompleteAndFetchResult } from './functions/index';
+import {
+  CONSUMER_GROUP,
+  completeJob,
+  completeAndFetchNext,
+  failJob,
+  addJob,
+  rateLimit as rateLimitFn,
+  checkConcurrency,
+  moveToActive,
+} from './functions/index';
+import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
-import { withSpan, withChildSpan } from './telemetry';
 export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed';
 
 export class Worker<D = any, R = any> extends EventEmitter {
@@ -112,10 +119,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       } catch (err) {
         if (this.running && !this.closing) {
           this.emit('error', err);
-          const delay = this.reconnectBackoff === 0
-            ? 1000
-            : Math.min(this.reconnectBackoff * 2, 30000);
-          this.reconnectBackoff = delay;
+          this.reconnectBackoff = nextReconnectDelay(this.reconnectBackoff);
           await this.reconnectAndResume();
           return; // reconnectAndResume restarts the loop
         }
@@ -173,11 +177,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
     } catch (err) {
       if (this.running && !this.closing) {
         this.emit('error', err);
-        const delay = this.reconnectBackoff === 0
-          ? 1000
-          : Math.min(this.reconnectBackoff * 2, 30000);
-        this.reconnectBackoff = delay;
-        setTimeout(() => this.reconnectAndResume(), delay);
+        this.reconnectBackoff = nextReconnectDelay(this.reconnectBackoff);
+        setTimeout(() => this.reconnectAndResume(), this.reconnectBackoff);
       }
     }
   }
@@ -269,6 +270,128 @@ export class Worker<D = any, R = any> extends EventEmitter {
     this.activePromises.add(promise);
   }
 
+  // ---- Shared helpers for processJobFastPath / processJob ----
+
+  /**
+   * Handle a moveToActive result that is not a valid hash (null or REVOKED).
+   * Returns true if the result was handled (caller should return), false if the hash is valid.
+   */
+  private async handleMoveToActiveEdgeCase(
+    moveResult: Record<string, string> | 'REVOKED' | null,
+    jobId: string,
+    entryId: string,
+  ): Promise<boolean> {
+    if (!this.commandClient) return true;
+    if (moveResult === null) {
+      try { await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', Date.now(), CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
+      return true;
+    }
+    if (moveResult === 'REVOKED') {
+      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Run the processor with optional timeout, AbortController, and heartbeat.
+   * Returns { result, error } - exactly one will be set.
+   */
+  private async runProcessor(
+    job: Job<D, R>,
+    jobId: string,
+  ): Promise<{ result?: R; error?: Error; aborted: boolean }> {
+    if (this.opts.limiter) await this.waitForRateLimit();
+
+    const ac = new AbortController();
+    this.activeAbortControllers.set(jobId, ac);
+    job.abortSignal = ac.signal;
+    this.startHeartbeat(jobId);
+
+    let result: R | undefined;
+    let error: Error | undefined;
+
+    try {
+      const timeoutMs = job.opts.timeout;
+      if (timeoutMs && timeoutMs > 0) {
+        result = await Promise.race([
+          this.processor(job),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs)),
+        ]);
+      } else {
+        result = await this.processor(job);
+      }
+    } catch (err) {
+      error = err instanceof Error ? err : new Error(String(err));
+    } finally {
+      this.stopHeartbeat(jobId);
+      this.activeAbortControllers.delete(jobId);
+    }
+
+    return { result, error, aborted: ac.signal.aborted };
+  }
+
+  /**
+   * Handle a failed job: applies rate limiting, backoff, DLQ, and emits 'failed'.
+   * Returns true if the error was a RateLimitError (caller should skip the 'failed' event).
+   */
+  private async handleJobFailure(
+    job: Job<D, R>,
+    jobId: string,
+    entryId: string,
+    error: Error,
+  ): Promise<void> {
+    if (!this.commandClient) {
+      job.failedReason = error.message;
+      this.emit('failed', job, error);
+      return;
+    }
+
+    if (error instanceof Worker.RateLimitError) {
+      const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
+      this.rateLimitUntil = Date.now() + delayMs;
+      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'rate limited', Date.now(), job.attemptsMade + 2, delayMs, CONSUMER_GROUP); } catch (e) { this.emit('error', e); }
+      return;
+    }
+
+    const maxAttempts = job.opts.attempts ?? 0;
+    let backoffDelay = 0;
+    if (maxAttempts > 0 && job.opts.backoff) {
+      const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
+      backoffDelay = strategyFn
+        ? strategyFn(job.attemptsMade + 1, error)
+        : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, job.attemptsMade + 1, job.opts.backoff.jitter);
+    }
+
+    const failResult = await failJob(
+      this.commandClient, this.queueKeys, jobId, entryId, error.message,
+      Date.now(), maxAttempts, backoffDelay, CONSUMER_GROUP, job.opts.removeOnFail,
+    );
+
+    if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
+      await this.moveToDLQ(job, error);
+    }
+    job.failedReason = error.message;
+    this.emit('failed', job, error);
+  }
+
+  /**
+   * Build parent dependency info for complete/completeAndFetchNext calls.
+   */
+  private buildParentInfo(
+    job: Job<D, R>,
+    jobId: string,
+  ): { depsMember: string; parentId: string; parentKeys: QueueKeys } | undefined {
+    if (!job.parentId || !job.parentQueue) return undefined;
+    return {
+      depsMember: `${keyPrefix(this.opts.prefix ?? 'glide', this.name)}:${jobId}`,
+      parentId: job.parentId,
+      parentKeys: buildKeys(job.parentQueue, this.opts.prefix),
+    };
+  }
+
+  // ---- Main processing paths ----
+
   /**
    * Fast path for c=1: processes jobs in a tight loop using completeAndFetchNext.
    * First job uses moveToActive (2 RTTs). Subsequent jobs use completeAndFetchNext (1 RTT).
@@ -277,16 +400,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private async processJobFastPath(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
 
-    // First job: moveToActive (since we got it from XREADGROUP, not from completeAndFetchNext)
-    let hash = await moveToActive(this.commandClient, this.queueKeys, jobId, Date.now());
-    if (hash === null) {
-      try { await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', Date.now(), CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
-      return;
-    }
-    if (hash === 'REVOKED') {
-      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
-      return;
-    }
+    const hash = await moveToActive(this.commandClient, this.queueKeys, jobId, Date.now());
+    if (await this.handleMoveToActiveEdgeCase(hash, jobId, entryId)) return;
 
     let currentJobId = jobId;
     let currentEntryId = entryId;
@@ -297,72 +412,19 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash);
       job.entryId = currentEntryId;
 
-      if (this.opts.limiter) await this.waitForRateLimit();
-
-      const ac = new AbortController();
-      this.activeAbortControllers.set(currentJobId, ac);
-      job.abortSignal = ac.signal;
-      this.startHeartbeat(currentJobId);
-
-      let processResult: R | undefined;
-      let processError: Error | undefined;
-
-      try {
-        const timeoutMs = job.opts.timeout;
-        if (timeoutMs && timeoutMs > 0) {
-          processResult = await Promise.race([
-            this.processor(job),
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs)),
-          ]);
-        } else {
-          processResult = await this.processor(job);
-        }
-      } catch (err) {
-        processError = err instanceof Error ? err : new Error(String(err));
-      } finally {
-        this.stopHeartbeat(currentJobId);
-        this.activeAbortControllers.delete(currentJobId);
-      }
+      const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
 
       if (!this.commandClient) return;
 
-      // Handle failure - use regular failJob (no fetch-next on failure)
-      if (processError || ac.signal.aborted) {
-        const error = ac.signal.aborted ? new Error('revoked') : processError!;
-        if (error instanceof Worker.RateLimitError) {
-          const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
-          this.rateLimitUntil = Date.now() + delayMs;
-          try { await failJob(this.commandClient, this.queueKeys, currentJobId, currentEntryId, 'rate limited', Date.now(), job.attemptsMade + 2, delayMs, CONSUMER_GROUP); } catch (e) { this.emit('error', e); }
-        } else {
-          const maxAttempts = job.opts.attempts ?? 0;
-          let backoffDelay = 0;
-          if (maxAttempts > 0 && job.opts.backoff) {
-            const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
-            backoffDelay = strategyFn
-              ? strategyFn(job.attemptsMade + 1, error)
-              : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, job.attemptsMade + 1, job.opts.backoff.jitter);
-          }
-          const failResult = await failJob(this.commandClient, this.queueKeys, currentJobId, currentEntryId, error.message, Date.now(), maxAttempts, backoffDelay, CONSUMER_GROUP, job.opts.removeOnFail);
-          if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
-            await this.moveToDLQ(job, error);
-          }
-          job.failedReason = error.message;
-          this.emit('failed', job, error);
-        }
+      if (processError || aborted) {
+        const error = aborted ? new Error('revoked') : processError!;
+        await this.handleJobFailure(job, currentJobId, currentEntryId, error);
         return; // Back to pollOnce for next XREADGROUP
       }
 
       // Success: completeAndFetchNext - 1 RTT for complete + fetch + activate
       const returnvalue = processResult !== undefined ? JSON.stringify(processResult) : 'null';
-      let parentInfo: Parameters<typeof completeAndFetchNext>[9];
-      if (job.parentId && job.parentQueue) {
-        const parentKeys = buildKeys(job.parentQueue, this.opts.prefix);
-        parentInfo = {
-          depsMember: `${keyPrefix(this.opts.prefix ?? 'glide', this.name)}:${currentJobId}`,
-          parentId: job.parentId,
-          parentKeys,
-        };
-      }
+      const parentInfo = this.buildParentInfo(job, currentJobId);
 
       const fetchResult = await completeAndFetchNext(
         this.commandClient, this.queueKeys, currentJobId, currentEntryId,
@@ -374,12 +436,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
       job.finishedOn = Date.now();
       this.emit('completed', job, processResult);
 
-      // Check if we got a next job
       if (fetchResult.next === false) {
         return; // No more jobs - back to pollOnce for blocking XREADGROUP
       }
       if (fetchResult.next === 'REVOKED') {
-        // Next job is revoked - fail it and return to poll
         if (fetchResult.nextJobId && fetchResult.nextEntryId) {
           try { await failJob(this.commandClient, this.queueKeys, fetchResult.nextJobId, fetchResult.nextEntryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
         }
@@ -396,106 +456,33 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private async processJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
 
-    const now = Date.now();
+    const moveResult = await moveToActive(this.commandClient, this.queueKeys, jobId, Date.now());
+    if (await this.handleMoveToActiveEdgeCase(moveResult, jobId, entryId)) return;
 
-    // Single FCALL: reads job hash, checks revoked, sets state=active + lastActive + processedOn
-    const moveResult = await moveToActive(this.commandClient, this.queueKeys, jobId, now);
-
-    if (moveResult === null) {
-      try { await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', now, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
-      return;
-    }
-    if (moveResult === 'REVOKED') {
-      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', now, 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
-      return;
-    }
-
-    const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, jobId, moveResult);
+    const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, jobId, moveResult as Record<string, string>);
     job.entryId = entryId;
 
-    if (this.opts.limiter) await this.waitForRateLimit();
+    const { result: processResult, error: processError, aborted } = await this.runProcessor(job, jobId);
 
-    const ac = new AbortController();
-    this.activeAbortControllers.set(jobId, ac);
-    job.abortSignal = ac.signal;
-    this.startHeartbeat(jobId);
-
-    try {
-      try {
-        let processResult: R;
-        const timeoutMs = job.opts.timeout;
-        if (timeoutMs && timeoutMs > 0) {
-          processResult = await Promise.race([
-            this.processor(job),
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs)),
-          ]);
-        } else {
-          processResult = await this.processor(job);
-        }
-
-        if (ac.signal.aborted) {
-          if (!this.commandClient) return;
-          await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP);
-          return;
-        }
-
-        const returnvalue = processResult !== undefined ? JSON.stringify(processResult) : 'null';
-
-        let parentInfo: Parameters<typeof completeJob>[8];
-        if (job.parentId && job.parentQueue) {
-          const parentKeys = buildKeys(job.parentQueue, this.opts.prefix);
-          parentInfo = {
-            depsMember: `${keyPrefix(this.opts.prefix ?? 'glide', this.name)}:${jobId}`,
-            parentId: job.parentId,
-            parentKeys,
-          };
-        }
-
-        if (!this.commandClient) return;
-        await completeJob(
-          this.commandClient, this.queueKeys, jobId, entryId, returnvalue,
-          Date.now(), CONSUMER_GROUP, job.opts.removeOnComplete, parentInfo,
-        );
-
-        job.returnvalue = processResult;
-        job.finishedOn = Date.now();
-        this.emit('completed', job, processResult);
-      } catch (err) {
-        if (err instanceof Worker.RateLimitError) {
-          const delayMs = (err as any).delayMs || (this.opts.limiter?.duration ?? 1000);
-          this.rateLimitUntil = Date.now() + delayMs;
-          if (!this.commandClient) return;
-          try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'rate limited', Date.now(), job.attemptsMade + 2, delayMs, CONSUMER_GROUP); } catch (e) { this.emit('error', e); }
-          return;
-        }
-
-        const error = err instanceof Error ? err : new Error(String(err));
-        const maxAttempts = job.opts.attempts ?? 0;
-        let backoffDelay = 0;
-        if (maxAttempts > 0 && job.opts.backoff) {
-          const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
-          backoffDelay = strategyFn
-            ? strategyFn(job.attemptsMade + 1, error)
-            : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, job.attemptsMade + 1, job.opts.backoff.jitter);
-        }
-
-        if (!this.commandClient) { job.failedReason = error.message; this.emit('failed', job, error); return; }
-
-        const failResult = await failJob(
-          this.commandClient, this.queueKeys, jobId, entryId, error.message,
-          Date.now(), maxAttempts, backoffDelay, CONSUMER_GROUP, job.opts.removeOnFail,
-        );
-
-        if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
-          await this.moveToDLQ(job, error);
-        }
-        job.failedReason = error.message;
-        this.emit('failed', job, error);
-      }
-    } finally {
-      this.stopHeartbeat(jobId);
-      this.activeAbortControllers.delete(jobId);
+    if (processError || aborted) {
+      const error = aborted ? new Error('revoked') : processError!;
+      await this.handleJobFailure(job, jobId, entryId, error);
+      return;
     }
+
+    if (!this.commandClient) return;
+
+    const returnvalue = processResult !== undefined ? JSON.stringify(processResult) : 'null';
+    const parentInfo = this.buildParentInfo(job, jobId);
+
+    await completeJob(
+      this.commandClient, this.queueKeys, jobId, entryId, returnvalue,
+      Date.now(), CONSUMER_GROUP, job.opts.removeOnComplete, parentInfo,
+    );
+
+    job.returnvalue = processResult;
+    job.finishedOn = Date.now();
+    this.emit('completed', job, processResult);
   }
 
   /**

@@ -214,7 +214,7 @@ export class Job<D = any, R = any> {
    */
   async isRevoked(): Promise<boolean> {
     const val = await this.client.hget(this.queueKeys.job(this.id), 'revoked');
-    return val === '1' || String(val) === '1';
+    return String(val) === '1';
   }
 
   /**
