@@ -1699,3 +1699,704 @@ describeEachMode('Bee-Queue #120: bulk stalled job recovery reclaims all jobs', 
     await queue.close();
   }, 30000);
 });
+
+// ===========================================================================
+// Sidekiq bulletproof tests (from sidekiq-bugs-and-failures analysis)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Sidekiq #1: BRPOP job loss immunity - Streams+PEL prevents loss on crash
+// ---------------------------------------------------------------------------
+
+describeEachMode('Sidekiq BRPOP immunity: job in PEL survives worker crash and is reclaimed', (CONNECTION) => {
+  const Q = 'bp-sidekiq-brpop-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('job enters PEL, worker crashes, second worker stalled recovery reclaims it', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const MAX_STALLED = 1;
+    const STALL_INTERVAL = 1000;
+
+    // Add a job
+    const job = await queue.add('brpop-immune', { critical: true });
+    expect(job).not.toBeNull();
+
+    // Worker 1: picks up the job but never completes it (simulates crash)
+    let jobPicked = false;
+    const crashWorker = new Worker(
+      Q,
+      async () => {
+        jobPicked = true;
+        // Hang forever - never return
+        await new Promise(() => {});
+        return 'never';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 2,
+        blockTimeout: 500,
+        stalledInterval: 60000,
+        lockDuration: 200,
+      },
+    );
+    crashWorker.on('error', () => {});
+
+    // Wait for job to be picked up (enters PEL)
+    await new Promise<void>((resolve) => {
+      const deadline = Date.now() + 10000;
+      const check = setInterval(() => {
+        if (jobPicked || Date.now() > deadline) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 50);
+    });
+    expect(jobPicked).toBe(true);
+
+    // Force-close worker 1 (crash - no graceful ACK)
+    await crashWorker.close(true);
+
+    // KEY ASSERTION: job is still in PEL after crash (not lost like BRPOP+LPUSH)
+    const k = buildKeys(Q);
+    const pendingAfterCrash = await cleanupClient.xpending(k.stream, 'workers');
+    const pelCount = Number(pendingAfterCrash[0]);
+    expect(pelCount).toBeGreaterThanOrEqual(1);
+
+    // The job hash should still exist with state=active
+    const stateAfterCrash = await cleanupClient.hget(k.job(job!.id), 'state');
+    expect(String(stateAfterCrash)).toBe('active');
+
+    // Wait for PEL entry to age past stall interval
+    await new Promise(r => setTimeout(r, STALL_INTERVAL + 500));
+
+    // Worker 2: recovery worker's scheduler reclaims the stalled entry
+    const recoveryWorker = new Worker(
+      Q,
+      async () => 'should-not-process',
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: STALL_INTERVAL,
+        maxStalledCount: MAX_STALLED,
+        lockDuration: 200,
+      },
+    );
+    recoveryWorker.on('error', () => {});
+
+    // Wait for enough stalled recovery cycles to exceed maxStalledCount
+    await new Promise(r => setTimeout(r, STALL_INTERVAL * (MAX_STALLED + 2) + 1000));
+
+    await recoveryWorker.close(true);
+
+    // The job must NOT be lost - stalled recovery moved it to failed
+    const finalState = await cleanupClient.hget(k.job(job!.id), 'state');
+    expect(String(finalState)).toBe('failed');
+
+    // Verify stalled reason
+    const reason = await cleanupClient.hget(k.job(job!.id), 'failedReason');
+    expect(String(reason)).toContain('stalled');
+
+    // Job is in the failed ZSet (not lost in limbo)
+    const failedScore = await cleanupClient.zscore(k.failed, job!.id);
+    expect(failedScore).not.toBeNull();
+
+    await queue.close();
+  }, 25000);
+});
+
+// ---------------------------------------------------------------------------
+// Sidekiq #2: Unique lock not orphaned after completion
+// ---------------------------------------------------------------------------
+
+describeEachMode('Sidekiq dedup: unique lock freed after job completion', (CONNECTION) => {
+  const Q = 'bp-sidekiq-dedup-complete-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('dedup id=unique-1 reusable after first job completes', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const DEDUP = 'unique-1';
+
+    // Add first job with dedup id
+    const job1 = await queue.add('dedup-round-1', { round: 1 }, {
+      deduplication: { id: DEDUP, mode: 'simple' },
+    });
+    expect(job1).not.toBeNull();
+
+    // Process it to completion
+    const firstDone = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
+      const worker = new Worker(
+        Q,
+        async () => 'done-1',
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+      );
+      worker.on('completed', () => {
+        clearTimeout(timeout);
+        worker.close(true).then(resolve);
+      });
+      worker.on('error', () => {});
+    });
+    await firstDone;
+
+    // Verify first job completed
+    const k = buildKeys(Q);
+    const state1 = await cleanupClient.hget(k.job(job1!.id), 'state');
+    expect(String(state1)).toBe('completed');
+
+    // Add second job with SAME dedup id - must succeed (not blocked by orphaned lock)
+    const job2 = await queue.add('dedup-round-2', { round: 2 }, {
+      deduplication: { id: DEDUP, mode: 'simple' },
+    });
+    expect(job2).not.toBeNull();
+    expect(job2!.id).not.toBe(job1!.id);
+
+    // Process second job
+    const secondDone = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
+      const worker = new Worker(
+        Q,
+        async () => 'done-2',
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+      );
+      worker.on('completed', () => {
+        clearTimeout(timeout);
+        worker.close(true).then(resolve);
+      });
+      worker.on('error', () => {});
+    });
+    await secondDone;
+
+    const state2 = await cleanupClient.hget(k.job(job2!.id), 'state');
+    expect(String(state2)).toBe('completed');
+
+    await queue.close();
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// Sidekiq #3: Unique lock not orphaned after failure
+// ---------------------------------------------------------------------------
+
+describeEachMode('Sidekiq dedup: unique lock freed after job fails permanently', (CONNECTION) => {
+  const Q = 'bp-sidekiq-dedup-fail-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('dedup id=unique-2 reusable after first job fails permanently', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const DEDUP = 'unique-2';
+
+    // Add job with dedup id and attempts=1 (no retry - fails permanently)
+    const job1 = await queue.add('dedup-fail', { run: 1 }, {
+      deduplication: { id: DEDUP, mode: 'simple' },
+      attempts: 1,
+    });
+    expect(job1).not.toBeNull();
+
+    // Process it - it will fail permanently
+    const failDone = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
+      const worker = new Worker(
+        Q,
+        async () => {
+          throw new Error('permanent failure');
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+      );
+      worker.on('failed', () => {
+        clearTimeout(timeout);
+        worker.close(true).then(resolve);
+      });
+      worker.on('error', () => {});
+    });
+    await failDone;
+
+    // Verify first job is in failed state
+    const k = buildKeys(Q);
+    const state1 = await cleanupClient.hget(k.job(job1!.id), 'state');
+    expect(String(state1)).toBe('failed');
+
+    // Add second job with SAME dedup id - must succeed (lock not orphaned)
+    const job2 = await queue.add('dedup-retry', { run: 2 }, {
+      deduplication: { id: DEDUP, mode: 'simple' },
+    });
+    expect(job2).not.toBeNull();
+    expect(job2!.id).not.toBe(job1!.id);
+
+    // Process second job to completion
+    const secondDone = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
+      const worker = new Worker(
+        Q,
+        async () => 'success-after-fail',
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+      );
+      worker.on('completed', () => {
+        clearTimeout(timeout);
+        worker.close(true).then(resolve);
+      });
+      worker.on('error', () => {});
+    });
+    await secondDone;
+
+    const state2 = await cleanupClient.hget(k.job(job2!.id), 'state');
+    expect(String(state2)).toBe('completed');
+
+    await queue.close();
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// Sidekiq #4: Batch callback duplicate prevention - parent completes once
+// ---------------------------------------------------------------------------
+
+describeEachMode('Sidekiq batch: parent completes exactly once when all children finish', (CONNECTION) => {
+  const Q = 'bp-sidekiq-batch-once-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('flow with 3 children - parent processed exactly once', async () => {
+    const flow = new FlowProducer({ connection: CONNECTION });
+
+    const node = await flow.add({
+      name: 'batch-parent',
+      queueName: Q,
+      data: { role: 'parent' },
+      children: [
+        { name: 'batch-child-1', queueName: Q, data: { idx: 1 } },
+        { name: 'batch-child-2', queueName: Q, data: { idx: 2 } },
+        { name: 'batch-child-3', queueName: Q, data: { idx: 3 } },
+      ],
+    });
+
+    const parentId = node.job.id;
+    let parentProcessedCount = 0;
+    const completedJobIds: string[] = [];
+
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout - batch test')), 20000);
+
+      const worker = new Worker(
+        Q,
+        async (job: any) => {
+          if (job.id === parentId) {
+            parentProcessedCount++;
+          }
+          return { name: job.name, done: true };
+        },
+        { connection: CONNECTION, concurrency: 2, blockTimeout: 500 },
+      );
+
+      worker.on('completed', (job: any) => {
+        completedJobIds.push(job.id);
+        if (job.id === parentId) {
+          clearTimeout(timeout);
+          // Allow a brief window for any potential duplicate
+          setTimeout(() => worker.close(true).then(resolve), 500);
+        }
+      });
+      worker.on('error', () => {});
+    });
+
+    await done;
+
+    // Parent must have been processed exactly once - not duplicated
+    expect(parentProcessedCount).toBe(1);
+
+    // All 3 children + parent = 4 total completions
+    expect(completedJobIds).toHaveLength(4);
+
+    // Verify parent final state
+    const k = buildKeys(Q);
+    const parentState = await cleanupClient.hget(k.job(parentId), 'state');
+    expect(String(parentState)).toBe('completed');
+
+    // Parent ID should appear exactly once in completedJobIds
+    const parentCompletions = completedJobIds.filter(id => id === parentId);
+    expect(parentCompletions).toHaveLength(1);
+
+    await flow.close();
+  }, 25000);
+});
+
+// ---------------------------------------------------------------------------
+// Sidekiq #5: Retry doesn't lose job between states
+// ---------------------------------------------------------------------------
+
+describeEachMode('Sidekiq retry: job never missing from all state structures during retry', (CONNECTION) => {
+  const Q = 'bp-sidekiq-retry-states-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('job with attempts=3 is always in a known state during retries', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    let attemptCount = 0;
+    const stateSnapshots: string[] = [];
+
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 25000);
+      const worker = new Worker(
+        Q,
+        async () => {
+          attemptCount++;
+          if (attemptCount < 3) {
+            throw new Error(`fail-attempt-${attemptCount}`);
+          }
+          return 'success-attempt-3';
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 500,
+          stalledInterval: 60000,
+          promotionInterval: 300,
+        },
+      );
+      worker.on('completed', () => {
+        clearTimeout(timeout);
+        worker.close(true).then(resolve);
+      });
+      worker.on('error', () => {});
+    });
+
+    await new Promise(r => setTimeout(r, 500));
+    const job = await queue.add('retry-track', { v: 1 }, {
+      attempts: 3,
+      backoff: { type: 'fixed', delay: 200 },
+    });
+
+    // Poll job state rapidly during the retry cycle
+    const pollInterval = setInterval(async () => {
+      try {
+        const k = buildKeys(Q);
+        const s = await cleanupClient.hget(k.job(job!.id), 'state');
+        if (s) stateSnapshots.push(String(s));
+      } catch { /* ignore */ }
+    }, 50);
+
+    await done;
+    clearInterval(pollInterval);
+
+    // Job must have succeeded on attempt 3
+    expect(attemptCount).toBe(3);
+
+    // Final state is completed
+    const k = buildKeys(Q);
+    const finalState = await cleanupClient.hget(k.job(job!.id), 'state');
+    expect(String(finalState)).toBe('completed');
+
+    // Every snapshot must be a valid, known state - never undefined/empty/unknown
+    const validStates = ['waiting', 'active', 'delayed', 'completed', 'failed'];
+    for (const s of stateSnapshots) {
+      expect(validStates).toContain(s);
+    }
+
+    // Must have captured at least some snapshots during processing
+    expect(stateSnapshots.length).toBeGreaterThan(0);
+
+    await queue.close();
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// Sidekiq #6: Scheduled job timing drift
+// ---------------------------------------------------------------------------
+
+describeEachMode('Sidekiq scheduler drift: interval jobs fire without drift accumulation', (CONNECTION) => {
+  const Q = 'bp-sidekiq-drift-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('scheduler every=1000ms fires 3 times in ~4s with gaps within 500ms tolerance', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const processedTimestamps: number[] = [];
+
+    // Create scheduler with 1000ms interval
+    await queue.upsertJobScheduler('drift-check', { every: 1000 }, {
+      name: 'tick',
+      data: { drift: true },
+    });
+
+    const done = new Promise<void>((resolve) => {
+      const worker = new Worker(
+        Q,
+        async () => {
+          processedTimestamps.push(Date.now());
+          return 'tick';
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 500,
+          stalledInterval: 60000,
+          promotionInterval: 500,
+        },
+      );
+      worker.on('error', () => {});
+
+      // Run for ~4.5 seconds to capture at least 3 firings
+      setTimeout(() => {
+        worker.close(true).then(resolve);
+      }, 4500);
+    });
+
+    await done;
+
+    // Must have at least 3 firings
+    expect(processedTimestamps.length).toBeGreaterThanOrEqual(3);
+
+    // Check gaps between consecutive firings
+    processedTimestamps.sort((a, b) => a - b);
+    for (let i = 1; i < processedTimestamps.length; i++) {
+      const gap = processedTimestamps[i] - processedTimestamps[i - 1];
+      // Expected ~1000ms, allow 500-1500ms range (500ms tolerance)
+      expect(gap).toBeGreaterThanOrEqual(500);
+      expect(gap).toBeLessThanOrEqual(1500);
+    }
+
+    // Check for drift accumulation: the gap between first and last should be
+    // roughly (N-1) * 1000ms, not significantly more
+    const totalSpan = processedTimestamps[processedTimestamps.length - 1] - processedTimestamps[0];
+    const expectedSpan = (processedTimestamps.length - 1) * 1000;
+    const driftAccumulation = Math.abs(totalSpan - expectedSpan);
+    // Allow up to 500ms total drift across all firings
+    expect(driftAccumulation).toBeLessThanOrEqual(500);
+
+    await queue.removeJobScheduler('drift-check');
+    await queue.close();
+  }, 15000);
+});
+
+// ---------------------------------------------------------------------------
+// Sidekiq #7: Connection pool exhaustion immunity
+// ---------------------------------------------------------------------------
+
+describeEachMode('Sidekiq pool exhaustion: rapid create/close does not leak connections', (CONNECTION) => {
+  const Q_PREFIX = 'bp-sidekiq-pool-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    // Clean up all queues used
+    for (let i = 0; i < 20; i++) {
+      await flushQueue(cleanupClient, `${Q_PREFIX}-q${i}`);
+      await flushQueue(cleanupClient, `${Q_PREFIX}-w${i}`);
+    }
+    cleanupClient.close();
+  });
+
+  it('20 Queue + 20 Worker instances created and closed - no connection leak', async () => {
+    // Snapshot baseline connections
+    const infoBefore = await cleanupClient.info(['CLIENTS']);
+    const connBefore = parseConnectedClients(infoBefore);
+
+    // Create 20 Queue instances rapidly
+    const queues: InstanceType<typeof Queue>[] = [];
+    for (let i = 0; i < 20; i++) {
+      const q = new Queue(`${Q_PREFIX}-q${i}`, { connection: CONNECTION });
+      await q.add('pool-test', { i });
+      queues.push(q);
+    }
+
+    // Create 20 Worker instances rapidly
+    const workers: InstanceType<typeof Worker>[] = [];
+    for (let i = 0; i < 20; i++) {
+      const w = new Worker(
+        `${Q_PREFIX}-w${i}`,
+        async () => 'ok',
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 200 },
+      );
+      w.on('error', () => {});
+      workers.push(w);
+    }
+
+    // Allow workers to initialize
+    await new Promise(r => setTimeout(r, 2000));
+
+    const infoOpen = await cleanupClient.info(['CLIENTS']);
+    const connOpen = parseConnectedClients(infoOpen);
+
+    // Many connections should be open now
+    expect(connOpen).toBeGreaterThan(connBefore);
+
+    // Close all workers and queues
+    await Promise.all(workers.map(w => w.close(true)));
+    await Promise.all(queues.map(q => q.close()));
+
+    // Wait for connections to drain
+    await new Promise(r => setTimeout(r, CONNECTION.clusterMode ? 5000 : 3000));
+
+    const infoAfter = await cleanupClient.info(['CLIENTS']);
+    const connAfter = parseConnectedClients(infoAfter);
+
+    // Connections after close should drop below the peak
+    expect(connAfter).toBeLessThan(connOpen);
+
+    // Verify the system is still functional after mass create/close
+    const verifyQ = new Queue(`${Q_PREFIX}-q0`, { connection: CONNECTION });
+    const verifyJob = await verifyQ.add('verify-alive', { alive: true });
+    expect(verifyJob).not.toBeNull();
+    expect(verifyJob!.id).toBeTruthy();
+    await verifyQ.close();
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// Sidekiq #8: Large payload handling (500KB)
+// ---------------------------------------------------------------------------
+
+describeEachMode('Sidekiq large payload: 500KB job data roundtrips without corruption', (CONNECTION) => {
+  const Q = 'bp-sidekiq-large-payload-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('500KB payload is stored and retrieved intact through processing', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    // Generate a 500KB payload with varied content to detect corruption
+    const KB = 1024;
+    const SIZE = 500 * KB;
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let largeString = '';
+    for (let i = 0; i < SIZE; i++) {
+      largeString += chars[i % chars.length];
+    }
+
+    const payload = {
+      marker: 'large-payload-test',
+      blob: largeString,
+      nested: { arr: [1, 2, 3], flag: true },
+    };
+
+    const job = await queue.add('big-job', payload);
+    expect(job).not.toBeNull();
+
+    // Process the job and verify data inside the processor
+    let receivedData: any = null;
+    let receivedId: string | null = null;
+
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
+
+      const worker = new Worker(
+        Q,
+        async (processedJob: any) => {
+          receivedData = processedJob.data;
+          receivedId = processedJob.id;
+          return { processed: true, dataLength: JSON.stringify(processedJob.data).length };
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+      );
+
+      worker.on('completed', () => {
+        clearTimeout(timeout);
+        worker.close(true).then(resolve);
+      });
+      worker.on('error', () => {});
+    });
+
+    await done;
+
+    // Verify the data roundtripped correctly
+    expect(receivedId).toBe(job!.id);
+    expect(receivedData).not.toBeNull();
+    expect(receivedData.marker).toBe('large-payload-test');
+    expect(receivedData.blob).toBe(largeString);
+    expect(receivedData.blob.length).toBe(SIZE);
+    expect(receivedData.nested.arr).toEqual([1, 2, 3]);
+    expect(receivedData.nested.flag).toBe(true);
+
+    // Verify the job is completed in the server
+    const k = buildKeys(Q);
+    const state = await cleanupClient.hget(k.job(job!.id), 'state');
+    expect(String(state)).toBe('completed');
+
+    // Verify the returnvalue was stored
+    const rv = await cleanupClient.hget(k.job(job!.id), 'returnvalue');
+    const parsed = JSON.parse(String(rv));
+    expect(parsed.processed).toBe(true);
+    expect(parsed.dataLength).toBeGreaterThan(500000);
+
+    await queue.close();
+  }, 25000);
+});
+
+// ---------------------------------------------------------------------------
+// Helper: parse connected_clients from INFO CLIENTS output
+// ---------------------------------------------------------------------------
+
+function parseConnectedClients(info: string | Record<string, string>): number {
+  if (typeof info === 'string') {
+    const match = info.match(/connected_clients:(\d+)/);
+    return match ? parseInt(match[1], 10) : 0;
+  }
+  // Cluster mode: info is Record<nodeAddress, infoString>
+  let total = 0;
+  for (const nodeInfo of Object.values(info)) {
+    const match = nodeInfo.match(/connected_clients:(\d+)/);
+    if (match) total += parseInt(match[1], 10);
+  }
+  return total;
+}
