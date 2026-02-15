@@ -4,18 +4,18 @@ High-performance message queue for Node.js, built on Valkey/Redis Streams with n
 
 ## Performance
 
-| Concurrency | glide-mq | BullMQ | Ratio |
-|-------------|----------|--------|-------|
-| c=1 | 4,376 jobs/s | 2,041 jobs/s | **2.1x faster** |
-| c=10 | 20,979 jobs/s | ~2,000 jobs/s | **10x faster** |
-| c=50 | 44,643 jobs/s | - | - |
+| Concurrency | Throughput |
+|-------------|-----------|
+| c=1 | 4,376 jobs/s |
+| c=10 | 20,979 jobs/s |
+| c=50 | 44,643 jobs/s |
 
-Benchmarked with no-op processor on localhost Valkey 8.0.
+No-op processor, Valkey 8.0, single node.
 
 ## Why
 
 - **Streams-first** - uses Redis Streams + consumer groups + PEL instead of Lists + BRPOPLPUSH. Fewer moving parts, built-in at-least-once delivery.
-- **Server Functions** - single `FUNCTION LOAD` instead of 53 EVAL scripts. Persistent across restarts, no NOSCRIPT cache-miss errors.
+- **Server Functions** - single `FUNCTION LOAD` instead of dozens of EVAL scripts. Persistent across restarts, no NOSCRIPT cache-miss errors.
 - **1 RTT per job** - `completeAndFetchNext` combines job completion + next job fetch + activation in a single FCALL round trip.
 - **Cluster-native** - hash-tagged keys from day one. No afterthought `{braces}` requirement.
 - **Native bindings** - built on [@glidemq/speedkey](https://github.com/avifenesh/speedkey) (valkey-glide with Rust core + NAPI).
