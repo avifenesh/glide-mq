@@ -8,6 +8,13 @@
 - Repos: github.com/avifenesh/glide-mq, github.com/avifenesh/speedkey, github.com/avifenesh/glidemq-dashboard
 - Research guides in agent-knowledge/ (gitignored)
 
+# Architecture
+- All queue operations use Valkey Server Functions (FUNCTION LOAD + FCALL), not EVAL scripts.
+- Function library: src/functions/index.ts (loaded once per connection, persistent across restarts).
+- Keys are hash-tagged (glide:{queueName}:*) for cluster compatibility.
+- Streams-first: XREADGROUP + consumer groups + PEL for at-least-once delivery.
+- completeAndFetchNext: single FCALL that completes current job + fetches next (1 RTT/job).
+
 <critical-rules>
 
 # Rules
@@ -28,8 +35,8 @@
 - Always check the speedkey/valkey-glide API before using it. Read the actual type signatures. Never assume you know the API.
 - Never use `customCommand`. Always use the typed API methods. If FCALL needs deterministic routing in cluster mode, pass a dummy hash-tagged key like `{glidemq}:_` instead of using customCommand with route options.
 - Before every commit, review your own code.
-- Commit every logical change separately.
-- Run /deslop before every push (removes dead code, debug logs, ghost code, unnecessary comments).
+- Commit every logical change separately - makes bisect/revert possible and review cleaner.
+- Run /deslop before every push (skill that removes dead code, debug logs, ghost code, unnecessary comments).
 - A task is not done unless covered by tests, review orchestration, and delivery approval.
 - Fix all test failures. Never skip as "out of scope" or "pre-existing".
 - Always run git hooks. If a hook blocks, fix the reported issue.
@@ -57,6 +64,7 @@
 - `npx vitest run tests/search.test.ts` - search feature tests
 - `npx vitest run tests/testing-mode.test.ts` - in-memory testing mode (no Valkey needed)
 - `npm run bench` - run benchmarks vs BullMQ
+- Import `{ TestQueue, TestWorker }` from `glide-mq/testing` for in-memory testing (no Valkey needed)
 
 <end-reminder>
 
