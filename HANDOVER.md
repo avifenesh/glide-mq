@@ -2,41 +2,30 @@
 
 ## Current State (2026-02-15)
 
-### @glidemq/speedkey
-- Migrated to @glidemq npm scope
-- v0.2.0 CD running (all 7 platform packages under @glidemq/speedkey-*)
-- Repo: github.com/avifenesh/speedkey (public)
-- Scoped packages bypass npm spam detection permanently
+### Published packages
+- **glide-mq@0.1.0** on npm
+- **@glidemq/speedkey@0.2.0** on npm (7 platform binaries including Windows)
 
-### glide-mq
-- Repo: github.com/avifenesh/glide-mq (public)
-- CI: typecheck + unit tests + integration tests (all green)
-- 750+ test executions (standalone + cluster parameterized)
-- README written
+### Repos
+- github.com/avifenesh/glide-mq (queue library)
+- github.com/avifenesh/speedkey (native Valkey client)
+- github.com/avifenesh/glide-mq-demo (e-commerce demo app)
 
 ### Performance
-- c=1: 4,376 jobs/s (BullMQ: 2,041 - 2.1x faster)
-- c=10: 20,979 jobs/s (10x faster)
+- c=1: 4,376 jobs/s (2.1x BullMQ)
+- c=10: 20,979 jobs/s (10x BullMQ)
 - c=50: 44,643 jobs/s
-- Key: completeAndFetchNext FCALL (1 RTT/job steady state)
 
-### Features
-- Queue, Worker, Job, QueueEvents, FlowProducer
-- 15 Valkey Functions (FUNCTION LOAD/FCALL)
-- Streams-first (XREADGROUP + PEL + XAUTOCLAIM)
-- Cluster-native, dedup, rate limiting, global concurrency
-- Per-job timeout, job log, lock renewal, DLQ
-- Workflows (chain, group, chord), job revocation
-- Schedulers (cron + interval), metrics, OpenTelemetry
-- Graceful shutdown, connection recovery, custom backoff
+### CI
+- glide-mq: typecheck + unit tests + integration tests (all green)
+- speedkey: 6-target CD with platform package publishing
 
 ### Testing
+- 750+ test executions (standalone + cluster parameterized)
 - 44 bulletproof tests (known bugs from BullMQ, Celery, Sidekiq, Bee-Queue)
 - 20 fuzz/chaos tests
 - 4-pass code review (73 findings addressed)
-- Code simplified twice
+- Demo app validates full pipeline end-to-end
 
-### Next
-- Wait for @glidemq/speedkey v0.2.0 publish
-- Switch glide-mq dep from file: to npm
-- Publish glide-mq to npm
+### NPM token
+- Needs rotation (was shared in conversation)
