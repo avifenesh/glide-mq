@@ -4,21 +4,41 @@ High-performance message queue for Node.js, built on Valkey/Redis Streams with [
 
 ## Performance
 
+### Processing throughput
+
 | Concurrency | Throughput |
 |-------------|-----------|
 | c=1 | 4,376 jobs/s |
-| c=10 | 20,979 jobs/s |
-| c=50 | 44,643 jobs/s |
+| c=5 | 14,925 jobs/s |
+| c=10 | 15,504 jobs/s |
+| c=50 | 48,077 jobs/s |
+
+### Bulk add (addBulk with Batch API)
+
+| Jobs | Serial | Batch | Speedup |
+|------|--------|-------|---------|
+| 200 | 76ms | 14ms | 5.4x |
+| 1,000 | 228ms | 18ms | 12.7x |
+
+### Payload compression
+
+| Mode | Stored size (15KB payload) | Savings |
+|------|--------------------------|---------|
+| Plain | 15,327 bytes | - |
+| Gzip | 331 bytes | 98% |
 
 No-op processor, Valkey 8.0, single node.
 
 ## Why
 
-- **Streams-first** - uses Redis Streams + consumer groups + PEL instead of Lists + BRPOPLPUSH. Fewer moving parts, built-in at-least-once delivery.
+- **Streams-first** - Redis Streams + consumer groups + PEL instead of Lists + BRPOPLPUSH. Fewer moving parts, built-in at-least-once delivery.
 - **Server Functions** - single `FUNCTION LOAD` instead of dozens of EVAL scripts. Persistent across restarts, no NOSCRIPT cache-miss errors.
 - **1 RTT per job** - `completeAndFetchNext` combines job completion + next job fetch + activation in a single FCALL round trip.
 - **Cluster-native** - hash-tagged keys from day one. No afterthought `{braces}` requirement.
 - **Native bindings** - built on [@glidemq/speedkey](https://github.com/avifenesh/speedkey) (valkey-glide with Rust core + NAPI).
+- **AZ-Affinity** - route reads to same-AZ replicas, reducing cross-AZ latency and AWS costs by up to 75%.
+- **Batch pipelining** - `addBulk` uses GLIDE's Batch API for single round-trip bulk operations (12.7x faster than serial).
+- **Transparent compression** - gzip payloads with zero-config decompression on workers (98% savings on repetitive data).
 
 ## Install
 
@@ -68,6 +88,7 @@ worker.on('failed', (job, err) => console.log(`Job ${job.id} failed: ${err.messa
 - **Global concurrency** - limit active jobs across all workers
 - **Job retention** - removeOnComplete/removeOnFail (count, age-based)
 - **Priorities** - encoded in sorted set scores, FIFO within same priority
+- **Compression** - transparent gzip for job payloads (Node.js zlib, zero deps)
 
 ### Workflows
 - **FlowProducer** - atomic parent-child job trees with nested flows
@@ -81,6 +102,12 @@ worker.on('failed', (job, err) => console.log(`Job ${job.id} failed: ${err.messa
 - **Metrics** - getJobCounts, getMetrics
 - **OpenTelemetry** - optional spans for Queue.add, Worker.process, FlowProducer.add
 
+### Cloud-Native (GLIDE-exclusive)
+- **AZ-Affinity routing** - route reads to same-AZ replicas for lower latency and reduced cross-AZ costs
+- **IAM authentication** - native AWS ElastiCache/MemoryDB auth with auto-token refresh
+- **Batch API** - single round-trip bulk operations via GLIDE's non-atomic pipeline
+- **Multiplexed connections** - single connection per node instead of connection pools
+
 ### Operations
 - **Graceful shutdown** - SIGTERM/SIGINT handler, waits for active jobs
 - **Connection recovery** - exponential backoff reconnect with function library reload
@@ -93,8 +120,16 @@ worker.on('failed', (job, err) => console.log(`Job ${job.id} failed: ${err.messa
 
 ```typescript
 const queue = new Queue('name', {
-  connection: { addresses: [{ host, port }], clusterMode: false },
-  prefix: 'glide', // key prefix (default: 'glide')
+  connection: {
+    addresses: [{ host, port }],
+    clusterMode: false,
+    readFrom: ReadFrom.AZAffinity,  // route reads to same-AZ replicas
+    clientAz: 'us-east-1a',
+    credentials: { password: 'secret' },
+    // or IAM: { type: 'iam', serviceType: 'elasticache', region: 'us-east-1', userId: 'user', clusterName: 'my-cluster' }
+  },
+  prefix: 'glide',
+  compression: 'gzip',  // transparent payload compression
 });
 
 await queue.add('jobName', data, {
@@ -107,6 +142,12 @@ await queue.add('jobName', data, {
   deduplication: { id: 'unique-key', mode: 'simple' },
 });
 
+// Bulk add - 12.7x faster than serial via Batch API
+await queue.addBulk([
+  { name: 'job1', data: { a: 1 } },
+  { name: 'job2', data: { a: 2 } },
+]);
+
 await queue.pause();
 await queue.resume();
 await queue.getJobCounts();  // { waiting, active, delayed, completed, failed }
@@ -118,6 +159,7 @@ await queue.close();
 
 ```typescript
 const worker = new Worker('name', async (job) => {
+  await job.log('Starting processing');
   await job.updateProgress(50);
   return result;
 }, {
@@ -127,6 +169,10 @@ const worker = new Worker('name', async (job) => {
   stalledInterval: 30000,
   lockDuration: 30000,
   limiter: { max: 100, duration: 60000 },
+  deadLetterQueue: { name: 'failed-jobs' },
+  backoffStrategies: {
+    custom: (attemptsMade, err) => attemptsMade * 1000,
+  },
 });
 
 worker.on('completed', (job, result) => {});
@@ -179,6 +225,8 @@ events.on('stalled', ({ jobId }) => {});
 const connection = {
   addresses: [{ host: 'cluster-node', port: 7000 }],
   clusterMode: true,
+  readFrom: ReadFrom.AZAffinity,
+  clientAz: 'us-east-1a',
 };
 
 // Everything works the same - keys are hash-tagged automatically
