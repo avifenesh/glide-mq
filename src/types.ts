@@ -1,12 +1,51 @@
-import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient, ReadFrom } from '@glidemq/speedkey';
 
 export type Client = GlideClient | GlideClusterClient;
+
+export type { ReadFrom } from '@glidemq/speedkey';
+
+/** Standard password-based credentials. */
+export interface PasswordCredentials {
+  username?: string;
+  password: string;
+}
+
+/** IAM authentication credentials for AWS ElastiCache/MemoryDB. */
+export interface IamCredentials {
+  type: 'iam';
+  /** ElastiCache or MemoryDB. */
+  serviceType: 'elasticache' | 'memorydb';
+  /** AWS region (e.g. 'us-east-1'). */
+  region: string;
+  /** The IAM user ID used for authentication. Maps to username in Valkey AUTH. */
+  userId: string;
+  /** The ElastiCache/MemoryDB cluster name. */
+  clusterName: string;
+  /** Token refresh interval in seconds. Defaults to 300 (5 min). */
+  refreshIntervalSeconds?: number;
+}
 
 export interface ConnectionOptions {
   addresses: { host: string; port: number }[];
   useTLS?: boolean;
-  credentials?: { username?: string; password: string };
+  credentials?: PasswordCredentials | IamCredentials;
   clusterMode?: boolean;
+  /**
+   * Read strategy for the client. Controls how read commands are routed.
+   * - 'primary': Always read from primary (default).
+   * - 'preferReplica': Round-robin across replicas, fallback to primary.
+   * - 'AZAffinity': Route reads to replicas in the same availability zone.
+   * - 'AZAffinityReplicasAndPrimary': Route reads to any node in the same AZ.
+   *
+   * AZ-based strategies require `clientAz` to be set.
+   */
+  readFrom?: ReadFrom;
+  /**
+   * Availability zone of the client (e.g., 'us-east-1a').
+   * Used with readFrom 'AZAffinity' or 'AZAffinityReplicasAndPrimary' to route
+   * read commands to nodes in the same AZ, reducing cross-AZ latency and cost.
+   */
+  clientAz?: string;
 }
 
 export interface DeadLetterQueueOptions {
@@ -21,6 +60,8 @@ export interface QueueOptions {
   prefix?: string;
   /** Dead letter queue configuration. Jobs that exhaust retries are moved here. */
   deadLetterQueue?: DeadLetterQueueOptions;
+  /** Enable transparent compression of job data. Default: 'none'. */
+  compression?: 'none' | 'gzip';
 }
 
 export interface WorkerOptions extends QueueOptions {

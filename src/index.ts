@@ -17,12 +17,15 @@ export type {
   FlowProducerOptions,
   QueueEventsOptions,
   ConnectionOptions,
+  PasswordCredentials,
+  IamCredentials,
   ScheduleOpts,
   JobTemplate,
   SchedulerEntry,
   Metrics,
   JobCounts,
   DeadLetterQueueOptions,
+  ReadFrom,
 } from './types';
 
 export { GlideMQError, ConnectionError } from './errors';

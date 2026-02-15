@@ -1,7 +1,7 @@
 import type { JobOptions, Client } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob } from './functions/index';
-import { calculateBackoff } from './utils';
+import { calculateBackoff, decompress } from './utils';
 
 export class Job<D = any, R = any> {
   readonly id: string;
@@ -255,7 +255,7 @@ export class Job<D = any, R = any> {
     let data: D;
     let opts: JobOptions;
     let returnvalue: R | undefined;
-    try { data = JSON.parse(hash.data || '{}'); } catch { data = {} as D; }
+    try { data = JSON.parse(decompress(hash.data || '{}')); } catch { data = {} as D; }
     try { opts = JSON.parse(hash.opts || '{}'); } catch { opts = {}; }
     try { returnvalue = hash.returnvalue ? JSON.parse(hash.returnvalue) : undefined; } catch { returnvalue = undefined; }
 

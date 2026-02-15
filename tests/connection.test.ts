@@ -21,6 +21,10 @@ vi.mock('@glidemq/speedkey', () => {
   return {
     GlideClient: MockGlideClient,
     GlideClusterClient: MockGlideClusterClient,
+    ServiceType: {
+      Elasticache: 'Elasticache',
+      MemoryDB: 'MemoryDB',
+    },
   };
 });
 
@@ -58,6 +62,8 @@ describe('createClient', () => {
       addresses: [{ host: '127.0.0.1', port: 6379 }],
       useTLS: undefined,
       credentials: undefined,
+      readFrom: undefined,
+      clientAz: undefined,
     });
     expect(GlideClusterClient.createClient).not.toHaveBeenCalled();
     expect(client).toBe(mockClient);
@@ -73,6 +79,8 @@ describe('createClient', () => {
       addresses: [{ host: '127.0.0.1', port: 7000 }],
       useTLS: undefined,
       credentials: undefined,
+      readFrom: undefined,
+      clientAz: undefined,
     });
     expect(GlideClient.createClient).not.toHaveBeenCalled();
     expect(client).toBe(mockClient);
@@ -94,7 +102,84 @@ describe('createClient', () => {
       addresses: [{ host: 'secure.example.com', port: 6380 }],
       useTLS: true,
       credentials: { username: 'admin', password: 'secret' },
+      readFrom: undefined,
+      clientAz: undefined,
     });
+  });
+
+  it('should map IAM credentials to speedkey ServerCredentials format', async () => {
+    const mockClient = makeMockClient();
+    vi.mocked(GlideClient.createClient).mockResolvedValue(mockClient as any);
+
+    const opts = {
+      addresses: [{ host: 'my-cluster.amazonaws.com', port: 6379 }],
+      useTLS: true,
+      credentials: {
+        type: 'iam' as const,
+        serviceType: 'elasticache' as const,
+        region: 'us-east-1',
+        userId: 'my-iam-user',
+        clusterName: 'my-cluster',
+      },
+    };
+
+    await createClient(opts);
+
+    const call = vi.mocked(GlideClient.createClient).mock.calls[0][0];
+    expect(call.credentials).toEqual({
+      username: 'my-iam-user',
+      iamConfig: {
+        clusterName: 'my-cluster',
+        service: 'Elasticache',
+        region: 'us-east-1',
+      },
+    });
+  });
+
+  it('should map IAM credentials for MemoryDB service type', async () => {
+    const mockClient = makeMockClient();
+    vi.mocked(GlideClient.createClient).mockResolvedValue(mockClient as any);
+
+    const opts = {
+      addresses: [{ host: 'my-memorydb.amazonaws.com', port: 6379 }],
+      useTLS: true,
+      credentials: {
+        type: 'iam' as const,
+        serviceType: 'memorydb' as const,
+        region: 'eu-west-1',
+        userId: 'db-user',
+        clusterName: 'my-memorydb-cluster',
+        refreshIntervalSeconds: 600,
+      },
+    };
+
+    await createClient(opts);
+
+    const call = vi.mocked(GlideClient.createClient).mock.calls[0][0];
+    expect(call.credentials).toEqual({
+      username: 'db-user',
+      iamConfig: {
+        clusterName: 'my-memorydb-cluster',
+        service: 'MemoryDB',
+        region: 'eu-west-1',
+        refreshIntervalSeconds: 600,
+      },
+    });
+  });
+
+  it('should pass password credentials unchanged', async () => {
+    const mockClient = makeMockClient();
+    vi.mocked(GlideClient.createClient).mockResolvedValue(mockClient as any);
+
+    const opts = {
+      addresses: [{ host: 'localhost', port: 6379 }],
+      credentials: { password: 'secret123' },
+    };
+
+    await createClient(opts);
+
+    const call = vi.mocked(GlideClient.createClient).mock.calls[0][0];
+    expect(call.credentials).toEqual({ password: 'secret123' });
   });
 
   it('should throw ConnectionError when client creation fails', async () => {

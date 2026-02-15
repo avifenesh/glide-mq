@@ -1,16 +1,43 @@
-import { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
-import type { ConnectionOptions, Client } from './types';
+import { GlideClient, GlideClusterClient, ServiceType } from '@glidemq/speedkey';
+import type { BaseClientConfiguration, ServerCredentials } from '@glidemq/speedkey';
+import type { ConnectionOptions, Client, IamCredentials } from './types';
 import { ConnectionError } from './errors';
 import { LIBRARY_VERSION, LIBRARY_SOURCE } from './functions/index';
+
+function isIamCredentials(creds: NonNullable<ConnectionOptions['credentials']>): creds is IamCredentials {
+  return 'type' in creds && creds.type === 'iam';
+}
+
+function buildCredentials(creds?: ConnectionOptions['credentials']): ServerCredentials | undefined {
+  if (!creds) return undefined;
+  if (!isIamCredentials(creds)) return creds;
+
+  const serviceMap: Record<string, ServiceType> = {
+    elasticache: ServiceType.Elasticache,
+    memorydb: ServiceType.MemoryDB,
+  };
+
+  return {
+    username: creds.userId,
+    iamConfig: {
+      clusterName: creds.clusterName,
+      service: serviceMap[creds.serviceType],
+      region: creds.region,
+      ...(creds.refreshIntervalSeconds != null && { refreshIntervalSeconds: creds.refreshIntervalSeconds }),
+    },
+  };
+}
 
 /**
  * Create a GlideClient (standalone) or GlideClusterClient (cluster) based on options.
  */
 export async function createClient(opts: ConnectionOptions): Promise<Client> {
-  const config = {
+  const config: BaseClientConfiguration = {
     addresses: opts.addresses,
     useTLS: opts.useTLS,
-    credentials: opts.credentials,
+    credentials: buildCredentials(opts.credentials),
+    readFrom: opts.readFrom,
+    clientAz: opts.clientAz,
   };
 
   try {

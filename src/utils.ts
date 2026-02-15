@@ -1,4 +1,31 @@
+import { gzipSync, gunzipSync } from 'zlib';
+
 const DEFAULT_PREFIX = 'glide';
+
+// ---- Compression helpers ----
+
+const COMPRESSED_PREFIX = 'gz:';
+
+/**
+ * Compress a string with gzip and return a prefixed base64 string.
+ * Format: 'gz:' + base64(gzipped data)
+ */
+export function compress(data: string): string {
+  const buf = gzipSync(Buffer.from(data, 'utf8'));
+  return COMPRESSED_PREFIX + buf.toString('base64');
+}
+
+/**
+ * Decompress a 'gz:'-prefixed base64 string back to the original string.
+ * If the input is not compressed (no 'gz:' prefix), returns it as-is.
+ */
+export function decompress(data: string): string {
+  if (!data.startsWith(COMPRESSED_PREFIX)) {
+    return data;
+  }
+  const buf = Buffer.from(data.slice(COMPRESSED_PREFIX.length), 'base64');
+  return gunzipSync(buf).toString('utf8');
+}
 
 // Valkey SCAN glob special characters that must be escaped in key patterns
 const GLOB_SPECIAL = /[*?\[\]\\]/g;

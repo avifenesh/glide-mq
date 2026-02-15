@@ -1,9 +1,9 @@
 import { EventEmitter } from 'events';
-import { InfBoundary } from '@glidemq/speedkey';
+import { InfBoundary, Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts } from './types';
 import { Job } from './job';
-import { buildKeys, keyPrefixPattern, nextCronOccurrence, hashDataToRecord, extractJobIdsFromStreamEntries } from './utils';
+import { buildKeys, keyPrefixPattern, nextCronOccurrence, hashDataToRecord, extractJobIdsFromStreamEntries, compress } from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
 import {
   LIBRARY_SOURCE,
@@ -79,9 +79,13 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const maxAttempts = opts?.attempts ?? 0;
 
         // Payload size validation - prevent DoS via oversized jobs
-        const serialized = JSON.stringify(data);
+        let serialized = JSON.stringify(data);
         if (serialized.length > 1_048_576) {
           throw new Error(`Job data exceeds maximum size (${serialized.length} bytes > 1MB). Use smaller payloads or store large data externally.`);
+        }
+
+        if (this.opts.compression === 'gzip') {
+          serialized = compress(serialized);
         }
 
         let jobId: string;
@@ -141,47 +145,86 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   /**
    * Add multiple jobs to the queue in a pipeline.
-   * Each job is added via a separate addJob FCALL (non-atomic across jobs).
+   * Uses GLIDE's Batch API to pipeline all addJob FCALL commands in a single round trip.
+   * Non-atomic: each job is independent, but all are sent together for efficiency.
    */
   async addBulk(
     jobs: { name: string; data: D; opts?: JobOptions }[],
   ): Promise<Job<D, R>[]> {
+    if (jobs.length === 0) return [];
+
     const client = await this.getClient();
-    const results: Job<D, R>[] = [];
-    for (const entry of jobs) {
-      const timestamp = Date.now();
+    const isCluster = this.opts.connection.clusterMode ?? false;
+    const timestamp = Date.now();
+
+    // Prepare job metadata for each entry
+    const prepared = jobs.map((entry) => {
       const opts = entry.opts ?? {};
       const delay = opts.delay ?? 0;
       const priority = opts.priority ?? 0;
       const parentId = opts.parent ? opts.parent.id : '';
       const maxAttempts = opts.attempts ?? 0;
 
-      const jobId = await addJob(
-        client,
-        this.keys,
-        entry.name,
-        JSON.stringify(entry.data),
-        JSON.stringify(opts),
-        timestamp,
-        delay,
-        priority,
-        parentId,
-        maxAttempts,
-      );
+      let serializedData = JSON.stringify(entry.data);
+      if (this.opts.compression === 'gzip') {
+        serializedData = compress(serializedData);
+      }
 
+      return { entry, opts, delay, priority, parentId, maxAttempts, serializedData };
+    });
+
+    // Build a batch with all fcall commands
+    const keys = [this.keys.id, this.keys.stream, this.keys.scheduled, this.keys.events];
+
+    if (isCluster) {
+      const batch = new ClusterBatch(false);
+      for (const p of prepared) {
+        batch.fcall('glidemq_addJob', keys, [
+          p.entry.name, p.serializedData, JSON.stringify(p.opts),
+          timestamp.toString(), p.delay.toString(), p.priority.toString(),
+          p.parentId, p.maxAttempts.toString(),
+        ]);
+      }
+      const rawResults = await (client as GlideClusterClient).exec(batch, true);
+      return this.buildBulkJobs(client, prepared, rawResults, timestamp);
+    } else {
+      const batch = new Batch(false);
+      for (const p of prepared) {
+        batch.fcall('glidemq_addJob', keys, [
+          p.entry.name, p.serializedData, JSON.stringify(p.opts),
+          timestamp.toString(), p.delay.toString(), p.priority.toString(),
+          p.parentId, p.maxAttempts.toString(),
+        ]);
+      }
+      const rawResults = await (client as GlideClient).exec(batch, true);
+      return this.buildBulkJobs(client, prepared, rawResults, timestamp);
+    }
+  }
+
+  /** @internal Build Job objects from batch exec results. */
+  private buildBulkJobs(
+    client: Client,
+    prepared: { entry: { name: string; data: D; opts?: JobOptions }; opts: JobOptions; parentId: string }[],
+    rawResults: unknown[] | null,
+    timestamp: number,
+  ): Job<D, R>[] {
+    if (!rawResults || rawResults.length !== prepared.length) {
+      throw new Error(`addBulk batch returned ${rawResults?.length ?? 'null'} results, expected ${prepared.length}`);
+    }
+    return prepared.map((p, i) => {
+      const jobId = String(rawResults[i]);
       const job = new Job<D, R>(
         client,
         this.keys,
-        String(jobId),
-        entry.name,
-        entry.data,
-        opts,
+        jobId,
+        p.entry.name,
+        p.entry.data,
+        p.opts,
       );
       job.timestamp = timestamp;
-      job.parentId = parentId || undefined;
-      results.push(job);
-    }
-    return results;
+      job.parentId = p.parentId || undefined;
+      return job;
+    });
   }
 
   /**
