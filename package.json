@@ -42,13 +42,9 @@
     "vitest": "^3"
   },
   "peerDependencies": {
-    "express": "^4 || ^5",
     "@opentelemetry/api": "^1.0.0"
   },
   "peerDependenciesMeta": {
-    "express": {
-      "optional": true
-    },
     "@opentelemetry/api": {
       "optional": true
     }

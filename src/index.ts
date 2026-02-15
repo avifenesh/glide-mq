@@ -36,6 +36,3 @@ export { chain, group, chord } from './workflows';
 export type { WorkflowJobDef } from './workflows';
 
 export { setTracer, isTracingEnabled } from './telemetry';
-
-export { createDashboard } from './dashboard';
-export type { DashboardOptions } from './dashboard';
