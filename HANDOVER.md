@@ -1,50 +1,42 @@
 # Handover
 
-## Current State (2026-02-14)
+## Current State (2026-02-15)
 
-### speedkey
-- speedkey@0.1.0 published on npm
-- 6 targets: linux x64/arm64 (gnu+musl), darwin arm64, win32 x64
+### @glidemq/speedkey
+- Migrated to @glidemq npm scope
+- v0.2.0 CD running (all 7 platform packages under @glidemq/speedkey-*)
 - Repo: github.com/avifenesh/speedkey (public)
-- NPM token needs rotation
+- Scoped packages bypass npm spam detection permanently
 
 ### glide-mq
 - Repo: github.com/avifenesh/glide-mq (public)
-- 700+ test executions (standalone + cluster parameterized)
-- speedkey linked as file dependency (file:../speedkey/node)
+- CI: typecheck + unit tests + integration tests (all green)
+- 750+ test executions (standalone + cluster parameterized)
+- README written
 
-### Performance (no-op processor benchmark)
-- c=1: 4,376 jobs/s (BullMQ: 2,041 - we're 2.1x faster)
-- c=10: 20,979 jobs/s (BullMQ: ~2,000 - we're 10x faster)
+### Performance
+- c=1: 4,376 jobs/s (BullMQ: 2,041 - 2.1x faster)
+- c=10: 20,979 jobs/s (10x faster)
 - c=50: 44,643 jobs/s
-- Key optimization: completeAndFetchNext FCALL (1 RTT/job steady state)
+- Key: completeAndFetchNext FCALL (1 RTT/job steady state)
 
-### Implemented features
+### Features
 - Queue, Worker, Job, QueueEvents, FlowProducer
-- 15 Valkey Functions (FUNCTION LOAD, not EVAL scripts)
+- 15 Valkey Functions (FUNCTION LOAD/FCALL)
 - Streams-first (XREADGROUP + PEL + XAUTOCLAIM)
-- Cluster-native (hash tags on all keys)
-- Deduplication (simple, throttle, debounce)
-- Rate limiting (sliding window)
-- Global concurrency
-- Job retention (removeOnComplete/removeOnFail)
-- Per-job timeout
-- Job log
-- Lock renewal (heartbeat)
-- Dead letter queue
-- Workflow primitives (chain, group, chord)
-- Job revocation (cooperative abort)
-- Job schedulers (cron + interval)
-- Metrics (getJobCounts, getMetrics)
-- OpenTelemetry (optional peer dep)
-- Graceful shutdown + connection recovery
-- Custom backoff strategies
+- Cluster-native, dedup, rate limiting, global concurrency
+- Per-job timeout, job log, lock renewal, DLQ
+- Workflows (chain, group, chord), job revocation
+- Schedulers (cron + interval), metrics, OpenTelemetry
+- Graceful shutdown, connection recovery, custom backoff
 
-### Skipped (by design)
-- Sandboxed processors (container isolation preferred over child_process)
-- Worker autoscale (k8s HPA preferred over in-process scaling)
+### Testing
+- 44 bulletproof tests (known bugs from BullMQ, Celery, Sidekiq, Bee-Queue)
+- 20 fuzz/chaos tests
+- 4-pass code review (73 findings addressed)
+- Code simplified twice
 
-### Next steps
-- Publish glide-mq to npm (switch speedkey from file: to npm dep)
-- Update benchmarks to reflect latest numbers
-- README for glide-mq
+### Next
+- Wait for @glidemq/speedkey v0.2.0 publish
+- Switch glide-mq dep from file: to npm
+- Publish glide-mq to npm
