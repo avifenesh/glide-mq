@@ -21,7 +21,7 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "speedkey": "file:../speedkey/node"
+    "@glidemq/speedkey": "file:../speedkey/node"
   },
   "devDependencies": {
     "@types/node": "^22",

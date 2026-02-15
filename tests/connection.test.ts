@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GlideClient, GlideClusterClient } from 'speedkey';
+import { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import {
   createClient,
   createBlockingClient,
@@ -10,7 +10,7 @@ import { ConnectionError } from '../src/errors';
 import { LIBRARY_SOURCE, LIBRARY_VERSION } from '../src/functions/index';
 
 // Mock speedkey module
-vi.mock('speedkey', () => {
+vi.mock('@glidemq/speedkey', () => {
   const MockGlideClient = {
     createClient: vi.fn(),
   };

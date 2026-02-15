@@ -1,4 +1,4 @@
-import type { GlideClient, GlideClusterClient } from 'speedkey';
+import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 
 export type Client = GlideClient | GlideClusterClient;
 

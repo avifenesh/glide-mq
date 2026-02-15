@@ -1,4 +1,4 @@
-import { GlideClient, GlideClusterClient } from 'speedkey';
+import { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { ConnectionOptions, Client } from './types';
 import { ConnectionError } from './errors';
 import { LIBRARY_VERSION, LIBRARY_SOURCE } from './functions/index';

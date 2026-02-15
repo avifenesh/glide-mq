@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { GlideClient } from 'speedkey';
+import { GlideClient } from '@glidemq/speedkey';
 import { Worker } from '../src/worker';
 import { Queue } from '../src/queue';
 import { QueueEvents } from '../src/queue-events';
@@ -7,7 +7,7 @@ import { FlowProducer } from '../src/flow-producer';
 import { LIBRARY_VERSION } from '../src/functions/index';
 
 // Mock speedkey module
-vi.mock('speedkey', () => {
+vi.mock('@glidemq/speedkey', () => {
   const MockGlideClient = {
     createClient: vi.fn(),
   };

@@ -15,7 +15,7 @@
 
 import { describe } from 'vitest';
 
-const { GlideClient, GlideClusterClient } = require('speedkey') as typeof import('speedkey');
+const { GlideClient, GlideClusterClient } = require('@glidemq/speedkey') as typeof import('@glidemq/speedkey');
 const { buildKeys, keyPrefix } = require('../../dist/utils') as typeof import('../../src/utils');
 const { ensureFunctionLibrary } = require('../../dist/connection') as typeof import('../../src/connection');
 const { LIBRARY_SOURCE } = require('../../dist/functions/index') as typeof import('../../src/functions/index');

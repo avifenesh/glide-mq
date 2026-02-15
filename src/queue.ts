@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
-import { InfBoundary } from 'speedkey';
-import type { GlideClient, GlideClusterClient } from 'speedkey';
+import { InfBoundary } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts } from './types';
 import { Job } from './job';
 import { buildKeys, keyPrefixPattern, nextCronOccurrence, hashDataToRecord, extractJobIdsFromStreamEntries } from './utils';
@@ -378,7 +378,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
    */
   private async scanAndDelete(client: Client, pattern: string): Promise<void> {
     if (this.opts.connection.clusterMode) {
-      const { ClusterScanCursor } = await import('speedkey');
+      const { ClusterScanCursor } = await import('@glidemq/speedkey');
       const clusterClient = client as GlideClusterClient;
       let cursor = new ClusterScanCursor();
       while (!cursor.isFinished()) {

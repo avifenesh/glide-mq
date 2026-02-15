@@ -5,7 +5,7 @@ export default defineConfig({
   resolve: {
     alias: {
       // Force vitest to use the built JS output, not TS source
-      speedkey: path.resolve(__dirname, '../speedkey/node/build-ts/index.js'),
+      '@glidemq/speedkey': path.resolve(__dirname, '../speedkey/node/build-ts/index.js'),
     },
   },
   test: {

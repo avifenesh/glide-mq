@@ -1,5 +1,5 @@
 import type { Client } from '../types';
-import type { GlideReturnType } from 'speedkey';
+import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
 export const LIBRARY_VERSION = '5';
