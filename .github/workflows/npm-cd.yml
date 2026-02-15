@@ -43,7 +43,10 @@ jobs:
           else
             VERSION="${{ github.event.inputs.version }}"
           fi
-          npm version $VERSION --no-git-tag-version
+          CURRENT=$(node -p "require('./package.json').version")
+          if [ "$CURRENT" != "$VERSION" ]; then
+            npm version $VERSION --no-git-tag-version
+          fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Publish
