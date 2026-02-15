@@ -1,0 +1,12 @@
+src/
+tests/
+benchmarks/
+docs/
+agent-knowledge/
+.github/
+.claude/
+*.tgz
+tsconfig.json
+vitest.config.ts
+HANDOVER.md
+CLAUDE.md
