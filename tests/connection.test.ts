@@ -160,7 +160,7 @@ describe('ensureFunctionLibrary', () => {
 
   it('should load library when fcall throws (function not found)', async () => {
     const mockClient = makeMockClient({
-      fcall: vi.fn().mockRejectedValue(new Error('ERR Function not found')),
+      fcall: vi.fn().mockRejectedValue(new Error('Function not loaded')),
       functionLoad: vi.fn().mockResolvedValue('glidemq'),
     });
 
@@ -174,7 +174,7 @@ describe('ensureFunctionLibrary', () => {
 
   it('should use allPrimaries route when clusterMode is true', async () => {
     const mockClient = makeMockClient({
-      fcall: vi.fn().mockRejectedValue(new Error('ERR Function not found')),
+      fcall: vi.fn().mockRejectedValue(new Error('Function not loaded')),
       functionLoad: vi.fn().mockResolvedValue('glidemq'),
     });
 
@@ -188,7 +188,7 @@ describe('ensureFunctionLibrary', () => {
 
   it('should not use route when clusterMode is false', async () => {
     const mockClient = makeMockClient({
-      fcall: vi.fn().mockRejectedValue(new Error('ERR Function not found')),
+      fcall: vi.fn().mockRejectedValue(new Error('NOSCRIPT No matching script')),
       functionLoad: vi.fn().mockResolvedValue('glidemq'),
     });
 
@@ -203,7 +203,7 @@ describe('ensureFunctionLibrary', () => {
   it('should accept custom library source', async () => {
     const customSource = '#!lua name=custom\nreturn 1';
     const mockClient = makeMockClient({
-      fcall: vi.fn().mockRejectedValue(new Error('not found')),
+      fcall: vi.fn().mockRejectedValue(new Error('No matching script')),
       functionLoad: vi.fn().mockResolvedValue('custom'),
     });
 

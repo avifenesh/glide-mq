@@ -116,7 +116,7 @@ describe('Worker.close()', () => {
     const jobPromise = new Promise<void>((r) => { resolveJob = r; });
     const processor = vi.fn().mockReturnValue(jobPromise);
 
-    // Set up a mock that returns one job entry, then null
+    // Set up a mock that returns one job entry, then blocks forever
     let callIdx = 0;
     mockBlockingClient.xreadgroup.mockImplementation(async () => {
       callIdx++;
@@ -128,25 +128,29 @@ describe('Worker.close()', () => {
           },
         }];
       }
-      return null;
+      return new Promise(() => {}); // block forever
     });
 
-    mockCommandClient.hgetall.mockResolvedValue([
-      { field: 'id', value: '1' },
-      { field: 'name', value: 'test' },
-      { field: 'data', value: '{}' },
-      { field: 'opts', value: '{}' },
-      { field: 'timestamp', value: String(Date.now()) },
-      { field: 'attemptsMade', value: '0' },
-    ]);
-
-    mockCommandClient.fcall.mockImplementation((func: string) => {
+    // moveToActive returns a valid hash so the job is processed.
+    // completeAndFetchNext returns {next: false} so the loop exits after one job.
+    mockCommandClient.fcall.mockImplementation((func: string, _keys?: string[], args?: string[]) => {
       if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
-      if (func === 'glidemq_completeJob') return Promise.resolve(1);
+      if (func === 'glidemq_complete') return Promise.resolve(1);
+      if (func === 'glidemq_promote') return Promise.resolve(0);
+      if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
+      if (func === 'glidemq_completeAndFetchNext') {
+        const jobId = args?.[0] ?? '0';
+        return Promise.resolve(JSON.stringify({ completed: jobId, next: false }));
+      }
       return Promise.resolve(LIBRARY_VERSION);
     });
 
-    const worker = new Worker('test-queue', processor, defaultWorkerOpts);
+    // Use concurrency=2 so dispatchJob is used (tracks activePromises).
+    // At c=1, processJobFastPath runs inline and close() cannot wait for it.
+    const worker = new Worker('test-queue', processor, {
+      ...defaultWorkerOpts,
+      concurrency: 2,
+    });
     await worker.waitUntilReady();
 
     // Wait for the processor to be called

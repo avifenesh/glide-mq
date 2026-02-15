@@ -22,11 +22,16 @@ vi.mock('speedkey', () => {
 
 function makeMockClient(overrides: Record<string, unknown> = {}) {
   return {
-    fcall: vi.fn().mockImplementation((func: string) => {
+    fcall: vi.fn().mockImplementation((func: string, _keys?: string[], args?: string[]) => {
       if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
       if (func === 'glidemq_complete') return Promise.resolve(1);
       if (func === 'glidemq_fail') return Promise.resolve('failed');
       if (func === 'glidemq_promote') return Promise.resolve(0);
+      if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
+      if (func === 'glidemq_completeAndFetchNext') {
+        const jobId = args?.[0] ?? '0';
+        return Promise.resolve(JSON.stringify({ completed: jobId, next: false }));
+      }
       return Promise.resolve(LIBRARY_VERSION);
     }),
     functionLoad: vi.fn(),
@@ -170,10 +175,10 @@ describe('Worker', () => {
     await worker.close(true);
   });
 
-  it('should process a job and call completeJob on success', async () => {
+  it('should process a job and call completeAndFetchNext on success (c=1)', async () => {
     const processor = vi.fn().mockResolvedValue({ result: 42 });
 
-    // Return one message from xreadgroup, then null (to keep the loop going)
+    // Return one message from xreadgroup, then block forever
     let xreadCalls = 0;
     mockBlockingClient.xreadgroup = vi.fn().mockImplementation(() => {
       xreadCalls++;
@@ -190,15 +195,26 @@ describe('Worker', () => {
       return new Promise(() => {}); // block forever
     });
 
-    // Return job hash data
-    mockCommandClient.hgetall = vi.fn().mockResolvedValue([
-      { field: 'id', value: '1' },
-      { field: 'name', value: 'test-job' },
-      { field: 'data', value: '{"foo":"bar"}' },
-      { field: 'opts', value: '{}' },
-      { field: 'timestamp', value: '1000' },
-      { field: 'attemptsMade', value: '0' },
+    // At c=1, processJobFastPath calls moveToActive (fcall glidemq_moveToActive)
+    // which returns a JSON-encoded hash array, then completeAndFetchNext.
+    const jobHash = JSON.stringify([
+      'id', '1', 'name', 'test-job', 'data', '{"foo":"bar"}',
+      'opts', '{}', 'timestamp', '1000', 'attemptsMade', '0',
+      'state', 'active',
     ]);
+
+    mockCommandClient.fcall = vi.fn().mockImplementation((func: string, _keys?: string[], args?: string[]) => {
+      if (func === 'glidemq_version') return Promise.resolve(LIBRARY_VERSION);
+      if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
+      if (func === 'glidemq_promote') return Promise.resolve(0);
+      if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
+      if (func === 'glidemq_moveToActive') return Promise.resolve(jobHash);
+      if (func === 'glidemq_completeAndFetchNext') {
+        const jobId = args?.[0] ?? '0';
+        return Promise.resolve(JSON.stringify({ completed: jobId, next: false }));
+      }
+      return Promise.resolve(LIBRARY_VERSION);
+    });
 
     const completedJobs: any[] = [];
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
@@ -216,9 +232,9 @@ describe('Worker', () => {
     expect(jobArg.name).toBe('test-job');
     expect(jobArg.data).toEqual({ foo: 'bar' });
 
-    // completeJob is called via fcall('glidemq_complete', ...)
+    // At c=1, completeAndFetchNext is called instead of completeJob
     expect(mockCommandClient.fcall).toHaveBeenCalledWith(
-      'glidemq_complete',
+      'glidemq_completeAndFetchNext',
       [keys.stream, keys.completed, keys.events, keys.job('1')],
       expect.arrayContaining(['1', '1234567890-0']),
     );
@@ -426,8 +442,20 @@ describe('Worker', () => {
       return new Promise(() => {});
     });
 
-    // Return empty hash (job deleted)
-    mockCommandClient.hgetall = vi.fn().mockResolvedValue([]);
+    // moveToActive returns '' when job hash doesn't exist (job deleted)
+    mockCommandClient.fcall = vi.fn().mockImplementation((func: string, _keys?: string[], args?: string[]) => {
+      if (func === 'glidemq_version') return Promise.resolve(LIBRARY_VERSION);
+      if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
+      if (func === 'glidemq_promote') return Promise.resolve(0);
+      if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
+      if (func === 'glidemq_moveToActive') return Promise.resolve('');
+      if (func === 'glidemq_complete') return Promise.resolve(1);
+      if (func === 'glidemq_completeAndFetchNext') {
+        const jobId = args?.[0] ?? '0';
+        return Promise.resolve(JSON.stringify({ completed: jobId, next: false }));
+      }
+      return Promise.resolve(LIBRARY_VERSION);
+    });
 
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
     await worker.waitUntilReady();
@@ -436,7 +464,7 @@ describe('Worker', () => {
     // Processor should NOT have been called
     expect(processor).not.toHaveBeenCalled();
 
-    // But complete should have been called to ACK the orphaned entry
+    // completeJob is called to ACK the orphaned entry
     expect(mockCommandClient.fcall).toHaveBeenCalledWith(
       'glidemq_complete',
       expect.any(Array),

@@ -169,25 +169,30 @@ describe('Worker connection error recovery', () => {
 
     await worker.waitUntilReady();
 
-    // First poll fails
+    // First poll fails -> reconnectAndResume runs immediately and fails ->
+    // schedules setTimeout(reconnectAndResume, 2000)
     await vi.advanceTimersByTimeAsync(200);
+    const countAfterImmediate = createCount;
+    expect(countAfterImmediate).toBeGreaterThan(2); // init(2) + immediate reconnect(1)
 
-    // 1s backoff -> first reconnect fails
-    await vi.advanceTimersToNextTimerAsync();
-    const firstReconnectTime = createTimes[createTimes.length - 1];
-    const countAfterFirst = createCount;
-    expect(countAfterFirst).toBeGreaterThan(2);
+    // Advance 2s to fire the first backoff timer (reconnect attempt #2)
+    await vi.advanceTimersByTimeAsync(2000);
+    const countAfterFirstTimer = createCount;
+    expect(countAfterFirstTimer).toBeGreaterThan(countAfterImmediate);
 
-    // 2s backoff -> second reconnect fails
-    await vi.advanceTimersToNextTimerAsync();
-    const secondReconnectTime = createTimes[createTimes.length - 1];
-    const countAfterSecond = createCount;
-    expect(countAfterSecond).toBeGreaterThan(countAfterFirst);
+    // Advance 4s to fire the second backoff timer (reconnect attempt #3, exponential)
+    await vi.advanceTimersByTimeAsync(4000);
+    const countAfterSecondTimer = createCount;
+    expect(countAfterSecondTimer).toBeGreaterThan(countAfterFirstTimer);
 
-    // Verify exponential backoff: second delay should be longer than first
-    const firstDelay = firstReconnectTime - createTimes[1]; // time since init
-    const secondDelay = secondReconnectTime - firstReconnectTime;
-    expect(secondDelay).toBeGreaterThanOrEqual(firstDelay);
+    // Verify exponential backoff via timestamps:
+    // The gap between reconnect attempts should grow.
+    // createTimes[2] = immediate reconnect (no timer delay)
+    // createTimes[3] = after ~2s timer
+    // createTimes[4] = after ~4s timer
+    const gap1 = createTimes[3] - createTimes[2]; // should be ~2000
+    const gap2 = createTimes[4] - createTimes[3]; // should be ~4000
+    expect(gap2).toBeGreaterThanOrEqual(gap1);
 
     await worker.close(true);
   });
