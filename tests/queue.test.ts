@@ -11,9 +11,15 @@ vi.mock('@glidemq/speedkey', () => {
   const MockGlideClusterClient = {
     createClient: vi.fn(),
   };
+  const MockBatch = vi.fn().mockImplementation(() => ({
+    fcall: vi.fn().mockReturnThis(),
+  }));
   return {
     GlideClient: MockGlideClient,
     GlideClusterClient: MockGlideClusterClient,
+    Batch: MockBatch,
+    ClusterBatch: MockBatch,
+    InfBoundary: { PositiveInfinity: '+', NegativeInfinity: '-' },
   };
 });
 
@@ -27,6 +33,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     xgroupCreate: vi.fn(),
     zadd: vi.fn(),
     smembers: vi.fn().mockResolvedValue(new Set()),
+    exec: vi.fn().mockResolvedValue(['1', '2', '3']),
     close: vi.fn(),
     ...overrides,
   };
@@ -150,11 +157,8 @@ describe('Queue', () => {
 
   describe('addBulk', () => {
     it('should add multiple jobs and return an array of Job instances', async () => {
-      mockClient.fcall
-        .mockResolvedValueOnce(LIBRARY_VERSION)
-        .mockResolvedValueOnce('1')
-        .mockResolvedValueOnce('2')
-        .mockResolvedValueOnce('3');
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION);
+      mockClient.exec.mockResolvedValueOnce(['1', '2', '3']);
       const queue = new Queue('test-queue', connOpts);
 
       const jobs = await queue.addBulk([
