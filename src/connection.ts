@@ -68,7 +68,7 @@ export async function ensureFunctionLibrary(
     if (String(result) === LIBRARY_VERSION) return;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (!msg.includes('Function not loaded') && !msg.includes('No matching script') && !msg.includes('NOSCRIPT')) {
+    if (!msg.includes('Function not loaded') && !msg.includes('Function not found') && !msg.includes('No matching script') && !msg.includes('NOSCRIPT')) {
       throw err;
     }
   }
