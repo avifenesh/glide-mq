@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import type { QueueEventsOptions, Client } from './types';
-import { buildKeys, nextReconnectDelay } from './utils';
+import { buildKeys, nextReconnectDelay, reconnectWithBackoff } from './utils';
 import { createBlockingClient, ensureFunctionLibrary } from './connection';
 
 export class QueueEvents extends EventEmitter {
@@ -61,34 +61,34 @@ export class QueueEvents extends EventEmitter {
       });
   }
 
+  private reconnectCtx = {
+    isActive: () => this.running && !this.closing,
+    getBackoff: () => this.reconnectBackoff,
+    setBackoff: (ms: number) => { this.reconnectBackoff = ms; },
+    onError: (err: unknown) => { this.emit('error', err); },
+  };
+
   /**
    * Attempt to reconnect the client and resume polling after a connection error.
    */
   private async reconnectAndResume(): Promise<void> {
-    if (!this.running || this.closing) return;
+    await reconnectWithBackoff(
+      this.reconnectCtx,
+      async () => {
+        if (this.client) {
+          try { this.client.close(); } catch { /* ignore */ }
+          this.client = null;
+        }
 
-    try {
-      if (this.client) {
-        try { this.client.close(); } catch { /* ignore */ }
-        this.client = null;
-      }
-
-      this.client = await createBlockingClient(this.opts.connection);
-      await ensureFunctionLibrary(
-        this.client,
-        undefined,
-        this.opts.connection.clusterMode ?? false,
-      );
-
-      this.reconnectBackoff = 0;
-      this.pollLoop();
-    } catch (err) {
-      if (this.running && !this.closing) {
-        this.emit('error', err);
-        this.reconnectBackoff = nextReconnectDelay(this.reconnectBackoff);
-        setTimeout(() => this.reconnectAndResume(), this.reconnectBackoff);
-      }
-    }
+        this.client = await createBlockingClient(this.opts.connection);
+        await ensureFunctionLibrary(
+          this.client,
+          undefined,
+          this.opts.connection.clusterMode ?? false,
+        );
+      },
+      () => this.pollLoop(),
+    );
   }
 
   private async pollOnce(): Promise<void> {

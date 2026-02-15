@@ -771,23 +771,6 @@ redis.register_function('glidemq_revoke', function(keys, args)
 end)
 `;
 
-/**
- * Ensures the glidemq function library is loaded on the server.
- * Checks version; loads/replaces if missing or outdated.
- */
-export async function ensureLibrary(client: Client): Promise<void> {
-  try {
-    const result = await client.fcall('glidemq_version', [], []);
-    if (result === LIBRARY_VERSION) return;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (!msg.includes('Function not loaded') && !msg.includes('Function not found') && !msg.includes('No matching script') && !msg.includes('NOSCRIPT')) {
-      throw err;
-    }
-  }
-  await client.functionLoad(LIBRARY_SOURCE, { replace: true });
-}
-
 // ---- Key set type ----
 
 export type QueueKeys = ReturnType<typeof import('../utils').buildKeys>;

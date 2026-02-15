@@ -3,7 +3,6 @@ import { Job } from './job';
 import { buildKeys, keyPrefix } from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
 import { LIBRARY_SOURCE, addFlow } from './functions/index';
-import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
 
 export interface JobNode {
@@ -104,38 +103,19 @@ export class FlowProducer {
       return { job };
     }
 
-    // First, recursively process children that themselves have children.
-    // We need to build the direct children list for the addFlow call.
-    // Children with sub-children become sub-flows (added bottom-up).
-    const directChildren: FlowJob[] = [];
+    // Recursively process children that themselves have children (bottom-up).
     const childNodeMap: Map<number, JobNode> = new Map();
-
     for (let i = 0; i < flow.children.length; i++) {
       const child = flow.children[i];
       if (child.children && child.children.length > 0) {
-        // Sub-flow: add bottom-up recursively, then wire as dep of current parent.
-        const subNode = await this.addFlowRecursive(client, child);
-        childNodeMap.set(i, subNode);
-      }
-      directChildren.push(child);
-    }
-
-    // Build children data for addFlow - only include children without sub-children
-    // (children with sub-children were already created recursively)
-    const leafChildren: { index: number; child: FlowJob }[] = [];
-    for (let i = 0; i < flow.children.length; i++) {
-      if (!childNodeMap.has(i)) {
-        leafChildren.push({ index: i, child: flow.children[i] });
+        childNodeMap.set(i, await this.addFlowRecursive(client, child));
       }
     }
 
-    const timestamp = Date.now();
-    const parentOpts = flow.opts ?? {};
-
-    if (leafChildren.length > 0) {
-      // Use addFlow for the parent + leaf children
-      const childrenForLua = leafChildren.map(({ child }) => {
-        const childKeys = buildKeys(child.queueName, prefix);
+    // Build leaf children data for addFlow (children without sub-children)
+    const childrenForLua = flow.children
+      .filter((_, i) => !childNodeMap.has(i))
+      .map((child) => {
         const childOpts = child.opts ?? {};
         return {
           name: child.name,
@@ -144,138 +124,86 @@ export class FlowProducer {
           delay: childOpts.delay ?? 0,
           priority: childOpts.priority ?? 0,
           maxAttempts: childOpts.attempts ?? 0,
-          keys: childKeys,
+          keys: buildKeys(child.queueName, prefix),
           queuePrefix: keyPrefix(prefix, child.queueName),
           parentQueueName: parentQueueName,
         };
       });
 
-      // Build extra deps for sub-flow children (already created recursively)
-      const extraDeps: string[] = [];
-      for (const [i, subNode] of childNodeMap.entries()) {
-        const child = flow.children[i];
-        const childPrefix = keyPrefix(prefix, child.queueName);
-        extraDeps.push(`${childPrefix}:${subNode.job.id}`);
-      }
-
-      const ids = await addFlow(
-        client,
-        parentKeys,
-        flow.name,
-        JSON.stringify(flow.data),
-        JSON.stringify(parentOpts),
-        timestamp,
-        parentOpts.delay ?? 0,
-        parentOpts.priority ?? 0,
-        parentOpts.attempts ?? 0,
-        childrenForLua,
-        extraDeps,
-      );
-
-      const parentId = ids[0];
-
-      // Set parentId and parentQueue on pre-existing sub-flow children
-      for (const [i, subNode] of childNodeMap.entries()) {
-        const child = flow.children[i];
-        const childKeys = buildKeys(child.queueName, prefix);
-        await client.hset(childKeys.job(subNode.job.id), {
-          parentId: parentId,
-          parentQueue: parentQueueName,
-        });
-        subNode.job.parentId = parentId;
-        subNode.job.parentQueue = parentQueueName;
-      }
-
-      // Build JobNode tree
-      const parentJob = new Job(
-        client,
-        parentKeys,
-        parentId,
-        flow.name,
-        flow.data,
-        parentOpts,
-      );
-      parentJob.timestamp = timestamp;
-
-      const childNodes: JobNode[] = [];
-      let leafIdx = 0;
-      for (let i = 0; i < flow.children.length; i++) {
-        if (childNodeMap.has(i)) {
-          childNodes.push(childNodeMap.get(i)!);
-        } else {
-          const childId = ids[1 + leafIdx];
-          const child = flow.children[i];
-          const childKeys = buildKeys(child.queueName, prefix);
-          const childJob = new Job(
-            client,
-            childKeys,
-            childId,
-            child.name,
-            child.data,
-            child.opts ?? {},
-          );
-          childJob.timestamp = timestamp;
-          childJob.parentId = parentId;
-          childJob.parentQueue = parentQueueName;
-          childNodes.push({ job: childJob });
-          leafIdx++;
-        }
-      }
-
-      return { job: parentJob, children: childNodes };
-    } else {
-      // All children were sub-flows (already created).
-      // Use addFlow with 0 leaf children but with extraDeps to create
-      // the parent atomically with its deps set.
-      const extraDeps: string[] = [];
-      for (const [i, subNode] of childNodeMap.entries()) {
-        const child = flow.children[i];
-        const childPrefix = keyPrefix(prefix, child.queueName);
-        extraDeps.push(`${childPrefix}:${subNode.job.id}`);
-      }
-
-      const ids = await addFlow(
-        client,
-        parentKeys,
-        flow.name,
-        JSON.stringify(flow.data),
-        JSON.stringify(parentOpts),
-        timestamp,
-        parentOpts.delay ?? 0,
-        parentOpts.priority ?? 0,
-        parentOpts.attempts ?? 0,
-        [],
-        extraDeps,
-      );
-
-      const parentIdStr = ids[0];
-
-      // Set parentId and parentQueue on pre-existing sub-flow children
-      const childNodes: JobNode[] = [];
-      for (const [i, subNode] of childNodeMap.entries()) {
-        const child = flow.children[i];
-        const childKeys = buildKeys(child.queueName, prefix);
-        await client.hset(childKeys.job(subNode.job.id), {
-          parentId: parentIdStr,
-          parentQueue: parentQueueName,
-        });
-        subNode.job.parentId = parentIdStr;
-        subNode.job.parentQueue = parentQueueName;
-        childNodes.push(subNode);
-      }
-
-      const parentJob = new Job(
-        client,
-        parentKeys,
-        parentIdStr,
-        flow.name,
-        flow.data,
-        parentOpts,
-      );
-      parentJob.timestamp = timestamp;
-
-      return { job: parentJob, children: childNodes };
+    // Build extra deps for sub-flow children (already created recursively)
+    const extraDeps: string[] = [];
+    for (const [i, subNode] of childNodeMap.entries()) {
+      const child = flow.children[i];
+      extraDeps.push(`${keyPrefix(prefix, child.queueName)}:${subNode.job.id}`);
     }
+
+    const timestamp = Date.now();
+    const parentOpts = flow.opts ?? {};
+
+    const ids = await addFlow(
+      client,
+      parentKeys,
+      flow.name,
+      JSON.stringify(flow.data),
+      JSON.stringify(parentOpts),
+      timestamp,
+      parentOpts.delay ?? 0,
+      parentOpts.priority ?? 0,
+      parentOpts.attempts ?? 0,
+      childrenForLua,
+      extraDeps,
+    );
+
+    const parentId = ids[0];
+
+    // Set parentId and parentQueue on pre-existing sub-flow children
+    for (const [i, subNode] of childNodeMap.entries()) {
+      const child = flow.children[i];
+      const childKeys = buildKeys(child.queueName, prefix);
+      await client.hset(childKeys.job(subNode.job.id), {
+        parentId: parentId,
+        parentQueue: parentQueueName,
+      });
+      subNode.job.parentId = parentId;
+      subNode.job.parentQueue = parentQueueName;
+    }
+
+    // Build JobNode tree - interleave sub-flow and leaf child nodes in original order
+    const childNodes: JobNode[] = [];
+    let leafIdx = 0;
+    for (let i = 0; i < flow.children.length; i++) {
+      if (childNodeMap.has(i)) {
+        childNodes.push(childNodeMap.get(i)!);
+      } else {
+        const childId = ids[1 + leafIdx];
+        const child = flow.children[i];
+        const childJob = new Job(
+          client,
+          buildKeys(child.queueName, prefix),
+          childId,
+          child.name,
+          child.data,
+          child.opts ?? {},
+        );
+        childJob.timestamp = timestamp;
+        childJob.parentId = parentId;
+        childJob.parentQueue = parentQueueName;
+        childNodes.push({ job: childJob });
+        leafIdx++;
+      }
+    }
+
+    const parentJob = new Job(
+      client,
+      parentKeys,
+      parentId,
+      flow.name,
+      flow.data,
+      parentOpts,
+    );
+    parentJob.timestamp = timestamp;
+
+    return { job: parentJob, children: childNodes };
   }
 
   /**

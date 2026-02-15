@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import type { WorkerOptions, Processor, Client } from './types';
 import { Job } from './job';
-import { buildKeys, calculateBackoff, keyPrefix, nextReconnectDelay } from './utils';
+import { buildKeys, calculateBackoff, keyPrefix, nextReconnectDelay, reconnectWithBackoff } from './utils';
 import { createClient, createBlockingClient, ensureFunctionLibrary, createConsumerGroup } from './connection';
 import {
   CONSUMER_GROUP,
@@ -127,60 +127,60 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
   }
 
+  private reconnectCtx = {
+    isActive: () => this.running && !this.closing,
+    getBackoff: () => this.reconnectBackoff,
+    setBackoff: (ms: number) => { this.reconnectBackoff = ms; },
+    onError: (err: unknown) => { this.emit('error', err); },
+  };
+
   /**
    * Attempt to reconnect clients and resume polling after a connection error.
    */
   private async reconnectAndResume(): Promise<void> {
-    if (!this.running || this.closing) return;
+    await reconnectWithBackoff(
+      this.reconnectCtx,
+      async () => {
+        // Close stale clients
+        if (this.commandClient) {
+          try { this.commandClient.close(); } catch { /* ignore */ }
+          this.commandClient = null;
+        }
+        if (this.blockingClient) {
+          try { this.blockingClient.close(); } catch { /* ignore */ }
+          this.blockingClient = null;
+        }
 
-    try {
-      // Close stale clients
-      if (this.commandClient) {
-        try { this.commandClient.close(); } catch { /* ignore */ }
-        this.commandClient = null;
-      }
-      if (this.blockingClient) {
-        try { this.blockingClient.close(); } catch { /* ignore */ }
-        this.blockingClient = null;
-      }
+        // Recreate clients
+        this.commandClient = await createClient(this.opts.connection);
+        this.blockingClient = await createBlockingClient(this.opts.connection);
+        await ensureFunctionLibrary(
+          this.commandClient,
+          undefined,
+          this.opts.connection.clusterMode ?? false,
+        );
 
-      // Recreate clients
-      this.commandClient = await createClient(this.opts.connection);
-      this.blockingClient = await createBlockingClient(this.opts.connection);
-      await ensureFunctionLibrary(
-        this.commandClient,
-        undefined,
-        this.opts.connection.clusterMode ?? false,
-      );
+        // Re-ensure consumer group
+        await createConsumerGroup(
+          this.commandClient,
+          this.queueKeys.stream,
+          CONSUMER_GROUP,
+        );
 
-      // Re-ensure consumer group
-      await createConsumerGroup(
-        this.commandClient,
-        this.queueKeys.stream,
-        CONSUMER_GROUP,
-      );
-
-      // Restart scheduler with the new client
-      if (this.scheduler) {
-        this.scheduler.stop();
-      }
-      this.scheduler = new Scheduler(this.commandClient, this.queueKeys, {
-        promotionInterval: this.opts.promotionInterval,
-        stalledInterval: this.stalledInterval,
-        maxStalledCount: this.maxStalledCount,
-        consumerId: this.consumerId,
-      });
-      this.scheduler.start();
-
-      this.reconnectBackoff = 0;
-      this.pollLoop();
-    } catch (err) {
-      if (this.running && !this.closing) {
-        this.emit('error', err);
-        this.reconnectBackoff = nextReconnectDelay(this.reconnectBackoff);
-        setTimeout(() => this.reconnectAndResume(), this.reconnectBackoff);
-      }
-    }
+        // Restart scheduler with the new client
+        if (this.scheduler) {
+          this.scheduler.stop();
+        }
+        this.scheduler = new Scheduler(this.commandClient, this.queueKeys, {
+          promotionInterval: this.opts.promotionInterval,
+          stalledInterval: this.stalledInterval,
+          maxStalledCount: this.maxStalledCount,
+          consumerId: this.consumerId,
+        });
+        this.scheduler.start();
+      },
+      () => this.pollLoop(),
+    );
   }
 
   private async pollOnce(): Promise<void> {
@@ -246,8 +246,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
         if (!jobId) continue;
 
         if (this.concurrency === 1) {
-          // c=1 fast path: process inline, use completeAndFetchNext for 1 RTT/job steady state
-          await this.processJobFastPath(jobId, String(entryId));
+          // c=1 fast path: process inline (blocks poll loop, no activeCount tracking needed)
+          await this.processJob(jobId, String(entryId));
         } else {
           this.dispatchJob(jobId, String(entryId));
         }
@@ -270,7 +270,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     this.activePromises.add(promise);
   }
 
-  // ---- Shared helpers for processJobFastPath / processJob ----
+  // ---- Job processing helpers ----
 
   /**
    * Handle a moveToActive result that is not a valid hash (null or REVOKED).
@@ -390,69 +390,13 @@ export class Worker<D = any, R = any> extends EventEmitter {
     };
   }
 
-  // ---- Main processing paths ----
+  // ---- Main processing path ----
 
   /**
-   * Fast path for c=1: processes jobs in a tight loop using completeAndFetchNext.
-   * First job uses moveToActive (2 RTTs). Subsequent jobs use completeAndFetchNext (1 RTT).
-   * Falls back to normal pollOnce when no more jobs are available.
+   * Process a job through its full lifecycle: activate, run processor, complete, fetch next.
+   * Used for both c=1 (inline, blocking poll loop) and c>1 (dispatched via dispatchJob).
+   * Chains into the next job via completeAndFetchNext to reuse the same dispatch slot.
    */
-  private async processJobFastPath(jobId: string, entryId: string): Promise<void> {
-    if (!this.commandClient) return;
-
-    const hash = await moveToActive(this.commandClient, this.queueKeys, jobId, Date.now());
-    if (await this.handleMoveToActiveEdgeCase(hash, jobId, entryId)) return;
-
-    let currentJobId = jobId;
-    let currentEntryId = entryId;
-    let currentHash = hash as Record<string, string>;
-
-    // Tight loop: process -> completeAndFetchNext -> process -> ...
-    while (this.running && !this.closing) {
-      const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash);
-      job.entryId = currentEntryId;
-
-      const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
-
-      if (!this.commandClient) return;
-
-      if (processError || aborted) {
-        const error = aborted ? new Error('revoked') : processError!;
-        await this.handleJobFailure(job, currentJobId, currentEntryId, error);
-        return; // Back to pollOnce for next XREADGROUP
-      }
-
-      // Success: completeAndFetchNext - 1 RTT for complete + fetch + activate
-      const returnvalue = processResult !== undefined ? JSON.stringify(processResult) : 'null';
-      const parentInfo = this.buildParentInfo(job, currentJobId);
-
-      const fetchResult = await completeAndFetchNext(
-        this.commandClient, this.queueKeys, currentJobId, currentEntryId,
-        returnvalue, Date.now(), CONSUMER_GROUP, this.consumerId,
-        job.opts.removeOnComplete, parentInfo,
-      );
-
-      job.returnvalue = processResult;
-      job.finishedOn = Date.now();
-      this.emit('completed', job, processResult);
-
-      if (fetchResult.next === false) {
-        return; // No more jobs - back to pollOnce for blocking XREADGROUP
-      }
-      if (fetchResult.next === 'REVOKED') {
-        if (fetchResult.nextJobId && fetchResult.nextEntryId) {
-          try { await failJob(this.commandClient, this.queueKeys, fetchResult.nextJobId, fetchResult.nextEntryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
-        }
-        return;
-      }
-
-      // Got next job - continue the loop
-      currentJobId = fetchResult.nextJobId!;
-      currentEntryId = fetchResult.nextEntryId!;
-      currentHash = fetchResult.next as unknown as Record<string, string>;
-    }
-  }
-
   private async processJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
 

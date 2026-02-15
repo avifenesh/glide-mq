@@ -86,6 +86,77 @@ export function nextReconnectDelay(currentDelay: number, maxMs = 30000): number 
   return Math.min(currentDelay * 2, maxMs);
 }
 
+// ---- HashDataType conversion ----
+
+/**
+ * Convert a HashDataType array ({ field, value }[]) from hgetall to a plain Record.
+ * Returns null if the array is empty or falsy (key does not exist).
+ */
+export function hashDataToRecord(
+  hashData: { field: unknown; value: unknown }[] | null,
+): Record<string, string> | null {
+  if (!hashData || hashData.length === 0) return null;
+  const record: Record<string, string> = {};
+  for (const entry of hashData) {
+    record[String(entry.field)] = String(entry.value);
+  }
+  return record;
+}
+
+// ---- Stream jobId extraction ----
+
+/**
+ * Extract jobId values from stream entries returned by xrange/xreadgroup.
+ * The entries object maps entryId -> [field, value][] pairs.
+ */
+export function extractJobIdsFromStreamEntries(
+  entries: Record<string, [unknown, unknown][]>,
+): string[] {
+  const jobIds: string[] = [];
+  for (const fieldPairs of Object.values(entries)) {
+    for (const [field, value] of fieldPairs) {
+      if (String(field) === 'jobId') {
+        jobIds.push(String(value));
+      }
+    }
+  }
+  return jobIds;
+}
+
+// ---- Reconnect helper ----
+
+export interface ReconnectContext {
+  isActive(): boolean;
+  getBackoff(): number;
+  setBackoff(ms: number): void;
+  onError(err: unknown): void;
+}
+
+/**
+ * Attempt a reconnect operation with exponential backoff.
+ * On success, resets backoff and calls resumeFn.
+ * On failure, emits error, bumps backoff, and schedules a retry.
+ */
+export async function reconnectWithBackoff(
+  ctx: ReconnectContext,
+  reconnectFn: () => Promise<void>,
+  resumeFn: () => void,
+): Promise<void> {
+  if (!ctx.isActive()) return;
+
+  try {
+    await reconnectFn();
+    ctx.setBackoff(0);
+    resumeFn();
+  } catch (err) {
+    if (!ctx.isActive()) return;
+    ctx.onError(err);
+    const delay = nextReconnectDelay(ctx.getBackoff());
+    ctx.setBackoff(delay);
+    setTimeout(() => reconnectWithBackoff(ctx, reconnectFn, resumeFn), delay);
+  }
+}
+
 // ---- Simple 5-field cron parser ----
 // Format: minute hour dayOfMonth month dayOfWeek
 // Supports: *, specific numbers, ranges (1-5), steps (*/5), lists (1,3,5)

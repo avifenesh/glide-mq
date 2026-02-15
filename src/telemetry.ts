@@ -122,36 +122,12 @@ export async function withSpan<T>(
 
 /**
  * Start a child span for a sub-operation within an already-active span.
- * Same semantics as withSpan but intended for nested operations.
+ * Same semantics as withSpan but the callback does not receive the span.
  */
 export async function withChildSpan<T>(
   name: string,
   attributes: SpanAttributes,
   fn: () => Promise<T>,
 ): Promise<T> {
-  if (!isTracingEnabled()) {
-    return fn();
-  }
-
-  const tracer = getTracer();
-  const span = tracer.startSpan(name);
-
-  for (const [key, value] of Object.entries(attributes)) {
-    span.setAttribute(key, value);
-  }
-
-  try {
-    const result = await fn();
-    span.setStatus({ code: otelApi?.SpanStatusCode.OK ?? 0 });
-    return result;
-  } catch (err) {
-    span.setStatus({
-      code: otelApi?.SpanStatusCode.ERROR ?? 1,
-      message: err instanceof Error ? err.message : String(err),
-    });
-    span.recordException(err instanceof Error ? err : new Error(String(err)));
-    throw err;
-  } finally {
-    span.end();
-  }
+  return withSpan(name, attributes, () => fn());
 }

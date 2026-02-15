@@ -3,7 +3,7 @@ import { InfBoundary } from 'speedkey';
 import type { GlideClient, GlideClusterClient } from 'speedkey';
 import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts } from './types';
 import { Job } from './job';
-import { buildKeys, keyPrefix, keyPrefixPattern, nextCronOccurrence } from './utils';
+import { buildKeys, keyPrefixPattern, nextCronOccurrence, hashDataToRecord, extractJobIdsFromStreamEntries } from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
 import {
   LIBRARY_SOURCE,
@@ -12,7 +12,6 @@ import {
   dedup,
   pause,
   resume,
-  removeJob,
   revokeJob,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
@@ -192,18 +191,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async getJob(id: string): Promise<Job<D, R> | null> {
     const client = await this.getClient();
     const hashData = await client.hgetall(this.keys.job(id));
-
-    // hgetall returns HashDataType which is { field: GlideString, value: GlideString }[]
-    // An empty array means the key does not exist.
-    if (!hashData || hashData.length === 0) {
-      return null;
-    }
-
-    // Convert HashDataType array to a plain Record<string, string>
-    const hash: Record<string, string> = {};
-    for (const entry of hashData) {
-      hash[String(entry.field)] = String(entry.value);
-    }
+    const hash = hashDataToRecord(hashData);
+    if (!hash) return null;
 
     return Job.fromHash<D, R>(client, this.keys, id, hash);
   }
@@ -428,7 +417,6 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     switch (type) {
       case 'waiting': {
-        // XRANGE on the stream to get waiting entries, extract jobId fields
         const entries = await client.xrange(
           this.keys.stream,
           InfBoundary.NegativeInfinity,
@@ -436,14 +424,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           end >= 0 ? { count: end + 1 } : undefined,
         );
         if (!entries) return [];
-        const allIds: string[] = [];
-        for (const fieldPairs of Object.values(entries)) {
-          for (const [field, value] of fieldPairs) {
-            if (String(field) === 'jobId') {
-              allIds.push(String(value));
-            }
-          }
-        }
+        const allIds = extractJobIdsFromStreamEntries(entries);
         jobIds = allIds.slice(start, end >= 0 ? end + 1 : undefined);
         break;
       }
@@ -460,7 +441,6 @@ export class Queue<D = any, R = any> extends EventEmitter {
             },
           );
           const entryIds = pendingEntries.slice(start, end >= 0 ? end + 1 : undefined).map(e => String(e[0]));
-          // Read each entry from the stream to get the jobId
           jobIds = [];
           for (const entryId of entryIds) {
             const entryData = await client.xrange(
@@ -470,13 +450,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
               { count: 1 },
             );
             if (entryData) {
-              for (const fieldPairs of Object.values(entryData)) {
-                for (const [field, value] of fieldPairs) {
-                  if (String(field) === 'jobId') {
-                    jobIds.push(String(value));
-                  }
-                }
-              }
+              jobIds.push(...extractJobIdsFromStreamEntries(entryData));
             }
           }
         } catch {
@@ -578,24 +552,13 @@ export class Queue<D = any, R = any> extends EventEmitter {
     );
     if (!entries) return [];
 
-    const jobIds: string[] = [];
-    for (const fieldPairs of Object.values(entries)) {
-      for (const [field, value] of fieldPairs) {
-        if (String(field) === 'jobId') {
-          jobIds.push(String(value));
-        }
-      }
-    }
-
+    const jobIds = extractJobIdsFromStreamEntries(entries);
     const sliced = jobIds.slice(start, end >= 0 ? end + 1 : undefined);
     const jobs: Job<D, R>[] = [];
     for (const id of sliced) {
       const hashData = await client.hgetall(dlqKeys.job(id));
-      if (!hashData || hashData.length === 0) continue;
-      const hash: Record<string, string> = {};
-      for (const entry of hashData) {
-        hash[String(entry.field)] = String(entry.value);
-      }
+      const hash = hashDataToRecord(hashData);
+      if (!hash) continue;
       jobs.push(Job.fromHash<D, R>(client, dlqKeys, id, hash));
     }
     return jobs;
