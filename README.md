@@ -1,6 +1,6 @@
 # glide-mq
 
-High-performance message queue for Node.js, built on Valkey/Redis Streams with native NAPI bindings.
+High-performance message queue for Node.js, built on Valkey/Redis Streams with [Valkey GLIDE](https://github.com/valkey-io/valkey-glide) native NAPI bindings.
 
 ## Performance
 
