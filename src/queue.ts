@@ -18,6 +18,14 @@ import {
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
 
+/** Check if all key-value pairs in filter exist in data (shallow match). */
+function matchesData(data: Record<string, unknown>, filter: Record<string, unknown>): boolean {
+  for (const [key, value] of Object.entries(filter)) {
+    if (data[key] !== value) return false;
+  }
+  return true;
+}
+
 export class Queue<D = any, R = any> extends EventEmitter {
   readonly name: string;
   private opts: QueueOptions;
@@ -176,30 +184,21 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     // Build a batch with all fcall commands
     const keys = [this.keys.id, this.keys.stream, this.keys.scheduled, this.keys.events];
+    const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
 
-    if (isCluster) {
-      const batch = new ClusterBatch(false);
-      for (const p of prepared) {
-        batch.fcall('glidemq_addJob', keys, [
-          p.entry.name, p.serializedData, JSON.stringify(p.opts),
-          timestamp.toString(), p.delay.toString(), p.priority.toString(),
-          p.parentId, p.maxAttempts.toString(),
-        ]);
-      }
-      const rawResults = await (client as GlideClusterClient).exec(batch, true);
-      return this.buildBulkJobs(client, prepared, rawResults, timestamp);
-    } else {
-      const batch = new Batch(false);
-      for (const p of prepared) {
-        batch.fcall('glidemq_addJob', keys, [
-          p.entry.name, p.serializedData, JSON.stringify(p.opts),
-          timestamp.toString(), p.delay.toString(), p.priority.toString(),
-          p.parentId, p.maxAttempts.toString(),
-        ]);
-      }
-      const rawResults = await (client as GlideClient).exec(batch, true);
-      return this.buildBulkJobs(client, prepared, rawResults, timestamp);
+    for (const p of prepared) {
+      batch.fcall('glidemq_addJob', keys, [
+        p.entry.name, p.serializedData, JSON.stringify(p.opts),
+        timestamp.toString(), p.delay.toString(), p.priority.toString(),
+        p.parentId, p.maxAttempts.toString(),
+      ]);
     }
+
+    const rawResults = isCluster
+      ? await (client as GlideClusterClient).exec(batch as ClusterBatch, true)
+      : await (client as GlideClient).exec(batch as Batch, true);
+
+    return this.buildBulkJobs(client, prepared, rawResults, timestamp);
   }
 
   /** @internal Build Job objects from batch exec results. */
@@ -506,11 +505,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
       case 'delayed':
       case 'completed':
       case 'failed': {
-        const zsetKey = type === 'delayed' ? this.keys.scheduled
-          : type === 'completed' ? this.keys.completed
-          : this.keys.failed;
         const members = await client.zrange(
-          zsetKey,
+          this.zsetKeyForState(type),
           { start: start, end: end >= 0 ? end : -1 },
         );
         jobIds = members.map(m => String(m));
@@ -559,22 +555,21 @@ export class Queue<D = any, R = any> extends EventEmitter {
       if (opts.name && !opts.state && job.name !== opts.name) continue;
 
       // Apply data filter (shallow key-value match)
-      if (opts.data) {
-        const jobData = job.data as Record<string, unknown>;
-        let match = true;
-        for (const [key, value] of Object.entries(opts.data)) {
-          if (jobData[key] !== value) {
-            match = false;
-            break;
-          }
-        }
-        if (!match) continue;
-      }
+      if (opts.data && !matchesData(job.data as Record<string, unknown>, opts.data)) continue;
 
       jobs.push(job);
     }
 
     return jobs;
+  }
+
+  /** @internal Map a terminal/zset state to its corresponding key. */
+  private zsetKeyForState(state: 'delayed' | 'completed' | 'failed'): string {
+    switch (state) {
+      case 'delayed': return this.keys.scheduled;
+      case 'completed': return this.keys.completed;
+      case 'failed': return this.keys.failed;
+    }
   }
 
   /** @internal Get job IDs from a state's data structure. */
@@ -626,10 +621,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       case 'delayed':
       case 'completed':
       case 'failed': {
-        const zsetKey = state === 'delayed' ? this.keys.scheduled
-          : state === 'completed' ? this.keys.completed
-          : this.keys.failed;
-        const members = await client.zrange(zsetKey, { start: 0, end: limit - 1 });
+        const members = await client.zrange(this.zsetKeyForState(state), { start: 0, end: limit - 1 });
         return members.map(m => String(m));
       }
     }
@@ -657,29 +649,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
       return matched;
     }
 
-    let stateKey: string;
-    let stateType: 'zset' | 'stream';
-
-    switch (state) {
-      case 'waiting':
-        stateKey = this.keys.stream;
-        stateType = 'stream';
-        break;
-      case 'delayed':
-        stateKey = this.keys.scheduled;
-        stateType = 'zset';
-        break;
-      case 'completed':
-        stateKey = this.keys.completed;
-        stateType = 'zset';
-        break;
-      case 'failed':
-        stateKey = this.keys.failed;
-        stateType = 'zset';
-        break;
+    if (state === 'waiting') {
+      return searchByName(client, this.keys.stream, 'stream', name, limit, pfx + ':');
     }
 
-    return searchByName(client, stateKey, stateType, name, limit, pfx + ':');
+    return searchByName(client, this.zsetKeyForState(state), 'zset', name, limit, pfx + ':');
   }
 
   /** @internal SCAN all job hashes and optionally filter by name. */
@@ -693,6 +667,19 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const jobIds: string[] = [];
     const prefixLen = `${pfx}:job:`.length;
 
+    const collectKeys = async (keys: unknown[]): Promise<void> => {
+      for (const key of keys) {
+        if (jobIds.length >= limit) break;
+        const keyStr = String(key);
+        const id = keyStr.substring(prefixLen);
+        if (nameFilter) {
+          const jobName = await client.hget(keyStr, 'name');
+          if (String(jobName) !== nameFilter) continue;
+        }
+        jobIds.push(id);
+      }
+    };
+
     if (this.opts.connection.clusterMode) {
       const { ClusterScanCursor } = await import('@glidemq/speedkey');
       const clusterClient = client as GlideClusterClient;
@@ -700,39 +687,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
       while (!cursor.isFinished() && jobIds.length < limit) {
         const [nextCursor, keys] = await clusterClient.scan(cursor, { match: pattern, count: 100 });
         cursor = nextCursor;
-        for (const key of keys) {
-          if (jobIds.length >= limit) break;
-          const keyStr = String(key);
-          const id = keyStr.substring(prefixLen);
-          if (nameFilter) {
-            const jobName = await client.hget(keyStr, 'name');
-            if (String(jobName) === nameFilter) {
-              jobIds.push(id);
-            }
-          } else {
-            jobIds.push(id);
-          }
-        }
+        await collectKeys(keys);
       }
     } else {
       let cursor = '0';
       do {
         const result = await (client as GlideClient).scan(cursor, { match: pattern, count: 100 });
         cursor = result[0] as string;
-        const keys = result[1];
-        for (const key of keys) {
-          if (jobIds.length >= limit) break;
-          const keyStr = String(key);
-          const id = keyStr.substring(prefixLen);
-          if (nameFilter) {
-            const jobName = await client.hget(keyStr, 'name');
-            if (String(jobName) === nameFilter) {
-              jobIds.push(id);
-            }
-          } else {
-            jobIds.push(id);
-          }
-        }
+        await collectKeys(result[1]);
       } while (cursor !== '0' && jobIds.length < limit);
     }
 

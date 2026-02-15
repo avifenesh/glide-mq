@@ -77,6 +77,14 @@ export interface SearchJobsOptions {
   state?: TestJobRecord['state'];
 }
 
+/** Check if all key-value pairs in filter exist in data (shallow match). */
+function matchesData(data: Record<string, unknown>, filter: Record<string, unknown>): boolean {
+  for (const [key, value] of Object.entries(filter)) {
+    if (data[key] !== value) return false;
+  }
+  return true;
+}
+
 // ---- TestQueue ----
 
 export interface TestQueueOptions {
@@ -211,17 +219,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     for (const record of this.jobs.values()) {
       if (opts.name !== undefined && record.name !== opts.name) continue;
       if (opts.state !== undefined && record.state !== opts.state) continue;
-      if (opts.data !== undefined) {
-        const recData = record.data as Record<string, unknown>;
-        let match = true;
-        for (const [k, v] of Object.entries(opts.data)) {
-          if (recData[k] !== v) {
-            match = false;
-            break;
-          }
-        }
-        if (!match) continue;
-      }
+      if (opts.data !== undefined && !matchesData(record.data as Record<string, unknown>, opts.data)) continue;
       results.push(new TestJob<D, R>(record));
     }
     return results;
