@@ -4,3 +4,4 @@ build/
 *.tgz
 .env
 agent-knowledge/
+HANDOVER.md
