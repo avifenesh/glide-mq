@@ -1,6 +1,6 @@
 {
   "name": "glide-mq",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "description": "High-performance message queue for Node.js built on Valkey/Redis with native NAPI bindings",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
