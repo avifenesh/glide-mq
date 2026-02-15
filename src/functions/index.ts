@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '5';
+export const LIBRARY_VERSION = '6';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -769,6 +769,48 @@ redis.register_function('glidemq_revoke', function(keys, args)
   emitEvent(eventsKey, 'revoked', jobId, nil)
   return 'flagged'
 end)
+
+redis.register_function('glidemq_searchByName', function(keys, args)
+  local stateKey = keys[1]
+  local stateType = args[1]
+  local nameFilter = args[2]
+  local limit = tonumber(args[3]) or 100
+  local prefix = args[4]
+  local matched = {}
+  if stateType == 'zset' then
+    local members = redis.call('ZRANGE', stateKey, 0, -1)
+    for i = 1, #members do
+      if #matched >= limit then break end
+      local jobId = members[i]
+      local jobKey = prefix .. 'job:' .. jobId
+      local name = redis.call('HGET', jobKey, 'name')
+      if name == nameFilter then
+        matched[#matched + 1] = jobId
+      end
+    end
+  elseif stateType == 'stream' then
+    local entries = redis.call('XRANGE', stateKey, '-', '+')
+    for i = 1, #entries do
+      if #matched >= limit then break end
+      local fields = entries[i][2]
+      local jobId = nil
+      for j = 1, #fields, 2 do
+        if fields[j] == 'jobId' then
+          jobId = fields[j + 1]
+          break
+        end
+      end
+      if jobId then
+        local jobKey = prefix .. 'job:' .. jobId
+        local name = redis.call('HGET', jobKey, 'name')
+        if name == nameFilter then
+          matched[#matched + 1] = jobId
+        end
+      end
+    end
+  end
+  return matched
+end)
 `;
 
 // ---- Key set type ----
@@ -1198,6 +1240,32 @@ export async function revokeJob(
     [jobId, timestamp.toString(), group],
   );
   return result as string;
+}
+
+/**
+ * Search for jobs by name within a specific state structure.
+ * For ZSet states (completed, failed, delayed): iterates members and checks name.
+ * For stream state (waiting): iterates stream entries and checks name.
+ * Returns an array of matching job IDs.
+ */
+export async function searchByName(
+  client: Client,
+  stateKey: string,
+  stateType: 'zset' | 'stream',
+  nameFilter: string,
+  limit: number,
+  keyPrefix: string,
+): Promise<string[]> {
+  const result = await client.fcall(
+    'glidemq_searchByName',
+    [stateKey],
+    [stateType, nameFilter, limit.toString(), keyPrefix],
+  );
+  if (!result) return [];
+  if (Array.isArray(result)) {
+    return result.map((r) => String(r));
+  }
+  return [];
 }
 
 /**

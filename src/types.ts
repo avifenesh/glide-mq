@@ -153,3 +153,10 @@ export interface JobCounts {
   completed: number;
   failed: number;
 }
+
+export interface SearchJobsOptions {
+  state?: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed';
+  name?: string;
+  data?: Record<string, unknown>;
+  limit?: number;
+}

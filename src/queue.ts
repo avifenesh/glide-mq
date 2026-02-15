@@ -1,9 +1,9 @@
 import { EventEmitter } from 'events';
 import { InfBoundary, Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
-import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts } from './types';
+import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts, SearchJobsOptions } from './types';
 import { Job } from './job';
-import { buildKeys, keyPrefixPattern, nextCronOccurrence, hashDataToRecord, extractJobIdsFromStreamEntries, compress } from './utils';
+import { buildKeys, keyPrefix, keyPrefixPattern, nextCronOccurrence, hashDataToRecord, extractJobIdsFromStreamEntries, compress } from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
 import {
   LIBRARY_SOURCE,
@@ -13,6 +13,7 @@ import {
   pause,
   resume,
   revokeJob,
+  searchByName,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -520,6 +521,222 @@ export class Queue<D = any, R = any> extends EventEmitter {
     // Fetch job hashes in parallel (avoids N+1 serial HGETALL)
     const results = await Promise.all(jobIds.map(id => this.getJob(id)));
     return results.filter((job): job is Job<D, R> => job !== null);
+  }
+
+  /**
+   * Search for jobs matching the given criteria.
+   * Supports filtering by state, name (exact match), and data fields (shallow key-value match).
+   * If state is provided, searches only within that state's data structure.
+   * If no state is provided, SCANs all job hashes matching the queue prefix.
+   * Default limit: 100.
+   */
+  async searchJobs(opts: SearchJobsOptions): Promise<Job<D, R>[]> {
+    const client = await this.getClient();
+    const limit = opts.limit ?? 100;
+    const pfx = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+
+    let jobIds: string[];
+
+    if (opts.state && opts.name) {
+      // Use Lua function for name-based filtering within a state
+      jobIds = await this.searchByNameInState(client, opts.state, opts.name, limit, pfx);
+    } else if (opts.state) {
+      // Get all IDs from the state, will filter by data below
+      jobIds = await this.getJobIdsForState(client, opts.state, limit);
+    } else {
+      // No state: SCAN all job hashes
+      jobIds = await this.scanJobIds(client, pfx, opts.name, limit);
+    }
+
+    // Fetch full job objects
+    const jobs: Job<D, R>[] = [];
+    for (const id of jobIds) {
+      if (jobs.length >= limit) break;
+      const job = await this.getJob(id);
+      if (!job) continue;
+
+      // Apply name filter if we used a non-Lua path
+      if (opts.name && !opts.state && job.name !== opts.name) continue;
+
+      // Apply data filter (shallow key-value match)
+      if (opts.data) {
+        const jobData = job.data as Record<string, unknown>;
+        let match = true;
+        for (const [key, value] of Object.entries(opts.data)) {
+          if (jobData[key] !== value) {
+            match = false;
+            break;
+          }
+        }
+        if (!match) continue;
+      }
+
+      jobs.push(job);
+    }
+
+    return jobs;
+  }
+
+  /** @internal Get job IDs from a state's data structure. */
+  private async getJobIdsForState(
+    client: Client,
+    state: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed',
+    limit: number,
+  ): Promise<string[]> {
+    switch (state) {
+      case 'waiting': {
+        const entries = await client.xrange(
+          this.keys.stream,
+          InfBoundary.NegativeInfinity,
+          InfBoundary.PositiveInfinity,
+          { count: limit },
+        );
+        if (!entries) return [];
+        return extractJobIdsFromStreamEntries(entries);
+      }
+      case 'active': {
+        try {
+          const pendingEntries = await client.xpendingWithOptions(
+            this.keys.stream,
+            CONSUMER_GROUP,
+            {
+              start: InfBoundary.NegativeInfinity,
+              end: InfBoundary.PositiveInfinity,
+              count: limit,
+            },
+          );
+          const entryIds = pendingEntries.map(e => String(e[0]));
+          const jobIds: string[] = [];
+          for (const entryId of entryIds) {
+            const entryData = await client.xrange(
+              this.keys.stream,
+              { value: entryId },
+              { value: entryId },
+              { count: 1 },
+            );
+            if (entryData) {
+              jobIds.push(...extractJobIdsFromStreamEntries(entryData));
+            }
+          }
+          return jobIds;
+        } catch {
+          return [];
+        }
+      }
+      case 'delayed':
+      case 'completed':
+      case 'failed': {
+        const zsetKey = state === 'delayed' ? this.keys.scheduled
+          : state === 'completed' ? this.keys.completed
+          : this.keys.failed;
+        const members = await client.zrange(zsetKey, { start: 0, end: limit - 1 });
+        return members.map(m => String(m));
+      }
+    }
+  }
+
+  /** @internal Use Lua searchByName within a specific state. */
+  private async searchByNameInState(
+    client: Client,
+    state: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed',
+    name: string,
+    limit: number,
+    pfx: string,
+  ): Promise<string[]> {
+    // Active state must be handled in TS since it requires consumer group interaction
+    if (state === 'active') {
+      const allIds = await this.getJobIdsForState(client, 'active', 10000);
+      const matched: string[] = [];
+      for (const id of allIds) {
+        if (matched.length >= limit) break;
+        const jobName = await client.hget(this.keys.job(id), 'name');
+        if (String(jobName) === name) {
+          matched.push(id);
+        }
+      }
+      return matched;
+    }
+
+    let stateKey: string;
+    let stateType: 'zset' | 'stream';
+
+    switch (state) {
+      case 'waiting':
+        stateKey = this.keys.stream;
+        stateType = 'stream';
+        break;
+      case 'delayed':
+        stateKey = this.keys.scheduled;
+        stateType = 'zset';
+        break;
+      case 'completed':
+        stateKey = this.keys.completed;
+        stateType = 'zset';
+        break;
+      case 'failed':
+        stateKey = this.keys.failed;
+        stateType = 'zset';
+        break;
+    }
+
+    return searchByName(client, stateKey, stateType, name, limit, pfx + ':');
+  }
+
+  /** @internal SCAN all job hashes and optionally filter by name. */
+  private async scanJobIds(
+    client: Client,
+    pfx: string,
+    nameFilter: string | undefined,
+    limit: number,
+  ): Promise<string[]> {
+    const pattern = `${pfx}:job:*`;
+    const jobIds: string[] = [];
+    const prefixLen = `${pfx}:job:`.length;
+
+    if (this.opts.connection.clusterMode) {
+      const { ClusterScanCursor } = await import('@glidemq/speedkey');
+      const clusterClient = client as GlideClusterClient;
+      let cursor = new ClusterScanCursor();
+      while (!cursor.isFinished() && jobIds.length < limit) {
+        const [nextCursor, keys] = await clusterClient.scan(cursor, { match: pattern, count: 100 });
+        cursor = nextCursor;
+        for (const key of keys) {
+          if (jobIds.length >= limit) break;
+          const keyStr = String(key);
+          const id = keyStr.substring(prefixLen);
+          if (nameFilter) {
+            const jobName = await client.hget(keyStr, 'name');
+            if (String(jobName) === nameFilter) {
+              jobIds.push(id);
+            }
+          } else {
+            jobIds.push(id);
+          }
+        }
+      }
+    } else {
+      let cursor = '0';
+      do {
+        const result = await (client as GlideClient).scan(cursor, { match: pattern, count: 100 });
+        cursor = result[0] as string;
+        const keys = result[1];
+        for (const key of keys) {
+          if (jobIds.length >= limit) break;
+          const keyStr = String(key);
+          const id = keyStr.substring(prefixLen);
+          if (nameFilter) {
+            const jobName = await client.hget(keyStr, 'name');
+            if (String(jobName) === nameFilter) {
+              jobIds.push(id);
+            }
+          } else {
+            jobIds.push(id);
+          }
+        }
+      } while (cursor !== '0' && jobIds.length < limit);
+    }
+
+    return jobIds;
   }
 
   /**

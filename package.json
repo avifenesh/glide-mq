@@ -4,6 +4,10 @@
   "description": "High-performance message queue for Node.js built on Valkey/Redis with native NAPI bindings",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./testing": { "types": "./dist/testing.d.ts", "default": "./dist/testing.js" }
+  },
   "type": "commonjs",
   "scripts": {
     "build": "tsc",
@@ -28,17 +32,23 @@
     "@glidemq/speedkey": "^0.2.0"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^22",
     "bullmq": "^5.69.2",
+    "express": "^5.2.1",
     "ioredis": "^5.9.3",
     "tsx": "^4.21.0",
     "typescript": "^5",
     "vitest": "^3"
   },
   "peerDependencies": {
+    "express": "^4 || ^5",
     "@opentelemetry/api": "^1.0.0"
   },
   "peerDependenciesMeta": {
+    "express": {
+      "optional": true
+    },
     "@opentelemetry/api": {
       "optional": true
     }

@@ -1,0 +1,1647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GLIDE-MQ // Dashboard</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap');
+
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg-0: #0a0c0f;
+    --bg-1: #0e1117;
+    --bg-2: #141820;
+    --bg-3: #1a1f2b;
+    --bg-4: #222836;
+    --border: #2a3040;
+    --border-bright: #3a4258;
+    --text-0: #c8cdd8;
+    --text-1: #8b92a5;
+    --text-2: #5c6377;
+    --accent: #00e59b;
+    --accent-dim: #00b87d;
+    --accent-glow: rgba(0, 229, 155, 0.15);
+    --red: #ff4d6a;
+    --red-dim: #cc3d55;
+    --red-glow: rgba(255, 77, 106, 0.12);
+    --blue: #4da6ff;
+    --blue-dim: #3d85cc;
+    --blue-glow: rgba(77, 166, 255, 0.12);
+    --yellow: #ffc44d;
+    --yellow-dim: #cc9d3d;
+    --yellow-glow: rgba(255, 196, 77, 0.12);
+    --gray: #6b7280;
+    --gray-dim: #4b5563;
+    --mono: 'IBM Plex Mono', 'Consolas', monospace;
+    --sans: 'DM Sans', -apple-system, sans-serif;
+    --radius: 4px;
+    --sidebar-w: 280px;
+    --inspector-w: 380px;
+    --bottombar-h: 180px;
+  }
+
+  html, body {
+    height: 100%;
+    background: var(--bg-0);
+    color: var(--text-0);
+    font-family: var(--sans);
+    font-size: 13px;
+    line-height: 1.5;
+    overflow: hidden;
+  }
+
+  /* --- Scanline overlay --- */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 9999;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0, 0, 0, 0.03) 2px,
+      rgba(0, 0, 0, 0.03) 4px
+    );
+  }
+
+  /* --- Layout --- */
+  .app {
+    display: grid;
+    grid-template-columns: var(--sidebar-w) 1fr 0;
+    grid-template-rows: 1fr var(--bottombar-h);
+    height: 100vh;
+    transition: grid-template-columns 0.3s ease;
+  }
+  .app.inspector-open {
+    grid-template-columns: var(--sidebar-w) 1fr var(--inspector-w);
+  }
+
+  /* --- Sidebar --- */
+  .sidebar {
+    grid-row: 1 / 3;
+    background: var(--bg-1);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .sidebar-header {
+    padding: 20px 16px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .logo {
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .logo::before {
+    content: '';
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background: var(--accent);
+    border-radius: 50%;
+    box-shadow: 0 0 8px var(--accent), 0 0 16px rgba(0, 229, 155, 0.3);
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  .logo-sub {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-2);
+    letter-spacing: 1px;
+    margin-top: 4px;
+  }
+
+  .queue-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+  }
+
+  .queue-list::-webkit-scrollbar { width: 4px; }
+  .queue-list::-webkit-scrollbar-track { background: transparent; }
+  .queue-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .queue-card {
+    padding: 12px;
+    margin-bottom: 4px;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    position: relative;
+  }
+
+  .queue-card:hover {
+    background: var(--bg-2);
+    border-color: var(--border);
+  }
+
+  .queue-card.active {
+    background: var(--bg-3);
+    border-color: var(--accent);
+    box-shadow: inset 3px 0 0 var(--accent), 0 0 12px var(--accent-glow);
+  }
+
+  .queue-card-name {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-0);
+    margin-bottom: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .queue-badges {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .badge {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    padding: 2px 6px;
+    border-radius: 2px;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    line-height: 1;
+  }
+
+  .badge-waiting { background: rgba(107, 114, 128, 0.15); color: var(--gray); }
+  .badge-active { background: var(--blue-glow); color: var(--blue); }
+  .badge-completed { background: var(--accent-glow); color: var(--accent); }
+  .badge-failed { background: var(--red-glow); color: var(--red); }
+  .badge-delayed { background: var(--yellow-glow); color: var(--yellow); }
+
+  .badge-failed.has-failures {
+    animation: pulse-fail 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse-fail {
+    0%, 100% { box-shadow: 0 0 0 0 transparent; }
+    50% { box-shadow: 0 0 8px var(--red-glow), 0 0 16px rgba(255, 77, 106, 0.08); }
+  }
+
+  .queue-trend {
+    position: absolute;
+    right: 12px;
+    top: 12px;
+    display: flex;
+    align-items: flex-end;
+    gap: 1px;
+    height: 16px;
+  }
+
+  .trend-bar {
+    width: 3px;
+    background: var(--accent);
+    opacity: 0.4;
+    border-radius: 1px 1px 0 0;
+    transition: height 0.3s ease;
+  }
+
+  /* --- Main area --- */
+  .main {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg-0);
+  }
+
+  .main-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+    background: var(--bg-1);
+  }
+
+  .main-title {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-0);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .main-title .queue-state {
+    font-size: 10px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 2px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .state-running { background: var(--accent-glow); color: var(--accent); }
+  .state-paused { background: var(--yellow-glow); color: var(--yellow); }
+
+  .main-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .btn {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-2);
+    color: var(--text-1);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+
+  .btn:hover {
+    background: var(--bg-3);
+    border-color: var(--border-bright);
+    color: var(--text-0);
+  }
+
+  .btn-danger {
+    border-color: rgba(255, 77, 106, 0.3);
+    color: var(--red);
+  }
+  .btn-danger:hover {
+    background: var(--red-glow);
+    border-color: var(--red-dim);
+  }
+
+  .btn-accent {
+    border-color: rgba(0, 229, 155, 0.3);
+    color: var(--accent);
+  }
+  .btn-accent:hover {
+    background: var(--accent-glow);
+    border-color: var(--accent-dim);
+  }
+
+  /* --- Filter tabs --- */
+  .filter-bar {
+    padding: 0 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex-shrink: 0;
+    background: var(--bg-1);
+  }
+
+  .filter-tab {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    padding: 10px 14px;
+    color: var(--text-2);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.15s ease;
+    position: relative;
+    user-select: none;
+  }
+
+  .filter-tab:hover {
+    color: var(--text-1);
+  }
+
+  .filter-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .filter-tab .tab-count {
+    font-size: 9px;
+    margin-left: 4px;
+    opacity: 0.6;
+  }
+
+  .search-box {
+    margin-left: auto;
+    padding: 5px 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-0);
+    outline: none;
+    width: 180px;
+    transition: border-color 0.15s ease;
+  }
+
+  .search-box:focus {
+    border-color: var(--accent-dim);
+  }
+
+  .search-box::placeholder {
+    color: var(--text-2);
+  }
+
+  /* --- Job table --- */
+  .job-table-wrap {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0;
+  }
+
+  .job-table-wrap::-webkit-scrollbar { width: 6px; }
+  .job-table-wrap::-webkit-scrollbar-track { background: var(--bg-0); }
+  .job-table-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .job-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .job-table thead {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+
+  .job-table th {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-2);
+    padding: 10px 16px;
+    text-align: left;
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  .job-table td {
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(42, 48, 64, 0.5);
+    font-size: 12px;
+    vertical-align: middle;
+  }
+
+  .job-table tr {
+    cursor: pointer;
+    transition: background 0.1s ease;
+  }
+
+  .job-table tbody tr:hover {
+    background: var(--bg-2);
+  }
+
+  .job-table tbody tr.selected {
+    background: var(--bg-3);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+
+  .job-id {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-1);
+  }
+
+  .job-name {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-0);
+  }
+
+  .state-badge {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .state-waiting { background: rgba(107, 114, 128, 0.15); color: var(--gray); }
+  .state-active { background: var(--blue-glow); color: var(--blue); }
+  .state-completed { background: var(--accent-glow); color: var(--accent); }
+  .state-failed { background: var(--red-glow); color: var(--red); }
+  .state-delayed { background: var(--yellow-glow); color: var(--yellow); }
+
+  .job-time {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+  }
+
+  .job-actions-cell {
+    display: flex;
+    gap: 4px;
+  }
+
+  .btn-sm {
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+    transition: all 0.1s ease;
+  }
+
+  .btn-sm:hover {
+    border-color: var(--border-bright);
+    color: var(--text-0);
+    background: var(--bg-3);
+  }
+
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-2);
+    font-family: var(--mono);
+    gap: 8px;
+  }
+
+  .empty-state-icon {
+    font-size: 32px;
+    opacity: 0.3;
+    margin-bottom: 8px;
+  }
+
+  .empty-state-text {
+    font-size: 13px;
+  }
+
+  .empty-state-sub {
+    font-size: 11px;
+    opacity: 0.6;
+  }
+
+  /* --- Inspector --- */
+  .inspector {
+    grid-row: 1 / 3;
+    background: var(--bg-1);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: opacity 0.2s ease;
+  }
+
+  .inspector-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  .inspector-title {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-0);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .inspector-close {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+    border-radius: 2px;
+    font-size: 14px;
+    transition: all 0.1s ease;
+  }
+
+  .inspector-close:hover {
+    background: var(--bg-3);
+    color: var(--text-0);
+  }
+
+  .inspector-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .inspector-tab {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    padding: 8px 14px;
+    color: var(--text-2);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.15s ease;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .inspector-tab:hover { color: var(--text-1); }
+  .inspector-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .inspector-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+  }
+
+  .inspector-body::-webkit-scrollbar { width: 4px; }
+  .inspector-body::-webkit-scrollbar-track { background: transparent; }
+  .inspector-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .inspector-section {
+    margin-bottom: 16px;
+  }
+
+  .inspector-section-title {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-2);
+    margin-bottom: 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .inspector-kv {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    gap: 4px 12px;
+    font-size: 12px;
+  }
+
+  .inspector-kv dt {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-2);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding-top: 2px;
+  }
+
+  .inspector-kv dd {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-0);
+    word-break: break-all;
+  }
+
+  .json-viewer {
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--text-0);
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .json-key { color: var(--blue); }
+  .json-string { color: var(--accent); }
+  .json-number { color: var(--yellow); }
+  .json-boolean { color: var(--red); }
+  .json-null { color: var(--text-2); }
+
+  .log-entries {
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.8;
+    color: var(--text-1);
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .log-entry {
+    padding: 2px 0;
+    border-bottom: 1px solid rgba(42, 48, 64, 0.3);
+  }
+
+  .log-entry:last-child { border-bottom: none; }
+
+  .progress-bar-wrap {
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    height: 20px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+    transition: width 0.5s ease;
+    position: relative;
+  }
+
+  .progress-bar-fill::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.1) 50%, transparent 100%);
+    animation: shimmer 2s infinite;
+  }
+
+  @keyframes shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+
+  .progress-text {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-0);
+    z-index: 1;
+  }
+
+  /* --- Bottom bar (event stream) --- */
+  .bottombar {
+    grid-column: 2 / 3;
+    background: var(--bg-1);
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .app.inspector-open .bottombar {
+    grid-column: 2 / 3;
+  }
+
+  .bottombar-header {
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  .bottombar-title {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-2);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .live-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
+    animation: pulse-dot 1.5s ease-in-out infinite;
+  }
+
+  .event-stream {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 16px;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.6;
+  }
+
+  .event-stream::-webkit-scrollbar { width: 4px; }
+  .event-stream::-webkit-scrollbar-track { background: transparent; }
+  .event-stream::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .event-line {
+    display: flex;
+    gap: 10px;
+    padding: 2px 0;
+    animation: fadeInEvent 0.2s ease;
+  }
+
+  @keyframes fadeInEvent {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .event-time {
+    color: var(--text-2);
+    flex-shrink: 0;
+    min-width: 70px;
+  }
+
+  .event-type {
+    font-weight: 600;
+    flex-shrink: 0;
+    min-width: 90px;
+  }
+
+  .event-type.evt-completed { color: var(--accent); }
+  .event-type.evt-failed { color: var(--red); }
+  .event-type.evt-active { color: var(--blue); }
+  .event-type.evt-waiting { color: var(--gray); }
+  .event-type.evt-delayed { color: var(--yellow); }
+  .event-type.evt-progress { color: var(--yellow); }
+  .event-type.evt-paused { color: var(--yellow); }
+  .event-type.evt-resumed { color: var(--accent); }
+  .event-type.evt-removed { color: var(--red); }
+
+  .event-detail {
+    color: var(--text-1);
+  }
+
+  /* --- Toast notifications --- */
+  .toast-container {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .toast {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 10px 16px;
+    background: var(--bg-3);
+    border: 1px solid var(--border-bright);
+    border-radius: var(--radius);
+    color: var(--text-0);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    animation: toastIn 0.2s ease, toastOut 0.3s ease 2.7s forwards;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .toast-success { border-left: 3px solid var(--accent); }
+  .toast-error { border-left: 3px solid var(--red); }
+  .toast-info { border-left: 3px solid var(--blue); }
+
+  @keyframes toastIn {
+    from { opacity: 0; transform: translateX(20px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  @keyframes toastOut {
+    from { opacity: 1; }
+    to { opacity: 0; transform: translateY(-8px); }
+  }
+
+  /* --- Confirm dialog --- */
+  .dialog-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10001;
+    animation: fadeIn 0.15s ease;
+  }
+
+  .dialog {
+    background: var(--bg-2);
+    border: 1px solid var(--border-bright);
+    border-radius: 6px;
+    padding: 24px;
+    min-width: 340px;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .dialog-title {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--red);
+    margin-bottom: 12px;
+  }
+
+  .dialog-text {
+    font-size: 12px;
+    color: var(--text-1);
+    margin-bottom: 20px;
+    line-height: 1.6;
+  }
+
+  .dialog-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  /* --- No queue selected --- */
+  .no-queue {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-2);
+    font-family: var(--mono);
+    text-align: center;
+    gap: 12px;
+  }
+
+  .no-queue-graphic {
+    width: 80px;
+    height: 40px;
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-2);
+    font-size: 18px;
+    margin-bottom: 8px;
+  }
+
+  /* --- Responsive --- */
+  @media (max-width: 900px) {
+    :root {
+      --sidebar-w: 0px;
+      --inspector-w: 0px;
+    }
+    .sidebar {
+      position: fixed;
+      left: -280px;
+      top: 0;
+      bottom: 0;
+      width: 280px;
+      z-index: 100;
+      transition: left 0.3s ease;
+    }
+    .sidebar.mobile-open {
+      left: 0;
+      box-shadow: 4px 0 20px rgba(0, 0, 0, 0.5);
+    }
+    .inspector {
+      position: fixed;
+      right: -380px;
+      top: 0;
+      bottom: 0;
+      width: 380px;
+      z-index: 100;
+      transition: right 0.3s ease;
+    }
+    .app.inspector-open .inspector {
+      right: 0;
+      box-shadow: -4px 0 20px rgba(0, 0, 0, 0.5);
+    }
+    .app {
+      grid-template-columns: 1fr !important;
+    }
+    .mobile-toggle {
+      display: flex !important;
+    }
+  }
+
+  .mobile-toggle {
+    display: none;
+    width: 32px;
+    height: 32px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-2);
+    color: var(--text-1);
+    cursor: pointer;
+    font-size: 16px;
+  }
+
+  /* --- Loading skeleton --- */
+  .skeleton {
+    background: linear-gradient(90deg, var(--bg-2) 25%, var(--bg-3) 50%, var(--bg-2) 75%);
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.5s infinite;
+    border-radius: 2px;
+  }
+
+  @keyframes skeleton-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app" id="app">
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">GLIDE-MQ</div>
+      <div class="logo-sub">Dashboard // Monitor</div>
+    </div>
+    <div class="queue-list" id="queueList">
+      <div class="empty-state" style="padding: 24px 0;">
+        <div class="empty-state-text">Loading queues...</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main" id="mainArea">
+    <div class="no-queue" id="noQueueState">
+      <div class="no-queue-graphic">&lt;/&gt;</div>
+      <div style="font-size: 13px; color: var(--text-1);">Select a queue</div>
+      <div style="font-size: 11px;">Pick a queue from the sidebar to inspect jobs</div>
+    </div>
+
+    <div id="queueView" style="display:none; flex-direction:column; height:100%;">
+      <div class="main-header">
+        <div class="main-title">
+          <button class="mobile-toggle" onclick="toggleSidebar()" title="Toggle sidebar">&#9776;</button>
+          <span id="selectedQueueName">--</span>
+          <span class="queue-state state-running" id="queueStateLabel">RUNNING</span>
+        </div>
+        <div class="main-actions">
+          <button class="btn btn-accent" id="btnPauseResume" onclick="togglePause()">PAUSE</button>
+          <button class="btn btn-danger" onclick="obliterateQueue()">OBLITERATE</button>
+        </div>
+      </div>
+
+      <div class="filter-bar">
+        <div class="filter-tab active" data-state="" onclick="setFilter(this, '')">All<span class="tab-count" id="countAll"></span></div>
+        <div class="filter-tab" data-state="waiting" onclick="setFilter(this, 'waiting')">Waiting<span class="tab-count" id="countWaiting"></span></div>
+        <div class="filter-tab" data-state="active" onclick="setFilter(this, 'active')">Active<span class="tab-count" id="countActive"></span></div>
+        <div class="filter-tab" data-state="delayed" onclick="setFilter(this, 'delayed')">Delayed<span class="tab-count" id="countDelayed"></span></div>
+        <div class="filter-tab" data-state="completed" onclick="setFilter(this, 'completed')">Completed<span class="tab-count" id="countCompleted"></span></div>
+        <div class="filter-tab" data-state="failed" onclick="setFilter(this, 'failed')">Failed<span class="tab-count" id="countFailed"></span></div>
+        <input class="search-box" type="text" placeholder="Search jobs..." id="jobSearch" oninput="filterJobs()">
+      </div>
+
+      <div class="job-table-wrap" id="jobTableWrap">
+        <table class="job-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Name</th>
+              <th>State</th>
+              <th>Created</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="jobTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <!-- Inspector -->
+  <aside class="inspector" id="inspector">
+    <div class="inspector-header">
+      <div class="inspector-title">
+        <span>JOB</span>
+        <span id="inspectorJobId" style="color: var(--accent);">--</span>
+      </div>
+      <button class="inspector-close" onclick="closeInspector()" title="Close (Esc)">&times;</button>
+    </div>
+    <div class="inspector-tabs">
+      <div class="inspector-tab active" onclick="setInspectorTab(this, 'data')">Data</div>
+      <div class="inspector-tab" onclick="setInspectorTab(this, 'logs')">Logs</div>
+      <div class="inspector-tab" onclick="setInspectorTab(this, 'details')">Details</div>
+    </div>
+    <div class="inspector-body" id="inspectorBody"></div>
+  </aside>
+
+  <!-- Bottom bar -->
+  <div class="bottombar">
+    <div class="bottombar-header">
+      <div class="bottombar-title">
+        <span class="live-dot"></span>
+        Event Stream
+      </div>
+      <button class="btn-sm" onclick="clearEvents()">Clear</button>
+    </div>
+    <div class="event-stream" id="eventStream"></div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ---- State ----
+  let queues = [];
+  let selectedQueue = null;
+  let selectedJob = null;
+  let currentFilter = '';
+  let currentJobs = [];
+  let isPaused = false;
+  let inspectorTab = 'data';
+  let jobDetail = null;
+  let eventSource = null;
+  let refreshInterval = null;
+
+  // ---- API helpers ----
+  const BASE = window.location.origin;
+
+  async function api(path, opts) {
+    try {
+      const res = await fetch(BASE + path, opts);
+      if (!res.ok) throw new Error(res.statusText);
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('json')) return res.json();
+      return res.text();
+    } catch (err) {
+      console.error('[API]', path, err);
+      throw err;
+    }
+  }
+
+  // ---- Queue list ----
+  async function loadQueues() {
+    try {
+      const data = await api('/api/queues');
+      queues = Array.isArray(data) ? data : [];
+      renderQueueList();
+    } catch (e) {
+      document.getElementById('queueList').innerHTML =
+        '<div class="empty-state" style="padding:24px 0"><div class="empty-state-text">Failed to load queues</div></div>';
+    }
+  }
+
+  function renderQueueList() {
+    const el = document.getElementById('queueList');
+    if (!queues.length) {
+      el.innerHTML = '<div class="empty-state" style="padding:24px 0"><div class="empty-state-text">No queues found</div></div>';
+      return;
+    }
+    el.innerHTML = queues.map(q => {
+      const name = q.name || q;
+      const counts = q.counts || {};
+      const w = counts.waiting || 0;
+      const a = counts.active || 0;
+      const c = counts.completed || 0;
+      const f = counts.failed || 0;
+      const d = counts.delayed || 0;
+      const isActive = selectedQueue === name;
+      const failClass = f > 0 ? 'has-failures' : '';
+
+      // Generate trend bars from recent activity
+      const total = w + a + c + f + d;
+      const bars = [w, a, d, c, f].map(v => {
+        const h = total > 0 ? Math.max(2, Math.round((v / total) * 16)) : 2;
+        return '<div class="trend-bar" style="height:' + h + 'px"></div>';
+      }).join('');
+
+      return '<div class="queue-card' + (isActive ? ' active' : '') + '" onclick="selectQueue(\'' + name + '\')">' +
+        '<div class="queue-trend">' + bars + '</div>' +
+        '<div class="queue-card-name">' + escHtml(name) + '</div>' +
+        '<div class="queue-badges">' +
+          '<span class="badge badge-waiting">W ' + w + '</span>' +
+          '<span class="badge badge-active">A ' + a + '</span>' +
+          '<span class="badge badge-delayed">D ' + d + '</span>' +
+          '<span class="badge badge-completed">C ' + c + '</span>' +
+          '<span class="badge badge-failed ' + failClass + '">F ' + f + '</span>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  // ---- Queue selection ----
+  window.selectQueue = async function(name) {
+    selectedQueue = name;
+    selectedJob = null;
+    jobDetail = null;
+    isPaused = false;
+    closeInspector();
+    renderQueueList();
+
+    const noQ = document.getElementById('noQueueState');
+    const qv = document.getElementById('queueView');
+    noQ.style.display = 'none';
+    qv.style.display = 'flex';
+    document.getElementById('selectedQueueName').textContent = name;
+
+    updateQueueState();
+    await loadJobs();
+  };
+
+  function updateQueueState() {
+    const label = document.getElementById('queueStateLabel');
+    const btn = document.getElementById('btnPauseResume');
+    if (isPaused) {
+      label.textContent = 'PAUSED';
+      label.className = 'queue-state state-paused';
+      btn.textContent = 'RESUME';
+    } else {
+      label.textContent = 'RUNNING';
+      label.className = 'queue-state state-running';
+      btn.textContent = 'PAUSE';
+    }
+  }
+
+  // ---- Jobs ----
+  async function loadJobs() {
+    if (!selectedQueue) return;
+    const stateParam = currentFilter ? '?state=' + currentFilter + '&start=0&end=100' : '?start=0&end=100';
+    try {
+      const data = await api('/api/queues/' + encodeURIComponent(selectedQueue) + '/jobs' + stateParam);
+      currentJobs = Array.isArray(data) ? data : [];
+      renderJobs();
+      updateFilterCounts();
+    } catch (e) {
+      document.getElementById('jobTableBody').innerHTML =
+        '<tr><td colspan="5" style="text-align:center;color:var(--text-2);padding:32px;">Failed to load jobs</td></tr>';
+    }
+  }
+
+  function renderJobs() {
+    const search = (document.getElementById('jobSearch').value || '').toLowerCase();
+    const tbody = document.getElementById('jobTableBody');
+    let filtered = currentJobs;
+    if (search) {
+      filtered = filtered.filter(j =>
+        (j.id || '').toString().toLowerCase().includes(search) ||
+        (j.name || '').toLowerCase().includes(search)
+      );
+    }
+
+    if (!filtered.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-2);padding:32px;font-family:var(--mono);font-size:12px;">No jobs found</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = filtered.map(j => {
+      const state = j.state || 'waiting';
+      const isSelected = selectedJob === j.id;
+      const ts = j.timestamp ? formatTime(j.timestamp) : '-';
+      const showRetry = state === 'failed';
+      return '<tr class="' + (isSelected ? 'selected' : '') + '" onclick="inspectJob(\'' + j.id + '\')">' +
+        '<td class="job-id">' + escHtml(String(j.id)) + '</td>' +
+        '<td class="job-name">' + escHtml(j.name || '-') + '</td>' +
+        '<td><span class="state-badge state-' + state + '">' + state + '</span></td>' +
+        '<td class="job-time">' + ts + '</td>' +
+        '<td><div class="job-actions-cell">' +
+          (showRetry ? '<button class="btn-sm" onclick="retryJob(event,\'' + j.id + '\')">Retry</button>' : '') +
+          '<button class="btn-sm" onclick="removeJob(event,\'' + j.id + '\')">Remove</button>' +
+        '</div></td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  function updateFilterCounts() {
+    // If we have queue-level counts from the sidebar data, use those
+    const q = queues.find(q => (q.name || q) === selectedQueue);
+    if (q && q.counts) {
+      const c = q.counts;
+      setCountText('countAll', sum(c));
+      setCountText('countWaiting', c.waiting || 0);
+      setCountText('countActive', c.active || 0);
+      setCountText('countDelayed', c.delayed || 0);
+      setCountText('countCompleted', c.completed || 0);
+      setCountText('countFailed', c.failed || 0);
+    }
+  }
+
+  function sum(c) {
+    return (c.waiting || 0) + (c.active || 0) + (c.delayed || 0) + (c.completed || 0) + (c.failed || 0);
+  }
+
+  function setCountText(id, n) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = n > 0 ? '(' + n + ')' : '';
+  }
+
+  window.setFilter = function(tab, state) {
+    currentFilter = state;
+    document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    loadJobs();
+  };
+
+  window.filterJobs = function() {
+    renderJobs();
+  };
+
+  // ---- Job inspection ----
+  window.inspectJob = async function(id) {
+    selectedJob = id;
+    renderJobs(); // highlight row
+
+    const app = document.getElementById('app');
+    app.classList.add('inspector-open');
+
+    document.getElementById('inspectorJobId').textContent = '#' + id;
+
+    try {
+      jobDetail = await api('/api/queues/' + encodeURIComponent(selectedQueue) + '/job/' + encodeURIComponent(id));
+      renderInspector();
+    } catch (e) {
+      document.getElementById('inspectorBody').innerHTML =
+        '<div style="color:var(--text-2);padding:16px;font-family:var(--mono);font-size:12px;">Failed to load job details</div>';
+    }
+  };
+
+  function renderInspector() {
+    if (!jobDetail) return;
+    const body = document.getElementById('inspectorBody');
+    const j = jobDetail;
+
+    if (inspectorTab === 'data') {
+      const dataHtml = j.data ? syntaxHighlight(JSON.stringify(j.data, null, 2)) : '<span class="json-null">null</span>';
+      let progressHtml = '';
+      const prog = j.progress;
+      if (typeof prog === 'number') {
+        const pct = Math.round(prog * 100) / 100;
+        progressHtml = '<div class="inspector-section">' +
+          '<div class="inspector-section-title">Progress</div>' +
+          '<div class="progress-bar-wrap">' +
+            '<div class="progress-text">' + pct + '%</div>' +
+            '<div class="progress-bar-fill" style="width:' + Math.min(100, pct) + '%"></div>' +
+          '</div>' +
+        '</div>';
+      } else if (prog && typeof prog === 'object') {
+        progressHtml = '<div class="inspector-section">' +
+          '<div class="inspector-section-title">Progress</div>' +
+          '<div class="json-viewer">' + syntaxHighlight(JSON.stringify(prog, null, 2)) + '</div>' +
+        '</div>';
+      }
+
+      body.innerHTML = '<div class="inspector-section">' +
+        '<div class="inspector-section-title">Job Data</div>' +
+        '<div class="json-viewer">' + dataHtml + '</div>' +
+      '</div>' +
+      progressHtml +
+      (j.returnvalue !== undefined && j.returnvalue !== null ? (
+        '<div class="inspector-section">' +
+          '<div class="inspector-section-title">Return Value</div>' +
+          '<div class="json-viewer">' + syntaxHighlight(JSON.stringify(j.returnvalue, null, 2)) + '</div>' +
+        '</div>'
+      ) : '') +
+      (j.failedReason ? (
+        '<div class="inspector-section">' +
+          '<div class="inspector-section-title">Failed Reason</div>' +
+          '<div class="json-viewer" style="border-color:rgba(255,77,106,0.3);color:var(--red);">' + escHtml(j.failedReason) + '</div>' +
+        '</div>'
+      ) : '');
+
+    } else if (inspectorTab === 'logs') {
+      const logs = j.logs || [];
+      if (!logs.length) {
+        body.innerHTML = '<div style="color:var(--text-2);padding:16px;font-family:var(--mono);font-size:12px;">No log entries</div>';
+      } else {
+        body.innerHTML = '<div class="log-entries">' +
+          logs.map(l => '<div class="log-entry">' + escHtml(l) + '</div>').join('') +
+        '</div>';
+      }
+
+    } else if (inspectorTab === 'details') {
+      const optsHtml = j.opts ? syntaxHighlight(JSON.stringify(j.opts, null, 2)) : '-';
+      body.innerHTML = '<div class="inspector-section">' +
+        '<div class="inspector-section-title">Metadata</div>' +
+        '<dl class="inspector-kv">' +
+          kvRow('ID', j.id) +
+          kvRow('Name', j.name) +
+          kvRow('State', j.state) +
+          kvRow('Attempts', j.attemptsMade || 0) +
+          kvRow('Created', j.timestamp ? formatTimeFull(j.timestamp) : '-') +
+          kvRow('Processed', j.processedOn ? formatTimeFull(j.processedOn) : '-') +
+          kvRow('Finished', j.finishedOn ? formatTimeFull(j.finishedOn) : '-') +
+          (j.parentId ? kvRow('Parent ID', j.parentId) : '') +
+          (j.parentQueue ? kvRow('Parent Q', j.parentQueue) : '') +
+        '</dl>' +
+      '</div>' +
+      '<div class="inspector-section">' +
+        '<div class="inspector-section-title">Options</div>' +
+        '<div class="json-viewer">' + optsHtml + '</div>' +
+      '</div>';
+    }
+  }
+
+  window.setInspectorTab = function(tab, name) {
+    inspectorTab = name;
+    document.querySelectorAll('.inspector-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    renderInspector();
+  };
+
+  window.closeInspector = function() {
+    selectedJob = null;
+    jobDetail = null;
+    document.getElementById('app').classList.remove('inspector-open');
+    renderJobs();
+  };
+
+  // ---- Actions ----
+  window.togglePause = async function() {
+    if (!selectedQueue) return;
+    try {
+      if (isPaused) {
+        await api('/api/queues/' + encodeURIComponent(selectedQueue) + '/resume', { method: 'POST' });
+        isPaused = false;
+        toast('Queue resumed', 'success');
+      } else {
+        await api('/api/queues/' + encodeURIComponent(selectedQueue) + '/pause', { method: 'POST' });
+        isPaused = true;
+        toast('Queue paused', 'info');
+      }
+      updateQueueState();
+    } catch (e) {
+      toast('Action failed: ' + e.message, 'error');
+    }
+  };
+
+  window.retryJob = async function(evt, id) {
+    evt.stopPropagation();
+    if (!selectedQueue) return;
+    try {
+      await api('/api/queues/' + encodeURIComponent(selectedQueue) + '/jobs/' + encodeURIComponent(id) + '/retry', { method: 'POST' });
+      toast('Job ' + id + ' retried', 'success');
+      loadJobs();
+    } catch (e) {
+      toast('Retry failed', 'error');
+    }
+  };
+
+  window.removeJob = async function(evt, id) {
+    evt.stopPropagation();
+    if (!selectedQueue) return;
+    try {
+      await api('/api/queues/' + encodeURIComponent(selectedQueue) + '/jobs/' + encodeURIComponent(id), { method: 'DELETE' });
+      toast('Job ' + id + ' removed', 'success');
+      if (selectedJob === id) closeInspector();
+      loadJobs();
+    } catch (e) {
+      toast('Remove failed', 'error');
+    }
+  };
+
+  window.obliterateQueue = function() {
+    if (!selectedQueue) return;
+    showConfirm(
+      'Obliterate Queue',
+      'This will permanently destroy the queue "' + selectedQueue + '" and ALL its jobs. This action cannot be undone.',
+      async function() {
+        try {
+          await api('/api/queues/' + encodeURIComponent(selectedQueue) + '/obliterate', { method: 'POST' });
+          toast('Queue obliterated', 'success');
+          selectedQueue = null;
+          document.getElementById('noQueueState').style.display = '';
+          document.getElementById('queueView').style.display = 'none';
+          closeInspector();
+          loadQueues();
+        } catch (e) {
+          toast('Obliterate failed', 'error');
+        }
+      }
+    );
+  };
+
+  // ---- SSE event stream ----
+  function connectSSE() {
+    if (eventSource) eventSource.close();
+    eventSource = new EventSource(BASE + '/api/events');
+    eventSource.onmessage = function(e) {
+      try {
+        const data = JSON.parse(e.data);
+        addEvent(data);
+        // Refresh counts if event is for the selected queue
+        loadQueues();
+        if (selectedQueue && data.queue === selectedQueue) {
+          loadJobs();
+        }
+      } catch (err) {
+        // plain text event
+        addEventRaw(e.data);
+      }
+    };
+    eventSource.onerror = function() {
+      // Reconnect after 5s
+      setTimeout(connectSSE, 5000);
+    };
+  }
+
+  function addEvent(data) {
+    const stream = document.getElementById('eventStream');
+    const time = formatTimeShort(Date.now());
+    const evtType = data.event || 'unknown';
+    const detail = data.jobId ? 'Job #' + data.jobId : '';
+    const qname = data.queue ? ' [' + data.queue + ']' : '';
+
+    const line = document.createElement('div');
+    line.className = 'event-line';
+    line.innerHTML = '<span class="event-time">' + time + '</span>' +
+      '<span class="event-type evt-' + evtType + '">' + evtType + '</span>' +
+      '<span class="event-detail">' + escHtml(detail + qname + (data.data ? ' - ' + truncate(data.data, 60) : '')) + '</span>';
+
+    stream.appendChild(line);
+    // Keep max 200 events
+    while (stream.children.length > 200) stream.removeChild(stream.firstChild);
+    stream.scrollTop = stream.scrollHeight;
+  }
+
+  function addEventRaw(text) {
+    const stream = document.getElementById('eventStream');
+    const line = document.createElement('div');
+    line.className = 'event-line';
+    line.innerHTML = '<span class="event-time">' + formatTimeShort(Date.now()) + '</span>' +
+      '<span class="event-detail">' + escHtml(text) + '</span>';
+    stream.appendChild(line);
+    stream.scrollTop = stream.scrollHeight;
+  }
+
+  window.clearEvents = function() {
+    document.getElementById('eventStream').innerHTML = '';
+  };
+
+  // ---- Confirm dialog ----
+  function showConfirm(title, text, onConfirm) {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = '<div class="dialog">' +
+      '<div class="dialog-title">' + escHtml(title) + '</div>' +
+      '<div class="dialog-text">' + escHtml(text) + '</div>' +
+      '<div class="dialog-actions">' +
+        '<button class="btn" id="dialogCancel">Cancel</button>' +
+        '<button class="btn btn-danger" id="dialogConfirm">Confirm</button>' +
+      '</div>' +
+    '</div>';
+    document.body.appendChild(overlay);
+
+    overlay.querySelector('#dialogCancel').onclick = function() { overlay.remove(); };
+    overlay.querySelector('#dialogConfirm').onclick = function() { overlay.remove(); onConfirm(); };
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+  }
+
+  // ---- Toast ----
+  function toast(msg, type) {
+    type = type || 'info';
+    const container = document.getElementById('toastContainer');
+    const el = document.createElement('div');
+    el.className = 'toast toast-' + type;
+    el.textContent = msg;
+    container.appendChild(el);
+    setTimeout(function() { el.remove(); }, 3000);
+  }
+
+  // ---- Mobile ----
+  window.toggleSidebar = function() {
+    document.getElementById('sidebar').classList.toggle('mobile-open');
+  };
+
+  // ---- Keyboard shortcuts ----
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      closeInspector();
+      // Also close mobile sidebar
+      document.getElementById('sidebar').classList.remove('mobile-open');
+    }
+  });
+
+  // Click outside inspector to close
+  document.getElementById('mainArea').addEventListener('click', function(e) {
+    // Don't close if we clicked a job row (that opens inspector)
+    if (e.target.closest('tr[onclick]')) return;
+    if (e.target.closest('.main-header') || e.target.closest('.filter-bar')) return;
+  });
+
+  // ---- Utility ----
+  function escHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function formatTime(ts) {
+    const d = new Date(typeof ts === 'number' ? ts : parseInt(ts));
+    if (isNaN(d.getTime())) return '-';
+    const now = new Date();
+    const diff = now - d;
+    if (diff < 60000) return Math.floor(diff / 1000) + 's ago';
+    if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+    if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+    return d.toLocaleDateString();
+  }
+
+  function formatTimeFull(ts) {
+    const d = new Date(typeof ts === 'number' ? ts : parseInt(ts));
+    if (isNaN(d.getTime())) return '-';
+    return d.toLocaleString();
+  }
+
+  function formatTimeShort(ts) {
+    const d = new Date(ts);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function truncate(s, n) {
+    s = String(s);
+    return s.length > n ? s.substring(0, n) + '...' : s;
+  }
+
+  function kvRow(key, val) {
+    return '<dt>' + escHtml(key) + '</dt><dd>' + escHtml(String(val === undefined ? '-' : val)) + '</dd>';
+  }
+
+  function syntaxHighlight(json) {
+    if (!json) return '';
+    json = escHtml(json);
+    return json.replace(
+      /("(\\u[\da-fA-F]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+      function(match) {
+        let cls = 'json-number';
+        if (/^"/.test(match)) {
+          if (/:$/.test(match)) {
+            cls = 'json-key';
+            // Remove trailing colon from the styled part
+            return '<span class="' + cls + '">' + match.slice(0, -1) + '</span>:';
+          } else {
+            cls = 'json-string';
+          }
+        } else if (/true|false/.test(match)) {
+          cls = 'json-boolean';
+        } else if (/null/.test(match)) {
+          cls = 'json-null';
+        }
+        return '<span class="' + cls + '">' + match + '</span>';
+      }
+    );
+  }
+
+  // ---- Init ----
+  loadQueues();
+  connectSSE();
+
+  // Auto-refresh every 2 seconds
+  refreshInterval = setInterval(function() {
+    loadQueues();
+    if (selectedQueue) loadJobs();
+  }, 2000);
+
+})();
+</script>
+</body>
+</html>
