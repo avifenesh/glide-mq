@@ -1,0 +1,26 @@
+{
+  "name": "glide-mq-demo",
+  "version": "1.0.0",
+  "description": "Comprehensive demo showcasing all glide-mq features",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts",
+    "dev": "tsx --watch index.ts",
+    "dashboard": "tsx dashboard-server.ts"
+  },
+  "dependencies": {
+    "glide-mq": "file:..",
+    "@glidemq/speedkey": "^0.2.0",
+    "express": "^5.2.1",
+    "chalk": "^5.3.0",
+    "ora": "^8.0.1",
+    "cli-table3": "^0.6.3",
+    "dotenv": "^16.4.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/express": "^5.0.6",
+    "tsx": "^4.21.0"
+  }
+}
