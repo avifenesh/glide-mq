@@ -46,7 +46,7 @@ No-op processor, Valkey 8.0, single node.
 npm install glide-mq
 ```
 
-Requires Node.js 20+ and a running Valkey (7.2+) or Redis (6.2+) instance.
+Requires Node.js 20+ and a running Valkey (7.0+) or Redis (7.0+) instance for FUNCTION support.
 
 ## Quick Start
 
@@ -100,7 +100,7 @@ worker.on('failed', (job, err) => console.log(`Job ${job.id} failed: ${err.messa
 - **QueueEvents** - stream-based event subscription (added, completed, failed, stalled, etc.)
 - **Job schedulers** - cron patterns and fixed intervals for repeatable jobs
 - **Metrics** - getJobCounts, getMetrics
-- **OpenTelemetry** - optional spans for Queue.add, Worker.process, FlowProducer.add
+- **OpenTelemetry** - automatic tracing spans for Queue.add and FlowProducer.add operations (optional peer dependency)
 
 ### Cloud-Native (GLIDE-exclusive)
 - **AZ-Affinity routing** - route reads to same-AZ replicas for lower latency and reduced cross-AZ costs
@@ -217,6 +217,21 @@ const events = new QueueEvents('tasks', { connection });
 events.on('completed', ({ jobId, returnvalue }) => {});
 events.on('failed', ({ jobId, failedReason }) => {});
 events.on('stalled', ({ jobId }) => {});
+```
+
+### OpenTelemetry
+
+```typescript
+// Install optional peer dependency
+// npm install @opentelemetry/api
+
+// Automatic tracing for Queue.add and FlowProducer.add
+const queue = new Queue('tasks', { connection });
+await queue.add('job', data);  // Creates span: glide-mq.queue.add
+
+// Custom tracer (optional)
+import { setTracer } from 'glide-mq';
+setTracer(customTracerInstance);
 ```
 
 ## Cluster Mode
