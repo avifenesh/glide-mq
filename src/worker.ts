@@ -263,10 +263,18 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private dispatchJob(jobId: string, entryId: string): void {
     this.activeCount++;
 
-    const promise = this.processJob(jobId, entryId).finally(() => {
-      this.activeCount--;
-      this.activePromises.delete(promise);
-    });
+    const promise = this.processJob(jobId, entryId)
+      .catch((err) => {
+        // Force close can interrupt in-flight commands and reject these promises.
+        // Consume rejections to avoid unhandled promise warnings during shutdown.
+        if (!this.closing && this.running) {
+          this.emit('error', err);
+        }
+      })
+      .finally(() => {
+        this.activeCount--;
+        this.activePromises.delete(promise);
+      });
 
     this.activePromises.add(promise);
   }
