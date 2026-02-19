@@ -128,16 +128,17 @@ redis.register_function('glidemq_promote', function(keys, args)
   local now = tonumber(args[1])
 
   -- Scores are encoded as: (priority * PRIORITY_SHIFT) + scheduledAt.
-  -- Promote by priority bands so work scales with due jobs, not full ZSET size.
-  local maxEntry = redis.call('ZREVRANGE', scheduledKey, '0', '0', 'WITHSCORES')
-  if not maxEntry or #maxEntry == 0 then
-    return 0
-  end
-  local maxScore = tonumber(maxEntry[2]) or 0
-  local maxPriority = math.floor(maxScore / PRIORITY_SHIFT)
+  -- Iterate only populated priority bands to avoid full scans and sparse huge loops.
 
   local count = 0
-  for priority = 0, maxPriority do
+  local cursorMin = 0
+  while true do
+    local nextEntry = redis.call('ZRANGEBYSCORE', scheduledKey, tostring(cursorMin), '+inf', 'WITHSCORES', 'LIMIT', 0, 1)
+    if not nextEntry or #nextEntry == 0 then
+      break
+    end
+    local firstScore = tonumber(nextEntry[2]) or 0
+    local priority = math.floor(firstScore / PRIORITY_SHIFT)
     local minScore = priority * PRIORITY_SHIFT
     local maxDueScore = minScore + now
     local members = redis.call('ZRANGEBYSCORE', scheduledKey, tostring(minScore), tostring(maxDueScore))
@@ -155,6 +156,7 @@ redis.register_function('glidemq_promote', function(keys, args)
       emitEvent(eventsKey, 'promoted', jobId, nil)
       count = count + 1
     end
+    cursorMin = (priority + 1) * PRIORITY_SHIFT
   end
 
   return count
