@@ -334,7 +334,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
   /**
    * Handle a failed job: applies rate limiting, backoff, DLQ, and emits 'failed'.
-   * Returns true if the error was a RateLimitError (caller should skip the 'failed' event).
+   * Returns true when the job reached a terminal failed state, false when it will retry.
    */
   private async handleJobFailure(
     job: Job<D, R>,
@@ -420,18 +420,6 @@ export class Worker<D = any, R = any> extends EventEmitter {
     await deferActive(this.commandClient, this.queueKeys, jobId, entryId, CONSUMER_GROUP);
   }
 
-  private async markOrderingDone(job: Job<D, R>): Promise<void> {
-    if (!this.commandClient) return;
-    const field = this.orderingMetaField(job);
-    if (!field) return;
-    const seq = job.orderingSeq as number;
-    const lastDoneRaw = await this.commandClient.hget(this.queueKeys.meta, field);
-    const lastDone = lastDoneRaw ? Number(lastDoneRaw) : 0;
-    if (seq > (Number.isFinite(lastDone) ? lastDone : 0)) {
-      await this.commandClient.hset(this.queueKeys.meta, { [field]: String(seq) });
-    }
-  }
-
   // ---- Main processing path ----
 
   /**
@@ -468,15 +456,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
 
       if (processError || aborted) {
-        const terminalFailure = await this.handleJobFailure(
+        await this.handleJobFailure(
           job,
           currentJobId,
           currentEntryId,
           aborted ? new Error('revoked') : processError!,
         );
-        if (terminalFailure) {
-          await this.markOrderingDone(job);
-        }
         return;
       }
 
@@ -493,7 +478,6 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
       job.returnvalue = processResult;
       job.finishedOn = Date.now();
-      await this.markOrderingDone(job);
       this.emit('completed', job, processResult);
 
       // No next job - return to poll loop

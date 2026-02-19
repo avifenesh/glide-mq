@@ -18,6 +18,42 @@ local function emitEvent(eventsKey, eventType, jobId, extraFields)
   redis.call('XADD', eventsKey, 'MAXLEN', '~', '1000', '*', unpack(fields))
 end
 
+local function markOrderingDone(jobKey, jobId)
+  local orderingKey = redis.call('HGET', jobKey, 'orderingKey')
+  if not orderingKey or orderingKey == '' then
+    return
+  end
+  local orderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+  if orderingSeq <= 0 then
+    return
+  end
+
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  local metaKey = prefix .. 'meta'
+  local doneField = 'orderdone:' .. orderingKey
+  local pendingKey = prefix .. 'orderdone:pending:' .. orderingKey
+
+  local lastDone = tonumber(redis.call('HGET', metaKey, doneField)) or 0
+  if orderingSeq <= lastDone then
+    redis.call('HDEL', pendingKey, tostring(orderingSeq))
+    return
+  end
+
+  redis.call('HSET', pendingKey, tostring(orderingSeq), '1')
+  local advanced = lastDone
+  while true do
+    local nextSeq = advanced + 1
+    if redis.call('HEXISTS', pendingKey, tostring(nextSeq)) == 0 then
+      break
+    end
+    redis.call('HDEL', pendingKey, tostring(nextSeq))
+    advanced = nextSeq
+  end
+  if advanced > lastDone then
+    redis.call('HSET', metaKey, doneField, tostring(advanced))
+  end
+end
+
 -- glidemq_version()
 -- Returns the library version string.
 -- KEYS: (none)  ARGS: (none)
@@ -233,6 +269,7 @@ redis.register_function('glidemq_complete', function(keys, args)
     'returnvalue', returnvalue,
     'finishedOn', tostring(timestamp)
   )
+  markOrderingDone(jobKey, jobId)
 
   -- Emit event
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
@@ -370,6 +407,7 @@ redis.register_function('glidemq_fail', function(keys, args)
       'finishedOn', tostring(timestamp),
       'processedOn', tostring(timestamp)
     )
+    markOrderingDone(jobKey, jobId)
 
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
 
@@ -492,6 +530,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
           'failedReason', 'job stalled more than maxStalledCount',
           'finishedOn', tostring(timestamp)
         )
+        markOrderingDone(jobKey, jobId)
         emitEvent(eventsKey, 'failed', jobId, {
           'failedReason', 'job stalled more than maxStalledCount'
         })
@@ -621,6 +660,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
         if state == 'delayed' or state == 'prioritized' then
           -- Remove old job from scheduled ZSet and delete hash
           redis.call('ZREM', scheduledKey, existingJobId)
+          markOrderingDone(jobKey, existingJobId)
           redis.call('DEL', jobKey)
           emitEvent(eventsKey, 'removed', existingJobId, nil)
         elseif state and state ~= 'completed' and state ~= 'failed' then
@@ -1014,6 +1054,7 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('ZREM', scheduledKey, jobId)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
+  markOrderingDone(jobKey, jobId)
 
   -- Delete the job hash
   redis.call('DEL', jobKey)

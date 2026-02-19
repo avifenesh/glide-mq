@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '13';
+export const LIBRARY_VERSION = '14';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -22,6 +22,42 @@ local function emitEvent(eventsKey, eventType, jobId, extraFields)
     end
   end
   redis.call('XADD', eventsKey, 'MAXLEN', '~', '1000', '*', unpack(fields))
+end
+
+local function markOrderingDone(jobKey, jobId)
+  local orderingKey = redis.call('HGET', jobKey, 'orderingKey')
+  if not orderingKey or orderingKey == '' then
+    return
+  end
+  local orderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+  if orderingSeq <= 0 then
+    return
+  end
+
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  local metaKey = prefix .. 'meta'
+  local doneField = 'orderdone:' .. orderingKey
+  local pendingKey = prefix .. 'orderdone:pending:' .. orderingKey
+
+  local lastDone = tonumber(redis.call('HGET', metaKey, doneField)) or 0
+  if orderingSeq <= lastDone then
+    redis.call('HDEL', pendingKey, tostring(orderingSeq))
+    return
+  end
+
+  redis.call('HSET', pendingKey, tostring(orderingSeq), '1')
+  local advanced = lastDone
+  while true do
+    local nextSeq = advanced + 1
+    if redis.call('HEXISTS', pendingKey, tostring(nextSeq)) == 0 then
+      break
+    end
+    redis.call('HDEL', pendingKey, tostring(nextSeq))
+    advanced = nextSeq
+  end
+  if advanced > lastDone then
+    redis.call('HSET', metaKey, doneField, tostring(advanced))
+  end
 end
 
 redis.register_function('glidemq_version', function(keys, args)
@@ -158,6 +194,7 @@ redis.register_function('glidemq_complete', function(keys, args)
     'returnvalue', returnvalue,
     'finishedOn', tostring(timestamp)
   )
+  markOrderingDone(jobKey, jobId)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   if removeMode == 'true' then
@@ -238,6 +275,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     'returnvalue', returnvalue,
     'finishedOn', tostring(timestamp)
   )
+  markOrderingDone(jobKey, jobId)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
 
@@ -353,6 +391,7 @@ redis.register_function('glidemq_fail', function(keys, args)
       'finishedOn', tostring(timestamp),
       'processedOn', tostring(timestamp)
     )
+    markOrderingDone(jobKey, jobId)
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     if removeMode == 'true' then
@@ -439,6 +478,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
           'failedReason', 'job stalled more than maxStalledCount',
           'finishedOn', tostring(timestamp)
         )
+        markOrderingDone(jobKey, jobId)
         emitEvent(eventsKey, 'failed', jobId, {
           'failedReason', 'job stalled more than maxStalledCount'
         })
@@ -520,6 +560,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
         local state = redis.call('HGET', jobKey, 'state')
         if state == 'delayed' or state == 'prioritized' then
           redis.call('ZREM', scheduledKey, existingJobId)
+          markOrderingDone(jobKey, existingJobId)
           redis.call('DEL', jobKey)
           emitEvent(eventsKey, 'removed', existingJobId, nil)
         elseif state and state ~= 'completed' and state ~= 'failed' then
@@ -781,6 +822,7 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('ZREM', scheduledKey, jobId)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
+  markOrderingDone(jobKey, jobId)
   redis.call('DEL', jobKey)
   redis.call('DEL', logKey)
   emitEvent(eventsKey, 'removed', jobId, nil)
@@ -822,6 +864,7 @@ redis.register_function('glidemq_revoke', function(keys, args)
       'failedReason', 'revoked',
       'finishedOn', tostring(timestamp)
     )
+    markOrderingDone(jobKey, jobId)
     emitEvent(eventsKey, 'revoked', jobId, nil)
     return 'revoked'
   end
