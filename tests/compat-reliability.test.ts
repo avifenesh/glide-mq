@@ -690,6 +690,39 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
 
     expect(shutdownResolved).toBe(true);
   }, 5000);
+
+  it('gracefulShutdown() supports manual shutdown trigger', async () => {
+    const Q = uniqueQueue('shutdown-manual');
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    const shutdown = gracefulShutdown([queue]);
+    await shutdown.shutdown();
+
+    let resolved = false;
+    shutdown.then(() => { resolved = true; });
+    await new Promise(r => setTimeout(r, 100));
+
+    expect(resolved).toBe(true);
+  }, 5000);
+
+  it('gracefulShutdown() returns same in-flight promise for reentrant calls', async () => {
+    const Q = uniqueQueue('shutdown-reentrant');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const originalClose = queue.close.bind(queue);
+    let closeCalls = 0;
+    (queue as any).close = async () => {
+      closeCalls += 1;
+      await new Promise(r => setTimeout(r, 75));
+      return originalClose();
+    };
+
+    const shutdown = gracefulShutdown([queue]);
+    const first = shutdown.shutdown();
+    const second = shutdown.shutdown();
+
+    await Promise.all([first, second]);
+    expect(closeCalls).toBe(1);
+  }, 5000);
 });
 
 // ---------------------------------------------------------------------------

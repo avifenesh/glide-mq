@@ -127,25 +127,36 @@ redis.register_function('glidemq_promote', function(keys, args)
 
   local now = tonumber(args[1])
 
-  -- Promote all jobs with score <= now
-  -- For prioritized (non-delayed) jobs, their score has timestamp component = 0,
-  -- which is always <= now, so they always promote.
-  local members = redis.call('ZRANGEBYSCORE', scheduledKey, '0', tostring(now))
+  -- Scores are encoded as: (priority * PRIORITY_SHIFT) + scheduledAt.
+  -- Iterate only populated priority bands to avoid full scans and sparse huge loops.
 
   local count = 0
-  for i = 1, #members do
-    local jobId = members[i]
-    redis.call('XADD', streamKey, '*', 'jobId', jobId)
-    redis.call('ZREM', scheduledKey, jobId)
+  local cursorMin = 0
+  while true do
+    local nextEntry = redis.call('ZRANGEBYSCORE', scheduledKey, tostring(cursorMin), '+inf', 'WITHSCORES', 'LIMIT', 0, 1)
+    if not nextEntry or #nextEntry == 0 then
+      break
+    end
+    local firstScore = tonumber(nextEntry[2]) or 0
+    local priority = math.floor(firstScore / PRIORITY_SHIFT)
+    local minScore = priority * PRIORITY_SHIFT
+    local maxDueScore = minScore + now
+    local members = redis.call('ZRANGEBYSCORE', scheduledKey, tostring(minScore), tostring(maxDueScore))
+    for i = 1, #members do
+      local jobId = members[i]
+      redis.call('XADD', streamKey, '*', 'jobId', jobId)
+      redis.call('ZREM', scheduledKey, jobId)
 
-    -- Update job state
-    -- Derive the prefix from scheduledKey: "glide:{q}:scheduled" -> "glide:{q}:"
-    local prefix = string.sub(scheduledKey, 1, #scheduledKey - 9) -- strip "scheduled"
-    local jobKey = prefix .. 'job:' .. jobId
-    redis.call('HSET', jobKey, 'state', 'waiting')
+      -- Update job state
+      -- Derive the prefix from scheduledKey: "glide:{q}:scheduled" -> "glide:{q}:"
+      local prefix = string.sub(scheduledKey, 1, #scheduledKey - 9) -- strip "scheduled"
+      local jobKey = prefix .. 'job:' .. jobId
+      redis.call('HSET', jobKey, 'state', 'waiting')
 
-    emitEvent(eventsKey, 'promoted', jobId, nil)
-    count = count + 1
+      emitEvent(eventsKey, 'promoted', jobId, nil)
+      count = count + 1
+    end
+    cursorMin = (priority + 1) * PRIORITY_SHIFT
   end
 
   return count
