@@ -17,6 +17,8 @@ export class Job<D = any, R = any> {
   processedOn: number | undefined;
   parentId?: string;
   parentQueue?: string;
+  orderingKey?: string;
+  orderingSeq?: number;
 
   /**
    * AbortSignal that fires when this job is revoked during processing.
@@ -268,6 +270,8 @@ export class Job<D = any, R = any> {
     job.failedReason = hash.failedReason || undefined;
     job.parentId = hash.parentId || undefined;
     job.parentQueue = hash.parentQueue || undefined;
+    job.orderingKey = hash.orderingKey || undefined;
+    job.orderingSeq = hash.orderingSeq ? parseInt(hash.orderingSeq, 10) : undefined;
     if (hash.progress) {
       try {
         job.progress = JSON.parse(hash.progress);

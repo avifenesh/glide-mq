@@ -83,6 +83,13 @@ export interface WorkerOptions extends QueueOptions {
 export interface JobOptions {
   delay?: number;
   priority?: number;
+  /**
+   * Optional per-key ordering. Jobs sharing the same key are processed sequentially
+   * in enqueue order, even when worker concurrency > 1.
+   */
+  ordering?: {
+    key: string;
+  };
   attempts?: number;
   backoff?: { type: 'fixed' | 'exponential' | string; delay: number; jitter?: number };
   timeout?: number;

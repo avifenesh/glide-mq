@@ -86,6 +86,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const timestamp = Date.now();
         const parentId = opts?.parent ? opts.parent.id : '';
         const maxAttempts = opts?.attempts ?? 0;
+        const orderingKey = opts?.ordering?.key ?? '';
 
         // Payload size validation - prevent DoS via oversized jobs
         let serialized = JSON.stringify(data);
@@ -115,6 +116,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             priority,
             parentId,
             maxAttempts,
+            orderingKey,
           );
           if (result === 'skipped') {
             return null;
@@ -132,6 +134,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             priority,
             parentId,
             maxAttempts,
+            orderingKey,
           );
         }
 
@@ -173,25 +176,51 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const priority = opts.priority ?? 0;
       const parentId = opts.parent ? opts.parent.id : '';
       const maxAttempts = opts.attempts ?? 0;
+      const orderingKey = opts.ordering?.key ?? '';
+      const deduplication = opts.deduplication;
 
       let serializedData = JSON.stringify(entry.data);
       if (this.opts.compression === 'gzip') {
         serializedData = compress(serializedData);
       }
 
-      return { entry, opts, delay, priority, parentId, maxAttempts, serializedData };
+      return { entry, opts, delay, priority, parentId, maxAttempts, orderingKey, deduplication, serializedData };
     });
 
     // Build a batch with all fcall commands
     const keys = [this.keys.id, this.keys.stream, this.keys.scheduled, this.keys.events];
+    const dedupKeys = [this.keys.dedup, this.keys.id, this.keys.stream, this.keys.scheduled, this.keys.events];
     const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
 
     for (const p of prepared) {
-      batch.fcall('glidemq_addJob', keys, [
-        p.entry.name, p.serializedData, JSON.stringify(p.opts),
-        timestamp.toString(), p.delay.toString(), p.priority.toString(),
-        p.parentId, p.maxAttempts.toString(),
-      ]);
+      if (p.deduplication) {
+        batch.fcall('glidemq_dedup', dedupKeys, [
+          p.deduplication.id,
+          String(p.deduplication.ttl ?? 0),
+          p.deduplication.mode ?? 'simple',
+          p.entry.name,
+          p.serializedData,
+          JSON.stringify(p.opts),
+          timestamp.toString(),
+          p.delay.toString(),
+          p.priority.toString(),
+          p.parentId,
+          p.maxAttempts.toString(),
+          p.orderingKey,
+        ]);
+      } else {
+        batch.fcall('glidemq_addJob', keys, [
+          p.entry.name,
+          p.serializedData,
+          JSON.stringify(p.opts),
+          timestamp.toString(),
+          p.delay.toString(),
+          p.priority.toString(),
+          p.parentId,
+          p.maxAttempts.toString(),
+          p.orderingKey,
+        ]);
+      }
     }
 
     const rawResults = isCluster
@@ -211,8 +240,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (!rawResults || rawResults.length !== prepared.length) {
       throw new Error(`addBulk batch returned ${rawResults?.length ?? 'null'} results, expected ${prepared.length}`);
     }
-    return prepared.map((p, i) => {
-      const jobId = String(rawResults[i]);
+    return prepared.flatMap((p, i) => {
+      const raw = String(rawResults[i]);
+      if (raw === 'skipped') return [];
+      const jobId = raw;
       const job = new Job<D, R>(
         client,
         this.keys,
@@ -223,7 +254,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       );
       job.timestamp = timestamp;
       job.parentId = p.parentId || undefined;
-      return job;
+      return [job];
     });
   }
 

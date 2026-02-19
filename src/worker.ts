@@ -12,6 +12,7 @@ import {
   rateLimit as rateLimitFn,
   checkConcurrency,
   moveToActive,
+  deferActive,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
@@ -340,18 +341,18 @@ export class Worker<D = any, R = any> extends EventEmitter {
     jobId: string,
     entryId: string,
     error: Error,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!this.commandClient) {
       job.failedReason = error.message;
       this.emit('failed', job, error);
-      return;
+      return true;
     }
 
     if (error instanceof Worker.RateLimitError) {
       const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
       this.rateLimitUntil = Date.now() + delayMs;
       try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'rate limited', Date.now(), job.attemptsMade + 2, delayMs, CONSUMER_GROUP); } catch (e) { this.emit('error', e); }
-      return;
+      return false;
     }
 
     const maxAttempts = job.opts.attempts ?? 0;
@@ -373,6 +374,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
     job.failedReason = error.message;
     this.emit('failed', job, error);
+    return failResult === 'failed';
   }
 
   /**
@@ -388,6 +390,46 @@ export class Worker<D = any, R = any> extends EventEmitter {
       parentId: job.parentId,
       parentKeys: buildKeys(job.parentQueue, this.opts.prefix),
     };
+  }
+
+  private orderingMetaField(job: Job<D, R>): string | null {
+    if (!job.orderingKey || !job.orderingSeq || job.orderingSeq <= 0) return null;
+    return `orderdone:${job.orderingKey}`;
+  }
+
+  /**
+   * Checks whether this job can run now under per-key ordering.
+   * Returns false when an earlier sequence for the same key is still pending.
+   */
+  private async isOrderingTurn(job: Job<D, R>): Promise<boolean> {
+    if (!this.commandClient) return false;
+    const field = this.orderingMetaField(job);
+    if (!field) return true;
+
+    const targetSeq = job.orderingSeq as number;
+    const lastDoneRaw = await this.commandClient.hget(this.queueKeys.meta, field);
+    const lastDone = lastDoneRaw ? Number(lastDoneRaw) : 0;
+    return targetSeq <= (Number.isFinite(lastDone) ? lastDone : 0) + 1;
+  }
+
+  /**
+   * Re-enqueue out-of-order jobs instead of holding an active slot.
+   */
+  private async deferOutOfOrderJob(jobId: string, entryId: string): Promise<void> {
+    if (!this.commandClient) return;
+    await deferActive(this.commandClient, this.queueKeys, jobId, entryId, CONSUMER_GROUP);
+  }
+
+  private async markOrderingDone(job: Job<D, R>): Promise<void> {
+    if (!this.commandClient) return;
+    const field = this.orderingMetaField(job);
+    if (!field) return;
+    const seq = job.orderingSeq as number;
+    const lastDoneRaw = await this.commandClient.hget(this.queueKeys.meta, field);
+    const lastDone = lastDoneRaw ? Number(lastDoneRaw) : 0;
+    if (seq > (Number.isFinite(lastDone) ? lastDone : 0)) {
+      await this.commandClient.hset(this.queueKeys.meta, { [field]: String(seq) });
+    }
   }
 
   // ---- Main processing path ----
@@ -417,10 +459,24 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash);
       job.entryId = currentEntryId;
 
+      const orderingReady = await this.isOrderingTurn(job);
+      if (!orderingReady) {
+        await this.deferOutOfOrderJob(currentJobId, currentEntryId);
+        return;
+      }
+
       const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
 
       if (processError || aborted) {
-        await this.handleJobFailure(job, currentJobId, currentEntryId, aborted ? new Error('revoked') : processError!);
+        const terminalFailure = await this.handleJobFailure(
+          job,
+          currentJobId,
+          currentEntryId,
+          aborted ? new Error('revoked') : processError!,
+        );
+        if (terminalFailure) {
+          await this.markOrderingDone(job);
+        }
         return;
       }
 
@@ -437,6 +493,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
       job.returnvalue = processResult;
       job.finishedOn = Date.now();
+      await this.markOrderingDone(job);
       this.emit('completed', job, processResult);
 
       // No next job - return to poll loop

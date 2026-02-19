@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '9';
+export const LIBRARY_VERSION = '12';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -41,10 +41,16 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local priority = tonumber(args[6]) or 0
   local parentId = args[7] or ''
   local maxAttempts = tonumber(args[8]) or 0
+  local orderingKey = args[9] or ''
   local jobId = redis.call('INCR', idKey)
   local jobIdStr = tostring(jobId)
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local jobKey = prefix .. 'job:' .. jobIdStr
+  local orderingSeq = 0
+  if orderingKey ~= '' then
+    local orderingMetaKey = prefix .. 'ordering'
+    orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
+  end
   local hashFields = {
     'id', jobIdStr,
     'name', jobName,
@@ -56,6 +62,12 @@ redis.register_function('glidemq_addJob', function(keys, args)
     'priority', tostring(priority),
     'maxAttempts', tostring(maxAttempts)
   }
+  if orderingKey ~= '' then
+    hashFields[#hashFields + 1] = 'orderingKey'
+    hashFields[#hashFields + 1] = orderingKey
+    hashFields[#hashFields + 1] = 'orderingSeq'
+    hashFields[#hashFields + 1] = tostring(orderingSeq)
+  end
   if parentId ~= '' then
     hashFields[#hashFields + 1] = 'parentId'
     hashFields[#hashFields + 1] = parentId
@@ -89,7 +101,7 @@ redis.register_function('glidemq_promote', function(keys, args)
   local count = 0
   local cursorMin = 0
   while true do
-    local nextEntry = redis.call('ZRANGEBYSCORE', scheduledKey, tostring(cursorMin), '+inf', 'WITHSCORES', 'LIMIT', 0, 1)
+    local nextEntry = redis.call('ZRANGEBYSCORE', scheduledKey, string.format('%.0f', cursorMin), '+inf', 'WITHSCORES', 'LIMIT', 0, 1)
     if not nextEntry or #nextEntry == 0 then
       break
     end
@@ -97,7 +109,7 @@ redis.register_function('glidemq_promote', function(keys, args)
     local priority = math.floor(firstScore / PRIORITY_SHIFT)
     local minScore = priority * PRIORITY_SHIFT
     local maxDueScore = minScore + now
-    local members = redis.call('ZRANGEBYSCORE', scheduledKey, tostring(minScore), tostring(maxDueScore))
+    local members = redis.call('ZRANGEBYSCORE', scheduledKey, string.format('%.0f', minScore), string.format('%.0f', maxDueScore))
     for i = 1, #members do
       local jobId = members[i]
       redis.call('XADD', streamKey, '*', 'jobId', jobId)
@@ -464,6 +476,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local priority = tonumber(args[9]) or 0
   local parentId = args[10] or ''
   local maxAttempts = tonumber(args[11]) or 0
+  local orderingKey = args[12] or ''
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local existing = redis.call('HGET', dedupKey, dedupId)
   if mode == 'simple' then
@@ -508,6 +521,11 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local jobId = redis.call('INCR', idKey)
   local jobIdStr = tostring(jobId)
   local jobKey = prefix .. 'job:' .. jobIdStr
+  local orderingSeq = 0
+  if orderingKey ~= '' then
+    local orderingMetaKey = prefix .. 'ordering'
+    orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
+  end
   local hashFields = {
     'id', jobIdStr,
     'name', jobName,
@@ -519,6 +537,12 @@ redis.register_function('glidemq_dedup', function(keys, args)
     'priority', tostring(priority),
     'maxAttempts', tostring(maxAttempts)
   }
+  if orderingKey ~= '' then
+    hashFields[#hashFields + 1] = 'orderingKey'
+    hashFields[#hashFields + 1] = orderingKey
+    hashFields[#hashFields + 1] = 'orderingSeq'
+    hashFields[#hashFields + 1] = tostring(orderingSeq)
+  end
   if parentId ~= '' then
     hashFields[#hashFields + 1] = 'parentId'
     hashFields[#hashFields + 1] = parentId
@@ -596,6 +620,19 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
   redis.call('HSET', jobKey, 'state', 'active', 'processedOn', timestamp, 'lastActive', timestamp)
   local fields = redis.call('HGETALL', jobKey)
   return cjson.encode(fields)
+end)
+
+redis.register_function('glidemq_deferActive', function(keys, args)
+  local streamKey = keys[1]
+  local jobKey = keys[2]
+  local jobId = args[1]
+  local entryId = args[2]
+  local group = args[3]
+  redis.call('XACK', streamKey, group, entryId)
+  redis.call('XDEL', streamKey, entryId)
+  redis.call('XADD', streamKey, '*', 'jobId', jobId)
+  redis.call('HSET', jobKey, 'state', 'waiting')
+  return 1
 end)
 
 redis.register_function('glidemq_addFlow', function(keys, args)
@@ -846,6 +883,7 @@ export async function addJob(
   priority: number,
   parentId: string,
   maxAttempts: number,
+  orderingKey: string = '',
 ): Promise<string> {
   const result = await client.fcall(
     'glidemq_addJob',
@@ -859,6 +897,7 @@ export async function addJob(
       priority.toString(),
       parentId,
       maxAttempts.toString(),
+      orderingKey,
     ],
   );
   return result as string;
@@ -882,6 +921,7 @@ export async function dedup(
   priority: number,
   parentId: string,
   maxAttempts: number,
+  orderingKey: string = '',
 ): Promise<string> {
   const result = await client.fcall(
     'glidemq_dedup',
@@ -898,6 +938,7 @@ export async function dedup(
       priority.toString(),
       parentId,
       maxAttempts.toString(),
+      orderingKey,
     ],
   );
   return result as string;
@@ -1214,6 +1255,24 @@ export async function moveToActive(
     hash[String(arr[i])] = String(arr[i + 1]);
   }
   return hash;
+}
+
+/**
+ * Defers an active job back to waiting by acknowledging + deleting the current
+ * stream entry and re-enqueuing the same jobId to the stream tail.
+ */
+export async function deferActive(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  entryId: string,
+  group: string = CONSUMER_GROUP,
+): Promise<void> {
+  await client.fcall(
+    'glidemq_deferActive',
+    [k.stream, k.job(jobId)],
+    [jobId, entryId, group],
+  );
 }
 
 /**

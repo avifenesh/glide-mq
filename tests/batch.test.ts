@@ -139,6 +139,17 @@ describeEachMode('addBulk batch pipelining', (CONNECTION) => {
       expect(score).not.toBeNull();
     }
   });
+
+  it('addBulk honors deduplication and skips duplicates consistently', async () => {
+    const jobs = await queue.addBulk([
+      { name: 'dedup-first', data: { i: 1 }, opts: { deduplication: { id: 'batch-dedup-1', mode: 'simple' } } },
+      { name: 'dedup-duplicate', data: { i: 2 }, opts: { deduplication: { id: 'batch-dedup-1', mode: 'simple' } } },
+      { name: 'dedup-second-key', data: { i: 3 }, opts: { deduplication: { id: 'batch-dedup-2', mode: 'simple' } } },
+    ]);
+
+    expect(jobs).toHaveLength(2);
+    expect(jobs.map((j) => j.name).sort()).toEqual(['dedup-first', 'dedup-second-key']);
+  });
 });
 
 describeEachMode('addBulk batch - worker processing', (CONNECTION) => {
