@@ -86,13 +86,19 @@ redis.register_function('glidemq_promote', function(keys, args)
   local streamKey = keys[2]
   local eventsKey = keys[3]
   local now = tonumber(args[1])
-  local entries = redis.call('ZRANGE', scheduledKey, '0', '-1', 'WITHSCORES')
+  local maxEntry = redis.call('ZREVRANGE', scheduledKey, '0', '0', 'WITHSCORES')
+  if not maxEntry or #maxEntry == 0 then
+    return 0
+  end
+  local maxScore = tonumber(maxEntry[2]) or 0
+  local maxPriority = math.floor(maxScore / PRIORITY_SHIFT)
   local count = 0
-  for i = 1, #entries, 2 do
-    local jobId = entries[i]
-    local score = tonumber(entries[i + 1]) or 0
-    local scheduledAt = score % PRIORITY_SHIFT
-    if scheduledAt <= now then
+  for priority = 0, maxPriority do
+    local minScore = priority * PRIORITY_SHIFT
+    local maxDueScore = minScore + now
+    local members = redis.call('ZRANGEBYSCORE', scheduledKey, tostring(minScore), tostring(maxDueScore))
+    for i = 1, #members do
+      local jobId = members[i]
       redis.call('XADD', streamKey, '*', 'jobId', jobId)
       redis.call('ZREM', scheduledKey, jobId)
       local prefix = string.sub(scheduledKey, 1, #scheduledKey - 9)

@@ -21,8 +21,8 @@ export type GracefulShutdownHandle = Promise<void> & {
 export function gracefulShutdown(
   components: Closeable[],
 ): GracefulShutdownHandle {
-  let shutting = false;
   let done = false;
+  let shutdownPromise: Promise<void> | null = null;
 
   let resolvePromise!: () => void;
   const promise = new Promise<void>((resolve) => {
@@ -37,11 +37,13 @@ export function gracefulShutdown(
     resolvePromise();
   };
 
-  const shutdown = async () => {
-    if (shutting) return;
-    shutting = true;
-    await Promise.allSettled(components.map((c) => c.close()));
-    finish();
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      await Promise.allSettled(components.map((c) => c.close()));
+      finish();
+    })();
+    return shutdownPromise;
   };
 
   const onSignal = () => {
