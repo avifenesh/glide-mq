@@ -18,6 +18,16 @@ import {
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
 
+const MAX_ORDERING_KEY_LENGTH = 256;
+
+function validateOrderingKey(orderingKey: string): void {
+  if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
+    throw new Error(
+      `Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`,
+    );
+  }
+}
+
 /** Check if all key-value pairs in filter exist in data (shallow match). */
 function matchesData(data: Record<string, unknown>, filter: Record<string, unknown>): boolean {
   for (const [key, value] of Object.entries(filter)) {
@@ -87,6 +97,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const parentId = opts?.parent ? opts.parent.id : '';
         const maxAttempts = opts?.attempts ?? 0;
         const orderingKey = opts?.ordering?.key ?? '';
+        validateOrderingKey(orderingKey);
 
         // Payload size validation - prevent DoS via oversized jobs
         let serialized = JSON.stringify(data);
@@ -177,6 +188,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const parentId = opts.parent ? opts.parent.id : '';
       const maxAttempts = opts.attempts ?? 0;
       const orderingKey = opts.ordering?.key ?? '';
+      validateOrderingKey(orderingKey);
       const deduplication = opts.deduplication;
 
       let serializedData = JSON.stringify(entry.data);

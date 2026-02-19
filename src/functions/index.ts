@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '12';
+export const LIBRARY_VERSION = '13';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -98,9 +98,10 @@ redis.register_function('glidemq_promote', function(keys, args)
   local streamKey = keys[2]
   local eventsKey = keys[3]
   local now = tonumber(args[1])
+  local MAX_PROMOTIONS = 1000
   local count = 0
   local cursorMin = 0
-  while true do
+  while count < MAX_PROMOTIONS do
     local nextEntry = redis.call('ZRANGEBYSCORE', scheduledKey, string.format('%.0f', cursorMin), '+inf', 'WITHSCORES', 'LIMIT', 0, 1)
     if not nextEntry or #nextEntry == 0 then
       break
@@ -109,7 +110,16 @@ redis.register_function('glidemq_promote', function(keys, args)
     local priority = math.floor(firstScore / PRIORITY_SHIFT)
     local minScore = priority * PRIORITY_SHIFT
     local maxDueScore = minScore + now
-    local members = redis.call('ZRANGEBYSCORE', scheduledKey, string.format('%.0f', minScore), string.format('%.0f', maxDueScore))
+    local remaining = MAX_PROMOTIONS - count
+    local members = redis.call(
+      'ZRANGEBYSCORE',
+      scheduledKey,
+      string.format('%.0f', minScore),
+      string.format('%.0f', maxDueScore),
+      'LIMIT',
+      0,
+      remaining
+    )
     for i = 1, #members do
       local jobId = members[i]
       redis.call('XADD', streamKey, '*', 'jobId', jobId)
