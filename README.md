@@ -195,17 +195,23 @@ await flow.add({
   ],
 });
 
-// Chain: A -> B -> C (sequential)
-await chain(connection, 'tasks', [
+// Chain: A -> B -> C (sequential, each step receives previous result)
+await chain('tasks', [
   { name: 'step1', data: {} },
   { name: 'step2', data: {} },
-]);
+], connection);
 
-// Group: A + B + C (parallel)
-await group(connection, 'tasks', [
+// Group: A + B + C (parallel, parent completes when all children done)
+await group('tasks', [
   { name: 'task1', data: {} },
   { name: 'task2', data: {} },
-]);
+], connection);
+
+// Chord: run group in parallel, then callback with all results
+await chord('tasks', [
+  { name: 'task1', data: {} },
+  { name: 'task2', data: {} },
+], { name: 'aggregate', data: {} }, connection);
 ```
 
 ### Events
@@ -234,6 +240,19 @@ import { setTracer } from 'glide-mq';
 setTracer(customTracerInstance);
 ```
 
+### Graceful Shutdown
+
+```typescript
+import { gracefulShutdown } from 'glide-mq';
+
+const queue = new Queue('tasks', { connection });
+const worker = new Worker('tasks', processor, { connection });
+const events = new QueueEvents('tasks', { connection });
+
+// Registers SIGTERM/SIGINT handlers and resolves when all components are closed
+await gracefulShutdown([queue, worker, events]);
+```
+
 ## Cluster Mode
 
 ```typescript
@@ -246,6 +265,107 @@ const connection = {
 
 // Everything works the same - keys are hash-tagged automatically
 const queue = new Queue('tasks', { connection });
+```
+
+## Testing Mode
+
+glide-mq ships a built-in in-memory backend so you can unit-test your job processors **without a running Valkey instance**.
+
+```typescript
+import { TestQueue, TestWorker } from 'glide-mq/testing';
+
+const queue = new TestQueue('tasks');
+
+const worker = new TestWorker(queue, async (job) => {
+  return { processed: job.data };
+});
+
+worker.on('completed', (job, result) => {
+  console.log(`Job ${job.id} done:`, result);
+});
+
+worker.on('failed', (job, err) => {
+  console.error(`Job ${job.id} failed:`, err.message);
+});
+
+await queue.add('send-email', { to: 'user@example.com' });
+
+// Inspect state without touching Valkey
+const counts = await queue.getJobCounts();
+// { waiting: 0, active: 0, delayed: 0, completed: 1, failed: 0 }
+
+// Search jobs by name or data fields
+const jobs = await queue.searchJobs({ name: 'send-email', state: 'completed' });
+
+await worker.close();
+await queue.close();
+```
+
+`TestQueue` and `TestWorker` mirror the real `Queue` / `Worker` public API (add, addBulk, getJob, getJobs, getJobCounts, pause, resume, events, retries, concurrency), making it straightforward to swap implementations between test and production code.
+
+## Dashboard
+
+glide-mq exposes a REST + Server-Sent Events API that can be consumed by the [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) UI package.
+
+### Quick start with the built-in demo server
+
+```bash
+cd demo
+npm install
+npm run dashboard   # starts http://localhost:3000
+```
+
+### REST endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/queues` | List all queues with counts and metrics |
+| `GET` | `/api/queues/:name` | Queue details + recent jobs |
+| `GET` | `/api/queues/:name/jobs/:id` | Single job details, state, logs |
+| `POST` | `/api/queues/:name/jobs` | Add a new job |
+| `POST` | `/api/queues/:name/pause` | Pause a queue |
+| `POST` | `/api/queues/:name/resume` | Resume a queue |
+| `POST` | `/api/queues/:name/jobs/:id/retry` | Retry a failed job |
+| `DELETE` | `/api/queues/:name/jobs/:id` | Remove a job |
+| `POST` | `/api/queues/:name/drain` | Drain all waiting jobs |
+| `POST` | `/api/queues/:name/obliterate` | Obliterate queue and all data |
+| `GET` | `/api/events` | SSE stream for real-time job events |
+
+### Real-time events via SSE
+
+```javascript
+const es = new EventSource('http://localhost:3000/api/events');
+es.onmessage = ({ data }) => {
+  const { queue, event, jobId } = JSON.parse(data);
+  // event: 'added' | 'completed' | 'failed' | 'progress' | 'stalled' | 'heartbeat'
+  console.log(`[${queue}] ${event} – job ${jobId}`);
+};
+```
+
+### Embedding the dashboard server in your own Express app
+
+```typescript
+import express from 'express';
+import { Queue, QueueEvents } from 'glide-mq';
+
+const app = express();
+app.use(express.json());
+
+const queues: Record<string, Queue> = {
+  orders: new Queue('orders', { connection }),
+  payments: new Queue('payments', { connection }),
+};
+
+app.get('/api/queues', async (_req, res) => {
+  const data = await Promise.all(
+    Object.entries(queues).map(async ([name, q]) => ({
+      name,
+      counts: await q.getJobCounts(),
+      isPaused: await q.isPaused(),
+    })),
+  );
+  res.json(data);
+});
 ```
 
 ## License
