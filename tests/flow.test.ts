@@ -59,6 +59,35 @@ describeEachMode('FlowProducer', (CONNECTION) => {
     await flow.close();
   });
 
+  it('persists ordering metadata for flow parent and children', async () => {
+    const qName = Q + '-ordering';
+    const flow = new FlowProducer({ connection: CONNECTION });
+
+    const node = await flow.add({
+      name: 'parent-ordered',
+      queueName: qName,
+      data: { type: 'parent' },
+      opts: { ordering: { key: 'parent-key' } },
+      children: [
+        { name: 'child-ordered', queueName: qName, data: { idx: 1 }, opts: { ordering: { key: 'child-key' } } },
+      ],
+    });
+
+    const k = buildKeys(qName);
+    const parentOrderingKey = await cleanupClient.hget(k.job(node.job.id), 'orderingKey');
+    const parentOrderingSeq = await cleanupClient.hget(k.job(node.job.id), 'orderingSeq');
+    const childOrderingKey = await cleanupClient.hget(k.job(node.children![0].job.id), 'orderingKey');
+    const childOrderingSeq = await cleanupClient.hget(k.job(node.children![0].job.id), 'orderingSeq');
+
+    expect(String(parentOrderingKey)).toBe('parent-key');
+    expect(Number(parentOrderingSeq)).toBe(1);
+    expect(String(childOrderingKey)).toBe('child-key');
+    expect(Number(childOrderingSeq)).toBe(1);
+
+    await flow.close();
+    await flushQueue(cleanupClient, qName);
+  });
+
   it('parent completes after all children are processed', async () => {
     const qName = Q + '-complete';
     const flow = new FlowProducer({ connection: CONNECTION });

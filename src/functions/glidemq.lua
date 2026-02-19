@@ -54,6 +54,25 @@ local function markOrderingDone(jobKey, jobId)
   end
 end
 
+local function extractOrderingKeyFromOpts(optsJson)
+  if not optsJson or optsJson == '' then
+    return ''
+  end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then
+    return ''
+  end
+  local ordering = decoded['ordering']
+  if type(ordering) ~= 'table' then
+    return ''
+  end
+  local key = ordering['key']
+  if key == nil then
+    return ''
+  end
+  return tostring(key)
+end
+
 -- glidemq_version()
 -- Returns the library version string.
 -- KEYS: (none)  ARGS: (none)
@@ -847,9 +866,13 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   local jobId = args[1]
   local entryId = args[2]
   local group = args[3]
+  local exists = redis.call('EXISTS', jobKey)
 
   redis.call('XACK', streamKey, group, entryId)
   redis.call('XDEL', streamKey, entryId)
+  if exists == 0 then
+    return 0
+  end
   redis.call('XADD', streamKey, '*', 'jobId', jobId)
   redis.call('HSET', jobKey, 'state', 'waiting')
   return 1
@@ -879,6 +902,12 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   local parentPrefix = string.sub(parentIdKey, 1, #parentIdKey - 2)
   local parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
   local depsKey = parentPrefix .. 'deps:' .. parentJobIdStr
+  local parentOrderingKey = extractOrderingKeyFromOpts(parentOpts)
+  local parentOrderingSeq = 0
+  if parentOrderingKey ~= '' then
+    local parentOrderingMetaKey = parentPrefix .. 'ordering'
+    parentOrderingSeq = redis.call('HINCRBY', parentOrderingMetaKey, parentOrderingKey, 1)
+  end
 
   -- Store parent job hash with state=waiting-children
   local parentHash = {
@@ -893,6 +922,12 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     'maxAttempts', tostring(parentMaxAttempts),
     'state', 'waiting-children'
   }
+  if parentOrderingKey ~= '' then
+    parentHash[#parentHash + 1] = 'orderingKey'
+    parentHash[#parentHash + 1] = parentOrderingKey
+    parentHash[#parentHash + 1] = 'orderingSeq'
+    parentHash[#parentHash + 1] = tostring(parentOrderingSeq)
+  end
   redis.call('HSET', parentJobKey, unpack(parentHash))
 
   -- Collect child IDs for result
@@ -926,6 +961,12 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     -- Derive child prefix from child id key
     local childPrefix = string.sub(childIdKey, 1, #childIdKey - 2)
     local childJobKey = childPrefix .. 'job:' .. childJobIdStr
+    local childOrderingKey = extractOrderingKeyFromOpts(childOpts)
+    local childOrderingSeq = 0
+    if childOrderingKey ~= '' then
+      local childOrderingMetaKey = childPrefix .. 'ordering'
+      childOrderingSeq = redis.call('HINCRBY', childOrderingMetaKey, childOrderingKey, 1)
+    end
 
     -- Store child job hash with parentId and parentQueue
     local childHash = {
@@ -941,6 +982,12 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       'parentId', parentJobIdStr,
       'parentQueue', childParentQueue
     }
+    if childOrderingKey ~= '' then
+      childHash[#childHash + 1] = 'orderingKey'
+      childHash[#childHash + 1] = childOrderingKey
+      childHash[#childHash + 1] = 'orderingSeq'
+      childHash[#childHash + 1] = tostring(childOrderingSeq)
+    end
 
     if childDelay > 0 or childPriority > 0 then
       childHash[#childHash + 1] = 'state'

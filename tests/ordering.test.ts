@@ -7,6 +7,7 @@ import { it, expect, beforeAll, afterAll } from 'vitest';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
+const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
@@ -102,5 +103,25 @@ describeEachMode('Per-key ordering', (CONNECTION) => {
       expect(seenByAccount.get(accountId)).toBe(expectedFinal);
     }
   }, 25000);
-});
 
+  it('deferActive does not recreate removed job hashes', async () => {
+    const localQueueName = `test-ordering-defer-${Date.now()}`;
+    const k = buildKeys(localQueueName);
+    const missingJobId = '99999';
+    const entryId = await cleanupClient.xadd(k.stream, ['jobId', missingJobId]);
+
+    const result = await cleanupClient.fcall(
+      'glidemq_deferActive',
+      [k.stream, k.job(missingJobId)],
+      [missingJobId, String(entryId), 'workers'],
+    );
+
+    expect(Number(result)).toBe(0);
+
+    const hash = await cleanupClient.hgetall(k.job(missingJobId));
+    expect(hash).toEqual([]);
+
+    const streamLen = await cleanupClient.xlen(k.stream);
+    expect(Number(streamLen)).toBe(0);
+  });
+});
