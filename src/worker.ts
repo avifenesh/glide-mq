@@ -12,6 +12,7 @@ import {
   rateLimit as rateLimitFn,
   checkConcurrency,
   moveToActive,
+  deferActive,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
@@ -333,25 +334,25 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
   /**
    * Handle a failed job: applies rate limiting, backoff, DLQ, and emits 'failed'.
-   * Returns true if the error was a RateLimitError (caller should skip the 'failed' event).
+   * Returns true when the job reached a terminal failed state, false when it will retry.
    */
   private async handleJobFailure(
     job: Job<D, R>,
     jobId: string,
     entryId: string,
     error: Error,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!this.commandClient) {
       job.failedReason = error.message;
       this.emit('failed', job, error);
-      return;
+      return true;
     }
 
     if (error instanceof Worker.RateLimitError) {
       const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
       this.rateLimitUntil = Date.now() + delayMs;
       try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'rate limited', Date.now(), job.attemptsMade + 2, delayMs, CONSUMER_GROUP); } catch (e) { this.emit('error', e); }
-      return;
+      return false;
     }
 
     const maxAttempts = job.opts.attempts ?? 0;
@@ -373,6 +374,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
     job.failedReason = error.message;
     this.emit('failed', job, error);
+    return failResult === 'failed';
   }
 
   /**
@@ -388,6 +390,34 @@ export class Worker<D = any, R = any> extends EventEmitter {
       parentId: job.parentId,
       parentKeys: buildKeys(job.parentQueue, this.opts.prefix),
     };
+  }
+
+  private orderingMetaField(job: Job<D, R>): string | null {
+    if (!job.orderingKey || !job.orderingSeq || job.orderingSeq <= 0) return null;
+    return `orderdone:${job.orderingKey}`;
+  }
+
+  /**
+   * Checks whether this job can run now under per-key ordering.
+   * Returns false when an earlier sequence for the same key is still pending.
+   */
+  private async isOrderingTurn(job: Job<D, R>): Promise<boolean> {
+    if (!this.commandClient) return false;
+    const field = this.orderingMetaField(job);
+    if (!field) return true;
+
+    const targetSeq = job.orderingSeq as number;
+    const lastDoneRaw = await this.commandClient.hget(this.queueKeys.meta, field);
+    const lastDone = lastDoneRaw ? Number(lastDoneRaw) : 0;
+    return targetSeq <= (Number.isFinite(lastDone) ? lastDone : 0) + 1;
+  }
+
+  /**
+   * Re-enqueue out-of-order jobs instead of holding an active slot.
+   */
+  private async deferOutOfOrderJob(jobId: string, entryId: string): Promise<void> {
+    if (!this.commandClient) return;
+    await deferActive(this.commandClient, this.queueKeys, jobId, entryId, CONSUMER_GROUP);
   }
 
   // ---- Main processing path ----
@@ -417,10 +447,21 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash);
       job.entryId = currentEntryId;
 
+      const orderingReady = await this.isOrderingTurn(job);
+      if (!orderingReady) {
+        await this.deferOutOfOrderJob(currentJobId, currentEntryId);
+        return;
+      }
+
       const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
 
       if (processError || aborted) {
-        await this.handleJobFailure(job, currentJobId, currentEntryId, aborted ? new Error('revoked') : processError!);
+        await this.handleJobFailure(
+          job,
+          currentJobId,
+          currentEntryId,
+          aborted ? new Error('revoked') : processError!,
+        );
         return;
       }
 

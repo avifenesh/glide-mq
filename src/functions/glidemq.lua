@@ -18,6 +18,61 @@ local function emitEvent(eventsKey, eventType, jobId, extraFields)
   redis.call('XADD', eventsKey, 'MAXLEN', '~', '1000', '*', unpack(fields))
 end
 
+local function markOrderingDone(jobKey, jobId)
+  local orderingKey = redis.call('HGET', jobKey, 'orderingKey')
+  if not orderingKey or orderingKey == '' then
+    return
+  end
+  local orderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+  if orderingSeq <= 0 then
+    return
+  end
+
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  local metaKey = prefix .. 'meta'
+  local doneField = 'orderdone:' .. orderingKey
+  local pendingKey = prefix .. 'orderdone:pending:' .. orderingKey
+
+  local lastDone = tonumber(redis.call('HGET', metaKey, doneField)) or 0
+  if orderingSeq <= lastDone then
+    redis.call('HDEL', pendingKey, tostring(orderingSeq))
+    return
+  end
+
+  redis.call('HSET', pendingKey, tostring(orderingSeq), '1')
+  local advanced = lastDone
+  while true do
+    local nextSeq = advanced + 1
+    if redis.call('HEXISTS', pendingKey, tostring(nextSeq)) == 0 then
+      break
+    end
+    redis.call('HDEL', pendingKey, tostring(nextSeq))
+    advanced = nextSeq
+  end
+  if advanced > lastDone then
+    redis.call('HSET', metaKey, doneField, tostring(advanced))
+  end
+end
+
+local function extractOrderingKeyFromOpts(optsJson)
+  if not optsJson or optsJson == '' then
+    return ''
+  end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then
+    return ''
+  end
+  local ordering = decoded['ordering']
+  if type(ordering) ~= 'table' then
+    return ''
+  end
+  local key = ordering['key']
+  if key == nil then
+    return ''
+  end
+  return tostring(key)
+end
+
 -- glidemq_version()
 -- Returns the library version string.
 -- KEYS: (none)  ARGS: (none)
@@ -39,6 +94,7 @@ end)
 -- ARGS[6] = priority (0 = no priority)
 -- ARGS[7] = parentId (empty string = no parent)
 -- ARGS[8] = maxAttempts (0 = no retry)
+-- ARGS[9] = orderingKey (empty string = no per-key ordering)
 -- Returns: job ID (string)
 redis.register_function('glidemq_addJob', function(keys, args)
   local idKey = keys[1]
@@ -54,6 +110,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local priority = tonumber(args[6]) or 0
   local parentId = args[7] or ''
   local maxAttempts = tonumber(args[8]) or 0
+  local orderingKey = args[9] or ''
 
   -- Generate job ID via atomic increment
   local jobId = redis.call('INCR', idKey)
@@ -63,6 +120,11 @@ redis.register_function('glidemq_addJob', function(keys, args)
   -- idKey is like "glide:{q}:id", job key is "glide:{q}:job:{id}"
   local prefix = string.sub(idKey, 1, #idKey - 2) -- strip ":id"
   local jobKey = prefix .. 'job:' .. jobIdStr
+  local orderingSeq = 0
+  if orderingKey ~= '' then
+    local orderingMetaKey = prefix .. 'ordering'
+    orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
+  end
 
   -- Store job hash
   local hashFields = {
@@ -76,6 +138,13 @@ redis.register_function('glidemq_addJob', function(keys, args)
     'priority', tostring(priority),
     'maxAttempts', tostring(maxAttempts)
   }
+
+  if orderingKey ~= '' then
+    hashFields[#hashFields + 1] = 'orderingKey'
+    hashFields[#hashFields + 1] = orderingKey
+    hashFields[#hashFields + 1] = 'orderingSeq'
+    hashFields[#hashFields + 1] = tostring(orderingSeq)
+  end
 
   if parentId ~= '' then
     hashFields[#hashFields + 1] = 'parentId'
@@ -126,14 +195,15 @@ redis.register_function('glidemq_promote', function(keys, args)
   local eventsKey = keys[3]
 
   local now = tonumber(args[1])
+  local MAX_PROMOTIONS = 1000
 
   -- Scores are encoded as: (priority * PRIORITY_SHIFT) + scheduledAt.
   -- Iterate only populated priority bands to avoid full scans and sparse huge loops.
 
   local count = 0
   local cursorMin = 0
-  while true do
-    local nextEntry = redis.call('ZRANGEBYSCORE', scheduledKey, tostring(cursorMin), '+inf', 'WITHSCORES', 'LIMIT', 0, 1)
+  while count < MAX_PROMOTIONS do
+    local nextEntry = redis.call('ZRANGEBYSCORE', scheduledKey, string.format('%.0f', cursorMin), '+inf', 'WITHSCORES', 'LIMIT', 0, 1)
     if not nextEntry or #nextEntry == 0 then
       break
     end
@@ -141,7 +211,8 @@ redis.register_function('glidemq_promote', function(keys, args)
     local priority = math.floor(firstScore / PRIORITY_SHIFT)
     local minScore = priority * PRIORITY_SHIFT
     local maxDueScore = minScore + now
-    local members = redis.call('ZRANGEBYSCORE', scheduledKey, tostring(minScore), tostring(maxDueScore))
+    local remaining = MAX_PROMOTIONS - count
+    local members = redis.call('ZRANGEBYSCORE', scheduledKey, string.format('%.0f', minScore), string.format('%.0f', maxDueScore), 'LIMIT', 0, remaining)
     for i = 1, #members do
       local jobId = members[i]
       redis.call('XADD', streamKey, '*', 'jobId', jobId)
@@ -217,6 +288,7 @@ redis.register_function('glidemq_complete', function(keys, args)
     'returnvalue', returnvalue,
     'finishedOn', tostring(timestamp)
   )
+  markOrderingDone(jobKey, jobId)
 
   -- Emit event
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
@@ -354,6 +426,7 @@ redis.register_function('glidemq_fail', function(keys, args)
       'finishedOn', tostring(timestamp),
       'processedOn', tostring(timestamp)
     )
+    markOrderingDone(jobKey, jobId)
 
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
 
@@ -476,6 +549,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
           'failedReason', 'job stalled more than maxStalledCount',
           'finishedOn', tostring(timestamp)
         )
+        markOrderingDone(jobKey, jobId)
         emitEvent(eventsKey, 'failed', jobId, {
           'failedReason', 'job stalled more than maxStalledCount'
         })
@@ -543,6 +617,7 @@ end)
 -- ARGS[9] = priority (0 = no priority)
 -- ARGS[10] = parentId (empty string = no parent)
 -- ARGS[11] = maxAttempts (0 = no retry)
+-- ARGS[12] = orderingKey (empty string = no per-key ordering)
 -- Returns: "skipped" if deduplicated, otherwise the new job ID (string)
 redis.register_function('glidemq_dedup', function(keys, args)
   local dedupKey = keys[1]
@@ -562,6 +637,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local priority = tonumber(args[9]) or 0
   local parentId = args[10] or ''
   local maxAttempts = tonumber(args[11]) or 0
+  local orderingKey = args[12] or ''
 
   local prefix = string.sub(idKey, 1, #idKey - 2) -- strip ":id"
 
@@ -603,6 +679,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
         if state == 'delayed' or state == 'prioritized' then
           -- Remove old job from scheduled ZSet and delete hash
           redis.call('ZREM', scheduledKey, existingJobId)
+          markOrderingDone(jobKey, existingJobId)
           redis.call('DEL', jobKey)
           emitEvent(eventsKey, 'removed', existingJobId, nil)
         elseif state and state ~= 'completed' and state ~= 'failed' then
@@ -617,6 +694,11 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local jobId = redis.call('INCR', idKey)
   local jobIdStr = tostring(jobId)
   local jobKey = prefix .. 'job:' .. jobIdStr
+  local orderingSeq = 0
+  if orderingKey ~= '' then
+    local orderingMetaKey = prefix .. 'ordering'
+    orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
+  end
 
   local hashFields = {
     'id', jobIdStr,
@@ -629,6 +711,13 @@ redis.register_function('glidemq_dedup', function(keys, args)
     'priority', tostring(priority),
     'maxAttempts', tostring(maxAttempts)
   }
+
+  if orderingKey ~= '' then
+    hashFields[#hashFields + 1] = 'orderingKey'
+    hashFields[#hashFields + 1] = orderingKey
+    hashFields[#hashFields + 1] = 'orderingSeq'
+    hashFields[#hashFields + 1] = tostring(orderingSeq)
+  end
 
   if parentId ~= '' then
     hashFields[#hashFields + 1] = 'parentId'
@@ -764,6 +853,31 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
   return cjson.encode(fields)
 end)
 
+-- glidemq_deferActive(KEYS, ARGS)
+-- Defers an active job back to waiting by replacing its stream entry.
+-- KEYS[1] = stream key
+-- KEYS[2] = job hash key
+-- ARGS[1] = job ID
+-- ARGS[2] = stream entry ID
+-- ARGS[3] = consumer group name
+redis.register_function('glidemq_deferActive', function(keys, args)
+  local streamKey = keys[1]
+  local jobKey = keys[2]
+  local jobId = args[1]
+  local entryId = args[2]
+  local group = args[3]
+  local exists = redis.call('EXISTS', jobKey)
+
+  redis.call('XACK', streamKey, group, entryId)
+  redis.call('XDEL', streamKey, entryId)
+  if exists == 0 then
+    return 0
+  end
+  redis.call('XADD', streamKey, '*', 'jobId', jobId)
+  redis.call('HSET', jobKey, 'state', 'waiting')
+  return 1
+end)
+
 -- Returns: cjson array [parentId, childId1, childId2, ...]
 redis.register_function('glidemq_addFlow', function(keys, args)
   local parentIdKey = keys[1]
@@ -788,6 +902,12 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   local parentPrefix = string.sub(parentIdKey, 1, #parentIdKey - 2)
   local parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
   local depsKey = parentPrefix .. 'deps:' .. parentJobIdStr
+  local parentOrderingKey = extractOrderingKeyFromOpts(parentOpts)
+  local parentOrderingSeq = 0
+  if parentOrderingKey ~= '' then
+    local parentOrderingMetaKey = parentPrefix .. 'ordering'
+    parentOrderingSeq = redis.call('HINCRBY', parentOrderingMetaKey, parentOrderingKey, 1)
+  end
 
   -- Store parent job hash with state=waiting-children
   local parentHash = {
@@ -802,6 +922,12 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     'maxAttempts', tostring(parentMaxAttempts),
     'state', 'waiting-children'
   }
+  if parentOrderingKey ~= '' then
+    parentHash[#parentHash + 1] = 'orderingKey'
+    parentHash[#parentHash + 1] = parentOrderingKey
+    parentHash[#parentHash + 1] = 'orderingSeq'
+    parentHash[#parentHash + 1] = tostring(parentOrderingSeq)
+  end
   redis.call('HSET', parentJobKey, unpack(parentHash))
 
   -- Collect child IDs for result
@@ -835,6 +961,12 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     -- Derive child prefix from child id key
     local childPrefix = string.sub(childIdKey, 1, #childIdKey - 2)
     local childJobKey = childPrefix .. 'job:' .. childJobIdStr
+    local childOrderingKey = extractOrderingKeyFromOpts(childOpts)
+    local childOrderingSeq = 0
+    if childOrderingKey ~= '' then
+      local childOrderingMetaKey = childPrefix .. 'ordering'
+      childOrderingSeq = redis.call('HINCRBY', childOrderingMetaKey, childOrderingKey, 1)
+    end
 
     -- Store child job hash with parentId and parentQueue
     local childHash = {
@@ -850,6 +982,12 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       'parentId', parentJobIdStr,
       'parentQueue', childParentQueue
     }
+    if childOrderingKey ~= '' then
+      childHash[#childHash + 1] = 'orderingKey'
+      childHash[#childHash + 1] = childOrderingKey
+      childHash[#childHash + 1] = 'orderingSeq'
+      childHash[#childHash + 1] = tostring(childOrderingSeq)
+    end
 
     if childDelay > 0 or childPriority > 0 then
       childHash[#childHash + 1] = 'state'
@@ -963,6 +1101,7 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('ZREM', scheduledKey, jobId)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
+  markOrderingDone(jobKey, jobId)
 
   -- Delete the job hash
   redis.call('DEL', jobKey)

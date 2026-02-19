@@ -153,6 +153,17 @@ describe('Queue', () => {
 
       expect(GlideClient.createClient).toHaveBeenCalledTimes(1);
     });
+
+    it('should reject oversized ordering keys', async () => {
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION);
+      const queue = new Queue('test-queue', connOpts);
+      const orderingKey = 'x'.repeat(257);
+
+      await expect(
+        queue.add('ordered', { x: 1 }, { ordering: { key: orderingKey } }),
+      ).rejects.toThrow('Ordering key exceeds maximum length');
+      expect(mockClient.fcall).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('addBulk', () => {
@@ -180,6 +191,19 @@ describe('Queue', () => {
 
       const jobs = await queue.addBulk([]);
       expect(jobs).toEqual([]);
+    });
+
+    it('should reject oversized ordering keys in bulk entries', async () => {
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION);
+      const queue = new Queue('test-queue', connOpts);
+      const orderingKey = 'x'.repeat(257);
+
+      await expect(
+        queue.addBulk([
+          { name: 'a', data: { x: 1 }, opts: { ordering: { key: orderingKey } } },
+        ]),
+      ).rejects.toThrow('Ordering key exceeds maximum length');
+      expect(mockClient.exec).not.toHaveBeenCalled();
     });
   });
 
