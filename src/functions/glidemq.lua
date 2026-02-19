@@ -127,25 +127,30 @@ redis.register_function('glidemq_promote', function(keys, args)
 
   local now = tonumber(args[1])
 
-  -- Promote all jobs with score <= now
-  -- For prioritized (non-delayed) jobs, their score has timestamp component = 0,
-  -- which is always <= now, so they always promote.
-  local members = redis.call('ZRANGEBYSCORE', scheduledKey, '0', tostring(now))
+  -- Scores are encoded as: (priority * PRIORITY_SHIFT) + scheduledAt.
+  -- We must decode scheduledAt from the score, otherwise prioritized jobs
+  -- (priority > 0) may never match a simple score<=now range.
+  local entries = redis.call('ZRANGE', scheduledKey, '0', '-1', 'WITHSCORES')
 
   local count = 0
-  for i = 1, #members do
-    local jobId = members[i]
-    redis.call('XADD', streamKey, '*', 'jobId', jobId)
-    redis.call('ZREM', scheduledKey, jobId)
+  for i = 1, #entries, 2 do
+    local jobId = entries[i]
+    local score = tonumber(entries[i + 1]) or 0
+    local scheduledAt = score % PRIORITY_SHIFT
 
-    -- Update job state
-    -- Derive the prefix from scheduledKey: "glide:{q}:scheduled" -> "glide:{q}:"
-    local prefix = string.sub(scheduledKey, 1, #scheduledKey - 9) -- strip "scheduled"
-    local jobKey = prefix .. 'job:' .. jobId
-    redis.call('HSET', jobKey, 'state', 'waiting')
+    if scheduledAt <= now then
+      redis.call('XADD', streamKey, '*', 'jobId', jobId)
+      redis.call('ZREM', scheduledKey, jobId)
 
-    emitEvent(eventsKey, 'promoted', jobId, nil)
-    count = count + 1
+      -- Update job state
+      -- Derive the prefix from scheduledKey: "glide:{q}:scheduled" -> "glide:{q}:"
+      local prefix = string.sub(scheduledKey, 1, #scheduledKey - 9) -- strip "scheduled"
+      local jobKey = prefix .. 'job:' .. jobId
+      redis.call('HSET', jobKey, 'state', 'waiting')
+
+      emitEvent(eventsKey, 'promoted', jobId, nil)
+      count = count + 1
+    end
   end
 
   return count

@@ -690,6 +690,20 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
 
     expect(shutdownResolved).toBe(true);
   }, 5000);
+
+  it('gracefulShutdown() supports manual shutdown trigger', async () => {
+    const Q = uniqueQueue('shutdown-manual');
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    const shutdown = gracefulShutdown([queue]);
+    await shutdown.shutdown();
+
+    let resolved = false;
+    shutdown.then(() => { resolved = true; });
+    await new Promise(r => setTimeout(r, 100));
+
+    expect(resolved).toBe(true);
+  }, 5000);
 });
 
 // ---------------------------------------------------------------------------

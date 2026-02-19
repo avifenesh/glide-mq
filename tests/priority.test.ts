@@ -77,11 +77,6 @@ describeEachMode('Priority jobs', (CONNECTION) => {
       worker.on('error', () => {});
     });
 
-    await new Promise(r => setTimeout(r, 500));
-
-    const promoted = await promote(cleanupClient, buildKeys(qName), Number.MAX_SAFE_INTEGER);
-    expect(promoted).toBe(3);
-
     await allDone;
 
     expect(processedPrios).toEqual([1, 2, 3]);
@@ -153,4 +148,39 @@ describeEachMode('Priority jobs', (CONNECTION) => {
     await localQueue.close();
     await flushQueue(cleanupClient, qName);
   });
+
+  it('worker scheduler promotes prioritized jobs without manual promote()', async () => {
+    const qName = Q + '-auto-promote';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+
+    let processed = 0;
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 7000);
+      const worker = new Worker(
+        qName,
+        async () => {
+          processed += 1;
+          if (processed === 2) {
+            clearTimeout(timeout);
+            setTimeout(() => worker.close(true).then(resolve), 50);
+          }
+          return 'ok';
+        },
+        { connection: CONNECTION, concurrency: 1, promotionInterval: 100, blockTimeout: 500 },
+      );
+      worker.on('error', () => {});
+    });
+
+    await localQueue.add('p1', { x: 1 }, { priority: 1 });
+    await localQueue.add('p2', { x: 2 }, { priority: 2 });
+
+    await done;
+
+    const counts = await localQueue.getJobCounts();
+    expect(counts.completed).toBe(2);
+    expect(counts.delayed).toBe(0);
+
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 10000);
 });

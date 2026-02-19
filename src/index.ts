@@ -31,6 +31,7 @@ export type {
 
 export { GlideMQError, ConnectionError } from './errors';
 export { gracefulShutdown } from './graceful-shutdown';
+export type { GracefulShutdownHandle } from './graceful-shutdown';
 
 export { chain, group, chord } from './workflows';
 export type { WorkflowJobDef } from './workflows';

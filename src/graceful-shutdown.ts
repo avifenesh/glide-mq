@@ -4,6 +4,10 @@ import type { QueueEvents } from './queue-events';
 import type { FlowProducer } from './flow-producer';
 
 type Closeable = Queue | Worker | QueueEvents | FlowProducer;
+export type GracefulShutdownHandle = Promise<void> & {
+  shutdown: () => Promise<void>;
+  dispose: () => void;
+};
 
 /**
  * Register SIGTERM and SIGINT handlers that gracefully close all provided components.
@@ -16,19 +20,39 @@ type Closeable = Queue | Worker | QueueEvents | FlowProducer;
  */
 export function gracefulShutdown(
   components: Closeable[],
-): Promise<void> {
-  return new Promise<void>((resolve) => {
-    let shutting = false;
+): GracefulShutdownHandle {
+  let shutting = false;
+  let done = false;
 
-    const handler = () => {
-      if (shutting) return;
-      shutting = true;
-
-      Promise.allSettled(components.map((c) => c.close()))
-        .then(() => resolve());
-    };
-
-    process.on('SIGTERM', handler);
-    process.on('SIGINT', handler);
+  let resolvePromise!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
   });
+
+  const finish = () => {
+    if (done) return;
+    done = true;
+    process.off('SIGTERM', onSignal);
+    process.off('SIGINT', onSignal);
+    resolvePromise();
+  };
+
+  const shutdown = async () => {
+    if (shutting) return;
+    shutting = true;
+    await Promise.allSettled(components.map((c) => c.close()));
+    finish();
+  };
+
+  const onSignal = () => {
+    void shutdown();
+  };
+
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
+
+  const handle = promise as GracefulShutdownHandle;
+  handle.shutdown = shutdown;
+  handle.dispose = finish;
+  return handle;
 }

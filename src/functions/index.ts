@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '6';
+export const LIBRARY_VERSION = '7';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -86,17 +86,21 @@ redis.register_function('glidemq_promote', function(keys, args)
   local streamKey = keys[2]
   local eventsKey = keys[3]
   local now = tonumber(args[1])
-  local members = redis.call('ZRANGEBYSCORE', scheduledKey, '0', tostring(now))
+  local entries = redis.call('ZRANGE', scheduledKey, '0', '-1', 'WITHSCORES')
   local count = 0
-  for i = 1, #members do
-    local jobId = members[i]
-    redis.call('XADD', streamKey, '*', 'jobId', jobId)
-    redis.call('ZREM', scheduledKey, jobId)
-    local prefix = string.sub(scheduledKey, 1, #scheduledKey - 9)
-    local jobKey = prefix .. 'job:' .. jobId
-    redis.call('HSET', jobKey, 'state', 'waiting')
-    emitEvent(eventsKey, 'promoted', jobId, nil)
-    count = count + 1
+  for i = 1, #entries, 2 do
+    local jobId = entries[i]
+    local score = tonumber(entries[i + 1]) or 0
+    local scheduledAt = score % PRIORITY_SHIFT
+    if scheduledAt <= now then
+      redis.call('XADD', streamKey, '*', 'jobId', jobId)
+      redis.call('ZREM', scheduledKey, jobId)
+      local prefix = string.sub(scheduledKey, 1, #scheduledKey - 9)
+      local jobKey = prefix .. 'job:' .. jobId
+      redis.call('HSET', jobKey, 'state', 'waiting')
+      emitEvent(eventsKey, 'promoted', jobId, nil)
+      count = count + 1
+    end
   end
   return count
 end)
