@@ -12,7 +12,7 @@
 
 ## FlowProducer
 
-`FlowProducer` lets you atomically enqueue a tree of parent and child jobs. A parent job only becomes runnable once **all** of its children have completed.
+`FlowProducer` lets you atomically enqueue a tree of parent and child jobs. A parent job only becomes runnable once **all** of its children have successfully completed; failed or dead-lettered children do not unblock the parent.
 
 ```typescript
 import { FlowProducer } from 'glide-mq';
@@ -63,19 +63,18 @@ const nodes = await flow.addBulk([
 
 ## Reading Child Results
 
-In the parent processor, call `job.getChildrenValues()` to retrieve the return values of all direct children, keyed by `queueName::jobId`.
+In the parent processor, call `job.getChildrenValues()` to retrieve the return values of all direct children. The keys are internal dependency identifiers (implementation detail — prefer `Object.values()` when you only need the results).
 
 ```typescript
 const worker = new Worker('reports', async (job) => {
   // Runs only after all children have completed
   const childValues = await job.getChildrenValues();
-  // {
-  //   'data::1': { sales: 42000 },
-  //   'data::2': { returns: 300 },
-  // }
+  // Keys are opaque internal identifiers; use Object.values() for the results:
+  const results = Object.values(childValues);
+  // [ { sales: 42000 }, { returns: 300 } ]
 
-  const total = Object.values(childValues).reduce((s, v) => s + v.sales, 0);
-  return { total };
+  const totalSales = results.reduce((s, v) => s + (v.sales ?? 0), 0);
+  return { totalSales };
 }, { connection });
 ```
 
@@ -83,22 +82,23 @@ const worker = new Worker('reports', async (job) => {
 
 ## `chain`
 
-Execute a list of jobs **sequentially**. Step N+1 runs only after step N completes. Each step can read the previous step's result via `getChildrenValues()`.
+Execute a list of jobs **sequentially**, specified in **reverse execution order** (the last element in the array runs first). Each step can read the previous step's result via `getChildrenValues()`.
 
 ```typescript
 import { chain } from 'glide-mq';
 
+// Execution order: download → parse → transform → upload
 await chain('pipeline', [
-  { name: 'download',  data: { url: 'https://example.com/file.csv' } },
-  { name: 'parse',     data: {} },
+  { name: 'upload',    data: { bucket: 'my-bucket' } },   // runs last  (root)
   { name: 'transform', data: {} },
-  { name: 'upload',    data: { bucket: 'my-bucket' } },
+  { name: 'parse',     data: {} },
+  { name: 'download',  data: { url: 'https://example.com/file.csv' } }, // runs first (leaf)
 ], connection);
 ```
 
-- The first job in the array is the root (the one that finishes last).
-- The last job in the array runs first.
-- Each step's processor receives the previous step's return value via `job.getChildrenValues()`.
+- The **last** element in the array is the leaf — it runs first.
+- The **first** element in the array is the root — it runs last (after all descendants complete).
+- Each step's processor can access the prior step's return value via `Object.values(job.getChildrenValues())[0]`.
 
 ```typescript
 const worker = new Worker('pipeline', async (job) => {
@@ -158,9 +158,9 @@ In the callback processor:
 const worker = new Worker('tasks', async (job) => {
   if (job.name === 'select-best-model') {
     const scores = await job.getChildrenValues();
-    // { 'tasks::1': { score: 0.91 }, 'tasks::2': { score: 0.87 }, ... }
+    // Keys are opaque — use Object.entries() if you need them, or Object.values():
     const best = Object.entries(scores).sort((a, b) => b[1].score - a[1].score)[0];
-    return { winner: best[0], score: best[1].score };
+    return { score: best[1].score };
   }
   // ... other processors
 }, { connection });

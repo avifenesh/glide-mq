@@ -31,7 +31,7 @@ const job = await queue.add('send-email', { to: 'user@example.com' });
 await queue.add('send-email', { to: 'user@example.com' }, {
   delay: 5_000,           // run after 5 s
   priority: 1,            // lower = higher priority (default: 0)
-  attempts: 3,            // retry up to 3 times on failure
+  attempts: 3,            // run at most 3 times total (initial + 2 retries)
   backoff: { type: 'exponential', delay: 1_000 },
   timeout: 30_000,        // fail job if processor exceeds 30 s
   removeOnComplete: true, // auto-remove on success (or { age, count })

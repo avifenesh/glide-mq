@@ -192,7 +192,7 @@ await queue.add('webhook', data, {
 // Exponential with jitter (avoids thundering herd)
 await queue.add('poll', data, {
   attempts: 10,
-  backoff: { type: 'exponential', delay: 500, jitter: true },
+  backoff: { type: 'exponential', delay: 500, jitter: 0.1 },
 });
 
 // Custom strategy — register on the Worker

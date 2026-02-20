@@ -97,8 +97,7 @@ describe('email processor', () => {
 | `getJobCounts()` | Returns `{ waiting, active, delayed, completed, failed }` |
 | `searchJobs(opts)` | Filter jobs by state, name, and/or data fields |
 | `pause()` / `resume()` | Pause / resume the queue |
-| `isPaused()` | Check pause state |
-| `obliterate()` | Clear all jobs |
+| `isPaused()` | Check pause state (synchronous, returns `boolean`) |
 | `close()` | Close the queue |
 
 ### TestWorker
@@ -107,7 +106,6 @@ describe('email processor', () => {
 |----------------|-------------|
 | `on('completed', fn)` | Fired when a job finishes successfully |
 | `on('failed', fn)` | Fired when a job throws |
-| `on('error', fn)` | Fired on unexpected errors |
 | `close()` | Stop the worker |
 
 ---
@@ -132,11 +130,9 @@ const userFailed = await queue.searchJobs({
 // Search across all states (scans all job hashes)
 const byName = await queue.searchJobs({ name: 'send-email' });
 
-// Limit results (default: 100)
-const recent = await queue.searchJobs({ state: 'completed', limit: 10 });
 ```
 
-`searchJobs` works identically on the real `Queue` class — you can call it in production too.
+`searchJobs` is also available on the real `Queue` class (with an additional `limit` option, default 100).
 
 ---
 
