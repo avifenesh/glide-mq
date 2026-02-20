@@ -595,7 +595,10 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     });
 
     // Give it a moment - close should not have resolved yet
+    // The job takes 2000ms, we wait 500ms, so it should still be running
     await new Promise((r) => setTimeout(r, 500));
+
+    // Note: If this check fails (is true), it means close() resolved too early
     expect(closeFinished).toBe(false);
 
     // Wait for close to complete (job should finish first)

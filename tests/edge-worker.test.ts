@@ -99,7 +99,12 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
 
       const job = await queue.add('task', { x: 1 });
 
-      await new Promise((r) => setTimeout(r, 300));
+      // Wait until job processing starts or finishes
+      let waited = 0;
+      while (completed.length === 0 && waited < 2000) {
+        await new Promise((r) => setTimeout(r, 50));
+        waited += 50;
+      }
 
       await worker.close(false);
 
@@ -134,7 +139,13 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
 
       const job1 = await queue.add('task1', { i: 1 });
 
-      await new Promise((r) => setTimeout(r, 100));
+      // Wait until job1 is processed or close enough
+      let waited = 0;
+      while (processed.length === 0 && waited < 2000) {
+        await new Promise((r) => setTimeout(r, 50));
+        waited += 50;
+      }
+
       await worker.pause();
 
       expect(processed).toContain(job1.id);

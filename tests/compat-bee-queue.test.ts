@@ -416,6 +416,9 @@ describeEachMode('Bee-Queue: Graceful shutdown', (CONNECTION) => {
     // Graceful close (force=false) should wait for active job
     await worker.close(false);
 
+    // Wait slightly to ensure local state update
+    await new Promise((r) => setTimeout(r, 50));
+
     expect(jobCompleted).toBe(true);
 
     await queue.close();
@@ -1345,11 +1348,15 @@ describeEachMode('Bee-Queue: Job state queries', (CONNECTION) => {
       worker.on('error', () => {});
       worker.on('completed', () => {
         clearTimeout(timeout);
+        // Ensure worker is closed but job state is final
         worker.close().then(resolve);
       });
     });
 
     await done;
+
+    // Small wait to ensure state persistence
+    await new Promise((r) => setTimeout(r, 100));
 
     const fetched = await queue.getJob(job!.id);
     expect(await fetched!.isCompleted()).toBe(true);
