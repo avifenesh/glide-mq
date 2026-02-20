@@ -97,7 +97,6 @@ describe('Worker Saturation', () => {
     await new Promise(r => setTimeout(r, 100));
 
     const calls = pollOnceSpy.mock.calls.length;
-    console.log(`pollOnce calls: ${calls}`);
 
     // With optimized wait, should only be called a few times (initial calls + maybe one wait call)
     // Definitely NOT 20+
