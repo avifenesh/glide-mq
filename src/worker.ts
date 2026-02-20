@@ -37,6 +37,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private initPromise: Promise<void>;
   private rateLimitUntil = 0;
   private reconnectBackoff = 0;
+  private internalEvents = new EventEmitter();
 
   // Configurable defaults
   private concurrency: number;
@@ -184,14 +185,33 @@ export class Worker<D = any, R = any> extends EventEmitter {
     );
   }
 
+  private async waitForSlot(): Promise<void> {
+    if (this.prefetch - this.activeCount > 0) return;
+
+    return new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout>;
+
+      const done = () => {
+        this.internalEvents.off('slotFree', done);
+        this.off('closing', done);
+        clearTimeout(timer);
+        resolve();
+      };
+
+      this.internalEvents.once('slotFree', done);
+      this.once('closing', done);
+      timer = setTimeout(done, 100);
+    });
+  }
+
   private async pollOnce(): Promise<void> {
     if (!this.blockingClient || !this.commandClient) return;
 
     // Calculate how many jobs we can fetch without exceeding concurrency
     const available = this.prefetch - this.activeCount;
     if (available <= 0) {
-      // At capacity - yield to let active jobs finish, then retry
-      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      // At capacity - wait for a slot to free up
+      await this.waitForSlot();
       return;
     }
 
@@ -274,6 +294,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       .finally(() => {
         this.activeCount--;
         this.activePromises.delete(promise);
+        this.internalEvents.emit('slotFree');
       });
 
     this.activePromises.add(promise);
