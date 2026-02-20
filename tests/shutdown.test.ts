@@ -113,7 +113,9 @@ describe('Worker.close()', () => {
 
   it('should wait for active jobs before closing (force=false)', async () => {
     let resolveJob!: () => void;
-    const jobPromise = new Promise<void>((r) => { resolveJob = r; });
+    const jobPromise = new Promise<void>((r) => {
+      resolveJob = r;
+    });
     const processor = vi.fn().mockReturnValue(jobPromise);
 
     // Set up a mock that returns one job entry, then blocks forever
@@ -121,29 +123,33 @@ describe('Worker.close()', () => {
     mockBlockingClient.xreadgroup.mockImplementation(async () => {
       callIdx++;
       if (callIdx === 1) {
-        return [{
-          key: 'glide:{test-queue}:stream',
-          value: {
-            '1-0': [['jobId', '1']],
+        return [
+          {
+            key: 'glide:{test-queue}:stream',
+            value: {
+              '1-0': [['jobId', '1']],
+            },
           },
-        }];
+        ];
       }
       return new Promise(() => {}); // block forever
     });
 
     // moveToActive returns a valid hash so the job is processed.
     // completeAndFetchNext returns {next: false} so the loop exits after one job.
-    mockCommandClient.fcall.mockImplementation((func: string, _keys?: string[], args?: string[]) => {
-      if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
-      if (func === 'glidemq_complete') return Promise.resolve(1);
-      if (func === 'glidemq_promote') return Promise.resolve(0);
-      if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
-      if (func === 'glidemq_completeAndFetchNext') {
-        const jobId = args?.[0] ?? '0';
-        return Promise.resolve(JSON.stringify({ completed: jobId, next: false }));
-      }
-      return Promise.resolve(LIBRARY_VERSION);
-    });
+    mockCommandClient.fcall.mockImplementation(
+      (func: string, _keys?: string[], args?: string[]) => {
+        if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
+        if (func === 'glidemq_complete') return Promise.resolve(1);
+        if (func === 'glidemq_promote') return Promise.resolve(0);
+        if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
+        if (func === 'glidemq_completeAndFetchNext') {
+          const jobId = args?.[0] ?? '0';
+          return Promise.resolve(JSON.stringify({ completed: jobId, next: false }));
+        }
+        return Promise.resolve(LIBRARY_VERSION);
+      },
+    );
 
     // Use concurrency=2 so dispatchJob is used (tracks activePromises).
     // At c=1, processJobFastPath runs inline and close() cannot wait for it.
@@ -159,7 +165,9 @@ describe('Worker.close()', () => {
 
     // Start close (should wait for active job)
     let closed = false;
-    const closePromise = worker.close().then(() => { closed = true; });
+    const closePromise = worker.close().then(() => {
+      closed = true;
+    });
 
     // Job still active - close should not have resolved
     await vi.advanceTimersByTimeAsync(50);
@@ -174,19 +182,23 @@ describe('Worker.close()', () => {
 
   it('should close immediately with force=true even with active jobs', async () => {
     let resolveJob!: (v: string) => void;
-    const jobPromise = new Promise<string>((r) => { resolveJob = r; });
+    const jobPromise = new Promise<string>((r) => {
+      resolveJob = r;
+    });
     const processor = vi.fn().mockReturnValue(jobPromise);
 
     let callIdx = 0;
     mockBlockingClient.xreadgroup.mockImplementation(async () => {
       callIdx++;
       if (callIdx === 1) {
-        return [{
-          key: 'glide:{test-queue}:stream',
-          value: {
-            '1-0': [['jobId', '1']],
+        return [
+          {
+            key: 'glide:{test-queue}:stream',
+            value: {
+              '1-0': [['jobId', '1']],
+            },
           },
-        }];
+        ];
       }
       return null;
     });
@@ -248,9 +260,7 @@ describe('Queue.close()', () => {
   });
 
   it('should be idempotent', async () => {
-    mockClient.fcall
-      .mockResolvedValueOnce(LIBRARY_VERSION)
-      .mockResolvedValueOnce('1');
+    mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1');
     const queue = new Queue('test-queue', { connection: connectionOpts });
 
     // Force client creation
@@ -340,9 +350,7 @@ describe('FlowProducer.close()', () => {
   });
 
   it('should be idempotent', async () => {
-    mockClient.fcall
-      .mockResolvedValueOnce(LIBRARY_VERSION)
-      .mockResolvedValueOnce('1');
+    mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1');
     const fp = new FlowProducer({ connection: connectionOpts });
 
     // Force client creation via add

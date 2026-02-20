@@ -314,7 +314,10 @@ describeEachMode('Retry lifecycle', (CONNECTION) => {
 
     await done;
 
-    const entries = await cleanupClient.xrange(k.events, '-', '+') as Record<string, [string, string][]>;
+    const entries = (await cleanupClient.xrange(k.events, '-', '+')) as Record<
+      string,
+      [string, string][]
+    >;
     const events: { event: string; jobId: string }[] = [];
     for (const entryId of Object.keys(entries)) {
       const fields = entries[entryId];
@@ -327,7 +330,7 @@ describeEachMode('Retry lifecycle', (CONNECTION) => {
       }
     }
 
-    const eventTypes = events.map(e => e.event);
+    const eventTypes = events.map((e) => e.event);
     expect(eventTypes).toContain('added');
     expect(eventTypes).toContain('retrying');
     expect(eventTypes).toContain('completed');

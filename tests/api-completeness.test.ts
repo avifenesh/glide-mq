@@ -149,18 +149,20 @@ describe('Queue.obliterate', () => {
     const queue = new Queue('obliterate-test', connOpts);
     await queue.obliterate({ force: true });
 
-    expect(mockClient.del).toHaveBeenCalledWith(expect.arrayContaining([
-      'glide:{obliterate-test}:id',
-      'glide:{obliterate-test}:stream',
-      'glide:{obliterate-test}:scheduled',
-      'glide:{obliterate-test}:completed',
-      'glide:{obliterate-test}:failed',
-      'glide:{obliterate-test}:events',
-      'glide:{obliterate-test}:meta',
-      'glide:{obliterate-test}:dedup',
-      'glide:{obliterate-test}:rate',
-      'glide:{obliterate-test}:schedulers',
-    ]));
+    expect(mockClient.del).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        'glide:{obliterate-test}:id',
+        'glide:{obliterate-test}:stream',
+        'glide:{obliterate-test}:scheduled',
+        'glide:{obliterate-test}:completed',
+        'glide:{obliterate-test}:failed',
+        'glide:{obliterate-test}:events',
+        'glide:{obliterate-test}:meta',
+        'glide:{obliterate-test}:dedup',
+        'glide:{obliterate-test}:rate',
+        'glide:{obliterate-test}:schedulers',
+      ]),
+    );
 
     await queue.close();
   });
@@ -169,7 +171,10 @@ describe('Queue.obliterate', () => {
     // First scan call (job pattern): returns keys, then empty
     // Second scan call (deps pattern): returns keys, then empty
     mockClient.scan
-      .mockResolvedValueOnce(['123', ['glide:{obliterate-test}:job:1', 'glide:{obliterate-test}:job:2']])
+      .mockResolvedValueOnce([
+        '123',
+        ['glide:{obliterate-test}:job:1', 'glide:{obliterate-test}:job:2'],
+      ])
       .mockResolvedValueOnce(['0', []])
       .mockResolvedValueOnce(['456', ['glide:{obliterate-test}:deps:1']])
       .mockResolvedValueOnce(['0', []]);
@@ -179,7 +184,10 @@ describe('Queue.obliterate', () => {
 
     // del called: once for static keys, once for job batch, once for deps batch
     expect(mockClient.del).toHaveBeenCalledTimes(3);
-    expect(mockClient.del).toHaveBeenCalledWith(['glide:{obliterate-test}:job:1', 'glide:{obliterate-test}:job:2']);
+    expect(mockClient.del).toHaveBeenCalledWith([
+      'glide:{obliterate-test}:job:1',
+      'glide:{obliterate-test}:job:2',
+    ]);
     expect(mockClient.del).toHaveBeenCalledWith(['glide:{obliterate-test}:deps:1']);
 
     await queue.close();
@@ -231,13 +239,17 @@ describe('Queue.getJobs', () => {
     });
     mockClient.hgetall
       .mockResolvedValueOnce([
-        { field: 'id', value: '1' }, { field: 'name', value: 'j1' },
-        { field: 'data', value: '{}' }, { field: 'opts', value: '{}' },
+        { field: 'id', value: '1' },
+        { field: 'name', value: 'j1' },
+        { field: 'data', value: '{}' },
+        { field: 'opts', value: '{}' },
         { field: 'state', value: 'waiting' },
       ])
       .mockResolvedValueOnce([
-        { field: 'id', value: '2' }, { field: 'name', value: 'j2' },
-        { field: 'data', value: '{}' }, { field: 'opts', value: '{}' },
+        { field: 'id', value: '2' },
+        { field: 'name', value: 'j2' },
+        { field: 'data', value: '{}' },
+        { field: 'opts', value: '{}' },
         { field: 'state', value: 'waiting' },
       ]);
 
@@ -255,13 +267,17 @@ describe('Queue.getJobs', () => {
     mockClient.zrange.mockResolvedValue(['5', '6']);
     mockClient.hgetall
       .mockResolvedValueOnce([
-        { field: 'id', value: '5' }, { field: 'name', value: 'j5' },
-        { field: 'data', value: '{}' }, { field: 'opts', value: '{}' },
+        { field: 'id', value: '5' },
+        { field: 'name', value: 'j5' },
+        { field: 'data', value: '{}' },
+        { field: 'opts', value: '{}' },
         { field: 'state', value: 'delayed' },
       ])
       .mockResolvedValueOnce([
-        { field: 'id', value: '6' }, { field: 'name', value: 'j6' },
-        { field: 'data', value: '{}' }, { field: 'opts', value: '{}' },
+        { field: 'id', value: '6' },
+        { field: 'name', value: 'j6' },
+        { field: 'data', value: '{}' },
+        { field: 'opts', value: '{}' },
         { field: 'state', value: 'delayed' },
       ]);
 
@@ -271,10 +287,10 @@ describe('Queue.getJobs', () => {
     expect(jobs).toHaveLength(2);
     expect(jobs[0].id).toBe('5');
     expect(jobs[1].id).toBe('6');
-    expect(mockClient.zrange).toHaveBeenCalledWith(
-      'glide:{getjobs-test}:scheduled',
-      { start: 0, end: -1 },
-    );
+    expect(mockClient.zrange).toHaveBeenCalledWith('glide:{getjobs-test}:scheduled', {
+      start: 0,
+      end: -1,
+    });
 
     await queue.close();
   });
@@ -282,8 +298,10 @@ describe('Queue.getJobs', () => {
   it('returns completed jobs from the completed ZSet', async () => {
     mockClient.zrange.mockResolvedValue(['10']);
     mockClient.hgetall.mockResolvedValueOnce([
-      { field: 'id', value: '10' }, { field: 'name', value: 'j10' },
-      { field: 'data', value: '{}' }, { field: 'opts', value: '{}' },
+      { field: 'id', value: '10' },
+      { field: 'name', value: 'j10' },
+      { field: 'data', value: '{}' },
+      { field: 'opts', value: '{}' },
       { field: 'state', value: 'completed' },
       { field: 'returnvalue', value: '"done"' },
     ]);
@@ -293,10 +311,10 @@ describe('Queue.getJobs', () => {
 
     expect(jobs).toHaveLength(1);
     expect(jobs[0].id).toBe('10');
-    expect(mockClient.zrange).toHaveBeenCalledWith(
-      'glide:{getjobs-test}:completed',
-      { start: 0, end: -1 },
-    );
+    expect(mockClient.zrange).toHaveBeenCalledWith('glide:{getjobs-test}:completed', {
+      start: 0,
+      end: -1,
+    });
 
     await queue.close();
   });
@@ -304,8 +322,10 @@ describe('Queue.getJobs', () => {
   it('returns failed jobs from the failed ZSet', async () => {
     mockClient.zrange.mockResolvedValue(['20']);
     mockClient.hgetall.mockResolvedValueOnce([
-      { field: 'id', value: '20' }, { field: 'name', value: 'j20' },
-      { field: 'data', value: '{}' }, { field: 'opts', value: '{}' },
+      { field: 'id', value: '20' },
+      { field: 'name', value: 'j20' },
+      { field: 'data', value: '{}' },
+      { field: 'opts', value: '{}' },
       { field: 'state', value: 'failed' },
       { field: 'failedReason', value: 'error' },
     ]);
@@ -320,16 +340,16 @@ describe('Queue.getJobs', () => {
   });
 
   it('returns active jobs via XPENDING + XRANGE', async () => {
-    mockClient.xpendingWithOptions.mockResolvedValue([
-      ['1-0', 'consumer1', 5000, 1],
-    ]);
+    mockClient.xpendingWithOptions.mockResolvedValue([['1-0', 'consumer1', 5000, 1]]);
     // XRANGE for each pending entry to get the jobId
     mockClient.xrange.mockResolvedValue({
       '1-0': [['jobId', '7']],
     });
     mockClient.hgetall.mockResolvedValueOnce([
-      { field: 'id', value: '7' }, { field: 'name', value: 'j7' },
-      { field: 'data', value: '{}' }, { field: 'opts', value: '{}' },
+      { field: 'id', value: '7' },
+      { field: 'name', value: 'j7' },
+      { field: 'data', value: '{}' },
+      { field: 'opts', value: '{}' },
       { field: 'state', value: 'active' },
     ]);
 
@@ -356,18 +376,20 @@ describe('Queue.getJobs', () => {
   it('applies pagination for delayed jobs', async () => {
     mockClient.zrange.mockResolvedValue(['3']);
     mockClient.hgetall.mockResolvedValueOnce([
-      { field: 'id', value: '3' }, { field: 'name', value: 'j3' },
-      { field: 'data', value: '{}' }, { field: 'opts', value: '{}' },
+      { field: 'id', value: '3' },
+      { field: 'name', value: 'j3' },
+      { field: 'data', value: '{}' },
+      { field: 'opts', value: '{}' },
       { field: 'state', value: 'delayed' },
     ]);
 
     const queue = new Queue('getjobs-test', connOpts);
     const jobs = await queue.getJobs('delayed', 2, 5);
 
-    expect(mockClient.zrange).toHaveBeenCalledWith(
-      'glide:{getjobs-test}:scheduled',
-      { start: 2, end: 5 },
-    );
+    expect(mockClient.zrange).toHaveBeenCalledWith('glide:{getjobs-test}:scheduled', {
+      start: 2,
+      end: 5,
+    });
 
     await queue.close();
   });
@@ -398,8 +420,8 @@ describe('Queue.getJobCountByTypes', () => {
   it('returns the same result as getJobCounts', async () => {
     mockClient.xlen.mockResolvedValue(10);
     mockClient.zcard
-      .mockResolvedValueOnce(5)  // completed
-      .mockResolvedValueOnce(2)  // failed
+      .mockResolvedValueOnce(5) // completed
+      .mockResolvedValueOnce(2) // failed
       .mockResolvedValueOnce(3); // scheduled
     mockClient.xpending.mockResolvedValue([4, '1-0', '4-0', [['c1', '4']]]);
 
@@ -407,7 +429,7 @@ describe('Queue.getJobCountByTypes', () => {
     const counts = await queue.getJobCountByTypes();
 
     expect(counts).toEqual({
-      waiting: 6,  // 10 - 4
+      waiting: 6, // 10 - 4
       active: 4,
       delayed: 3,
       completed: 5,
@@ -432,7 +454,7 @@ describe('Worker.drain', () => {
     // Mock both command and blocking clients
     const mockBlockingClient = makeMockClient();
     vi.mocked(GlideClient.createClient)
-      .mockResolvedValueOnce(mockClient as any)   // command client
+      .mockResolvedValueOnce(mockClient as any) // command client
       .mockResolvedValueOnce(mockBlockingClient as any); // blocking client
 
     mockClient.xlen.mockResolvedValue(0);

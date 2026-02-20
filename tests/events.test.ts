@@ -3,7 +3,12 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
+import {
+  describeEachMode,
+  createCleanupClient,
+  flushQueue,
+  ConnectionConfig,
+} from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -37,7 +42,10 @@ describeEachMode('QueueEvents', (CONNECTION) => {
 
     it('emits added event when a job is added', async () => {
       const received = new Promise<{ jobId: string; name: string }>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('timeout waiting for added event')), 10000);
+        const timeout = setTimeout(
+          () => reject(new Error('timeout waiting for added event')),
+          10000,
+        );
         queueEvents = new QueueEvents(Q, { connection: CONNECTION, blockTimeout: 1000 });
         queueEvents.on('added', (data: any) => {
           clearTimeout(timeout);
@@ -49,7 +57,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       // Wait for QueueEvents to connect and start listening
       await queueEvents.waitUntilReady();
       // Small delay to ensure XREAD BLOCK is active
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const job = await queue.add('test-job', { x: 1 });
 
@@ -76,7 +84,10 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       queueEvents.on('error', () => {});
 
       const received = new Promise<{ jobId: string; returnvalue: string }>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('timeout waiting for completed event')), 15000);
+        const timeout = setTimeout(
+          () => reject(new Error('timeout waiting for completed event')),
+          15000,
+        );
         queueEvents.on('completed', (data: any) => {
           clearTimeout(timeout);
           resolve(data);
@@ -84,7 +95,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       });
 
       await queueEvents.waitUntilReady();
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const worker = new Worker(
         Q,
@@ -95,7 +106,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       );
       worker.on('error', () => {});
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       const job = await queue.add('compute', { input: 1 });
 
       const event = await received;
@@ -123,7 +134,10 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       queueEvents.on('error', () => {});
 
       const received = new Promise<{ jobId: string; failedReason: string }>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('timeout waiting for failed event')), 15000);
+        const timeout = setTimeout(
+          () => reject(new Error('timeout waiting for failed event')),
+          15000,
+        );
         queueEvents.on('failed', (data: any) => {
           clearTimeout(timeout);
           resolve(data);
@@ -131,7 +145,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       });
 
       await queueEvents.waitUntilReady();
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const worker = new Worker(
         Q,
@@ -143,7 +157,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       worker.on('error', () => {});
       worker.on('failed', () => {});
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       const job = await queue.add('fail-job', { input: 1 });
 
       const event = await received;
@@ -188,7 +202,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       });
 
       await queueEvents.waitUntilReady();
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const worker = new Worker(
         Q,
@@ -199,7 +213,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       );
       worker.on('error', () => {});
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       const job1 = await queue.add('multi-1', { i: 1 });
       const job2 = await queue.add('multi-2', { i: 2 });
 

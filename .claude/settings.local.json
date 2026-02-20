@@ -1,7 +1,5 @@
 {
   "permissions": {
-    "allow": [
-      "Skill(consult)"
-    ]
+    "allow": ["Skill(consult)"]
   }
 }

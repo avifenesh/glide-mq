@@ -30,7 +30,7 @@ await queue.upsertJobScheduler(
 // Interval: run "cleanup" every 5 minutes
 await queue.upsertJobScheduler(
   'cleanup',
-  { every: 5 * 60 * 1_000 },  // ms
+  { every: 5 * 60 * 1_000 }, // ms
   { name: 'cleanup-old-records', data: {} },
 );
 
@@ -51,12 +51,20 @@ Add `ordering.key` to a job to guarantee that all jobs with the same key are pro
 
 ```typescript
 // All jobs with ordering.key = 'user:42' are processed sequentially
-await queue.add('process-payment', { userId: 42, amount: 100 }, {
-  ordering: { key: 'user:42' },
-});
-await queue.add('send-receipt', { userId: 42 }, {
-  ordering: { key: 'user:42' },
-});
+await queue.add(
+  'process-payment',
+  { userId: 42, amount: 100 },
+  {
+    ordering: { key: 'user:42' },
+  },
+);
+await queue.add(
+  'send-receipt',
+  { userId: 42 },
+  {
+    ordering: { key: 'user:42' },
+  },
+);
 ```
 
 - Jobs with different ordering keys (or no ordering key) are processed concurrently as normal.
@@ -69,27 +77,39 @@ await queue.add('send-receipt', { userId: 42 }, {
 
 Prevent duplicate jobs from entering the queue using `deduplication.id`. Three modes are supported:
 
-| Mode | Behaviour |
-|------|-----------|
-| `simple` | Skip the new job if any job with the same ID already exists (any state). |
-| `throttle` | Accept only the first job in a TTL window; later arrivals are dropped. |
+| Mode       | Behaviour                                                                 |
+| ---------- | ------------------------------------------------------------------------- |
+| `simple`   | Skip the new job if any job with the same ID already exists (any state).  |
+| `throttle` | Accept only the first job in a TTL window; later arrivals are dropped.    |
 | `debounce` | Accept only the last job in a TTL window; earlier arrivals are cancelled. |
 
 ```typescript
 // Simple: skip if a job with this ID is already queued / active / completed
-await queue.add('send-welcome', { userId: 99 }, {
-  deduplication: { id: 'welcome-99', mode: 'simple' },
-});
+await queue.add(
+  'send-welcome',
+  { userId: 99 },
+  {
+    deduplication: { id: 'welcome-99', mode: 'simple' },
+  },
+);
 
 // Throttle: at most one "sync" job per 10 s
-await queue.add('sync', { region: 'eu' }, {
-  deduplication: { id: 'sync-eu', mode: 'throttle', ttl: 10_000 },
-});
+await queue.add(
+  'sync',
+  { region: 'eu' },
+  {
+    deduplication: { id: 'sync-eu', mode: 'throttle', ttl: 10_000 },
+  },
+);
 
 // Debounce: only the last "search" job within 500 ms is actually queued
-await queue.add('search', { query: 'hello' }, {
-  deduplication: { id: 'search-user-1', mode: 'debounce', ttl: 500 },
-});
+await queue.add(
+  'search',
+  { query: 'hello' },
+  {
+    deduplication: { id: 'search-user-1', mode: 'debounce', ttl: 500 },
+  },
+);
 ```
 
 `queue.add()` returns `null` when a job is skipped by deduplication.
@@ -131,15 +151,19 @@ const result = await queue.revoke(job.id);
 In your processor, use `job.abortSignal` to react to revocation:
 
 ```typescript
-const worker = new Worker('tasks', async (job) => {
-  for (const chunk of largeDataset) {
-    if (job.abortSignal?.aborted) {
-      throw new Error('Job revoked');
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    for (const chunk of largeDataset) {
+      if (job.abortSignal?.aborted) {
+        throw new Error('Job revoked');
+      }
+      await processChunk(chunk);
     }
-    await processChunk(chunk);
-  }
-  return { done: true };
-}, { connection });
+    return { done: true };
+  },
+  { connection },
+);
 ```
 
 `job.abortSignal` is an [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal). You can pass it directly to `fetch`, `axios`, or any `AbortSignal`-aware API.
@@ -161,7 +185,7 @@ await queue.add('process-large', { report: '... 15 KB of data ...' });
 // Stored size: ~300 bytes (98% savings on repetitive data)
 ```
 
-**Payload size limit:** job data must be ≤ 1 MB *after* serialisation but *before* compression. Larger payloads throw immediately:
+**Payload size limit:** job data must be ≤ 1 MB _after_ serialisation but _before_ compression. Larger payloads throw immediately:
 
 ```
 Error: Job data exceeds maximum size (1234567 bytes > 1MB).

@@ -20,11 +20,15 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
+    "lint:fix": "eslint src/ tests/ --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "clean": "rm -rf dist",
     "bench": "npx tsx benchmarks/run.ts all",
     "bench:throughput": "npx tsx benchmarks/run.ts throughput",
     "bench:latency": "npx tsx benchmarks/run.ts latency",
-    "bench:memory": "npx tsx benchmarks/run.ts memory"
+    "bench:memory": "npx tsx benchmarks/run.ts memory",
+    "prepare": "husky"
   },
   "engines": {
     "node": ">=20"
@@ -38,13 +42,22 @@
     "@glidemq/speedkey": "^0.2.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.3",
     "@types/express": "^5.0.6",
     "@types/node": "^22",
+    "@vitest/coverage-v8": "^3.2.4",
     "bullmq": "^5.69.2",
+    "eslint": "^9.39.3",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.5",
     "express": "^5.2.1",
+    "husky": "^9.1.7",
     "ioredis": "^5.9.3",
+    "lint-staged": "^15.4.3",
+    "prettier": "^3.5.3",
     "tsx": "^4.21.0",
     "typescript": "^5",
+    "typescript-eslint": "^8.56.0",
     "vitest": "^3"
   },
   "peerDependencies": {

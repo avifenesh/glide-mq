@@ -1048,11 +1048,7 @@ export async function dedup(
  * Promote delayed/prioritized jobs whose score <= now from scheduled ZSet to stream.
  * Returns the number of jobs promoted.
  */
-export async function promote(
-  client: Client,
-  k: QueueKeys,
-  timestamp: number,
-): Promise<number> {
+export async function promote(client: Client, k: QueueKeys, timestamp: number): Promise<number> {
   const result = await client.fcall(
     'glidemq_promote',
     [k.scheduled, k.stream, k.events],
@@ -1064,9 +1060,11 @@ export async function promote(
 /**
  * Encode a removeOnComplete/removeOnFail option into Lua args.
  */
-function encodeRetention(
-  opt?: boolean | number | { age: number; count: number },
-): { mode: string; count: number; age: number } {
+function encodeRetention(opt?: boolean | number | { age: number; count: number }): {
+  mode: string;
+  count: number;
+  age: number;
+} {
   if (opt === true) {
     return { mode: 'true', count: 0, age: 0 };
   }
@@ -1112,12 +1110,7 @@ export async function completeJob(
 
   if (parentInfo) {
     const pk = parentInfo.parentKeys;
-    keys.push(
-      pk.deps(parentInfo.parentId),
-      pk.job(parentInfo.parentId),
-      pk.stream,
-      pk.events,
-    );
+    keys.push(pk.deps(parentInfo.parentId), pk.job(parentInfo.parentId), pk.stream, pk.events);
     args.push(parentInfo.depsMember, parentInfo.parentId);
   } else {
     args.push('', '');
@@ -1158,9 +1151,15 @@ export async function completeAndFetchNext(
 
   const keys: string[] = [k.stream, k.completed, k.events, k.job(jobId)];
   const args: string[] = [
-    jobId, entryId, returnvalue, timestamp.toString(),
-    group, consumer,
-    mode, count.toString(), age.toString(),
+    jobId,
+    entryId,
+    returnvalue,
+    timestamp.toString(),
+    group,
+    consumer,
+    mode,
+    count.toString(),
+    age.toString(),
   ];
 
   if (parentInfo) {
@@ -1178,7 +1177,12 @@ export async function completeAndFetchNext(
     return { completed: parsed.completed, next: false };
   }
   if (parsed.next === 'REVOKED') {
-    return { completed: parsed.completed, next: 'REVOKED', nextJobId: parsed.nextJobId, nextEntryId: parsed.nextEntryId };
+    return {
+      completed: parsed.completed,
+      next: 'REVOKED',
+      nextJobId: parsed.nextJobId,
+      nextEntryId: parsed.nextEntryId,
+    };
   }
 
   // Parse the HGETALL array into a hash map
@@ -1187,7 +1191,12 @@ export async function completeAndFetchNext(
   for (let i = 0; i < arr.length; i += 2) {
     hash[String(arr[i])] = String(arr[i + 1]);
   }
-  return { completed: parsed.completed, next: hash as any, nextJobId: parsed.nextJobId, nextEntryId: parsed.nextEntryId };
+  return {
+    completed: parsed.completed,
+    next: hash as any,
+    nextJobId: parsed.nextJobId,
+    nextEntryId: parsed.nextEntryId,
+  };
 }
 
 /**
@@ -1258,29 +1267,15 @@ export async function reclaimStalled(
 /**
  * Pause a queue: sets paused=1 in meta hash, emits event.
  */
-export async function pause(
-  client: Client,
-  k: QueueKeys,
-): Promise<void> {
-  await client.fcall(
-    'glidemq_pause',
-    [k.meta, k.events],
-    [],
-  );
+export async function pause(client: Client, k: QueueKeys): Promise<void> {
+  await client.fcall('glidemq_pause', [k.meta, k.events], []);
 }
 
 /**
  * Resume a queue: sets paused=0 in meta hash, emits event.
  */
-export async function resume(
-  client: Client,
-  k: QueueKeys,
-): Promise<void> {
-  await client.fcall(
-    'glidemq_resume',
-    [k.meta, k.events],
-    [],
-  );
+export async function resume(client: Client, k: QueueKeys): Promise<void> {
+  await client.fcall('glidemq_resume', [k.meta, k.events], []);
 }
 
 /**
@@ -1297,11 +1292,7 @@ export async function rateLimit(
   const result = await client.fcall(
     'glidemq_rateLimit',
     [k.rate, k.meta],
-    [
-      maxPerWindow.toString(),
-      windowDuration.toString(),
-      timestamp.toString(),
-    ],
+    [maxPerWindow.toString(), windowDuration.toString(), timestamp.toString()],
   );
   return result as number;
 }
@@ -1316,11 +1307,7 @@ export async function checkConcurrency(
   k: QueueKeys,
   group: string = CONSUMER_GROUP,
 ): Promise<number> {
-  const result = await client.fcall(
-    'glidemq_checkConcurrency',
-    [k.meta, k.stream],
-    [group],
-  );
+  const result = await client.fcall('glidemq_checkConcurrency', [k.meta, k.stream], [group]);
   return result as number;
 }
 
@@ -1340,11 +1327,7 @@ export async function moveToActive(
   jobId: string,
   timestamp: number,
 ): Promise<Record<string, string> | 'REVOKED' | null> {
-  const result = await client.fcall(
-    'glidemq_moveToActive',
-    [k.job(jobId)],
-    [timestamp.toString()],
-  );
+  const result = await client.fcall('glidemq_moveToActive', [k.job(jobId)], [timestamp.toString()]);
   const str = String(result);
   if (str === '' || str === 'null') return null;
   if (str === 'REVOKED') return 'REVOKED';
@@ -1369,22 +1352,14 @@ export async function deferActive(
   entryId: string,
   group: string = CONSUMER_GROUP,
 ): Promise<void> {
-  await client.fcall(
-    'glidemq_deferActive',
-    [k.stream, k.job(jobId)],
-    [jobId, entryId, group],
-  );
+  await client.fcall('glidemq_deferActive', [k.stream, k.job(jobId)], [jobId, entryId, group]);
 }
 
 /**
  * Remove a job from all data structures (hash, stream, scheduled, completed, failed).
  * Returns 1 if removed, 0 if not found.
  */
-export async function removeJob(
-  client: Client,
-  k: QueueKeys,
-  jobId: string,
-): Promise<number> {
+export async function removeJob(client: Client, k: QueueKeys, jobId: string): Promise<number> {
   const result = await client.fcall(
     'glidemq_removeJob',
     [k.job(jobId), k.stream, k.scheduled, k.completed, k.failed, k.events, k.log(jobId)],

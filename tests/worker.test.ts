@@ -110,9 +110,7 @@ describe('Worker', () => {
 
   it('should ensure function library is loaded during init', async () => {
     const processor = vi.fn().mockResolvedValue('done');
-    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(
-      () => new Promise(() => {}),
-    );
+    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(() => new Promise(() => {}));
 
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
     await worker.waitUntilReady();
@@ -125,19 +123,14 @@ describe('Worker', () => {
 
   it('should create consumer group during init', async () => {
     const processor = vi.fn().mockResolvedValue('done');
-    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(
-      () => new Promise(() => {}),
-    );
+    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(() => new Promise(() => {}));
 
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
     await worker.waitUntilReady();
 
-    expect(mockCommandClient.xgroupCreate).toHaveBeenCalledWith(
-      keys.stream,
-      CONSUMER_GROUP,
-      '0',
-      { mkStream: true },
-    );
+    expect(mockCommandClient.xgroupCreate).toHaveBeenCalledWith(keys.stream, CONSUMER_GROUP, '0', {
+      mkStream: true,
+    });
 
     await worker.close(true);
   });
@@ -198,23 +191,36 @@ describe('Worker', () => {
     // At c=1, processJobFastPath calls moveToActive (fcall glidemq_moveToActive)
     // which returns a JSON-encoded hash array, then completeAndFetchNext.
     const jobHash = JSON.stringify([
-      'id', '1', 'name', 'test-job', 'data', '{"foo":"bar"}',
-      'opts', '{}', 'timestamp', '1000', 'attemptsMade', '0',
-      'state', 'active',
+      'id',
+      '1',
+      'name',
+      'test-job',
+      'data',
+      '{"foo":"bar"}',
+      'opts',
+      '{}',
+      'timestamp',
+      '1000',
+      'attemptsMade',
+      '0',
+      'state',
+      'active',
     ]);
 
-    mockCommandClient.fcall = vi.fn().mockImplementation((func: string, _keys?: string[], args?: string[]) => {
-      if (func === 'glidemq_version') return Promise.resolve(LIBRARY_VERSION);
-      if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
-      if (func === 'glidemq_promote') return Promise.resolve(0);
-      if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
-      if (func === 'glidemq_moveToActive') return Promise.resolve(jobHash);
-      if (func === 'glidemq_completeAndFetchNext') {
-        const jobId = args?.[0] ?? '0';
-        return Promise.resolve(JSON.stringify({ completed: jobId, next: false }));
-      }
-      return Promise.resolve(LIBRARY_VERSION);
-    });
+    mockCommandClient.fcall = vi
+      .fn()
+      .mockImplementation((func: string, _keys?: string[], args?: string[]) => {
+        if (func === 'glidemq_version') return Promise.resolve(LIBRARY_VERSION);
+        if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
+        if (func === 'glidemq_promote') return Promise.resolve(0);
+        if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
+        if (func === 'glidemq_moveToActive') return Promise.resolve(jobHash);
+        if (func === 'glidemq_completeAndFetchNext') {
+          const jobId = args?.[0] ?? '0';
+          return Promise.resolve(JSON.stringify({ completed: jobId, next: false }));
+        }
+        return Promise.resolve(LIBRARY_VERSION);
+      });
 
     const completedJobs: any[] = [];
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
@@ -443,19 +449,21 @@ describe('Worker', () => {
     });
 
     // moveToActive returns '' when job hash doesn't exist (job deleted)
-    mockCommandClient.fcall = vi.fn().mockImplementation((func: string, _keys?: string[], args?: string[]) => {
-      if (func === 'glidemq_version') return Promise.resolve(LIBRARY_VERSION);
-      if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
-      if (func === 'glidemq_promote') return Promise.resolve(0);
-      if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
-      if (func === 'glidemq_moveToActive') return Promise.resolve('');
-      if (func === 'glidemq_complete') return Promise.resolve(1);
-      if (func === 'glidemq_completeAndFetchNext') {
-        const jobId = args?.[0] ?? '0';
-        return Promise.resolve(JSON.stringify({ completed: jobId, next: false }));
-      }
-      return Promise.resolve(LIBRARY_VERSION);
-    });
+    mockCommandClient.fcall = vi
+      .fn()
+      .mockImplementation((func: string, _keys?: string[], args?: string[]) => {
+        if (func === 'glidemq_version') return Promise.resolve(LIBRARY_VERSION);
+        if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
+        if (func === 'glidemq_promote') return Promise.resolve(0);
+        if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
+        if (func === 'glidemq_moveToActive') return Promise.resolve('');
+        if (func === 'glidemq_complete') return Promise.resolve(1);
+        if (func === 'glidemq_completeAndFetchNext') {
+          const jobId = args?.[0] ?? '0';
+          return Promise.resolve(JSON.stringify({ completed: jobId, next: false }));
+        }
+        return Promise.resolve(LIBRARY_VERSION);
+      });
 
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
     await worker.waitUntilReady();
@@ -502,9 +510,7 @@ describe('Worker', () => {
   it('pause should stop the poll loop', async () => {
     const processor = vi.fn().mockResolvedValue('done');
 
-    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(
-      () => new Promise(() => {}),
-    );
+    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(() => new Promise(() => {}));
 
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
     await worker.waitUntilReady();
@@ -524,9 +530,7 @@ describe('Worker', () => {
 
   it('close should stop scheduler and close clients', async () => {
     const processor = vi.fn().mockResolvedValue('done');
-    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(
-      () => new Promise(() => {}),
-    );
+    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(() => new Promise(() => {}));
 
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
     await worker.waitUntilReady();
@@ -717,14 +721,7 @@ describe('Scheduler', () => {
     expect(mockClient.fcall).toHaveBeenCalledWith(
       'glidemq_reclaimStalled',
       [queueKeys.stream, queueKeys.events],
-      [
-        CONSUMER_GROUP,
-        'my-consumer',
-        '15000',
-        '3',
-        now.toString(),
-        queueKeys.failed,
-      ],
+      [CONSUMER_GROUP, 'my-consumer', '15000', '3', now.toString(), queueKeys.failed],
     );
   });
 });

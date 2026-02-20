@@ -12,7 +12,8 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
-const { gracefulShutdown } = require('../dist/graceful-shutdown') as typeof import('../src/graceful-shutdown');
+const { gracefulShutdown } =
+  require('../dist/graceful-shutdown') as typeof import('../src/graceful-shutdown');
 
 import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
@@ -51,7 +52,7 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
     const worker1 = new Worker(
       Q,
       async () => {
-        await new Promise(r => setTimeout(r, 60000));
+        await new Promise((r) => setTimeout(r, 60000));
         return 'never';
       },
       {
@@ -64,28 +65,24 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
     worker1.on('error', () => {});
 
     // Wait for worker1 to pick up the job
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 2000));
     await worker1.close(true);
 
     // Worker 2: has short stalledInterval - should detect the stalled job
     const stalledIds: string[] = [];
-    const worker2 = new Worker(
-      Q,
-      async () => 'recovered',
-      {
-        connection: CONNECTION,
-        concurrency: 1,
-        blockTimeout: 500,
-        stalledInterval: 1000,
-        maxStalledCount: 2,
-        promotionInterval: 500,
-      },
-    );
+    const worker2 = new Worker(Q, async () => 'recovered', {
+      connection: CONNECTION,
+      concurrency: 1,
+      blockTimeout: 500,
+      stalledInterval: 1000,
+      maxStalledCount: 2,
+      promotionInterval: 500,
+    });
     worker2.on('error', () => {});
     worker2.on('stalled', (jobId: string) => stalledIds.push(jobId));
 
     // Wait for stalled recovery to kick in
-    await new Promise(r => setTimeout(r, 5000));
+    await new Promise((r) => setTimeout(r, 5000));
 
     await worker2.close(true);
     await queue.close();
@@ -109,7 +106,7 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
     const worker1 = new Worker(
       Q,
       async () => {
-        await new Promise(r => setTimeout(r, 60000));
+        await new Promise((r) => setTimeout(r, 60000));
         return 'never';
       },
       {
@@ -120,14 +117,14 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
       },
     );
     worker1.on('error', () => {});
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 2000));
     await worker1.close(true);
 
     // Recovery worker with maxStalledCount=1
     const worker2 = new Worker(
       Q,
       async () => {
-        await new Promise(r => setTimeout(r, 60000));
+        await new Promise((r) => setTimeout(r, 60000));
         return 'never';
       },
       {
@@ -142,7 +139,7 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
     worker2.on('error', () => {});
 
     // Wait for 2+ stall detection cycles
-    await new Promise(r => setTimeout(r, 5000));
+    await new Promise((r) => setTimeout(r, 5000));
 
     await worker2.close(true);
     await queue.close();
@@ -170,7 +167,7 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
     const worker1 = new Worker(
       Q,
       async () => {
-        await new Promise(r => setTimeout(r, 60000));
+        await new Promise((r) => setTimeout(r, 60000));
         return 'never';
       },
       {
@@ -181,28 +178,24 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
       },
     );
     worker1.on('error', () => {});
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 2000));
     await worker1.close(true);
 
     // Worker with 500ms stalled interval - should detect quickly
     const stalledAt: number[] = [];
-    const worker2 = new Worker(
-      Q,
-      async () => 'recovered',
-      {
-        connection: CONNECTION,
-        concurrency: 1,
-        blockTimeout: 500,
-        stalledInterval: 500,
-        maxStalledCount: 3,
-        promotionInterval: 500,
-      },
-    );
+    const worker2 = new Worker(Q, async () => 'recovered', {
+      connection: CONNECTION,
+      concurrency: 1,
+      blockTimeout: 500,
+      stalledInterval: 500,
+      maxStalledCount: 3,
+      promotionInterval: 500,
+    });
     worker2.on('error', () => {});
     worker2.on('stalled', () => stalledAt.push(Date.now()));
 
     const start = Date.now();
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
 
     await worker2.close(true);
     await queue.close();
@@ -234,7 +227,7 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
     const worker1 = new Worker(
       Q,
       async () => {
-        await new Promise(r => setTimeout(r, 60000));
+        await new Promise((r) => setTimeout(r, 60000));
         return 'never';
       },
       {
@@ -247,25 +240,21 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
     worker1.on('error', () => {});
 
     // Wait for all 3 to be picked up
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
     await worker1.close(true);
 
     // Recovery worker - will detect all 3 as stalled via XAUTOCLAIM
-    const worker2 = new Worker(
-      Q,
-      async () => 'recovered',
-      {
-        connection: CONNECTION,
-        concurrency: 3,
-        blockTimeout: 500,
-        stalledInterval: 1000,
-        maxStalledCount: 3,
-        promotionInterval: 500,
-      },
-    );
+    const worker2 = new Worker(Q, async () => 'recovered', {
+      connection: CONNECTION,
+      concurrency: 3,
+      blockTimeout: 500,
+      stalledInterval: 1000,
+      maxStalledCount: 3,
+      promotionInterval: 500,
+    });
     worker2.on('error', () => {});
 
-    await new Promise(r => setTimeout(r, 5000));
+    await new Promise((r) => setTimeout(r, 5000));
 
     await worker2.close(true);
     await queue.close();
@@ -310,10 +299,14 @@ describeEachMode('Retry exhaustion', (CONNECTION) => {
     const k = buildKeys(Q);
 
     let attemptCount = 0;
-    const job = await queue.add('always-fail', { value: 'doomed' }, {
-      attempts: 3,
-      backoff: { type: 'fixed', delay: 100 },
-    });
+    const job = await queue.add(
+      'always-fail',
+      { value: 'doomed' },
+      {
+        attempts: 3,
+        backoff: { type: 'fixed', delay: 100 },
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
@@ -332,7 +325,9 @@ describeEachMode('Retry exhaustion', (CONNECTION) => {
         failCount++;
         if (failCount < 3) {
           setTimeout(async () => {
-            try { await promote(cleanupClient, buildKeys(Q), Date.now()); } catch {}
+            try {
+              await promote(cleanupClient, buildKeys(Q), Date.now());
+            } catch {}
           }, 200);
         } else {
           clearTimeout(timeout);
@@ -364,10 +359,14 @@ describeEachMode('Retry exhaustion', (CONNECTION) => {
 
     let attemptCount = 0;
 
-    const job = await queue.add('retry-persist', { x: 1 }, {
-      attempts: 4,
-      backoff: { type: 'fixed', delay: 100 },
-    });
+    const job = await queue.add(
+      'retry-persist',
+      { x: 1 },
+      {
+        attempts: 4,
+        backoff: { type: 'fixed', delay: 100 },
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
@@ -387,7 +386,9 @@ describeEachMode('Retry exhaustion', (CONNECTION) => {
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, buildKeys(Q), Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, buildKeys(Q), Date.now());
+          } catch {}
         }, 200);
       });
 
@@ -418,10 +419,14 @@ describeEachMode('Retry exhaustion', (CONNECTION) => {
 
     const processTimestamps: number[] = [];
 
-    const job = await queue.add('exp-verify', { x: 1 }, {
-      attempts: 4,
-      backoff: { type: 'exponential', delay: 200 },
-    });
+    const job = await queue.add(
+      'exp-verify',
+      { x: 1 },
+      {
+        attempts: 4,
+        backoff: { type: 'exponential', delay: 200 },
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 30000);
@@ -443,7 +448,9 @@ describeEachMode('Retry exhaustion', (CONNECTION) => {
       worker.on('failed', () => {
         const waitTime = Math.pow(2, failCount - 1) * 200 + 100;
         setTimeout(async () => {
-          try { await promote(cleanupClient, buildKeys(Q), Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, buildKeys(Q), Date.now());
+          } catch {}
         }, waitTime);
       });
 
@@ -476,10 +483,14 @@ describeEachMode('Retry exhaustion', (CONNECTION) => {
 
     const processTimestamps: number[] = [];
 
-    const job = await queue.add('jitter-verify', { x: 1 }, {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 100, jitter: 50 },
-    });
+    const job = await queue.add(
+      'jitter-verify',
+      { x: 1 },
+      {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 100, jitter: 50 },
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
@@ -506,7 +517,9 @@ describeEachMode('Retry exhaustion', (CONNECTION) => {
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, buildKeys(Q), Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, buildKeys(Q), Date.now());
+          } catch {}
         }, 500);
       });
 
@@ -565,7 +578,7 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     const worker = new Worker(
       Q,
       async () => {
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, 2000));
         jobFinished = true;
         return 'done';
       },
@@ -574,13 +587,15 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     worker.on('error', () => {});
 
     // Wait for job to start processing
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1000));
 
     // close(false) should wait for the active job
-    const closePromise = worker.close(false).then(() => { closeFinished = true; });
+    const closePromise = worker.close(false).then(() => {
+      closeFinished = true;
+    });
 
     // Give it a moment - close should not have resolved yet
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     expect(closeFinished).toBe(false);
 
     // Wait for close to complete (job should finish first)
@@ -602,7 +617,7 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     const worker = new Worker(
       Q,
       async () => {
-        await new Promise(r => setTimeout(r, 60000));
+        await new Promise((r) => setTimeout(r, 60000));
         return 'never';
       },
       { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -610,7 +625,7 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     worker.on('error', () => {});
 
     // Wait for job to be picked up
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 2000));
 
     const start = Date.now();
     await worker.close(true);
@@ -646,7 +661,7 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async (j: any) => {
-          await new Promise(r => setTimeout(r, 200));
+          await new Promise((r) => setTimeout(r, 200));
           return `done-${j.data.i}`;
         },
         { connection: CONNECTION, concurrency: 2, blockTimeout: 500, stalledInterval: 60000 },
@@ -657,10 +672,10 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     }
 
     // Let workers process some jobs
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
 
     // Close all simultaneously
-    await Promise.all(workers.map(w => w.close()));
+    await Promise.all(workers.map((w) => w.close()));
 
     // No duplicate IDs and no crashes
     expect(completedIds.size).toBeGreaterThan(0);
@@ -681,12 +696,14 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     // Verify the function registers signal handlers and responds to SIGINT
     let shutdownResolved = false;
     const shutdownPromise = gracefulShutdown([queue]);
-    shutdownPromise.then(() => { shutdownResolved = true; });
+    shutdownPromise.then(() => {
+      shutdownResolved = true;
+    });
 
     // Simulate SIGINT to trigger the handler
     process.emit('SIGINT' as any);
 
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1000));
 
     expect(shutdownResolved).toBe(true);
   }, 5000);
@@ -699,8 +716,10 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     await shutdown.shutdown();
 
     let resolved = false;
-    shutdown.then(() => { resolved = true; });
-    await new Promise(r => setTimeout(r, 100));
+    shutdown.then(() => {
+      resolved = true;
+    });
+    await new Promise((r) => setTimeout(r, 100));
 
     expect(resolved).toBe(true);
   }, 5000);
@@ -712,7 +731,7 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     let closeCalls = 0;
     (queue as any).close = async () => {
       closeCalls += 1;
-      await new Promise(r => setTimeout(r, 75));
+      await new Promise((r) => setTimeout(r, 75));
       return originalClose();
     };
 
@@ -815,7 +834,7 @@ describeEachMode('Operational patterns', (CONNECTION) => {
     const worker = new Worker(
       Q,
       async (j: any) => {
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise((r) => setTimeout(r, 100));
         return `done-${j.data.i}`;
       },
       {
@@ -849,11 +868,12 @@ describeEachMode('Operational patterns', (CONNECTION) => {
     // Process one
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 5000);
-      const worker = new Worker(
-        Q,
-        async () => 'ok',
-        { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
-      );
+      const worker = new Worker(Q, async () => 'ok', {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: 60000,
+      });
       worker.on('error', () => {});
       worker.on('completed', () => {
         clearTimeout(timeout);
@@ -925,7 +945,9 @@ describeEachMode('Operational patterns', (CONNECTION) => {
 
         // Promote so the worker's next poll can pick it up
         setTimeout(async () => {
-          try { await promote(cleanupClient, buildKeys(Q), Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, buildKeys(Q), Date.now());
+          } catch {}
         }, 200);
       });
 
@@ -978,19 +1000,17 @@ describeEachMode('Memory and resource management', (CONNECTION) => {
     const completedCount = { value: 0 };
     const jobCount = 100;
 
-    const worker = new Worker(
-      Q,
-      async () => 'ok',
-      {
-        connection: CONNECTION,
-        concurrency: 10,
-        blockTimeout: 500,
-        stalledInterval: 60000,
-        promotionInterval: 1000,
-      },
-    );
+    const worker = new Worker(Q, async () => 'ok', {
+      connection: CONNECTION,
+      concurrency: 10,
+      blockTimeout: 500,
+      stalledInterval: 60000,
+      promotionInterval: 1000,
+    });
     worker.on('error', () => {});
-    worker.on('completed', () => { completedCount.value++; });
+    worker.on('completed', () => {
+      completedCount.value++;
+    });
 
     // Add 100 jobs rapidly
     const addPromises = [];
@@ -1002,7 +1022,7 @@ describeEachMode('Memory and resource management', (CONNECTION) => {
     // Wait for all to be processed
     const start = Date.now();
     while (completedCount.value < jobCount && Date.now() - start < 30000) {
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
     }
 
     // Access activePromises via the private property to check it's bounded
@@ -1067,7 +1087,9 @@ describeEachMode('Memory and resource management', (CONNECTION) => {
     worker.on('error', () => {});
 
     let completedCount = 0;
-    worker.on('completed', () => { completedCount++; });
+    worker.on('completed', () => {
+      completedCount++;
+    });
 
     // Add jobs
     for (let i = 0; i < jobCount; i++) {
@@ -1077,7 +1099,7 @@ describeEachMode('Memory and resource management', (CONNECTION) => {
     // Wait for all to process
     const start = Date.now();
     while (completedCount < jobCount && Date.now() - start < 30000) {
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
     }
 
     expect(completedCount).toBe(jobCount);

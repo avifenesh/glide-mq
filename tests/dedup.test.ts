@@ -28,32 +28,48 @@ describeEachMode('Deduplication - simple mode', (CONNECTION) => {
   });
 
   it('first add succeeds, duplicate is skipped while job is active', async () => {
-    const job1 = await queue.add('task', { v: 1 }, {
-      deduplication: { id: 'unique-1', mode: 'simple' },
-    });
+    const job1 = await queue.add(
+      'task',
+      { v: 1 },
+      {
+        deduplication: { id: 'unique-1', mode: 'simple' },
+      },
+    );
     expect(job1).not.toBeNull();
     expect(job1!.id).toBeTruthy();
 
-    const job2 = await queue.add('task', { v: 2 }, {
-      deduplication: { id: 'unique-1', mode: 'simple' },
-    });
+    const job2 = await queue.add(
+      'task',
+      { v: 2 },
+      {
+        deduplication: { id: 'unique-1', mode: 'simple' },
+      },
+    );
     expect(job2).toBeNull();
   });
 
   it('allows re-add after job is completed', async () => {
     const k = buildKeys(Q);
 
-    const job1 = await queue.add('task', { v: 10 }, {
-      deduplication: { id: 'complete-test', mode: 'simple' },
-    });
+    const job1 = await queue.add(
+      'task',
+      { v: 10 },
+      {
+        deduplication: { id: 'complete-test', mode: 'simple' },
+      },
+    );
     expect(job1).not.toBeNull();
 
     await cleanupClient.hset(k.job(job1!.id), { state: 'completed' });
     await cleanupClient.zadd(k.completed, [{ element: job1!.id, score: Date.now() }]);
 
-    const job2 = await queue.add('task', { v: 11 }, {
-      deduplication: { id: 'complete-test', mode: 'simple' },
-    });
+    const job2 = await queue.add(
+      'task',
+      { v: 11 },
+      {
+        deduplication: { id: 'complete-test', mode: 'simple' },
+      },
+    );
     expect(job2).not.toBeNull();
     expect(job2!.id).not.toBe(job1!.id);
   });
@@ -61,27 +77,43 @@ describeEachMode('Deduplication - simple mode', (CONNECTION) => {
   it('allows re-add after job is failed', async () => {
     const k = buildKeys(Q);
 
-    const job1 = await queue.add('task', { v: 20 }, {
-      deduplication: { id: 'fail-test', mode: 'simple' },
-    });
+    const job1 = await queue.add(
+      'task',
+      { v: 20 },
+      {
+        deduplication: { id: 'fail-test', mode: 'simple' },
+      },
+    );
     expect(job1).not.toBeNull();
 
     await cleanupClient.hset(k.job(job1!.id), { state: 'failed' });
 
-    const job2 = await queue.add('task', { v: 21 }, {
-      deduplication: { id: 'fail-test', mode: 'simple' },
-    });
+    const job2 = await queue.add(
+      'task',
+      { v: 21 },
+      {
+        deduplication: { id: 'fail-test', mode: 'simple' },
+      },
+    );
     expect(job2).not.toBeNull();
     expect(job2!.id).not.toBe(job1!.id);
   });
 
   it('different dedup ids are independent', async () => {
-    const jobA = await queue.add('task', { v: 'a' }, {
-      deduplication: { id: 'id-a', mode: 'simple' },
-    });
-    const jobB = await queue.add('task', { v: 'b' }, {
-      deduplication: { id: 'id-b', mode: 'simple' },
-    });
+    const jobA = await queue.add(
+      'task',
+      { v: 'a' },
+      {
+        deduplication: { id: 'id-a', mode: 'simple' },
+      },
+    );
+    const jobB = await queue.add(
+      'task',
+      { v: 'b' },
+      {
+        deduplication: { id: 'id-b', mode: 'simple' },
+      },
+    );
     expect(jobA).not.toBeNull();
     expect(jobB).not.toBeNull();
     expect(jobA!.id).not.toBe(jobB!.id);
@@ -105,36 +137,56 @@ describeEachMode('Deduplication - throttle mode', (CONNECTION) => {
   });
 
   it('skips when within TTL window', async () => {
-    const job1 = await queue.add('task', { v: 1 }, {
-      deduplication: { id: 'throttle-1', mode: 'throttle', ttl: 60000 },
-    });
+    const job1 = await queue.add(
+      'task',
+      { v: 1 },
+      {
+        deduplication: { id: 'throttle-1', mode: 'throttle', ttl: 60000 },
+      },
+    );
     expect(job1).not.toBeNull();
 
-    const job2 = await queue.add('task', { v: 2 }, {
-      deduplication: { id: 'throttle-1', mode: 'throttle', ttl: 60000 },
-    });
+    const job2 = await queue.add(
+      'task',
+      { v: 2 },
+      {
+        deduplication: { id: 'throttle-1', mode: 'throttle', ttl: 60000 },
+      },
+    );
     expect(job2).toBeNull();
   });
 
   it('allows add after TTL expires', async () => {
-    const job1 = await queue.add('task', { v: 10 }, {
-      deduplication: { id: 'throttle-expire', mode: 'throttle', ttl: 100 },
-    });
+    const job1 = await queue.add(
+      'task',
+      { v: 10 },
+      {
+        deduplication: { id: 'throttle-expire', mode: 'throttle', ttl: 100 },
+      },
+    );
     expect(job1).not.toBeNull();
 
-    await new Promise(r => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 150));
 
-    const job2 = await queue.add('task', { v: 11 }, {
-      deduplication: { id: 'throttle-expire', mode: 'throttle', ttl: 100 },
-    });
+    const job2 = await queue.add(
+      'task',
+      { v: 11 },
+      {
+        deduplication: { id: 'throttle-expire', mode: 'throttle', ttl: 100 },
+      },
+    );
     expect(job2).not.toBeNull();
     expect(job2!.id).not.toBe(job1!.id);
   });
 
   it('first add without prior entry always succeeds', async () => {
-    const job = await queue.add('task', { v: 'first' }, {
-      deduplication: { id: 'throttle-fresh', mode: 'throttle', ttl: 5000 },
-    });
+    const job = await queue.add(
+      'task',
+      { v: 'first' },
+      {
+        deduplication: { id: 'throttle-fresh', mode: 'throttle', ttl: 5000 },
+      },
+    );
     expect(job).not.toBeNull();
   });
 });
@@ -158,19 +210,27 @@ describeEachMode('Deduplication - debounce mode', (CONNECTION) => {
   it('replaces a delayed job with fresh data', async () => {
     const k = buildKeys(Q);
 
-    const job1 = await queue.add('task', { v: 'old' }, {
-      delay: 60000,
-      deduplication: { id: 'debounce-1', mode: 'debounce' },
-    });
+    const job1 = await queue.add(
+      'task',
+      { v: 'old' },
+      {
+        delay: 60000,
+        deduplication: { id: 'debounce-1', mode: 'debounce' },
+      },
+    );
     expect(job1).not.toBeNull();
 
     const score1 = await cleanupClient.zscore(k.scheduled, job1!.id);
     expect(score1).not.toBeNull();
 
-    const job2 = await queue.add('task', { v: 'new' }, {
-      delay: 60000,
-      deduplication: { id: 'debounce-1', mode: 'debounce' },
-    });
+    const job2 = await queue.add(
+      'task',
+      { v: 'new' },
+      {
+        delay: 60000,
+        deduplication: { id: 'debounce-1', mode: 'debounce' },
+      },
+    );
     expect(job2).not.toBeNull();
     expect(job2!.id).not.toBe(job1!.id);
 
@@ -185,33 +245,49 @@ describeEachMode('Deduplication - debounce mode', (CONNECTION) => {
   });
 
   it('skips when existing job is in waiting state (not delayed)', async () => {
-    const job1 = await queue.add('task', { v: 'waiting' }, {
-      deduplication: { id: 'debounce-waiting', mode: 'debounce' },
-    });
+    const job1 = await queue.add(
+      'task',
+      { v: 'waiting' },
+      {
+        deduplication: { id: 'debounce-waiting', mode: 'debounce' },
+      },
+    );
     expect(job1).not.toBeNull();
 
-    const job2 = await queue.add('task', { v: 'retry' }, {
-      deduplication: { id: 'debounce-waiting', mode: 'debounce' },
-    });
+    const job2 = await queue.add(
+      'task',
+      { v: 'retry' },
+      {
+        deduplication: { id: 'debounce-waiting', mode: 'debounce' },
+      },
+    );
     expect(job2).toBeNull();
   });
 
   it('allows add after previous job completed', async () => {
     const k = buildKeys(Q);
 
-    const job1 = await queue.add('task', { v: 'first' }, {
-      delay: 60000,
-      deduplication: { id: 'debounce-completed', mode: 'debounce' },
-    });
+    const job1 = await queue.add(
+      'task',
+      { v: 'first' },
+      {
+        delay: 60000,
+        deduplication: { id: 'debounce-completed', mode: 'debounce' },
+      },
+    );
     expect(job1).not.toBeNull();
 
     await cleanupClient.hset(k.job(job1!.id), { state: 'completed' });
     await cleanupClient.zrem(k.scheduled, [job1!.id]);
 
-    const job2 = await queue.add('task', { v: 'second' }, {
-      delay: 60000,
-      deduplication: { id: 'debounce-completed', mode: 'debounce' },
-    });
+    const job2 = await queue.add(
+      'task',
+      { v: 'second' },
+      {
+        delay: 60000,
+        deduplication: { id: 'debounce-completed', mode: 'debounce' },
+      },
+    );
     expect(job2).not.toBeNull();
     expect(job2!.id).not.toBe(job1!.id);
   });
@@ -237,9 +313,13 @@ describeEachMode('Deduplication - dedup hash tracking', (CONNECTION) => {
     const k = buildKeys(Q);
     const before = Date.now();
 
-    const job = await queue.add('task', { v: 1 }, {
-      deduplication: { id: 'track-1', mode: 'simple' },
-    });
+    const job = await queue.add(
+      'task',
+      { v: 1 },
+      {
+        deduplication: { id: 'track-1', mode: 'simple' },
+      },
+    );
     expect(job).not.toBeNull();
 
     const entry = await cleanupClient.hget(k.dedup, 'track-1');
@@ -257,19 +337,27 @@ describeEachMode('Deduplication - dedup hash tracking', (CONNECTION) => {
   it('updates dedup entry when new job replaces old one', async () => {
     const k = buildKeys(Q);
 
-    const job1 = await queue.add('task', { v: 'a' }, {
-      delay: 60000,
-      deduplication: { id: 'replace-track', mode: 'debounce' },
-    });
+    const job1 = await queue.add(
+      'task',
+      { v: 'a' },
+      {
+        delay: 60000,
+        deduplication: { id: 'replace-track', mode: 'debounce' },
+      },
+    );
     expect(job1).not.toBeNull();
 
     const entry1 = String(await cleanupClient.hget(k.dedup, 'replace-track'));
     expect(entry1.startsWith(job1!.id + ':')).toBe(true);
 
-    const job2 = await queue.add('task', { v: 'b' }, {
-      delay: 60000,
-      deduplication: { id: 'replace-track', mode: 'debounce' },
-    });
+    const job2 = await queue.add(
+      'task',
+      { v: 'b' },
+      {
+        delay: 60000,
+        deduplication: { id: 'replace-track', mode: 'debounce' },
+      },
+    );
     expect(job2).not.toBeNull();
 
     const entry2 = String(await cleanupClient.hget(k.dedup, 'replace-track'));
@@ -295,14 +383,22 @@ describeEachMode('Deduplication - default mode is simple', (CONNECTION) => {
   });
 
   it('uses simple mode when mode is not specified', async () => {
-    const job1 = await queue.add('task', { v: 1 }, {
-      deduplication: { id: 'default-mode' },
-    });
+    const job1 = await queue.add(
+      'task',
+      { v: 1 },
+      {
+        deduplication: { id: 'default-mode' },
+      },
+    );
     expect(job1).not.toBeNull();
 
-    const job2 = await queue.add('task', { v: 2 }, {
-      deduplication: { id: 'default-mode' },
-    });
+    const job2 = await queue.add(
+      'task',
+      { v: 2 },
+      {
+        deduplication: { id: 'default-mode' },
+      },
+    );
     expect(job2).toBeNull();
   });
 });

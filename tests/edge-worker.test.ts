@@ -3,12 +3,18 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
+import {
+  describeEachMode,
+  createCleanupClient,
+  flushQueue,
+  ConnectionConfig,
+} from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
+const { CONSUMER_GROUP } =
+  require('../dist/functions/index') as typeof import('../src/functions/index');
 
 describeEachMode('Edge: Worker', (CONNECTION) => {
   let cleanupClient: any;
@@ -57,9 +63,11 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
       await worker.close(true);
 
       const k = buildKeys(Q);
-      const pending = await cleanupClient.customCommand([
-        'XPENDING', k.stream, CONSUMER_GROUP,
-      ]) as any[];
+      const pending = (await cleanupClient.customCommand([
+        'XPENDING',
+        k.stream,
+        CONSUMER_GROUP,
+      ])) as any[];
       expect(Number(pending[0])).toBeGreaterThanOrEqual(1);
 
       await queue.close();
@@ -469,9 +477,11 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
 
       await worker1.close(true);
 
-      const pending = await cleanupClient.customCommand([
-        'XPENDING', k.stream, CONSUMER_GROUP,
-      ]) as any[];
+      const pending = (await cleanupClient.customCommand([
+        'XPENDING',
+        k.stream,
+        CONSUMER_GROUP,
+      ])) as any[];
       expect(Number(pending[0])).toBeGreaterThanOrEqual(1);
 
       const worker2 = new Worker(

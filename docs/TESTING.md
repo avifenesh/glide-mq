@@ -19,7 +19,7 @@ Import from `glide-mq/testing`:
 ```typescript
 import { TestQueue, TestWorker } from 'glide-mq/testing';
 
-const queue  = new TestQueue('tasks');
+const queue = new TestQueue('tasks');
 const worker = new TestWorker(queue, async (job) => {
   // same processor signature as the real Worker
   return { processed: job.data };
@@ -54,7 +54,7 @@ describe('email processor', () => {
   let worker: TestWorker;
 
   beforeEach(() => {
-    queue  = new TestQueue('email');
+    queue = new TestQueue('email');
     worker = new TestWorker(queue, async (job) => {
       if (!job.data.to) throw new Error('missing recipient');
       return { sent: true };
@@ -88,25 +88,25 @@ describe('email processor', () => {
 
 ### TestQueue
 
-| Method | Description |
-|--------|-------------|
-| `add(name, data, opts?)` | Enqueue a job; triggers processing immediately |
-| `addBulk(jobs)` | Enqueue multiple jobs |
-| `getJob(id)` | Retrieve a job by ID |
-| `getJobs(state, start?, end?)` | List jobs by state |
-| `getJobCounts()` | Returns `{ waiting, active, delayed, completed, failed }` |
-| `searchJobs(opts)` | Filter jobs by state, name, and/or data fields |
-| `pause()` / `resume()` | Pause / resume the queue |
-| `isPaused()` | Check pause state (synchronous, returns `boolean`) |
-| `close()` | Close the queue |
+| Method                         | Description                                               |
+| ------------------------------ | --------------------------------------------------------- |
+| `add(name, data, opts?)`       | Enqueue a job; triggers processing immediately            |
+| `addBulk(jobs)`                | Enqueue multiple jobs                                     |
+| `getJob(id)`                   | Retrieve a job by ID                                      |
+| `getJobs(state, start?, end?)` | List jobs by state                                        |
+| `getJobCounts()`               | Returns `{ waiting, active, delayed, completed, failed }` |
+| `searchJobs(opts)`             | Filter jobs by state, name, and/or data fields            |
+| `pause()` / `resume()`         | Pause / resume the queue                                  |
+| `isPaused()`                   | Check pause state (synchronous, returns `boolean`)        |
+| `close()`                      | Close the queue                                           |
 
 ### TestWorker
 
-| Method / Event | Description |
-|----------------|-------------|
+| Method / Event        | Description                            |
+| --------------------- | -------------------------------------- |
 | `on('completed', fn)` | Fired when a job finishes successfully |
-| `on('failed', fn)` | Fired when a job throws |
-| `close()` | Stop the worker |
+| `on('failed', fn)`    | Fired when a job throws                |
+| `close()`             | Stop the worker                        |
 
 ---
 
@@ -129,7 +129,6 @@ const userFailed = await queue.searchJobs({
 
 // Search across all states (scans all job hashes)
 const byName = await queue.searchJobs({ name: 'send-email' });
-
 ```
 
 `searchJobs` is also available on the real `Queue` class (with an additional `limit` option, default 100).
@@ -163,10 +162,10 @@ expect(done[0]?.attemptsMade).toBe(2);
 
 ```typescript
 // Production
-const queue  = new Queue('tasks', { connection });
+const queue = new Queue('tasks', { connection });
 const worker = new Worker('tasks', myProcessor, { connection });
 
 // Tests
-const queue  = new TestQueue('tasks');
+const queue = new TestQueue('tasks');
 const worker = new TestWorker(queue, myProcessor);
 ```

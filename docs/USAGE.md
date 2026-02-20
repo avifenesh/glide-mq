@@ -28,15 +28,19 @@ const queue = new Queue('tasks', { connection });
 const job = await queue.add('send-email', { to: 'user@example.com' });
 
 // With options
-await queue.add('send-email', { to: 'user@example.com' }, {
-  delay: 5_000,           // run after 5 s
-  priority: 1,            // lower = higher priority (default: 0)
-  attempts: 3,            // run at most 3 times total (initial + 2 retries)
-  backoff: { type: 'exponential', delay: 1_000 },
-  timeout: 30_000,        // fail job if processor exceeds 30 s
-  removeOnComplete: true, // auto-remove on success (or { age, count })
-  removeOnFail: false,    // keep failed jobs for inspection
-});
+await queue.add(
+  'send-email',
+  { to: 'user@example.com' },
+  {
+    delay: 5_000, // run after 5 s
+    priority: 1, // lower = higher priority (default: 0)
+    attempts: 3, // run at most 3 times total (initial + 2 retries)
+    backoff: { type: 'exponential', delay: 1_000 },
+    timeout: 30_000, // fail job if processor exceeds 30 s
+    removeOnComplete: true, // auto-remove on success (or { age, count })
+    removeOnFail: false, // keep failed jobs for inspection
+  },
+);
 
 // Bulk add — 12.7× faster than serial via GLIDE Batch API
 await queue.addBulk([
@@ -51,11 +55,11 @@ await queue.addBulk([
 const job = await queue.getJob('42');
 
 // By state, with optional pagination
-const waiting  = await queue.getJobs('waiting',   0, 49);
-const active   = await queue.getJobs('active',    0, 49);
-const delayed  = await queue.getJobs('delayed',   0, 49);
-const done     = await queue.getJobs('completed', 0, 49);
-const failed   = await queue.getJobs('failed',    0, 49);
+const waiting = await queue.getJobs('waiting', 0, 49);
+const active = await queue.getJobs('active', 0, 49);
+const delayed = await queue.getJobs('delayed', 0, 49);
+const done = await queue.getJobs('completed', 0, 49);
+const failed = await queue.getJobs('failed', 0, 49);
 ```
 
 ### Queue counts
@@ -68,8 +72,8 @@ const counts = await queue.getJobCounts();
 ### Pause / resume
 
 ```typescript
-await queue.pause();   // workers stop picking up new jobs
-await queue.resume();  // resume normal operation
+await queue.pause(); // workers stop picking up new jobs
+await queue.resume(); // resume normal operation
 const paused = await queue.isPaused();
 ```
 
@@ -80,7 +84,7 @@ const paused = await queue.isPaused();
 // Note: no standalone drain() method — use obliterate with caution.
 
 // Remove ALL queue data from Valkey
-await queue.obliterate();             // fails if there are active jobs
+await queue.obliterate(); // fails if there are active jobs
 await queue.obliterate({ force: true }); // unconditional wipe
 ```
 
@@ -99,28 +103,32 @@ Create a worker with a name, an async processor function, and options.
 ```typescript
 import { Worker } from 'glide-mq';
 
-const worker = new Worker('tasks', async (job) => {
-  // job.data is typed if you use generics: Worker<MyData, MyResult>
-  console.log('Processing', job.name, job.data);
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    // job.data is typed if you use generics: Worker<MyData, MyResult>
+    console.log('Processing', job.name, job.data);
 
-  await job.log('step 1 done');          // append to job log
-  await job.updateProgress(50);          // broadcast progress (0–100 or object)
-  await job.updateData({ ...job.data, enriched: true });
+    await job.log('step 1 done'); // append to job log
+    await job.updateProgress(50); // broadcast progress (0–100 or object)
+    await job.updateData({ ...job.data, enriched: true });
 
-  return { ok: true };                   // becomes job.returnvalue
-}, {
-  connection,
-  concurrency: 10,          // process up to 10 jobs in parallel (default: 1)
-  blockTimeout: 5_000,      // XREADGROUP BLOCK timeout in ms
-  stalledInterval: 30_000,  // how often to check for stalled jobs
-  lockDuration: 30_000,     // stall detection window per job
-  limiter: { max: 100, duration: 60_000 }, // rate limit: 100 jobs / min
-  deadLetterQueue: { name: 'dlq' },        // route permanently-failed jobs here
-  backoffStrategies: {
-    // custom strategy called as: custom(attemptsMade, err) => delayMs
-    custom: (attemptsMade) => attemptsMade * 2_000,
+    return { ok: true }; // becomes job.returnvalue
   },
-});
+  {
+    connection,
+    concurrency: 10, // process up to 10 jobs in parallel (default: 1)
+    blockTimeout: 5_000, // XREADGROUP BLOCK timeout in ms
+    stalledInterval: 30_000, // how often to check for stalled jobs
+    lockDuration: 30_000, // stall detection window per job
+    limiter: { max: 100, duration: 60_000 }, // rate limit: 100 jobs / min
+    deadLetterQueue: { name: 'dlq' }, // route permanently-failed jobs here
+    backoffStrategies: {
+      // custom strategy called as: custom(attemptsMade, err) => delayMs
+      custom: (attemptsMade) => attemptsMade * 2_000,
+    },
+  },
+);
 ```
 
 ### Worker events
@@ -146,12 +154,12 @@ worker.on('stalled', (jobId) => {
 ### Pausing / closing a worker
 
 ```typescript
-await worker.pause();       // stop accepting new jobs (active ones finish)
-await worker.pause(true);   // force-stop immediately
+await worker.pause(); // stop accepting new jobs (active ones finish)
+await worker.pause(true); // force-stop immediately
 await worker.resume();
 
-await worker.close();       // graceful: waits for active jobs to finish
-await worker.close(true);   // force-close immediately
+await worker.close(); // graceful: waits for active jobs to finish
+await worker.close(true); // force-close immediately
 ```
 
 ---
@@ -163,7 +171,7 @@ await worker.close(true);   // force-close immediately
 ```typescript
 import { Queue, Worker, QueueEvents, gracefulShutdown } from 'glide-mq';
 
-const queue  = new Queue('tasks', { connection });
+const queue = new Queue('tasks', { connection });
 const worker = new Worker('tasks', processor, { connection });
 const events = new QueueEvents('tasks', { connection });
 
@@ -193,7 +201,7 @@ const connection = {
   clientAz: 'us-east-1a',
 };
 
-const queue  = new Queue('tasks', { connection });
+const queue = new Queue('tasks', { connection });
 const worker = new Worker('tasks', processor, { connection });
 ```
 
@@ -205,7 +213,7 @@ const connection = {
   clusterMode: true,
   credentials: {
     type: 'iam',
-    serviceType: 'elasticache',  // or 'memorydb'
+    serviceType: 'elasticache', // or 'memorydb'
     region: 'us-east-1',
     userId: 'my-iam-user',
     clusterName: 'my-cluster',
@@ -226,14 +234,14 @@ import { QueueEvents } from 'glide-mq';
 
 const events = new QueueEvents('tasks', { connection });
 
-events.on('added',     ({ jobId })                   => console.log('added',     jobId));
-events.on('active',    ({ jobId })                   => console.log('active',    jobId));
-events.on('progress',  ({ jobId, data })             => console.log('progress',  jobId, data));
-events.on('completed', ({ jobId, returnvalue })      => console.log('completed', jobId, returnvalue));
-events.on('failed',    ({ jobId, failedReason })     => console.log('failed',    jobId, failedReason));
-events.on('stalled',   ({ jobId })                   => console.log('stalled',   jobId));
-events.on('paused',    ()                            => console.log('queue paused'));
-events.on('resumed',   ()                            => console.log('queue resumed'));
+events.on('added', ({ jobId }) => console.log('added', jobId));
+events.on('active', ({ jobId }) => console.log('active', jobId));
+events.on('progress', ({ jobId, data }) => console.log('progress', jobId, data));
+events.on('completed', ({ jobId, returnvalue }) => console.log('completed', jobId, returnvalue));
+events.on('failed', ({ jobId, failedReason }) => console.log('failed', jobId, failedReason));
+events.on('stalled', ({ jobId }) => console.log('stalled', jobId));
+events.on('paused', () => console.log('queue paused'));
+events.on('resumed', () => console.log('queue resumed'));
 
 // Always close QueueEvents when done
 await events.close();

@@ -1,9 +1,27 @@
 import { EventEmitter } from 'events';
 import { InfBoundary, Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
-import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts, SearchJobsOptions } from './types';
+import type {
+  QueueOptions,
+  JobOptions,
+  Client,
+  ScheduleOpts,
+  JobTemplate,
+  SchedulerEntry,
+  Metrics,
+  JobCounts,
+  SearchJobsOptions,
+} from './types';
 import { Job } from './job';
-import { buildKeys, keyPrefix, keyPrefixPattern, nextCronOccurrence, hashDataToRecord, extractJobIdsFromStreamEntries, compress } from './utils';
+import {
+  buildKeys,
+  keyPrefix,
+  keyPrefixPattern,
+  nextCronOccurrence,
+  hashDataToRecord,
+  extractJobIdsFromStreamEntries,
+  compress,
+} from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
 import {
   LIBRARY_SOURCE,
@@ -102,7 +120,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
         // Payload size validation - prevent DoS via oversized jobs
         let serialized = JSON.stringify(data);
         if (serialized.length > 1_048_576) {
-          throw new Error(`Job data exceeds maximum size (${serialized.length} bytes > 1MB). Use smaller payloads or store large data externally.`);
+          throw new Error(
+            `Job data exceeds maximum size (${serialized.length} bytes > 1MB). Use smaller payloads or store large data externally.`,
+          );
         }
 
         if (this.opts.compression === 'gzip') {
@@ -151,14 +171,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
         span.setAttribute('glide-mq.job.id', String(jobId));
 
-        const job = new Job<D, R>(
-          client,
-          this.keys,
-          String(jobId),
-          name,
-          data,
-          opts ?? {},
-        );
+        const job = new Job<D, R>(client, this.keys, String(jobId), name, data, opts ?? {});
         job.timestamp = timestamp;
         job.parentId = parentId || undefined;
         return job;
@@ -171,9 +184,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * Uses GLIDE's Batch API to pipeline all addJob FCALL commands in a single round trip.
    * Non-atomic: each job is independent, but all are sent together for efficiency.
    */
-  async addBulk(
-    jobs: { name: string; data: D; opts?: JobOptions }[],
-  ): Promise<Job<D, R>[]> {
+  async addBulk(jobs: { name: string; data: D; opts?: JobOptions }[]): Promise<Job<D, R>[]> {
     if (jobs.length === 0) return [];
 
     const client = await this.getClient();
@@ -196,12 +207,28 @@ export class Queue<D = any, R = any> extends EventEmitter {
         serializedData = compress(serializedData);
       }
 
-      return { entry, opts, delay, priority, parentId, maxAttempts, orderingKey, deduplication, serializedData };
+      return {
+        entry,
+        opts,
+        delay,
+        priority,
+        parentId,
+        maxAttempts,
+        orderingKey,
+        deduplication,
+        serializedData,
+      };
     });
 
     // Build a batch with all fcall commands
     const keys = [this.keys.id, this.keys.stream, this.keys.scheduled, this.keys.events];
-    const dedupKeys = [this.keys.dedup, this.keys.id, this.keys.stream, this.keys.scheduled, this.keys.events];
+    const dedupKeys = [
+      this.keys.dedup,
+      this.keys.id,
+      this.keys.stream,
+      this.keys.scheduled,
+      this.keys.events,
+    ];
     const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
 
     for (const p of prepared) {
@@ -245,25 +272,24 @@ export class Queue<D = any, R = any> extends EventEmitter {
   /** @internal Build Job objects from batch exec results. */
   private buildBulkJobs(
     client: Client,
-    prepared: { entry: { name: string; data: D; opts?: JobOptions }; opts: JobOptions; parentId: string }[],
+    prepared: {
+      entry: { name: string; data: D; opts?: JobOptions };
+      opts: JobOptions;
+      parentId: string;
+    }[],
     rawResults: unknown[] | null,
     timestamp: number,
   ): Job<D, R>[] {
     if (!rawResults || rawResults.length !== prepared.length) {
-      throw new Error(`addBulk batch returned ${rawResults?.length ?? 'null'} results, expected ${prepared.length}`);
+      throw new Error(
+        `addBulk batch returned ${rawResults?.length ?? 'null'} results, expected ${prepared.length}`,
+      );
     }
     return prepared.flatMap((p, i) => {
       const raw = String(rawResults[i]);
       if (raw === 'skipped') return [];
       const jobId = raw;
-      const job = new Job<D, R>(
-        client,
-        this.keys,
-        jobId,
-        p.entry.name,
-        p.entry.data,
-        p.opts,
-      );
+      const job = new Job<D, R>(client, this.keys, jobId, p.entry.name, p.entry.data, p.opts);
       job.timestamp = timestamp;
       job.parentId = p.parentId || undefined;
       return [job];
@@ -426,7 +452,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const pendingInfo = await client.xpending(this.keys.stream, CONSUMER_GROUP);
         const activeCount = Number(pendingInfo[0]) || 0;
         if (activeCount > 0) {
-          throw new Error(`Cannot obliterate queue "${this.name}": ${activeCount} active jobs. Use { force: true } to override.`);
+          throw new Error(
+            `Cannot obliterate queue "${this.name}": ${activeCount} active jobs. Use { force: true } to override.`,
+          );
         }
       } catch (err) {
         // If the error is our own active-jobs check, re-throw
@@ -439,9 +467,16 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     // Delete all known static keys
     const staticKeys = [
-      this.keys.id, this.keys.stream, this.keys.scheduled,
-      this.keys.completed, this.keys.failed, this.keys.events,
-      this.keys.meta, this.keys.dedup, this.keys.rate, this.keys.schedulers,
+      this.keys.id,
+      this.keys.stream,
+      this.keys.scheduled,
+      this.keys.completed,
+      this.keys.failed,
+      this.keys.events,
+      this.keys.meta,
+      this.keys.dedup,
+      this.keys.rate,
+      this.keys.schedulers,
     ];
     await client.del(staticKeys);
 
@@ -526,7 +561,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
               count: end >= 0 ? end + 1 : 10000,
             },
           );
-          const entryIds = pendingEntries.slice(start, end >= 0 ? end + 1 : undefined).map(e => String(e[0]));
+          const entryIds = pendingEntries
+            .slice(start, end >= 0 ? end + 1 : undefined)
+            .map((e) => String(e[0]));
           jobIds = [];
           for (const entryId of entryIds) {
             const entryData = await client.xrange(
@@ -548,17 +585,17 @@ export class Queue<D = any, R = any> extends EventEmitter {
       case 'delayed':
       case 'completed':
       case 'failed': {
-        const members = await client.zrange(
-          this.zsetKeyForState(type),
-          { start: start, end: end >= 0 ? end : -1 },
-        );
-        jobIds = members.map(m => String(m));
+        const members = await client.zrange(this.zsetKeyForState(type), {
+          start: start,
+          end: end >= 0 ? end : -1,
+        });
+        jobIds = members.map((m) => String(m));
         break;
       }
     }
 
     // Fetch job hashes in parallel (avoids N+1 serial HGETALL)
-    const results = await Promise.all(jobIds.map(id => this.getJob(id)));
+    const results = await Promise.all(jobIds.map((id) => this.getJob(id)));
     return results.filter((job): job is Job<D, R> => job !== null);
   }
 
@@ -609,9 +646,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
   /** @internal Map a terminal/zset state to its corresponding key. */
   private zsetKeyForState(state: 'delayed' | 'completed' | 'failed'): string {
     switch (state) {
-      case 'delayed': return this.keys.scheduled;
-      case 'completed': return this.keys.completed;
-      case 'failed': return this.keys.failed;
+      case 'delayed':
+        return this.keys.scheduled;
+      case 'completed':
+        return this.keys.completed;
+      case 'failed':
+        return this.keys.failed;
     }
   }
 
@@ -643,7 +683,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
               count: limit,
             },
           );
-          const entryIds = pendingEntries.map(e => String(e[0]));
+          const entryIds = pendingEntries.map((e) => String(e[0]));
           const jobIds: string[] = [];
           for (const entryId of entryIds) {
             const entryData = await client.xrange(
@@ -664,8 +704,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
       case 'delayed':
       case 'completed':
       case 'failed': {
-        const members = await client.zrange(this.zsetKeyForState(state), { start: 0, end: limit - 1 });
-        return members.map(m => String(m));
+        const members = await client.zrange(this.zsetKeyForState(state), {
+          start: 0,
+          end: limit - 1,
+        });
+        return members.map((m) => String(m));
       }
     }
   }

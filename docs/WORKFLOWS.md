@@ -24,8 +24,8 @@ const { job: parent } = await flow.add({
   queueName: 'reports',
   data: { month: '2025-01' },
   children: [
-    { name: 'fetch-sales',    queueName: 'data', data: { region: 'eu' } },
-    { name: 'fetch-returns',  queueName: 'data', data: { region: 'eu' } },
+    { name: 'fetch-sales', queueName: 'data', data: { region: 'eu' } },
+    { name: 'fetch-returns', queueName: 'data', data: { region: 'eu' } },
     {
       name: 'fetch-inventory',
       queueName: 'data',
@@ -49,11 +49,15 @@ await flow.close();
 ```typescript
 const nodes = await flow.addBulk([
   {
-    name: 'report-jan', queueName: 'reports', data: {},
+    name: 'report-jan',
+    queueName: 'reports',
+    data: {},
     children: [{ name: 'data-jan', queueName: 'data', data: {} }],
   },
   {
-    name: 'report-feb', queueName: 'reports', data: {},
+    name: 'report-feb',
+    queueName: 'reports',
+    data: {},
     children: [{ name: 'data-feb', queueName: 'data', data: {} }],
   },
 ]);
@@ -66,16 +70,20 @@ const nodes = await flow.addBulk([
 In the parent processor, call `job.getChildrenValues()` to retrieve the return values of all direct children. The keys are internal dependency identifiers (implementation detail — prefer `Object.values()` when you only need the results).
 
 ```typescript
-const worker = new Worker('reports', async (job) => {
-  // Runs only after all children have completed
-  const childValues = await job.getChildrenValues();
-  // Keys are opaque internal identifiers; use Object.values() for the results:
-  const results = Object.values(childValues);
-  // [ { sales: 42000 }, { returns: 300 } ]
+const worker = new Worker(
+  'reports',
+  async (job) => {
+    // Runs only after all children have completed
+    const childValues = await job.getChildrenValues();
+    // Keys are opaque internal identifiers; use Object.values() for the results:
+    const results = Object.values(childValues);
+    // [ { sales: 42000 }, { returns: 300 } ]
 
-  const totalSales = results.reduce((s, v) => s + (v.sales ?? 0), 0);
-  return { totalSales };
-}, { connection });
+    const totalSales = results.reduce((s, v) => s + (v.sales ?? 0), 0);
+    return { totalSales };
+  },
+  { connection },
+);
 ```
 
 ---
@@ -88,12 +96,16 @@ Execute a list of jobs **sequentially**, specified in **reverse execution order*
 import { chain } from 'glide-mq';
 
 // Execution order: download → parse → transform → upload
-await chain('pipeline', [
-  { name: 'upload',    data: { bucket: 'my-bucket' } },   // runs last  (root)
-  { name: 'transform', data: {} },
-  { name: 'parse',     data: {} },
-  { name: 'download',  data: { url: 'https://example.com/file.csv' } }, // runs first (leaf)
-], connection);
+await chain(
+  'pipeline',
+  [
+    { name: 'upload', data: { bucket: 'my-bucket' } }, // runs last  (root)
+    { name: 'transform', data: {} },
+    { name: 'parse', data: {} },
+    { name: 'download', data: { url: 'https://example.com/file.csv' } }, // runs first (leaf)
+  ],
+  connection,
+);
 ```
 
 - The **last** element in the array is the leaf — it runs first.
@@ -101,14 +113,18 @@ await chain('pipeline', [
 - Each step's processor can access the prior step's return value via `Object.values(job.getChildrenValues())[0]`.
 
 ```typescript
-const worker = new Worker('pipeline', async (job) => {
-  if (job.name === 'parse') {
-    const prev = await job.getChildrenValues();
-    const raw = Object.values(prev)[0]; // result from 'download'
-    return parse(raw);
-  }
-  // ...
-}, { connection });
+const worker = new Worker(
+  'pipeline',
+  async (job) => {
+    if (job.name === 'parse') {
+      const prev = await job.getChildrenValues();
+      const raw = Object.values(prev)[0]; // result from 'download'
+      return parse(raw);
+    }
+    // ...
+  },
+  { connection },
+);
 ```
 
 ---
@@ -120,11 +136,15 @@ Execute a list of jobs **in parallel**. A synthetic `__group__` parent waits for
 ```typescript
 import { group } from 'glide-mq';
 
-await group('tasks', [
-  { name: 'resize-thumb',  data: { imageId: 1, size: 'sm' } },
-  { name: 'resize-medium', data: { imageId: 1, size: 'md' } },
-  { name: 'resize-large',  data: { imageId: 1, size: 'lg' } },
-], connection);
+await group(
+  'tasks',
+  [
+    { name: 'resize-thumb', data: { imageId: 1, size: 'sm' } },
+    { name: 'resize-medium', data: { imageId: 1, size: 'md' } },
+    { name: 'resize-large', data: { imageId: 1, size: 'lg' } },
+  ],
+  connection,
+);
 ```
 
 The `__group__` parent processor (if you define one) can collect results from all children via `getChildrenValues()`.
@@ -155,13 +175,17 @@ await chord(
 In the callback processor:
 
 ```typescript
-const worker = new Worker('tasks', async (job) => {
-  if (job.name === 'select-best-model') {
-    const scores = await job.getChildrenValues();
-    // Keys are opaque — use Object.entries() if you need them, or Object.values():
-    const best = Object.entries(scores).sort((a, b) => b[1].score - a[1].score)[0];
-    return { score: best[1].score };
-  }
-  // ... other processors
-}, { connection });
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    if (job.name === 'select-best-model') {
+      const scores = await job.getChildrenValues();
+      // Keys are opaque — use Object.entries() if you need them, or Object.values():
+      const best = Object.entries(scores).sort((a, b) => b[1].score - a[1].score)[0];
+      return { score: best[1].score };
+    }
+    // ... other processors
+  },
+  { connection },
+);
 ```

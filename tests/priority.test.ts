@@ -120,7 +120,7 @@ describeEachMode('Priority jobs', (CONNECTION) => {
       worker.on('error', () => {});
     });
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
 
     const promoted = await promote(cleanupClient, buildKeys(qName), Number.MAX_SAFE_INTEGER);
     expect(promoted).toBe(2);

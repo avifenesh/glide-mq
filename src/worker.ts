@@ -1,8 +1,19 @@
 import { EventEmitter } from 'events';
 import type { WorkerOptions, Processor, Client } from './types';
 import { Job } from './job';
-import { buildKeys, calculateBackoff, keyPrefix, nextReconnectDelay, reconnectWithBackoff } from './utils';
-import { createClient, createBlockingClient, ensureFunctionLibrary, createConsumerGroup } from './connection';
+import {
+  buildKeys,
+  calculateBackoff,
+  keyPrefix,
+  nextReconnectDelay,
+  reconnectWithBackoff,
+} from './utils';
+import {
+  createClient,
+  createBlockingClient,
+  ensureFunctionLibrary,
+  createConsumerGroup,
+} from './connection';
 import {
   CONSUMER_GROUP,
   completeJob,
@@ -85,11 +96,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     );
 
     // Create consumer group on the stream (idempotent)
-    await createConsumerGroup(
-      this.commandClient,
-      this.queueKeys.stream,
-      CONSUMER_GROUP,
-    );
+    await createConsumerGroup(this.commandClient, this.queueKeys.stream, CONSUMER_GROUP);
 
     // Check if global concurrency is configured (read once, avoid per-poll FCALL)
     const gcVal = await this.commandClient.hget(this.queueKeys.meta, 'globalConcurrency');
@@ -132,8 +139,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private reconnectCtx = {
     isActive: () => this.running && !this.closing,
     getBackoff: () => this.reconnectBackoff,
-    setBackoff: (ms: number) => { this.reconnectBackoff = ms; },
-    onError: (err: unknown) => { this.emit('error', err); },
+    setBackoff: (ms: number) => {
+      this.reconnectBackoff = ms;
+    },
+    onError: (err: unknown) => {
+      this.emit('error', err);
+    },
   };
 
   /**
@@ -145,11 +156,19 @@ export class Worker<D = any, R = any> extends EventEmitter {
       async () => {
         // Close stale clients
         if (this.commandClient) {
-          try { this.commandClient.close(); } catch { /* ignore */ }
+          try {
+            this.commandClient.close();
+          } catch {
+            /* ignore */
+          }
           this.commandClient = null;
         }
         if (this.blockingClient) {
-          try { this.blockingClient.close(); } catch { /* ignore */ }
+          try {
+            this.blockingClient.close();
+          } catch {
+            /* ignore */
+          }
           this.blockingClient = null;
         }
 
@@ -163,11 +182,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
         );
 
         // Re-ensure consumer group
-        await createConsumerGroup(
-          this.commandClient,
-          this.queueKeys.stream,
-          CONSUMER_GROUP,
-        );
+        await createConsumerGroup(this.commandClient, this.queueKeys.stream, CONSUMER_GROUP);
 
         // Restart scheduler with the new client
         if (this.scheduler) {
@@ -189,6 +204,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     if (this.prefetch - this.activeCount > 0) return;
 
     return new Promise<void>((resolve) => {
+      // eslint-disable-next-line prefer-const
       let timer: ReturnType<typeof setTimeout>;
 
       const done = () => {
@@ -313,11 +329,37 @@ export class Worker<D = any, R = any> extends EventEmitter {
   ): Promise<boolean> {
     if (!this.commandClient) return true;
     if (moveResult === null) {
-      try { await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', Date.now(), CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
+      try {
+        await completeJob(
+          this.commandClient,
+          this.queueKeys,
+          jobId,
+          entryId,
+          'null',
+          Date.now(),
+          CONSUMER_GROUP,
+        );
+      } catch (err) {
+        this.emit('error', err);
+      }
       return true;
     }
     if (moveResult === 'REVOKED') {
-      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
+      try {
+        await failJob(
+          this.commandClient,
+          this.queueKeys,
+          jobId,
+          entryId,
+          'revoked',
+          Date.now(),
+          0,
+          0,
+          CONSUMER_GROUP,
+        );
+      } catch (err) {
+        this.emit('error', err);
+      }
       return true;
     }
     return false;
@@ -346,7 +388,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
       if (timeoutMs && timeoutMs > 0) {
         result = await Promise.race([
           this.processor(job),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs)),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs),
+          ),
         ]);
       } else {
         result = await this.processor(job);
@@ -380,7 +424,21 @@ export class Worker<D = any, R = any> extends EventEmitter {
     if (error instanceof Worker.RateLimitError) {
       const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
       this.rateLimitUntil = Date.now() + delayMs;
-      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'rate limited', Date.now(), job.attemptsMade + 2, delayMs, CONSUMER_GROUP); } catch (e) { this.emit('error', e); }
+      try {
+        await failJob(
+          this.commandClient,
+          this.queueKeys,
+          jobId,
+          entryId,
+          'rate limited',
+          Date.now(),
+          job.attemptsMade + 2,
+          delayMs,
+          CONSUMER_GROUP,
+        );
+      } catch (e) {
+        this.emit('error', e);
+      }
       return false;
     }
 
@@ -390,12 +448,25 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
       backoffDelay = strategyFn
         ? strategyFn(job.attemptsMade + 1, error)
-        : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, job.attemptsMade + 1, job.opts.backoff.jitter);
+        : calculateBackoff(
+            job.opts.backoff.type,
+            job.opts.backoff.delay,
+            job.attemptsMade + 1,
+            job.opts.backoff.jitter,
+          );
     }
 
     const failResult = await failJob(
-      this.commandClient, this.queueKeys, jobId, entryId, error.message,
-      Date.now(), maxAttempts, backoffDelay, CONSUMER_GROUP, job.opts.removeOnFail,
+      this.commandClient,
+      this.queueKeys,
+      jobId,
+      entryId,
+      error.message,
+      Date.now(),
+      maxAttempts,
+      backoffDelay,
+      CONSUMER_GROUP,
+      job.opts.removeOnFail,
     );
 
     if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
@@ -468,7 +539,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
     while (this.running && !this.closing && this.commandClient) {
       // Activate the job (skip if we already have a pre-fetched hash from completeAndFetchNext)
       if (!currentHash) {
-        const moveResult = await moveToActive(this.commandClient, this.queueKeys, currentJobId, Date.now());
+        const moveResult = await moveToActive(
+          this.commandClient,
+          this.queueKeys,
+          currentJobId,
+          Date.now(),
+        );
         if (await this.handleMoveToActiveEdgeCase(moveResult, currentJobId, currentEntryId)) return;
         currentHash = moveResult as Record<string, string>;
       }
@@ -482,7 +558,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
         return;
       }
 
-      const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
+      const {
+        result: processResult,
+        error: processError,
+        aborted,
+      } = await this.runProcessor(job, currentJobId);
 
       if (processError || aborted) {
         await this.handleJobFailure(
@@ -500,9 +580,16 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const parentInfo = this.buildParentInfo(job, currentJobId);
 
       const fetchResult = await completeAndFetchNext(
-        this.commandClient, this.queueKeys, currentJobId, currentEntryId,
-        returnvalue, Date.now(), CONSUMER_GROUP, this.consumerId,
-        job.opts.removeOnComplete, parentInfo,
+        this.commandClient,
+        this.queueKeys,
+        currentJobId,
+        currentEntryId,
+        returnvalue,
+        Date.now(),
+        CONSUMER_GROUP,
+        this.consumerId,
+        job.opts.removeOnComplete,
+        parentInfo,
       );
 
       job.returnvalue = processResult;
@@ -514,7 +601,21 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
       if (fetchResult.next === 'REVOKED') {
         if (fetchResult.nextJobId && fetchResult.nextEntryId) {
-          try { await failJob(this.commandClient, this.queueKeys, fetchResult.nextJobId, fetchResult.nextEntryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
+          try {
+            await failJob(
+              this.commandClient,
+              this.queueKeys,
+              fetchResult.nextJobId,
+              fetchResult.nextEntryId,
+              'revoked',
+              Date.now(),
+              0,
+              0,
+              CONSUMER_GROUP,
+            );
+          } catch (err) {
+            this.emit('error', err);
+          }
         }
         return;
       }
@@ -607,7 +708,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
 
     // Server-side sliding window check
-    // eslint-disable-next-line no-constant-condition
+
     while (true) {
       const delayMs = await rateLimitFn(
         this.commandClient,
@@ -674,7 +775,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     await this.initPromise;
 
     // Poll until everything is empty
-    // eslint-disable-next-line no-constant-condition
+
     while (true) {
       if (!this.commandClient) break;
 

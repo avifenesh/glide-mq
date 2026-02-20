@@ -170,7 +170,9 @@ export class Scheduler {
 
       config.lastRun = now;
       config.nextRun = nextRun;
-      await this.client.hset(this.queueKeys.schedulers, { [schedulerName]: JSON.stringify(config) });
+      await this.client.hset(this.queueKeys.schedulers, {
+        [schedulerName]: JSON.stringify(config),
+      });
       fired++;
     }
 

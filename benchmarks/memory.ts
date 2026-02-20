@@ -40,16 +40,18 @@ async function glideMemory(): Promise<{ before: MemSnapshot; after: MemSnapshot 
   let completed = 0;
 
   await new Promise<void>((resolve) => {
-    const worker = new Worker(
-      'bench-mem',
-      async () => {},
-      { connection: GLIDE_CONNECTION, concurrency: 10 },
-    );
+    const worker = new Worker('bench-mem', async () => {}, {
+      connection: GLIDE_CONNECTION,
+      concurrency: 10,
+    });
 
     worker.on('completed', () => {
       completed++;
       if (completed >= N) {
-        worker.close(true).then(() => queue.close()).then(() => resolve());
+        worker
+          .close(true)
+          .then(() => queue.close())
+          .then(() => resolve());
       }
     });
 
@@ -77,16 +79,18 @@ async function bullMemory(): Promise<{ before: MemSnapshot; after: MemSnapshot }
   let completed = 0;
 
   await new Promise<void>((resolve) => {
-    const worker = new BullWorker(
-      'bench-mem-bull',
-      async () => {},
-      { connection: BULL_CONNECTION, concurrency: 10 },
-    );
+    const worker = new BullWorker('bench-mem-bull', async () => {}, {
+      connection: BULL_CONNECTION,
+      concurrency: 10,
+    });
 
     worker.on('completed', () => {
       completed++;
       if (completed >= N) {
-        worker.close(true).then(() => queue.close()).then(() => resolve());
+        worker
+          .close(true)
+          .then(() => queue.close())
+          .then(() => resolve());
       }
     });
 

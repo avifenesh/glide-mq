@@ -3,7 +3,12 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
+import {
+  describeEachMode,
+  createCleanupClient,
+  flushQueue,
+  ConnectionConfig,
+} from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -69,15 +74,26 @@ describeEachMode('FlowProducer', (CONNECTION) => {
       data: { type: 'parent' },
       opts: { ordering: { key: 'parent-key' } },
       children: [
-        { name: 'child-ordered', queueName: qName, data: { idx: 1 }, opts: { ordering: { key: 'child-key' } } },
+        {
+          name: 'child-ordered',
+          queueName: qName,
+          data: { idx: 1 },
+          opts: { ordering: { key: 'child-key' } },
+        },
       ],
     });
 
     const k = buildKeys(qName);
     const parentOrderingKey = await cleanupClient.hget(k.job(node.job.id), 'orderingKey');
     const parentOrderingSeq = await cleanupClient.hget(k.job(node.job.id), 'orderingSeq');
-    const childOrderingKey = await cleanupClient.hget(k.job(node.children![0].job.id), 'orderingKey');
-    const childOrderingSeq = await cleanupClient.hget(k.job(node.children![0].job.id), 'orderingSeq');
+    const childOrderingKey = await cleanupClient.hget(
+      k.job(node.children![0].job.id),
+      'orderingKey',
+    );
+    const childOrderingSeq = await cleanupClient.hget(
+      k.job(node.children![0].job.id),
+      'orderingSeq',
+    );
 
     expect(String(parentOrderingKey)).toBe('parent-key');
     expect(Number(parentOrderingSeq)).toBe(1);
@@ -154,9 +170,7 @@ describeEachMode('FlowProducer', (CONNECTION) => {
           name: 'parent-child',
           queueName: qName,
           data: { level: 1 },
-          children: [
-            { name: 'grandchild', queueName: qName, data: { level: 2 } },
-          ],
+          children: [{ name: 'grandchild', queueName: qName, data: { level: 2 } }],
         },
       ],
     });
@@ -193,8 +207,12 @@ describeEachMode('FlowProducer', (CONNECTION) => {
     await done;
 
     // Grandchild should complete first, then parent-child, then grandparent
-    expect(completedNames.indexOf('grandchild')).toBeLessThan(completedNames.indexOf('parent-child'));
-    expect(completedNames.indexOf('parent-child')).toBeLessThan(completedNames.indexOf('grandparent'));
+    expect(completedNames.indexOf('grandchild')).toBeLessThan(
+      completedNames.indexOf('parent-child'),
+    );
+    expect(completedNames.indexOf('parent-child')).toBeLessThan(
+      completedNames.indexOf('grandparent'),
+    );
 
     await flow.close();
     await flushQueue(cleanupClient, qName);
@@ -266,17 +284,13 @@ describeEachMode('FlowProducer', (CONNECTION) => {
         name: 'flow-1',
         queueName: qName,
         data: { f: 1 },
-        children: [
-          { name: 'f1-child', queueName: qName, data: { c: 1 } },
-        ],
+        children: [{ name: 'f1-child', queueName: qName, data: { c: 1 } }],
       },
       {
         name: 'flow-2',
         queueName: qName,
         data: { f: 2 },
-        children: [
-          { name: 'f2-child', queueName: qName, data: { c: 2 } },
-        ],
+        children: [{ name: 'f2-child', queueName: qName, data: { c: 2 } }],
       },
     ]);
 

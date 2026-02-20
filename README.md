@@ -8,40 +8,40 @@ Built on [Valkey Streams](https://valkey.io) + consumer groups with [Valkey GLID
 
 ### Processing throughput
 
-| Concurrency | Throughput |
-|-------------|-----------|
-| c=1 | 4,376 jobs/s |
-| c=5 | 14,925 jobs/s |
-| c=10 | 15,504 jobs/s |
-| c=50 | 48,077 jobs/s |
+| Concurrency | Throughput    |
+| ----------- | ------------- |
+| c=1         | 4,376 jobs/s  |
+| c=5         | 14,925 jobs/s |
+| c=10        | 15,504 jobs/s |
+| c=50        | 48,077 jobs/s |
 
 ### Bulk add (`addBulk` via Batch API)
 
-| Jobs | Serial | Batch | Speedup |
-|------|--------|-------|---------|
-| 200 | 76ms | 14ms | 5.4x |
-| 1,000 | 228ms | 18ms | 12.7x |
+| Jobs  | Serial | Batch | Speedup |
+| ----- | ------ | ----- | ------- |
+| 200   | 76ms   | 14ms  | 5.4x    |
+| 1,000 | 228ms  | 18ms  | 12.7x   |
 
 ### Payload compression
 
-| Mode | Stored size (15KB payload) | Savings |
-|------|--------------------------|---------|
-| Plain | 15,327 bytes | — |
-| Gzip | 331 bytes | 98% |
+| Mode  | Stored size (15KB payload) | Savings |
+| ----- | -------------------------- | ------- |
+| Plain | 15,327 bytes               | —       |
+| Gzip  | 331 bytes                  | 98%     |
 
-*No-op processor, Valkey 8.0, single node.*
+_No-op processor, Valkey 8.0, single node._
 
 ## Why glide-mq
 
-| Feature | glide-mq | Traditional queue |
-|---------|----------|-------------------|
-| Queue backend | Streams + PEL | Lists + BRPOPLPUSH |
-| Server scripts | 1 function library | 53 EVAL scripts |
-| RTT per job | 1 (`completeAndFetchNext`) | 2+ |
-| Cluster support | Built-in hash tags | Afterthought `{braces}` |
-| Client | NAPI Rust core | ioredis |
-| AZ-Affinity | ✓ | ✗ |
-| IAM auth | ✓ | ✗ |
+| Feature         | glide-mq                   | Traditional queue       |
+| --------------- | -------------------------- | ----------------------- |
+| Queue backend   | Streams + PEL              | Lists + BRPOPLPUSH      |
+| Server scripts  | 1 function library         | 53 EVAL scripts         |
+| RTT per job     | 1 (`completeAndFetchNext`) | 2+                      |
+| Cluster support | Built-in hash tags         | Afterthought `{braces}` |
+| Client          | NAPI Rust core             | ioredis                 |
+| AZ-Affinity     | ✓                          | ✗                       |
+| IAM auth        | ✓                          | ✗                       |
 
 ## Install
 
@@ -63,10 +63,14 @@ const queue = new Queue('tasks', { connection });
 await queue.add('send-email', { to: 'user@example.com', subject: 'Hello' });
 
 // Consumer
-const worker = new Worker('tasks', async (job) => {
-  console.log(`Processing ${job.name}:`, job.data);
-  return { sent: true };
-}, { connection, concurrency: 10 });
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    console.log(`Processing ${job.name}:`, job.data);
+    return { sent: true };
+  },
+  { connection, concurrency: 10 },
+);
 
 worker.on('completed', (job) => console.log(`Job ${job.id} done`));
 worker.on('failed', (job, err) => console.error(`Job ${job.id} failed:`, err.message));

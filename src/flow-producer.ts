@@ -92,14 +92,7 @@ export class FlowProducer {
         opts.attempts ?? 0,
         opts.ordering?.key ?? '',
       );
-      const job = new Job(
-        client,
-        parentKeys,
-        String(jobId),
-        flow.name,
-        flow.data,
-        opts,
-      );
+      const job = new Job(client, parentKeys, String(jobId), flow.name, flow.data, opts);
       job.timestamp = timestamp;
       return { job };
     }
@@ -194,14 +187,7 @@ export class FlowProducer {
       }
     }
 
-    const parentJob = new Job(
-      client,
-      parentKeys,
-      parentId,
-      flow.name,
-      flow.data,
-      parentOpts,
-    );
+    const parentJob = new Job(client, parentKeys, parentId, flow.name, flow.data, parentOpts);
     parentJob.timestamp = timestamp;
 
     return { job: parentJob, children: childNodes };

@@ -33,7 +33,9 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
 
     afterEach(async () => {
       for (const w of workers) {
-        try { await w.close(true); } catch {}
+        try {
+          await w.close(true);
+        } catch {}
       }
       workers.length = 0;
     });
@@ -124,7 +126,9 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
 
     afterEach(async () => {
       for (const w of workers) {
-        try { await w.close(true); } catch {}
+        try {
+          await w.close(true);
+        } catch {}
       }
       workers.length = 0;
     });
@@ -137,10 +141,14 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
         deadLetterQueue: { name: DLQ },
       });
 
-      await queue.add('fail-job', { value: 'important' }, {
-        attempts: 3,
-        backoff: { type: 'fixed', delay: 100 },
-      });
+      await queue.add(
+        'fail-job',
+        { value: 'important' },
+        {
+          attempts: 3,
+          backoff: { type: 'fixed', delay: 100 },
+        },
+      );
 
       let failCount = 0;
       const allDone = new Promise<void>((resolve) => {
@@ -199,7 +207,9 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
 
     afterEach(async () => {
       for (const w of workers) {
-        try { await w.close(true); } catch {}
+        try {
+          await w.close(true);
+        } catch {}
       }
       workers.length = 0;
     });
@@ -264,7 +274,9 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
 
     afterEach(async () => {
       for (const w of workers) {
-        try { await w.close(true); } catch {}
+        try {
+          await w.close(true);
+        } catch {}
       }
       workers.length = 0;
     });
@@ -334,7 +346,9 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
 
     afterEach(async () => {
       for (const w of workers) {
-        try { await w.close(true); } catch {}
+        try {
+          await w.close(true);
+        } catch {}
       }
       workers.length = 0;
     });

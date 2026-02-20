@@ -10,7 +10,8 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
+const { CONSUMER_GROUP } =
+  require('../dist/functions/index') as typeof import('../src/functions/index');
 const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
 import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
@@ -38,7 +39,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 50));
+          await new Promise((r) => setTimeout(r, 50));
           return 'done';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -68,7 +69,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, 2000));
           return 'should-not-reach';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -94,11 +95,15 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
     const k = buildKeys(Q);
 
     let attempt = 0;
-    const job = await queue.add('retry-to', { val: 1 }, {
-      timeout: 200,
-      attempts: 2,
-      backoff: { type: 'fixed', delay: 100 },
-    });
+    const job = await queue.add(
+      'retry-to',
+      { val: 1 },
+      {
+        timeout: 200,
+        attempts: 2,
+        backoff: { type: 'fixed', delay: 100 },
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('test timeout')), 15000);
@@ -108,7 +113,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
           attempt++;
           if (attempt === 1) {
             // Exceed timeout
-            await new Promise(r => setTimeout(r, 2000));
+            await new Promise((r) => setTimeout(r, 2000));
             return 'unreachable';
           }
           return 'ok';
@@ -119,7 +124,9 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       worker.on('failed', () => {
         // Promote so the retry is picked up
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 200);
       });
       worker.on('completed', (j: any) => {
@@ -147,11 +154,15 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
     const k = buildKeys(Q);
 
     let failCount = 0;
-    const job = await queue.add('retry-exhaust', { val: 1 }, {
-      timeout: 150,
-      attempts: 2,
-      backoff: { type: 'fixed', delay: 100 },
-    });
+    const job = await queue.add(
+      'retry-exhaust',
+      { val: 1 },
+      {
+        timeout: 150,
+        attempts: 2,
+        backoff: { type: 'fixed', delay: 100 },
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('test timeout')), 15000);
@@ -159,7 +170,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
         Q,
         async () => {
           // Always exceed timeout
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, 2000));
           return 'unreachable';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -169,7 +180,9 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
         failCount++;
         if (failCount < 2) {
           setTimeout(async () => {
-            try { await promote(cleanupClient, k, Date.now()); } catch {}
+            try {
+              await promote(cleanupClient, k, Date.now());
+            } catch {}
           }, 200);
         } else {
           clearTimeout(timer);
@@ -204,7 +217,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise((r) => setTimeout(r, 500));
           return 'slow-ok';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -234,7 +247,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise((r) => setTimeout(r, 500));
           return 'no-to-ok';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -265,7 +278,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
         Q,
         async () => {
           // Even a trivial async delay should exceed 1ms
-          await new Promise(r => setTimeout(r, 50));
+          await new Promise((r) => setTimeout(r, 50));
           return 'should-not-reach';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -295,7 +308,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, 2000));
           return 'unreachable';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -329,7 +342,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, 2000));
           return 'unreachable';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -371,7 +384,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, 2000));
           return 'unreachable';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -416,10 +429,10 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
         async (j: any) => {
           if (j.data.idx === 2) {
             // Slow job exceeds timeout
-            await new Promise(r => setTimeout(r, 2000));
+            await new Promise((r) => setTimeout(r, 2000));
             return 'unreachable';
           }
-          await new Promise(r => setTimeout(r, 50));
+          await new Promise((r) => setTimeout(r, 50));
           return `result-${j.data.idx}`;
         },
         { connection: CONNECTION, concurrency: 3, blockTimeout: 500, stalledInterval: 60000 },
@@ -467,9 +480,11 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
         async () => {
           // 50ms sync work
           const start = Date.now();
-          while (Date.now() - start < 50) { /* busy-wait */ }
+          while (Date.now() - start < 50) {
+            /* busy-wait */
+          }
           // Yield to event loop - timeout can fire here
-          await new Promise(r => setTimeout(r, 200));
+          await new Promise((r) => setTimeout(r, 200));
           return 'should-not-complete';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -493,17 +508,21 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
     const queue = new Queue(Q, { connection: CONNECTION });
     const k = buildKeys(Q);
 
-    const job = await queue.add('rm-fail', { val: 1 }, {
-      timeout: 100,
-      removeOnFail: true,
-    });
+    const job = await queue.add(
+      'rm-fail',
+      { val: 1 },
+      {
+        timeout: 100,
+        removeOnFail: true,
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('test timeout')), 10000);
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, 2000));
           return 'unreachable';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -553,7 +572,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
         async (j: any) => {
           if (j.data.idx === 2) {
             // Exceed timeout
-            await new Promise(r => setTimeout(r, 2000));
+            await new Promise((r) => setTimeout(r, 2000));
             return 'unreachable';
           }
           return `done-${j.data.idx}`;
@@ -607,7 +626,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
         async (j: any) => {
           processedCount++;
           if (j.data.idx === 1) {
-            await new Promise(r => setTimeout(r, 2000));
+            await new Promise((r) => setTimeout(r, 2000));
             return 'unreachable';
           }
           return 'ok';
@@ -656,7 +675,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
         Q,
         async () => {
           // Both take 200ms
-          await new Promise(r => setTimeout(r, 200));
+          await new Promise((r) => setTimeout(r, 200));
           return 'result';
         },
         { connection: CONNECTION, concurrency: 2, blockTimeout: 500, stalledInterval: 60000 },
@@ -699,7 +718,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, 2000));
           return 'unreachable';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -715,7 +734,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
 
     // If timers leaked, this would hang or cause unhandled errors.
     // Wait a bit to ensure no unhandled rejection / timer firing after close.
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
 
     await queue.close();
     await flushQueue(cleanupClient, Q);
@@ -734,7 +753,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, 2000));
           return 'unreachable';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -770,7 +789,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 300));
+          await new Promise((r) => setTimeout(r, 300));
           return 'neg-ok';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -800,7 +819,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 50));
+          await new Promise((r) => setTimeout(r, 50));
           throw new Error('processor-error');
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -832,7 +851,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
       const worker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise((r) => setTimeout(r, 500));
           throw new Error('late-processor-error');
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },

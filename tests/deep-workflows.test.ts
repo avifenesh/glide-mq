@@ -26,7 +26,10 @@ describeEachMode('Workflows', (CONNECTION) => {
   ): { promise: Promise<void>; workerRef: { w: any } } {
     const ref: { w: any } = { w: null };
     const promise = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('timeout waiting for ' + targetJobId)), timeoutMs);
+      const timeout = setTimeout(
+        () => reject(new Error('timeout waiting for ' + targetJobId)),
+        timeoutMs,
+      );
       const worker = new Worker(queueName, processor, {
         connection: CONNECTION,
         concurrency: 3,
@@ -395,7 +398,9 @@ describeEachMode('Workflows', (CONNECTION) => {
   // ---------------------------------------------------------------------------
 
   it('chord: rejects empty group jobs array', async () => {
-    await expect(chord('q', [], { name: 'cb', data: {} }, CONNECTION)).rejects.toThrow('at least one group job');
+    await expect(chord('q', [], { name: 'cb', data: {} }, CONNECTION)).rejects.toThrow(
+      'at least one group job',
+    );
   });
 
   it('chord: creates callback parent with group jobs as children', async () => {
@@ -560,9 +565,7 @@ describeEachMode('Workflows', (CONNECTION) => {
         name: 'flow-A',
         queueName: Q,
         data: { f: 'A' },
-        children: [
-          { name: 'a-child', queueName: Q, data: {} },
-        ],
+        children: [{ name: 'a-child', queueName: Q, data: {} }],
       },
       {
         name: 'flow-B',

@@ -11,8 +11,12 @@ const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { QueueEvents } = require('../dist/queue-events') as typeof import('../src/queue-events');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
-function uid() { return 'fuzz-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6); }
-function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+function uid() {
+  return 'fuzz-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+}
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 // ---- Chaos: concurrent producers + consumers ----
 
@@ -20,8 +24,13 @@ describeEachMode('Fuzz: concurrent producers and consumers', (CONNECTION) => {
   const Q = uid();
   let cleanup: any;
 
-  beforeAll(async () => { cleanup = await createCleanupClient(CONNECTION); });
-  afterAll(async () => { await flushQueue(cleanup, Q); cleanup.close(); });
+  beforeAll(async () => {
+    cleanup = await createCleanupClient(CONNECTION);
+  });
+  afterAll(async () => {
+    await flushQueue(cleanup, Q);
+    cleanup.close();
+  });
 
   it('3 producers + 3 workers + 300 jobs - no job lost or duplicated', async () => {
     const producedIds = new Set<string>();
@@ -43,20 +52,32 @@ describeEachMode('Fuzz: concurrent producers and consumers', (CONNECTION) => {
     const done = new Promise<void>((resolve) => {
       let count = 0;
       for (let i = 0; i < 3; i++) {
-        const w = new Worker(Q, async (job: any) => {
-          processedIds.add(job.id);
-          // Random delay to simulate real work
-          if (Math.random() > 0.8) await sleep(Math.random() * 10);
-          return { ok: true };
-        }, { connection: CONNECTION, concurrency: 10, blockTimeout: 500 });
-        w.on('completed', () => { count++; if (count >= TOTAL) resolve(); });
+        const w = new Worker(
+          Q,
+          async (job: any) => {
+            processedIds.add(job.id);
+            // Random delay to simulate real work
+            if (Math.random() > 0.8) await sleep(Math.random() * 10);
+            return { ok: true };
+          },
+          { connection: CONNECTION, concurrency: 10, blockTimeout: 500 },
+        );
+        w.on('completed', () => {
+          count++;
+          if (count >= TOTAL) resolve();
+        });
         w.on('error', () => {});
         workers.push(w);
       }
     });
 
     await Promise.all(producers);
-    await Promise.race([done, sleep(30000).then(() => { throw new Error('timeout'); })]);
+    await Promise.race([
+      done,
+      sleep(30000).then(() => {
+        throw new Error('timeout');
+      }),
+    ]);
 
     for (const w of workers) await w.close(true);
 
@@ -89,17 +110,26 @@ describeEachMode('Fuzz: worker close during active processing', (CONNECTION) => 
   const Q = uid();
   let cleanup: any;
 
-  beforeAll(async () => { cleanup = await createCleanupClient(CONNECTION); });
-  afterAll(async () => { await flushQueue(cleanup, Q); cleanup.close(); });
+  beforeAll(async () => {
+    cleanup = await createCleanupClient(CONNECTION);
+  });
+  afterAll(async () => {
+    await flushQueue(cleanup, Q);
+    cleanup.close();
+  });
 
   it('force-close worker while 10 jobs are processing - no crash', async () => {
     const q = new Queue(Q, { connection: CONNECTION });
     for (let i = 0; i < 10; i++) await q.add('slow', { i });
 
-    const w = new Worker(Q, async () => {
-      await sleep(5000); // Long running
-      return 'done';
-    }, { connection: CONNECTION, concurrency: 10, blockTimeout: 500 });
+    const w = new Worker(
+      Q,
+      async () => {
+        await sleep(5000); // Long running
+        return 'done';
+      },
+      { connection: CONNECTION, concurrency: 10, blockTimeout: 500 },
+    );
 
     await sleep(500); // Let worker start processing
     await w.close(true); // Force close
@@ -114,8 +144,13 @@ describeEachMode('Fuzz: random processor failures', (CONNECTION) => {
   const Q = uid();
   let cleanup: any;
 
-  beforeAll(async () => { cleanup = await createCleanupClient(CONNECTION); });
-  afterAll(async () => { await flushQueue(cleanup, Q); cleanup.close(); });
+  beforeAll(async () => {
+    cleanup = await createCleanupClient(CONNECTION);
+  });
+  afterAll(async () => {
+    await flushQueue(cleanup, Q);
+    cleanup.close();
+  });
 
   it('50% failure rate - all jobs end in completed or failed', async () => {
     const q = new Queue(Q, { connection: CONNECTION });
@@ -123,23 +158,48 @@ describeEachMode('Fuzz: random processor failures', (CONNECTION) => {
     const jobIds: string[] = [];
 
     for (let i = 0; i < TOTAL; i++) {
-      const job = await q.add('maybe-fail', { i }, { attempts: 3, backoff: { type: 'fixed', delay: 50 } });
+      const job = await q.add(
+        'maybe-fail',
+        { i },
+        { attempts: 3, backoff: { type: 'fixed', delay: 50 } },
+      );
       jobIds.push(job.id);
     }
 
     let completed = 0;
     let failed = 0;
     const done = new Promise<void>((resolve) => {
-      const w = new Worker(Q, async () => {
-        if (Math.random() < 0.5) throw new Error('random fail');
-        return 'ok';
-      }, { connection: CONNECTION, concurrency: 5, blockTimeout: 500, stalledInterval: 60000, lockDuration: 60000 });
-      w.on('completed', () => { completed++; if (completed + failed >= TOTAL) resolve(); });
-      w.on('failed', () => { failed++; if (completed + failed >= TOTAL) resolve(); });
+      const w = new Worker(
+        Q,
+        async () => {
+          if (Math.random() < 0.5) throw new Error('random fail');
+          return 'ok';
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 5,
+          blockTimeout: 500,
+          stalledInterval: 60000,
+          lockDuration: 60000,
+        },
+      );
+      w.on('completed', () => {
+        completed++;
+        if (completed + failed >= TOTAL) resolve();
+      });
+      w.on('failed', () => {
+        failed++;
+        if (completed + failed >= TOTAL) resolve();
+      });
       w.on('error', () => {});
     });
 
-    await Promise.race([done, sleep(30000).then(() => { throw new Error('timeout'); })]);
+    await Promise.race([
+      done,
+      sleep(30000).then(() => {
+        throw new Error('timeout');
+      }),
+    ]);
 
     // Every job should be in a terminal state
     expect(completed + failed).toBe(TOTAL);
@@ -155,18 +215,27 @@ describeEachMode('Fuzz: interleaved add and process', (CONNECTION) => {
   const Q = uid();
   let cleanup: any;
 
-  beforeAll(async () => { cleanup = await createCleanupClient(CONNECTION); });
-  afterAll(async () => { await flushQueue(cleanup, Q); cleanup.close(); });
+  beforeAll(async () => {
+    cleanup = await createCleanupClient(CONNECTION);
+  });
+  afterAll(async () => {
+    await flushQueue(cleanup, Q);
+    cleanup.close();
+  });
 
   it('add jobs while worker is processing - no race', async () => {
     const q = new Queue(Q, { connection: CONNECTION });
     const processed = new Set<string>();
     const TOTAL = 100;
 
-    const w = new Worker(Q, async (job: any) => {
-      processed.add(job.id);
-      return 'ok';
-    }, { connection: CONNECTION, concurrency: 5, blockTimeout: 500 });
+    const w = new Worker(
+      Q,
+      async (job: any) => {
+        processed.add(job.id);
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 5, blockTimeout: 500 },
+    );
     w.on('error', () => {});
 
     // Add jobs one by one with small delays
@@ -199,8 +268,13 @@ describeEachMode('Fuzz: adversarial job data', (CONNECTION) => {
   const Q = uid();
   let cleanup: any;
 
-  beforeAll(async () => { cleanup = await createCleanupClient(CONNECTION); });
-  afterAll(async () => { await flushQueue(cleanup, Q); cleanup.close(); });
+  beforeAll(async () => {
+    cleanup = await createCleanupClient(CONNECTION);
+  });
+  afterAll(async () => {
+    await flushQueue(cleanup, Q);
+    cleanup.close();
+  });
 
   it('handles special characters, unicode, null bytes, huge strings', async () => {
     const q = new Queue(Q, { connection: CONNECTION });
@@ -219,10 +293,14 @@ describeEachMode('Fuzz: adversarial job data', (CONNECTION) => {
     ];
 
     const processed: Record<string, any> = {};
-    const w = new Worker(Q, async (job: any) => {
-      processed[job.name] = job.data;
-      return job.data;
-    }, { connection: CONNECTION, concurrency: 1, blockTimeout: 500 });
+    const w = new Worker(
+      Q,
+      async (job: any) => {
+        processed[job.name] = job.data;
+        return job.data;
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+    );
     w.on('error', () => {});
 
     for (const item of weirdData) {
@@ -251,19 +329,28 @@ describeEachMode('Fuzz: pause/resume storm during processing', (CONNECTION) => {
   const Q = uid();
   let cleanup: any;
 
-  beforeAll(async () => { cleanup = await createCleanupClient(CONNECTION); });
-  afterAll(async () => { await flushQueue(cleanup, Q); cleanup.close(); });
+  beforeAll(async () => {
+    cleanup = await createCleanupClient(CONNECTION);
+  });
+  afterAll(async () => {
+    await flushQueue(cleanup, Q);
+    cleanup.close();
+  });
 
   it('rapid pause/resume while jobs are being processed', async () => {
     const q = new Queue(Q, { connection: CONNECTION });
     for (let i = 0; i < 20; i++) await q.add('storm', { i });
 
     const processed = new Set<string>();
-    const w = new Worker(Q, async (job: any) => {
-      processed.add(job.id);
-      await sleep(10);
-      return 'ok';
-    }, { connection: CONNECTION, concurrency: 3, blockTimeout: 500 });
+    const w = new Worker(
+      Q,
+      async (job: any) => {
+        processed.add(job.id);
+        await sleep(10);
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 3, blockTimeout: 500 },
+    );
     w.on('error', () => {});
 
     // Storm: pause and resume rapidly
@@ -294,26 +381,39 @@ describeEachMode('Fuzz: dedup stress test', (CONNECTION) => {
   const Q = uid();
   let cleanup: any;
 
-  beforeAll(async () => { cleanup = await createCleanupClient(CONNECTION); });
-  afterAll(async () => { await flushQueue(cleanup, Q); cleanup.close(); });
+  beforeAll(async () => {
+    cleanup = await createCleanupClient(CONNECTION);
+  });
+  afterAll(async () => {
+    await flushQueue(cleanup, Q);
+    cleanup.close();
+  });
 
   it('100 rapid adds with same dedup ID - only 1 processed', async () => {
     const q = new Queue(Q, { connection: CONNECTION });
     const processed = new Set<string>();
 
-    const w = new Worker(Q, async (job: any) => {
-      processed.add(job.id);
-      await sleep(50);
-      return 'ok';
-    }, { connection: CONNECTION, concurrency: 5, blockTimeout: 500 });
+    const w = new Worker(
+      Q,
+      async (job: any) => {
+        processed.add(job.id);
+        await sleep(50);
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 5, blockTimeout: 500 },
+    );
     w.on('error', () => {});
 
     // Rapid fire 100 jobs with same dedup ID
     let addedCount = 0;
     for (let i = 0; i < 100; i++) {
-      const result = await q.add('dedup-stress', { i }, {
-        deduplication: { id: 'same-id', mode: 'simple' },
-      });
+      const result = await q.add(
+        'dedup-stress',
+        { i },
+        {
+          deduplication: { id: 'same-id', mode: 'simple' },
+        },
+      );
       if (result !== null) addedCount++;
     }
 
@@ -333,8 +433,13 @@ describeEachMode('Fuzz: worker restart mid-batch', (CONNECTION) => {
   const Q = uid();
   let cleanup: any;
 
-  beforeAll(async () => { cleanup = await createCleanupClient(CONNECTION); });
-  afterAll(async () => { await flushQueue(cleanup, Q); cleanup.close(); });
+  beforeAll(async () => {
+    cleanup = await createCleanupClient(CONNECTION);
+  });
+  afterAll(async () => {
+    await flushQueue(cleanup, Q);
+    cleanup.close();
+  });
 
   it('kill and restart worker - all 50 jobs eventually complete', async () => {
     const q = new Queue(Q, { connection: CONNECTION });
@@ -343,20 +448,42 @@ describeEachMode('Fuzz: worker restart mid-batch', (CONNECTION) => {
     const processed = new Set<string>();
 
     // Worker 1: process some, then die
-    const w1 = new Worker(Q, async (job: any) => {
-      processed.add(job.id);
-      return 'w1';
-    }, { connection: CONNECTION, concurrency: 5, blockTimeout: 500, stalledInterval: 2000, maxStalledCount: 3, lockDuration: 60000 });
+    const w1 = new Worker(
+      Q,
+      async (job: any) => {
+        processed.add(job.id);
+        return 'w1';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 5,
+        blockTimeout: 500,
+        stalledInterval: 2000,
+        maxStalledCount: 3,
+        lockDuration: 60000,
+      },
+    );
     w1.on('error', () => {});
 
     await sleep(1000);
     await w1.close(true); // Kill w1
 
     // Worker 2: pick up remaining
-    const w2 = new Worker(Q, async (job: any) => {
-      processed.add(job.id);
-      return 'w2';
-    }, { connection: CONNECTION, concurrency: 10, blockTimeout: 500, stalledInterval: 2000, maxStalledCount: 3, lockDuration: 60000 });
+    const w2 = new Worker(
+      Q,
+      async (job: any) => {
+        processed.add(job.id);
+        return 'w2';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 10,
+        blockTimeout: 500,
+        stalledInterval: 2000,
+        maxStalledCount: 3,
+        lockDuration: 60000,
+      },
+    );
     w2.on('error', () => {});
 
     const deadline = Date.now() + 20000;
@@ -377,27 +504,36 @@ describeEachMode('Fuzz: mixed operations storm', (CONNECTION) => {
   const Q = uid();
   let cleanup: any;
 
-  beforeAll(async () => { cleanup = await createCleanupClient(CONNECTION); });
-  afterAll(async () => { await flushQueue(cleanup, Q); cleanup.close(); });
+  beforeAll(async () => {
+    cleanup = await createCleanupClient(CONNECTION);
+  });
+  afterAll(async () => {
+    await flushQueue(cleanup, Q);
+    cleanup.close();
+  });
 
   it('simultaneous add, getJob, getJobCounts, pause, resume - no crash', async () => {
     const q = new Queue(Q, { connection: CONNECTION });
     const errors: Error[] = [];
 
-    const w = new Worker(Q, async () => {
-      await sleep(5);
-      return 'ok';
-    }, { connection: CONNECTION, concurrency: 5, blockTimeout: 500 });
+    const w = new Worker(
+      Q,
+      async () => {
+        await sleep(5);
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 5, blockTimeout: 500 },
+    );
     w.on('error', () => {});
 
     // Fire all operations simultaneously
     const ops = [];
     for (let i = 0; i < 20; i++) {
-      ops.push(q.add('storm-' + i, { i }).catch(e => errors.push(e)));
-      ops.push(q.getJobCounts().catch(e => errors.push(e)));
-      if (i % 5 === 0) ops.push(q.pause().catch(e => errors.push(e)));
-      if (i % 5 === 2) ops.push(q.resume().catch(e => errors.push(e)));
-      if (i > 0) ops.push(q.getJob(String(i)).catch(e => errors.push(e)));
+      ops.push(q.add('storm-' + i, { i }).catch((e) => errors.push(e)));
+      ops.push(q.getJobCounts().catch((e) => errors.push(e)));
+      if (i % 5 === 0) ops.push(q.pause().catch((e) => errors.push(e)));
+      if (i % 5 === 2) ops.push(q.resume().catch((e) => errors.push(e)));
+      if (i > 0) ops.push(q.getJob(String(i)).catch((e) => errors.push(e)));
     }
 
     await Promise.all(ops);
@@ -406,7 +542,9 @@ describeEachMode('Fuzz: mixed operations storm', (CONNECTION) => {
     await q.close();
 
     // No unexpected errors (closing errors are acceptable)
-    const realErrors = errors.filter(e => !e.message.includes('closing') && !e.message.includes('closed'));
+    const realErrors = errors.filter(
+      (e) => !e.message.includes('closing') && !e.message.includes('closed'),
+    );
     expect(realErrors.length).toBe(0);
   }, 15000);
 });

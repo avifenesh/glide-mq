@@ -258,7 +258,9 @@ describe('Telemetry', () => {
 
       const error = new Error('boom');
       await expect(
-        withSpan('test.fail', {}, async () => { throw error; }),
+        withSpan('test.fail', {}, async () => {
+          throw error;
+        }),
       ).rejects.toThrow('boom');
 
       expect(span.setStatus).toHaveBeenCalledWith(
@@ -279,11 +281,7 @@ describe('Telemetry', () => {
       const { withChildSpan, setTracer } = await import('../src/telemetry');
       setTracer(tracer);
 
-      const result = await withChildSpan(
-        'test.child',
-        { childAttr: 'yes' },
-        async () => 123,
-      );
+      const result = await withChildSpan('test.child', { childAttr: 'yes' }, async () => 123);
 
       expect(tracer.startSpan).toHaveBeenCalledWith('test.child');
       expect(span.setAttribute).toHaveBeenCalledWith('childAttr', 'yes');

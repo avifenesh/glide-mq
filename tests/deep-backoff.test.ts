@@ -31,10 +31,14 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
     const strategyArgs: { attempt: number; message: string }[] = [];
 
-    const job = await queue.add('task', { v: 1 }, {
-      attempts: 3,
-      backoff: { type: 'custom-linear', delay: 100 },
-    });
+    const job = await queue.add(
+      'task',
+      { v: 1 },
+      {
+        attempts: 3,
+        backoff: { type: 'custom-linear', delay: 100 },
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
@@ -65,7 +69,9 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 200);
       });
 
@@ -91,10 +97,14 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
     const queue = new Queue(Q, { connection: CONNECTION });
     const k = buildKeys(Q);
 
-    const job = await queue.add('task', {}, {
-      attempts: 2,
-      backoff: { type: 'custom-fixed-500', delay: 0 },
-    });
+    const job = await queue.add(
+      'task',
+      {},
+      {
+        attempts: 2,
+        backoff: { type: 'custom-fixed-500', delay: 0 },
+      },
+    );
 
     let failCount = 0;
 
@@ -123,7 +133,9 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 600);
       });
 
@@ -150,10 +162,14 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
     const timestamps: number[] = [];
 
-    const job = await queue.add('task', {}, {
-      attempts: 3,
-      backoff: { type: 'instant-retry', delay: 0 },
-    });
+    const job = await queue.add(
+      'task',
+      {},
+      {
+        attempts: 3,
+        backoff: { type: 'instant-retry', delay: 0 },
+      },
+    );
 
     let attemptCount = 0;
 
@@ -183,7 +199,9 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 100);
       });
 
@@ -209,10 +227,14 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
     const queue = new Queue(Q, { connection: CONNECTION });
     const k = buildKeys(Q);
 
-    const job = await queue.add('task', {}, {
-      attempts: 2,
-      backoff: { type: 'fixed', delay: 200 },
-    });
+    const job = await queue.add(
+      'task',
+      {},
+      {
+        attempts: 2,
+        backoff: { type: 'fixed', delay: 200 },
+      },
+    );
 
     let attemptCount = 0;
 
@@ -239,7 +261,9 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 300);
       });
 
@@ -267,10 +291,14 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
     const delays: number[] = [];
 
-    const job = await queue.add('task', {}, {
-      attempts: 3,
-      backoff: { type: 'error-aware', delay: 100 },
-    });
+    const job = await queue.add(
+      'task',
+      {},
+      {
+        attempts: 3,
+        backoff: { type: 'error-aware', delay: 100 },
+      },
+    );
 
     let attemptCount = 0;
 
@@ -302,7 +330,9 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 300);
       });
 
@@ -328,10 +358,14 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
     const computedDelays: number[] = [];
 
-    const job = await queue.add('task', {}, {
-      attempts: 4,
-      backoff: { type: 'custom-exp', delay: 50 },
-    });
+    const job = await queue.add(
+      'task',
+      {},
+      {
+        attempts: 4,
+        backoff: { type: 'custom-exp', delay: 50 },
+      },
+    );
 
     let attemptCount = 0;
 
@@ -362,7 +396,9 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 300);
       });
 
@@ -388,16 +424,22 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
     let strategyCalled = false;
 
-    const job = await queue.add('task', {}, {
-      backoff: { type: 'should-not-run', delay: 100 },
-    });
+    const job = await queue.add(
+      'task',
+      {},
+      {
+        backoff: { type: 'should-not-run', delay: 100 },
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
 
       const worker = new Worker(
         Q,
-        async () => { throw new Error('fail'); },
+        async () => {
+          throw new Error('fail');
+        },
         {
           connection: CONNECTION,
           concurrency: 1,
@@ -436,9 +478,13 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
     let strategyCalled = false;
 
-    const job = await queue.add('task', {}, {
-      attempts: 3,
-    });
+    const job = await queue.add(
+      'task',
+      {},
+      {
+        attempts: 3,
+      },
+    );
 
     let failCount = 0;
 
@@ -458,7 +504,7 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
           blockTimeout: 500,
           promotionInterval: 500,
           backoffStrategies: {
-            'anything': () => {
+            anything: () => {
               strategyCalled = true;
               return 100;
             },
@@ -468,7 +514,9 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 200);
       });
 
@@ -494,14 +542,22 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
     const usedStrategies: string[] = [];
 
-    const jobA = await queue.add('jobA', { strategy: 'alpha' }, {
-      attempts: 2,
-      backoff: { type: 'alpha', delay: 100 },
-    });
-    const jobB = await queue.add('jobB', { strategy: 'beta' }, {
-      attempts: 2,
-      backoff: { type: 'beta', delay: 100 },
-    });
+    const jobA = await queue.add(
+      'jobA',
+      { strategy: 'alpha' },
+      {
+        attempts: 2,
+        backoff: { type: 'alpha', delay: 100 },
+      },
+    );
+    const jobB = await queue.add(
+      'jobB',
+      { strategy: 'beta' },
+      {
+        attempts: 2,
+        backoff: { type: 'beta', delay: 100 },
+      },
+    );
 
     const failCounts: Record<string, number> = {};
     let completedCount = 0;
@@ -524,15 +580,23 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
           blockTimeout: 500,
           promotionInterval: 500,
           backoffStrategies: {
-            alpha: () => { usedStrategies.push('alpha'); return 100; },
-            beta: () => { usedStrategies.push('beta'); return 200; },
+            alpha: () => {
+              usedStrategies.push('alpha');
+              return 100;
+            },
+            beta: () => {
+              usedStrategies.push('beta');
+              return 200;
+            },
           },
         },
       );
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 300);
       });
 
@@ -560,10 +624,14 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
     const queue = new Queue(Q, { connection: CONNECTION });
     const k = buildKeys(Q);
 
-    const job = await queue.add('task', {}, {
-      attempts: 2,
-      backoff: { type: 'very-slow', delay: 0 },
-    });
+    const job = await queue.add(
+      'task',
+      {},
+      {
+        attempts: 2,
+        backoff: { type: 'very-slow', delay: 0 },
+      },
+    );
 
     let attemptCount = 0;
 
@@ -618,10 +686,14 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
     const queue = new Queue(Q, { connection: CONNECTION });
     const k = buildKeys(Q);
 
-    const job = await queue.add('task', {}, {
-      attempts: 2,
-      backoff: { type: 'custom-fail', delay: 100 },
-    });
+    const job = await queue.add(
+      'task',
+      {},
+      {
+        attempts: 2,
+        backoff: { type: 'custom-fail', delay: 100 },
+      },
+    );
 
     let attemptCount = 0;
 
@@ -650,7 +722,9 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
         failCount++;
         if (failCount < 2) {
           setTimeout(async () => {
-            try { await promote(cleanupClient, k, Date.now()); } catch {}
+            try {
+              await promote(cleanupClient, k, Date.now());
+            } catch {}
           }, 200);
         } else {
           clearTimeout(timeout);

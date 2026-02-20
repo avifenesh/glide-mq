@@ -3,7 +3,12 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
+import {
+  describeEachMode,
+  createCleanupClient,
+  flushQueue,
+  ConnectionConfig,
+} from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -26,7 +31,11 @@ describeEachMode('Job schedulers', (CONNECTION) => {
   });
 
   it('upsertJobScheduler stores config in schedulers hash', async () => {
-    await queue.upsertJobScheduler('repeat-500', { every: 500 }, { name: 'my-repeat', data: { x: 1 } });
+    await queue.upsertJobScheduler(
+      'repeat-500',
+      { every: 500 },
+      { name: 'my-repeat', data: { x: 1 } },
+    );
 
     const k = buildKeys(Q);
     const raw = await cleanupClient.hget(k.schedulers, 'repeat-500');
@@ -70,10 +79,14 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     const qName = Q + '-repeat';
     const localQueue = new Queue(qName, { connection: CONNECTION });
 
-    await localQueue.upsertJobScheduler('fast-repeat', { every: 500 }, {
-      name: 'tick',
-      data: { seq: true },
-    });
+    await localQueue.upsertJobScheduler(
+      'fast-repeat',
+      { every: 500 },
+      {
+        name: 'tick',
+        data: { seq: true },
+      },
+    );
 
     const processed: string[] = [];
     let worker: InstanceType<typeof Worker>;
@@ -109,8 +122,8 @@ describeEachMode('Job schedulers', (CONNECTION) => {
   }, 15000);
 
   it('upsertJobScheduler rejects missing schedule', async () => {
-    await expect(
-      queue.upsertJobScheduler('bad', {} as any),
-    ).rejects.toThrow('Schedule must have either pattern (cron) or every (ms interval)');
+    await expect(queue.upsertJobScheduler('bad', {} as any)).rejects.toThrow(
+      'Schedule must have either pattern (cron) or every (ms interval)',
+    );
   });
 });

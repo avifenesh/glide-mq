@@ -22,11 +22,10 @@ async function glideSerialLatency(): Promise<number[]> {
   const queue = new Queue('bench-lat-serial', { connection: GLIDE_CONNECTION });
   const latencies: number[] = [];
 
-  const worker = new Worker(
-    'bench-lat-serial',
-    async () => {},
-    { connection: GLIDE_CONNECTION, concurrency: 1 },
-  );
+  const worker = new Worker('bench-lat-serial', async () => {}, {
+    connection: GLIDE_CONNECTION,
+    concurrency: 1,
+  });
   worker.on('error', () => {});
   await worker.waitUntilReady();
 
@@ -56,11 +55,10 @@ async function bullSerialLatency(): Promise<number[]> {
   const queue = new BullQueue('bench-lat-serial-bull', { connection: BULL_CONNECTION });
   const latencies: number[] = [];
 
-  const worker = new BullWorker(
-    'bench-lat-serial-bull',
-    async () => {},
-    { connection: BULL_CONNECTION, concurrency: 1 },
-  );
+  const worker = new BullWorker('bench-lat-serial-bull', async () => {}, {
+    connection: BULL_CONNECTION,
+    concurrency: 1,
+  });
   worker.on('error', () => {});
   await worker.waitUntilReady();
 
@@ -121,7 +119,10 @@ async function glidePipelinedLatency(): Promise<PipelinedEntry[]> {
       }
       completed++;
       if (completed >= N_PIPELINED) {
-        worker.close(true).then(() => queue.close()).then(() => resolve(entries));
+        worker
+          .close(true)
+          .then(() => queue.close())
+          .then(() => resolve(entries));
       }
     });
 
@@ -167,7 +168,10 @@ async function bullPipelinedLatency(): Promise<PipelinedEntry[]> {
       }
       completed++;
       if (completed >= N_PIPELINED) {
-        worker.close(true).then(() => queue.close()).then(() => resolve(entries));
+        worker
+          .close(true)
+          .then(() => queue.close())
+          .then(() => resolve(entries));
       }
     });
 
@@ -252,6 +256,9 @@ export async function runLatency(): Promise<void> {
   console.log('');
   printTable(
     ['Library', 'Metric', 'p50', 'p90', 'p99'],
-    [...summarizePipelined('glide-mq', glidePipelined), ...summarizePipelined('bullmq', bullPipelined)],
+    [
+      ...summarizePipelined('glide-mq', glidePipelined),
+      ...summarizePipelined('bullmq', bullPipelined),
+    ],
   );
 }

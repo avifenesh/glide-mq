@@ -3,7 +3,12 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
+import {
+  describeEachMode,
+  createCleanupClient,
+  flushQueue,
+  ConnectionConfig,
+} from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -66,18 +71,26 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
     it('allows re-add after the job is completed', async () => {
       const k = buildKeys(Q);
 
-      const job1 = await queue.add('task', { v: 1 }, {
-        deduplication: { id: 'reuse-1', mode: 'simple' },
-      });
+      const job1 = await queue.add(
+        'task',
+        { v: 1 },
+        {
+          deduplication: { id: 'reuse-1', mode: 'simple' },
+        },
+      );
       expect(job1).not.toBeNull();
 
       // Simulate completion
       await cleanupClient.hset(k.job(job1!.id), { state: 'completed' });
       await cleanupClient.zadd(k.completed, [{ element: job1!.id, score: Date.now() }]);
 
-      const job2 = await queue.add('task', { v: 2 }, {
-        deduplication: { id: 'reuse-1', mode: 'simple' },
-      });
+      const job2 = await queue.add(
+        'task',
+        { v: 2 },
+        {
+          deduplication: { id: 'reuse-1', mode: 'simple' },
+        },
+      );
       expect(job2).not.toBeNull();
       expect(job2!.id).not.toBe(job1!.id);
     });
@@ -97,21 +110,33 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
     });
 
     it('skips within TTL window, succeeds after TTL expires', async () => {
-      const job1 = await queue.add('task', { v: 1 }, {
-        deduplication: { id: 'ttl-edge', mode: 'throttle', ttl: 200 },
-      });
+      const job1 = await queue.add(
+        'task',
+        { v: 1 },
+        {
+          deduplication: { id: 'ttl-edge', mode: 'throttle', ttl: 200 },
+        },
+      );
       expect(job1).not.toBeNull();
 
-      const job2 = await queue.add('task', { v: 2 }, {
-        deduplication: { id: 'ttl-edge', mode: 'throttle', ttl: 200 },
-      });
+      const job2 = await queue.add(
+        'task',
+        { v: 2 },
+        {
+          deduplication: { id: 'ttl-edge', mode: 'throttle', ttl: 200 },
+        },
+      );
       expect(job2).toBeNull();
 
-      await new Promise(r => setTimeout(r, 250));
+      await new Promise((r) => setTimeout(r, 250));
 
-      const job3 = await queue.add('task', { v: 3 }, {
-        deduplication: { id: 'ttl-edge', mode: 'throttle', ttl: 200 },
-      });
+      const job3 = await queue.add(
+        'task',
+        { v: 3 },
+        {
+          deduplication: { id: 'ttl-edge', mode: 'throttle', ttl: 200 },
+        },
+      );
       expect(job3).not.toBeNull();
       expect(job3!.id).not.toBe(job1!.id);
     });
@@ -133,19 +158,27 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
     it('replaces delayed job, old job hash removed', async () => {
       const k = buildKeys(Q);
 
-      const job1 = await queue.add('task', { v: 'old' }, {
-        delay: 60000,
-        deduplication: { id: 'debounce-replace', mode: 'debounce' },
-      });
+      const job1 = await queue.add(
+        'task',
+        { v: 'old' },
+        {
+          delay: 60000,
+          deduplication: { id: 'debounce-replace', mode: 'debounce' },
+        },
+      );
       expect(job1).not.toBeNull();
 
       const score1 = await cleanupClient.zscore(k.scheduled, job1!.id);
       expect(score1).not.toBeNull();
 
-      const job2 = await queue.add('task', { v: 'new' }, {
-        delay: 60000,
-        deduplication: { id: 'debounce-replace', mode: 'debounce' },
-      });
+      const job2 = await queue.add(
+        'task',
+        { v: 'new' },
+        {
+          delay: 60000,
+          deduplication: { id: 'debounce-replace', mode: 'debounce' },
+        },
+      );
       expect(job2).not.toBeNull();
       expect(job2!.id).not.toBe(job1!.id);
 
@@ -173,12 +206,20 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
     });
 
     it('different dedup IDs both succeed', async () => {
-      const jobA = await queue.add('task', { v: 'a' }, {
-        deduplication: { id: 'id-alpha', mode: 'simple' },
-      });
-      const jobB = await queue.add('task', { v: 'b' }, {
-        deduplication: { id: 'id-beta', mode: 'simple' },
-      });
+      const jobA = await queue.add(
+        'task',
+        { v: 'a' },
+        {
+          deduplication: { id: 'id-alpha', mode: 'simple' },
+        },
+      );
+      const jobB = await queue.add(
+        'task',
+        { v: 'b' },
+        {
+          deduplication: { id: 'id-beta', mode: 'simple' },
+        },
+      );
       expect(jobA).not.toBeNull();
       expect(jobB).not.toBeNull();
       expect(jobA!.id).not.toBe(jobB!.id);
@@ -204,12 +245,20 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
     });
 
     it('same dedup ID on two different queues both succeed (no cross-queue dedup)', async () => {
-      const job1 = await queue1.add('task', { v: 1 }, {
-        deduplication: { id: 'shared-id', mode: 'simple' },
-      });
-      const job2 = await queue2.add('task', { v: 2 }, {
-        deduplication: { id: 'shared-id', mode: 'simple' },
-      });
+      const job1 = await queue1.add(
+        'task',
+        { v: 1 },
+        {
+          deduplication: { id: 'shared-id', mode: 'simple' },
+        },
+      );
+      const job2 = await queue2.add(
+        'task',
+        { v: 2 },
+        {
+          deduplication: { id: 'shared-id', mode: 'simple' },
+        },
+      );
       expect(job1).not.toBeNull();
       expect(job2).not.toBeNull();
     });
@@ -375,11 +424,11 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
 
       const done = new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
-        const worker = new Worker(
-          Q,
-          async () => 'ok',
-          { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
-        );
+        const worker = new Worker(Q, async () => 'ok', {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 1000,
+        });
         worker.on('completed', () => {
           processed++;
           if (processed >= TOTAL) {
@@ -390,11 +439,15 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
         worker.on('error', () => {});
       });
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       for (let i = 0; i < TOTAL; i++) {
-        await queue.add(`job-${i}`, { i }, {
-          removeOnComplete: { age: 1, count: 100 },
-        });
+        await queue.add(
+          `job-${i}`,
+          { i },
+          {
+            removeOnComplete: { age: 1, count: 100 },
+          },
+        );
       }
 
       await done;
@@ -402,16 +455,16 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
       const countBefore = await cleanupClient.zcard(k.completed);
       expect(countBefore).toBe(TOTAL);
 
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, 1500));
 
       let processed2 = 0;
       const done2 = new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
-        const worker2 = new Worker(
-          Q,
-          async () => 'ok',
-          { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
-        );
+        const worker2 = new Worker(Q, async () => 'ok', {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 1000,
+        });
         worker2.on('completed', () => {
           processed2++;
           if (processed2 >= 1) {
@@ -422,13 +475,17 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
         worker2.on('error', () => {});
       });
 
-      await new Promise(r => setTimeout(r, 500));
-      await queue.add('trigger', { trigger: true }, {
-        removeOnComplete: { age: 1, count: 100 },
-      });
+      await new Promise((r) => setTimeout(r, 500));
+      await queue.add(
+        'trigger',
+        { trigger: true },
+        {
+          removeOnComplete: { age: 1, count: 100 },
+        },
+      );
 
       await done2;
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const countAfter = await cleanupClient.zcard(k.completed);
       expect(countAfter).toBeLessThan(TOTAL + 1);
@@ -454,7 +511,9 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
         const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
         const worker = new Worker(
           Q,
-          async () => { throw new Error('intentional'); },
+          async () => {
+            throw new Error('intentional');
+          },
           { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
         );
         worker.on('failed', () => {
@@ -467,13 +526,13 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
         worker.on('error', () => {});
       });
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       for (let i = 0; i < TOTAL; i++) {
         await queue.add(`job-${i}`, { i }, { removeOnFail: 1 });
       }
 
       await done;
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const failedCount = await cleanupClient.zcard(k.failed);
       expect(failedCount).toBeLessThanOrEqual(1);
@@ -497,11 +556,11 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
 
       const done = new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
-        const worker = new Worker(
-          Q,
-          async () => 'ok',
-          { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
-        );
+        const worker = new Worker(Q, async () => 'ok', {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 1000,
+        });
         worker.on('completed', () => {
           processed++;
           if (processed >= TOTAL) {
@@ -512,13 +571,13 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
         worker.on('error', () => {});
       });
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       for (let i = 0; i < TOTAL; i++) {
         await queue.add(`job-${i}`, { i });
       }
 
       await done;
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const completedCount = await cleanupClient.zcard(k.completed);
       expect(completedCount).toBe(TOTAL);
@@ -561,7 +620,7 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
           async () => {
             current++;
             if (current > maxConcurrent) maxConcurrent = current;
-            await new Promise(r => setTimeout(r, 300));
+            await new Promise((r) => setTimeout(r, 300));
             current--;
             return 'ok';
           },
@@ -582,7 +641,7 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
         worker.on('error', () => {});
       });
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       for (let i = 0; i < TOTAL; i++) {
         await queue.add(`gc-${i}`, { i });
       }
@@ -620,7 +679,7 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
           async () => {
             current++;
             if (current > maxConcurrent) maxConcurrent = current;
-            await new Promise(r => setTimeout(r, 200));
+            await new Promise((r) => setTimeout(r, 200));
             current--;
             return 'ok';
           },
@@ -640,7 +699,7 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
         worker.on('error', () => {});
       });
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       for (let i = 0; i < TOTAL; i++) {
         await queue.add(`nc-${i}`, { i });
       }

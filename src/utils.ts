@@ -28,7 +28,7 @@ export function decompress(data: string): string {
 }
 
 // Valkey SCAN glob special characters that must be escaped in key patterns
-const GLOB_SPECIAL = /[*?\[\]\\]/g;
+const GLOB_SPECIAL = /[*?[\]\\]/g;
 
 export function escapeGlob(str: string): string {
   return str.replace(GLOB_SPECIAL, '\\$&');
@@ -273,5 +273,7 @@ export function nextCronOccurrence(pattern: string, afterMs: number): number {
     iterations++;
   }
 
-  throw new Error(`No cron match found within ${MAX_CRON_ITERATIONS} iterations for pattern: ${pattern}`);
+  throw new Error(
+    `No cron match found within ${MAX_CRON_ITERATIONS} iterations for pattern: ${pattern}`,
+  );
 }

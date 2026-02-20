@@ -29,10 +29,14 @@ describeEachMode('Job Logging', (CONNECTION) => {
 
   afterEach(async () => {
     if (worker) {
-      try { await worker.close(true); } catch {}
+      try {
+        await worker.close(true);
+      } catch {}
     }
     if (queue) {
-      try { await queue.close(); } catch {}
+      try {
+        await queue.close();
+      } catch {}
     }
     if (queueName) await flushQueue(cleanupClient, queueName);
   });
@@ -46,13 +50,17 @@ describeEachMode('Job Logging', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
 
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        await job.log('hello from processor');
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          await job.log('hello from processor');
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -69,15 +77,19 @@ describeEachMode('Job Logging', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
 
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        await job.log('step 1');
-        await job.log('step 2');
-        await job.log('step 3');
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          await job.log('step 1');
+          await job.log('step 2');
+          await job.log('step 3');
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -94,12 +106,16 @@ describeEachMode('Job Logging', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
 
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        return 'no logs';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          return 'no logs';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -124,13 +140,17 @@ describeEachMode('Job Logging', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
 
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        await job.log('persistent entry');
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          await job.log('persistent entry');
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -150,13 +170,17 @@ describeEachMode('Job Logging', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
 
     const failed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        await job.log('log before failure');
-        throw new Error('intentional');
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          await job.log('log before failure');
+          throw new Error('intentional');
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => resolve());
     });
 
@@ -173,15 +197,19 @@ describeEachMode('Job Logging', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
 
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        for (let i = 0; i < 10; i++) {
-          await job.log(`entry-${i}`);
-        }
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          for (let i = 0; i < 10; i++) {
+            await job.log(`entry-${i}`);
+          }
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -198,15 +226,19 @@ describeEachMode('Job Logging', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
 
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        await job.log('a');
-        await job.log('b');
-        await job.log('c');
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          await job.log('a');
+          await job.log('b');
+          await job.log('c');
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -223,13 +255,17 @@ describeEachMode('Job Logging', (CONNECTION) => {
 
     const specialMsg = 'Error: "value" has <html> & newlines\nline2\ttab';
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        await job.log(specialMsg);
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          await job.log(specialMsg);
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -246,13 +282,17 @@ describeEachMode('Job Logging', (CONNECTION) => {
 
     const longMsg = 'x'.repeat(10000);
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        await job.log(longMsg);
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          await job.log(longMsg);
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -269,13 +309,17 @@ describeEachMode('Job Logging', (CONNECTION) => {
 
     let completedCount = 0;
     const allDone = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        await job.log(`log for ${job.id}`);
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          await job.log(`log for ${job.id}`);
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => {
         completedCount++;
         if (completedCount >= 2) resolve();
@@ -300,13 +344,17 @@ describeEachMode('Job Logging', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
 
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        await job.log('key check');
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          await job.log('key check');
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -324,13 +372,17 @@ describeEachMode('Job Logging', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
 
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        await job.log('will be deleted');
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          await job.log('will be deleted');
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -354,15 +406,19 @@ describeEachMode('Job Logging', (CONNECTION) => {
 
     const N = 50;
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        for (let i = 0; i < N; i++) {
-          await job.log(`line-${i}`);
-        }
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          for (let i = 0; i < N; i++) {
+            await job.log(`line-${i}`);
+          }
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -382,23 +438,31 @@ describeEachMode('Job Logging', (CONNECTION) => {
 
     let attempt = 0;
     const done = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        attempt++;
-        await job.log(`attempt ${attempt}`);
-        if (attempt < 3) throw new Error('retry');
-        return 'ok';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-        promotionInterval: 50,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          attempt++;
+          await job.log(`attempt ${attempt}`);
+          if (attempt < 3) throw new Error('retry');
+          return 'ok';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+          promotionInterval: 50,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
-    const job = await queue.add('retry-log', { x: 1 }, {
-      attempts: 3,
-      backoff: { type: 'fixed', delay: 50 },
-    });
+    const job = await queue.add(
+      'retry-log',
+      { x: 1 },
+      {
+        attempts: 3,
+        backoff: { type: 'fixed', delay: 50 },
+      },
+    );
     await done;
 
     const { logs, count } = await queue.getJobLogs(job!.id);
@@ -411,15 +475,19 @@ describeEachMode('Job Logging', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
 
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        for (let i = 0; i < 5; i++) {
-          await job.log(`msg-${i}`);
-        }
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          for (let i = 0; i < 5; i++) {
+            await job.log(`msg-${i}`);
+          }
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -435,13 +503,17 @@ describeEachMode('Job Logging', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
 
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        await job.log('');
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          await job.log('');
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
@@ -459,13 +531,17 @@ describeEachMode('Job Logging', (CONNECTION) => {
 
     const jsonMsg = JSON.stringify({ level: 'info', message: 'test', data: [1, 2] });
     const completed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async (job: any) => {
-        await job.log(jsonMsg);
-        return 'done';
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          await job.log(jsonMsg);
+          return 'done';
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 

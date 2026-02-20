@@ -117,7 +117,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       );
       worker.on('error', () => {});
 
-      await new Promise(r => setTimeout(r, 3000));
+      await new Promise((r) => setTimeout(r, 3000));
 
       await worker.close(true);
       await queue.close();
@@ -152,7 +152,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
             }
 
             for (let i = 0; i < 50; i++) {
-              await new Promise(r => setTimeout(r, 100));
+              await new Promise((r) => setTimeout(r, 100));
               if (j.abortSignal?.aborted) {
                 throw new Error('Job was revoked');
               }
@@ -236,7 +236,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
 
       const start = Date.now();
       while (completedCount < 1 && Date.now() - start < 10000) {
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise((r) => setTimeout(r, 200));
       }
       expect(completedCount).toBeGreaterThanOrEqual(1);
 
@@ -244,7 +244,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
 
       const start2 = Date.now();
       while (completedCount < 2 && Date.now() - start2 < 10000) {
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise((r) => setTimeout(r, 200));
       }
       expect(completedCount).toBeGreaterThanOrEqual(2);
 
@@ -255,16 +255,12 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
     it('Worker exponential backoff on repeated connection errors', async () => {
       const Q = uniqueQueue('failover-backoff');
 
-      const worker = new Worker(
-        Q,
-        async () => 'ok',
-        {
-          connection: CONNECTION,
-          concurrency: 1,
-          blockTimeout: 500,
-          stalledInterval: 60000,
-        },
-      );
+      const worker = new Worker(Q, async () => 'ok', {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: 60000,
+      });
       worker.on('error', () => {});
 
       await worker.waitUntilReady();
@@ -295,16 +291,12 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
     it('Worker.close is idempotent - multiple calls do not throw', async () => {
       const Q = uniqueQueue('failover-close-idempotent');
 
-      const worker = new Worker(
-        Q,
-        async () => 'ok',
-        {
-          connection: CONNECTION,
-          concurrency: 1,
-          blockTimeout: 500,
-          stalledInterval: 60000,
-        },
-      );
+      const worker = new Worker(Q, async () => 'ok', {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: 60000,
+      });
       worker.on('error', () => {});
 
       await worker.waitUntilReady();
@@ -339,7 +331,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       await queue.add('error-test', { x: 1 });
       const start = Date.now();
       while (completedCount < 1 && Date.now() - start < 10000) {
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise((r) => setTimeout(r, 200));
       }
       expect(completedCount).toBe(1);
 
@@ -364,30 +356,30 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       const jobCount = 1000;
       let completedCount = 0;
 
-      const worker = new Worker(
-        Q,
-        async () => 'ok',
-        {
-          connection: CONNECTION,
-          concurrency: 20,
-          blockTimeout: 500,
-          stalledInterval: 60000,
-        },
-      );
+      const worker = new Worker(Q, async () => 'ok', {
+        connection: CONNECTION,
+        concurrency: 20,
+        blockTimeout: 500,
+        stalledInterval: 60000,
+      });
       worker.on('error', () => {});
-      worker.on('completed', () => { completedCount++; });
+      worker.on('completed', () => {
+        completedCount++;
+      });
 
       for (let batch = 0; batch < 10; batch++) {
         const promises = [];
         for (let i = 0; i < 100; i++) {
-          promises.push(queue.add(`heap-${batch * 100 + i}`, { i: batch * 100 + i, data: 'x'.repeat(100) }));
+          promises.push(
+            queue.add(`heap-${batch * 100 + i}`, { i: batch * 100 + i, data: 'x'.repeat(100) }),
+          );
         }
         await Promise.all(promises);
       }
 
       const start = Date.now();
       while (completedCount < jobCount && Date.now() - start < 60000) {
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise((r) => setTimeout(r, 200));
       }
 
       expect(completedCount).toBe(jobCount);
@@ -422,7 +414,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       }
 
       // Wait for connections to fully drain - cluster needs more time
-      await new Promise(r => setTimeout(r, CONNECTION.clusterMode ? 5000 : 3000));
+      await new Promise((r) => setTimeout(r, CONNECTION.clusterMode ? 5000 : 3000));
 
       const infoAfter = await cleanupClient.info(['CLIENTS']);
       const connectedAfter = parseConnectedClients(infoAfter);
@@ -462,8 +454,12 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
         },
       );
       worker.on('error', () => {});
-      worker.on('completed', () => { completedCount++; });
-      worker.on('failed', () => { failedCount++; });
+      worker.on('completed', () => {
+        completedCount++;
+      });
+      worker.on('failed', () => {
+        failedCount++;
+      });
 
       for (let batch = 0; batch < 10; batch++) {
         const promises = [];
@@ -475,12 +471,12 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
 
       const start = Date.now();
       while (completedCount + failedCount < jobCount && Date.now() - start < 60000) {
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise((r) => setTimeout(r, 200));
       }
 
       expect(completedCount + failedCount).toBe(jobCount);
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
 
       const activeSize = (worker as any).activePromises?.size ?? 0;
       expect(activeSize).toBe(0);

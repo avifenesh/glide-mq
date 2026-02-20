@@ -70,9 +70,8 @@ export class Job<D = any, R = any> {
    * Update the progress of this job. Persists to the job hash and emits a progress event.
    */
   async updateProgress(progress: number | object): Promise<void> {
-    const progressStr = typeof progress === 'number'
-      ? progress.toString()
-      : JSON.stringify(progress);
+    const progressStr =
+      typeof progress === 'number' ? progress.toString() : JSON.stringify(progress);
     await this.client.hset(this.queueKeys.job(this.id), {
       progress: progressStr,
     });
@@ -167,9 +166,7 @@ export class Job<D = any, R = any> {
     const priority = this.opts.priority ?? 0;
     const PRIORITY_SHIFT = 2 ** 42;
     const score = priority * PRIORITY_SHIFT + now;
-    await this.client.zadd(this.queueKeys.scheduled, [
-      { element: this.id, score },
-    ]);
+    await this.client.zadd(this.queueKeys.scheduled, [{ element: this.id, score }]);
     await this.client.hset(this.queueKeys.job(this.id), {
       state: 'delayed',
       failedReason: '',
@@ -232,7 +229,10 @@ export class Job<D = any, R = any> {
    * Polls the job hash state at the given interval.
    * Returns the final state.
    */
-  async waitUntilFinished(pollIntervalMs = 500, timeoutMs = 30000): Promise<'completed' | 'failed'> {
+  async waitUntilFinished(
+    pollIntervalMs = 500,
+    timeoutMs = 30000,
+  ): Promise<'completed' | 'failed'> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const state = await this.getState();
@@ -257,9 +257,21 @@ export class Job<D = any, R = any> {
     let data: D;
     let opts: JobOptions;
     let returnvalue: R | undefined;
-    try { data = JSON.parse(decompress(hash.data || '{}')); } catch { data = {} as D; }
-    try { opts = JSON.parse(hash.opts || '{}'); } catch { opts = {}; }
-    try { returnvalue = hash.returnvalue ? JSON.parse(hash.returnvalue) : undefined; } catch { returnvalue = undefined; }
+    try {
+      data = JSON.parse(decompress(hash.data || '{}'));
+    } catch {
+      data = {} as D;
+    }
+    try {
+      opts = JSON.parse(hash.opts || '{}');
+    } catch {
+      opts = {};
+    }
+    try {
+      returnvalue = hash.returnvalue ? JSON.parse(hash.returnvalue) : undefined;
+    } catch {
+      returnvalue = undefined;
+    }
 
     const job = new Job<D, R>(client, queueKeys, id, hash.name || '', data, opts);
     job.attemptsMade = parseInt(hash.attemptsMade || '0', 10);

@@ -17,13 +17,17 @@ Append log lines from inside a processor using `job.log()`, then fetch them from
 import { Worker } from 'glide-mq';
 
 // Inside the processor
-const worker = new Worker('tasks', async (job) => {
-  await job.log('Starting step 1');
-  await doStep1();
-  await job.log('Step 1 done, starting step 2');
-  await doStep2();
-  return { done: true };
-}, { connection });
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    await job.log('Starting step 1');
+    await doStep1();
+    await job.log('Step 1 done, starting step 2');
+    await doStep2();
+    return { done: true };
+  },
+  { connection },
+);
 
 // Fetching logs externally
 const queue = new Queue('tasks', { connection });
@@ -32,8 +36,8 @@ const { logs, count } = await queue.getJobLogs(jobId);
 // count: 2
 
 // Paginate logs for long-running jobs
-const { logs: page1 } = await queue.getJobLogs(jobId, 0, 49);   // first 50
-const { logs: page2 } = await queue.getJobLogs(jobId, 50, 99);  // next 50
+const { logs: page1 } = await queue.getJobLogs(jobId, 0, 49); // first 50
+const { logs: page2 } = await queue.getJobLogs(jobId, 50, 99); // next 50
 ```
 
 ---
@@ -115,10 +119,10 @@ console.log('Tracing active:', isTracingEnabled());
 
 ### Instrumented operations
 
-| Operation | Span name | Key attributes |
-|-----------|-----------|----------------|
-| `queue.add()` | `glide-mq.queue.add` | `glide-mq.queue`, `glide-mq.job.name`, `glide-mq.job.id`, `glide-mq.job.delay`, `glide-mq.job.priority` |
-| `flowProducer.add()` | `glide-mq.flow.add` | `glide-mq.queue`, `glide-mq.flow.name`, `glide-mq.flow.childCount` |
+| Operation            | Span name            | Key attributes                                                                                          |
+| -------------------- | -------------------- | ------------------------------------------------------------------------------------------------------- |
+| `queue.add()`        | `glide-mq.queue.add` | `glide-mq.queue`, `glide-mq.job.name`, `glide-mq.job.id`, `glide-mq.job.delay`, `glide-mq.job.priority` |
+| `flowProducer.add()` | `glide-mq.flow.add`  | `glide-mq.queue`, `glide-mq.flow.name`, `glide-mq.flow.childCount`                                      |
 
 ---
 
@@ -136,19 +140,19 @@ npm run dashboard   # http://localhost:3000
 
 ### REST API
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/queues` | List all queues with counts and metrics |
-| `GET` | `/api/queues/:name` | Queue details + recent jobs |
-| `GET` | `/api/queues/:name/jobs/:id` | Single job details, state, and logs |
-| `POST` | `/api/queues/:name/jobs` | Add a new job |
-| `POST` | `/api/queues/:name/pause` | Pause a queue |
-| `POST` | `/api/queues/:name/resume` | Resume a queue |
-| `POST` | `/api/queues/:name/jobs/:id/retry` | Retry a failed job |
-| `DELETE` | `/api/queues/:name/jobs/:id` | Remove a job |
-| `POST` | `/api/queues/:name/drain` | Drain all waiting jobs |
-| `POST` | `/api/queues/:name/obliterate` | Obliterate queue and all data |
-| `GET` | `/api/events` | SSE stream for real-time job events |
+| Method   | Path                               | Description                             |
+| -------- | ---------------------------------- | --------------------------------------- |
+| `GET`    | `/api/queues`                      | List all queues with counts and metrics |
+| `GET`    | `/api/queues/:name`                | Queue details + recent jobs             |
+| `GET`    | `/api/queues/:name/jobs/:id`       | Single job details, state, and logs     |
+| `POST`   | `/api/queues/:name/jobs`           | Add a new job                           |
+| `POST`   | `/api/queues/:name/pause`          | Pause a queue                           |
+| `POST`   | `/api/queues/:name/resume`         | Resume a queue                          |
+| `POST`   | `/api/queues/:name/jobs/:id/retry` | Retry a failed job                      |
+| `DELETE` | `/api/queues/:name/jobs/:id`       | Remove a job                            |
+| `POST`   | `/api/queues/:name/drain`          | Drain all waiting jobs                  |
+| `POST`   | `/api/queues/:name/obliterate`     | Obliterate queue and all data           |
+| `GET`    | `/api/events`                      | SSE stream for real-time job events     |
 
 ### Real-time events via SSE
 
@@ -171,7 +175,7 @@ const app = express();
 app.use(express.json());
 
 const queues: Record<string, Queue> = {
-  orders:   new Queue('orders',   { connection }),
+  orders: new Queue('orders', { connection }),
   payments: new Queue('payments', { connection }),
 };
 
@@ -180,7 +184,7 @@ app.get('/api/queues', async (_req, res) => {
   const data = await Promise.all(
     Object.entries(queues).map(async ([name, q]) => ({
       name,
-      counts:   await q.getJobCounts(),
+      counts: await q.getJobCounts(),
       isPaused: await q.isPaused(),
     })),
   );

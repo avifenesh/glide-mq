@@ -3,7 +3,12 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
+import {
+  describeEachMode,
+  createCleanupClient,
+  flushQueue,
+  ConnectionConfig,
+} from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -170,11 +175,11 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       const job = await queue.add('nullish', data);
       const fetched = await queue.getJob(job!.id);
       expect(fetched).not.toBeNull();
-      expect(fetched!.data.a).toBeNull();
-      expect(fetched!.data.b).toBe(0);
-      expect(fetched!.data.c).toBe('');
-      expect(fetched!.data.d).toBe(false);
-      expect(fetched!.data.e).toBeUndefined();
+      expect((fetched!.data as any).a).toBeNull();
+      expect((fetched!.data as any).b).toBe(0);
+      expect((fetched!.data as any).c).toBe('');
+      expect((fetched!.data as any).d).toBe(false);
+      expect((fetched!.data as any).e).toBeUndefined();
     });
 
     it('job with special characters in name', async () => {
@@ -213,14 +218,18 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
     });
 
     it('accepts a job with delay + priority + attempts + backoff + removeOnComplete + dedup', async () => {
-      const job = await queue.add('all-opts', { v: 1 }, {
-        delay: 5000,
-        priority: 3,
-        attempts: 5,
-        backoff: { type: 'exponential', delay: 1000, jitter: 0.1 },
-        removeOnComplete: true,
-        deduplication: { id: 'combo-1', ttl: 60000, mode: 'throttle' },
-      });
+      const job = await queue.add(
+        'all-opts',
+        { v: 1 },
+        {
+          delay: 5000,
+          priority: 3,
+          attempts: 5,
+          backoff: { type: 'exponential', delay: 1000, jitter: 0.1 },
+          removeOnComplete: true,
+          deduplication: { id: 'combo-1', ttl: 60000, mode: 'throttle' },
+        },
+      );
 
       expect(job).not.toBeNull();
       expect(job!.id).toBeTruthy();
@@ -259,15 +268,21 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       const JOBS_PER_QUEUE = 10;
 
       const [jobs1, jobs2, jobs3] = await Promise.all([
-        Promise.all(Array.from({ length: JOBS_PER_QUEUE }, (_, i) => q1.add(`q1-${i}`, { src: 1, i }))),
-        Promise.all(Array.from({ length: JOBS_PER_QUEUE }, (_, i) => q2.add(`q2-${i}`, { src: 2, i }))),
-        Promise.all(Array.from({ length: JOBS_PER_QUEUE }, (_, i) => q3.add(`q3-${i}`, { src: 3, i }))),
+        Promise.all(
+          Array.from({ length: JOBS_PER_QUEUE }, (_, i) => q1.add(`q1-${i}`, { src: 1, i })),
+        ),
+        Promise.all(
+          Array.from({ length: JOBS_PER_QUEUE }, (_, i) => q2.add(`q2-${i}`, { src: 2, i })),
+        ),
+        Promise.all(
+          Array.from({ length: JOBS_PER_QUEUE }, (_, i) => q3.add(`q3-${i}`, { src: 3, i })),
+        ),
       ]);
 
       const allJobs = [...jobs1, ...jobs2, ...jobs3].filter(Boolean);
       expect(allJobs).toHaveLength(JOBS_PER_QUEUE * 3);
 
-      const ids = allJobs.map(j => j!.id);
+      const ids = allJobs.map((j) => j!.id);
       const uniqueIds = new Set(ids);
       expect(uniqueIds.size).toBe(JOBS_PER_QUEUE * 3);
     });
@@ -338,7 +353,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
 
       await done;
 
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const fetched = await queue.getJob(job!.id);
       expect(fetched).toBeNull();
@@ -383,7 +398,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       );
       worker.on('error', () => {});
 
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 2000));
 
       await queue.resume();
 
@@ -430,7 +445,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
         cleanupClient.exists([k.events]),
         cleanupClient.exists([k.meta]),
       ]);
-      expect(checks.every(c => c === 0)).toBe(true);
+      expect(checks.every((c) => c === 0)).toBe(true);
 
       const jobKey = k.job('1');
       const jobExists = await cleanupClient.exists([jobKey]);
@@ -460,13 +475,13 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       );
 
       expect(jobs).toHaveLength(100);
-      const ids = jobs.map(j => j!.id);
+      const ids = jobs.map((j) => j!.id);
 
       const uniqueIds = new Set(ids);
       expect(uniqueIds.size).toBe(100);
 
       const numericIds = ids.map(Number);
-      expect(numericIds.every(n => !isNaN(n) && n > 0)).toBe(true);
+      expect(numericIds.every((n) => !isNaN(n) && n > 0)).toBe(true);
 
       const sorted = [...numericIds].sort((a, b) => a - b);
       for (let i = 1; i < sorted.length; i++) {
@@ -504,7 +519,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       expect(fetched).not.toBeNull();
       expect(fetched!.data).toEqual(payload);
 
-      const reconstructed = Buffer.from(fetched!.data.data, 'base64');
+      const reconstructed = Buffer.from((fetched!.data as any).data, 'base64');
       expect(reconstructed).toEqual(binaryLike);
     });
 
@@ -513,15 +528,17 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
         header: { version: 1, encoding: 'base64' },
         chunks: Array.from({ length: 50 }, (_, i) => ({
           index: i,
-          data: Buffer.from(Array.from({ length: 100 }, () => Math.floor(Math.random() * 256))).toString('base64'),
+          data: Buffer.from(
+            Array.from({ length: 100 }, () => Math.floor(Math.random() * 256)),
+          ).toString('base64'),
         })),
       };
 
       const job = await queue.add('chunks', payload);
       const fetched = await queue.getJob(job!.id);
       expect(fetched).not.toBeNull();
-      expect(fetched!.data.chunks).toHaveLength(50);
-      expect(fetched!.data.header).toEqual(payload.header);
+      expect((fetched!.data as any).chunks).toHaveLength(50);
+      expect((fetched!.data as any).header).toEqual(payload.header);
     });
   });
 
@@ -622,11 +639,11 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       const done = new Promise<void>((resolve, reject) => {
         let completed = 0;
         const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
-        const worker = new Worker(
-          Q,
-          async () => 'ok',
-          { connection: CONNECTION, concurrency: 3, blockTimeout: 1000 },
-        );
+        const worker = new Worker(Q, async () => 'ok', {
+          connection: CONNECTION,
+          concurrency: 3,
+          blockTimeout: 1000,
+        });
         worker.on('completed', () => {
           completed++;
           if (completed >= 3) {

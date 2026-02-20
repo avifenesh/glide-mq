@@ -23,14 +23,17 @@ const queueRegistry = [
   'recommendations',
   'reports',
   'dead-letter',
-  'priority-tasks'
+  'priority-tasks',
 ];
 
 // Create queue instances for dashboard
-const queues = queueRegistry.reduce((acc, name) => {
-  acc[name] = new Queue(name, { connection });
-  return acc;
-}, {} as Record<string, Queue>);
+const queues = queueRegistry.reduce(
+  (acc, name) => {
+    acc[name] = new Queue(name, { connection });
+    return acc;
+  },
+  {} as Record<string, Queue>,
+);
 
 // Middleware for CORS (if dashboard is on different port)
 app.use((req, res, next) => {
@@ -54,11 +57,11 @@ app.get('/api/queues', async (req, res) => {
         counts,
         metrics: {
           completed: metrics.completed || { count: 0, prevCount: 0 },
-          failed: metrics.failed || { count: 0, prevCount: 0 }
+          failed: metrics.failed || { count: 0, prevCount: 0 },
         },
-        isPaused: await queue.isPaused()
+        isPaused: await queue.isPaused(),
       };
-    })
+    }),
   );
 
   res.json(queueData);
@@ -74,16 +77,12 @@ app.get('/api/queues/:name', async (req, res) => {
   }
 
   const counts = await queue.getJobCounts();
-  const jobs = await queue.getJobs(
-    ['waiting', 'active', 'completed', 'failed', 'delayed'],
-    0,
-    20
-  );
+  const jobs = await queue.getJobs(['waiting', 'active', 'completed', 'failed', 'delayed'], 0, 20);
 
   res.json({
     name,
     counts,
-    jobs: jobs.map(job => ({
+    jobs: jobs.map((job) => ({
       id: job.id,
       name: job.name,
       data: job.data,
@@ -93,8 +92,8 @@ app.get('/api/queues/:name', async (req, res) => {
       failedReason: job.failedReason,
       finishedOn: job.finishedOn,
       processedOn: job.processedOn,
-      timestamp: job.timestamp
-    }))
+      timestamp: job.timestamp,
+    })),
   });
 });
 
@@ -128,7 +127,7 @@ app.get('/api/queues/:queueName/jobs/:jobId', async (req, res) => {
     timestamp: job.timestamp,
     state,
     logs: logs.logs,
-    returnvalue: job.returnvalue
+    returnvalue: job.returnvalue,
   });
 });
 
@@ -239,11 +238,11 @@ app.get('/api/events', (req, res) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive'
+    Connection: 'keep-alive',
   });
 
   // Setup event listeners for all queues
-  const eventSources = queueRegistry.map(name => {
+  const eventSources = queueRegistry.map((name) => {
     const events = new QueueEvents(name, { connection });
 
     events.on('added', ({ jobId }) => {
@@ -251,15 +250,21 @@ app.get('/api/events', (req, res) => {
     });
 
     events.on('completed', ({ jobId, returnvalue }) => {
-      res.write(`data: ${JSON.stringify({ queue: name, event: 'completed', jobId, returnvalue })}\n\n`);
+      res.write(
+        `data: ${JSON.stringify({ queue: name, event: 'completed', jobId, returnvalue })}\n\n`,
+      );
     });
 
     events.on('failed', ({ jobId, failedReason }) => {
-      res.write(`data: ${JSON.stringify({ queue: name, event: 'failed', jobId, failedReason })}\n\n`);
+      res.write(
+        `data: ${JSON.stringify({ queue: name, event: 'failed', jobId, failedReason })}\n\n`,
+      );
     });
 
     events.on('progress', ({ jobId, data }) => {
-      res.write(`data: ${JSON.stringify({ queue: name, event: 'progress', jobId, progress: data })}\n\n`);
+      res.write(
+        `data: ${JSON.stringify({ queue: name, event: 'progress', jobId, progress: data })}\n\n`,
+      );
     });
 
     events.on('stalled', ({ jobId }) => {
@@ -277,7 +282,7 @@ app.get('/api/events', (req, res) => {
   // Cleanup on close
   req.on('close', () => {
     clearInterval(heartbeat);
-    eventSources.forEach(events => events.close());
+    eventSources.forEach((events) => events.close());
   });
 });
 
@@ -467,7 +472,7 @@ process.on('SIGINT', async () => {
   console.log(chalk.yellow('\n[WARN] Shutting down dashboard server...'));
 
   // Close all queues
-  await Promise.all(Object.values(queues).map(q => q.close()));
+  await Promise.all(Object.values(queues).map((q) => q.close()));
 
   console.log(chalk.green('[OK] Dashboard server stopped.'));
   process.exit(0);

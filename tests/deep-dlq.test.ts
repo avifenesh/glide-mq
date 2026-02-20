@@ -31,13 +31,19 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
 
   afterEach(async () => {
     if (worker) {
-      try { await worker.close(true); } catch {}
+      try {
+        await worker.close(true);
+      } catch {}
     }
     if (queue) {
-      try { await queue.close(); } catch {}
+      try {
+        await queue.close();
+      } catch {}
     }
     if (dlqQueue) {
-      try { await dlqQueue.close(); } catch {}
+      try {
+        await dlqQueue.close();
+      } catch {}
     }
     if (queueName) await flushQueue(cleanupClient, queueName);
     if (dlqName) await flushQueue(cleanupClient, dlqName);
@@ -55,17 +61,25 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
       deadLetterQueue: { name: dlqName },
     });
 
-    const job = await queue.add('fail-task', { value: 42 }, { attempts: 2, backoff: { type: 'fixed', delay: 50 } });
+    const job = await queue.add(
+      'fail-task',
+      { value: 42 },
+      { attempts: 2, backoff: { type: 'fixed', delay: 50 } },
+    );
 
     const failedPromise = new Promise<void>((resolve) => {
       let failCount = 0;
-      worker = new Worker(queueName, async () => {
-        throw new Error('intentional failure');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('intentional failure');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => {
         failCount++;
         if (failCount >= 2) {
@@ -98,13 +112,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
     await queue.add('data-test', originalData, { attempts: 1 });
 
     const failedPromise = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('data preservation test');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('data preservation test');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => setTimeout(resolve, 200));
     });
 
@@ -125,17 +143,25 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
       deadLetterQueue: { name: dlqName },
     });
 
-    await queue.add('attempts-track', { x: 1 }, { attempts: 3, backoff: { type: 'fixed', delay: 50 } });
+    await queue.add(
+      'attempts-track',
+      { x: 1 },
+      { attempts: 3, backoff: { type: 'fixed', delay: 50 } },
+    );
 
     const failedPromise = new Promise<void>((resolve) => {
       let failCount = 0;
-      worker = new Worker(queueName, async () => {
-        throw new Error('attempt tracking');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('attempt tracking');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => {
         failCount++;
         if (failCount >= 3) setTimeout(resolve, 200);
@@ -160,23 +186,31 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
     });
 
     let callCount = 0;
-    await queue.add('retry-succeed', { x: 1 }, { attempts: 3, backoff: { type: 'fixed', delay: 50 } });
+    await queue.add(
+      'retry-succeed',
+      { x: 1 },
+      { attempts: 3, backoff: { type: 'fixed', delay: 50 } },
+    );
 
     const completedPromise = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        callCount++;
-        if (callCount < 2) throw new Error('fail once');
-        return 'ok';
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          callCount++;
+          if (callCount < 2) throw new Error('fail once');
+          return 'ok';
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('completed', () => resolve());
     });
 
     await completedPromise;
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 100));
 
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
     const dlqJobs = await dlqQueue.getJobs('waiting');
@@ -193,12 +227,16 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
     await queue.add('no-dlq', { x: 1 }, { attempts: 1 });
 
     const failedPromise = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('no dlq configured');
-      }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('no dlq configured');
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => setTimeout(resolve, 200));
     });
 
@@ -231,13 +269,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
 
     let failCount = 0;
     const allFailed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('dlq get test');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('dlq get test');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => {
         failCount++;
         if (failCount >= 2) setTimeout(resolve, 200);
@@ -264,13 +306,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
 
     let failCount = 0;
     const allFailed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('pagination test');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('pagination test');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => {
         failCount++;
         if (failCount >= 3) setTimeout(resolve, 200);
@@ -297,13 +343,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
 
     let failCount = 0;
     const allFailed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('multi fail');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('multi fail');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => {
         failCount++;
         if (failCount >= 5) setTimeout(resolve, 200);
@@ -328,13 +378,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
     await queue.add('special-name', { x: 1 }, { attempts: 1 });
 
     const failedPromise = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('name test');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('name test');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => setTimeout(resolve, 200));
     });
 
@@ -357,13 +411,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
     const job = await queue.add('state-check', { x: 1 }, { attempts: 1 });
 
     const failedPromise = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('state check');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('state check');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => setTimeout(resolve, 200));
     });
 
@@ -386,13 +444,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
     await queue.add('reason-check', { x: 1 }, { attempts: 1 });
 
     const failedPromise = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('specific failure reason XYZ');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('specific failure reason XYZ');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => setTimeout(resolve, 200));
     });
 
@@ -415,14 +477,18 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
     await queue.add('delayed-dlq', { x: 1 }, { delay: 100, attempts: 1 });
 
     const failedPromise = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('delayed fail');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        promotionInterval: 100,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('delayed fail');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          promotionInterval: 100,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => setTimeout(resolve, 300));
     });
 
@@ -443,21 +509,29 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
       deadLetterQueue: { name: dlqName },
     });
 
-    await queue.add('backoff-dlq', { x: 1 }, {
-      attempts: 3,
-      backoff: { type: 'fixed', delay: 50 },
-    });
+    await queue.add(
+      'backoff-dlq',
+      { x: 1 },
+      {
+        attempts: 3,
+        backoff: { type: 'fixed', delay: 50 },
+      },
+    );
 
     let failCount = 0;
     const allFailed = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('backoff exhaust');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        promotionInterval: 50,
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('backoff exhaust');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          promotionInterval: 50,
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => {
         failCount++;
         if (failCount >= 3) setTimeout(resolve, 200);
@@ -483,13 +557,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
 
     const failedJobs: any[] = [];
     const done = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('event test');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('event test');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', (job: any, err: Error) => {
         failedJobs.push({ job, err });
         setTimeout(resolve, 200);
@@ -513,13 +591,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
     await queue.add('counts-check', { x: 1 }, { attempts: 1 });
 
     const failedPromise = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('counts');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('counts');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => setTimeout(resolve, 200));
     });
 
@@ -540,13 +622,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
     await queue.add('origin-check', { x: 1 }, { attempts: 1 });
 
     const failedPromise = new Promise<void>((resolve) => {
-      worker = new Worker(queueName, async () => {
-        throw new Error('origin');
-      }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('origin');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
       worker.on('failed', () => setTimeout(resolve, 200));
     });
 

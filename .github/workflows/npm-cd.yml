@@ -3,14 +3,14 @@ name: NPM - Publish
 on:
   push:
     tags:
-      - "v*.*.*"
+      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish (e.g., 0.1.0)"
+        description: 'Version to publish (e.g., 0.1.0)'
         required: true
       publish:
-        description: "Publish to NPM"
+        description: 'Publish to NPM'
         required: true
         type: boolean
         default: false
@@ -27,8 +27,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
         run: npm install

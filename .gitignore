@@ -5,3 +5,4 @@ build/
 .env
 agent-knowledge/
 HANDOVER.md
+coverage/

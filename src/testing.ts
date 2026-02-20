@@ -151,9 +151,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   }
 
   /** Add multiple jobs. */
-  async addBulk(
-    jobs: { name: string; data: D; opts?: JobOptions }[],
-  ): Promise<TestJob<D, R>[]> {
+  async addBulk(jobs: { name: string; data: D; opts?: JobOptions }[]): Promise<TestJob<D, R>[]> {
     const results: TestJob<D, R>[] = [];
     for (const entry of jobs) {
       const job = await this.add(entry.name, entry.data, entry.opts);
@@ -219,7 +217,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     for (const record of this.jobs.values()) {
       if (opts.name !== undefined && record.name !== opts.name) continue;
       if (opts.state !== undefined && record.state !== opts.state) continue;
-      if (opts.data !== undefined && !matchesData(record.data as Record<string, unknown>, opts.data)) continue;
+      if (
+        opts.data !== undefined &&
+        !matchesData(record.data as Record<string, unknown>, opts.data)
+      )
+        continue;
       results.push(new TestJob<D, R>(record));
     }
     return results;
@@ -246,11 +248,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private running = true;
   private processing = false;
 
-  constructor(
-    queue: TestQueue<D, R>,
-    processor: Processor<D, R>,
-    opts?: TestWorkerOptions,
-  ) {
+  constructor(queue: TestQueue<D, R>, processor: Processor<D, R>, opts?: TestWorkerOptions) {
     super();
     this.queue = queue;
     this.processor = processor;

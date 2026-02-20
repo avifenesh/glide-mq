@@ -20,11 +20,24 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
       if (func === 'glidemq_promote') return Promise.resolve(0);
       if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
       if (func === 'glidemq_moveToActive') {
-         return Promise.resolve(JSON.stringify([
-            'id', args?.[0] ?? '1', 'name', 'test-job', 'data', '{}',
-            'opts', '{}', 'timestamp', '1000', 'attemptsMade', '0',
-            'state', 'active'
-         ]));
+        return Promise.resolve(
+          JSON.stringify([
+            'id',
+            args?.[0] ?? '1',
+            'name',
+            'test-job',
+            'data',
+            '{}',
+            'opts',
+            '{}',
+            'timestamp',
+            '1000',
+            'attemptsMade',
+            '0',
+            'state',
+            'active',
+          ]),
+        );
       }
       if (func === 'glidemq_completeAndFetchNext') {
         const jobId = args?.[0] ?? '0';
@@ -74,7 +87,9 @@ describe('Worker Saturation', () => {
     const pollOnceSpy = vi.spyOn(Worker.prototype as any, 'pollOnce');
 
     let finishJob: () => void;
-    const processingPromise = new Promise<void>((resolve) => { finishJob = resolve; });
+    const processingPromise = new Promise<void>((resolve) => {
+      finishJob = resolve;
+    });
     const processor = vi.fn().mockImplementation(() => processingPromise);
 
     // Provide 2 jobs to fill concurrency=2
@@ -86,8 +101,8 @@ describe('Worker Saturation', () => {
           {
             key: 'test:stream',
             value: {
-                '1-0': [['jobId', '1']],
-                '2-0': [['jobId', '2']]
+              '1-0': [['jobId', '1']],
+              '2-0': [['jobId', '2']],
             },
           },
         ]);

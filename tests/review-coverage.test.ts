@@ -159,7 +159,7 @@ describeEachMode('globalConcurrencyEnabled optimization', (CONNECTION) => {
       worker.on('error', () => {});
     });
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     for (let i = 0; i < 3; i++) {
       await queue.add(`no-gc-${i}`, { i });
     }
@@ -190,7 +190,7 @@ describeEachMode('globalConcurrencyEnabled optimization', (CONNECTION) => {
         async () => {
           current++;
           if (current > maxConcurrent) maxConcurrent = current;
-          await new Promise(r => setTimeout(r, 200));
+          await new Promise((r) => setTimeout(r, 200));
           current--;
           return 'ok';
         },
@@ -210,7 +210,7 @@ describeEachMode('globalConcurrencyEnabled optimization', (CONNECTION) => {
       worker.on('error', () => {});
     });
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     for (let i = 0; i < TOTAL; i++) {
       await queue.add(`gc-${i}`, { i });
     }
@@ -311,9 +311,9 @@ describeEachMode('Job.waitUntilFinished timeout', (CONNECTION) => {
     expect(liveJob).not.toBeNull();
 
     const start = Date.now();
-    await expect(
-      liveJob!.waitUntilFinished(100, 1000),
-    ).rejects.toThrow(/did not finish within 1000ms/);
+    await expect(liveJob!.waitUntilFinished(100, 1000)).rejects.toThrow(
+      /did not finish within 1000ms/,
+    );
     const elapsed = Date.now() - start;
 
     // Should have waited roughly 1s (not more than 3s)
@@ -333,11 +333,11 @@ describeEachMode('Job.waitUntilFinished timeout', (CONNECTION) => {
     expect(liveJob).not.toBeNull();
 
     // Start worker that will complete the job
-    const worker = new Worker(
-      Q,
-      async () => 'finished',
-      { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
-    );
+    const worker = new Worker(Q, async () => 'finished', {
+      connection: CONNECTION,
+      concurrency: 1,
+      blockTimeout: 1000,
+    });
     worker.on('error', () => {});
 
     const result = await liveJob!.waitUntilFinished(100, 10000);
@@ -427,9 +427,7 @@ describeEachMode('Payload size validation', (CONNECTION) => {
     const bigString = 'x'.repeat(1_100_000);
     const bigData = { payload: bigString };
 
-    await expect(
-      queue.add('too-big', bigData),
-    ).rejects.toThrow(/exceeds maximum size/);
+    await expect(queue.add('too-big', bigData)).rejects.toThrow(/exceeds maximum size/);
 
     // Verify nothing was stored - queue ID counter should not have been incremented
     // (The error is thrown before the FCALL, so no job should exist)

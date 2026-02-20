@@ -118,11 +118,16 @@ describe('Worker connection error recovery', () => {
     vi.mocked(GlideClient.createClient).mockImplementation(async () => {
       createCount++;
       switch (createCount) {
-        case 1: return initCommand as any;
-        case 2: return initBlocking as any;
-        case 3: return reconnectCommand as any;
-        case 4: return reconnectBlocking as any;
-        default: return makePendingMockClient() as any;
+        case 1:
+          return initCommand as any;
+        case 2:
+          return initBlocking as any;
+        case 3:
+          return reconnectCommand as any;
+        case 4:
+          return reconnectBlocking as any;
+        default:
+          return makePendingMockClient() as any;
       }
     });
 
@@ -243,11 +248,16 @@ describe('Worker connection error recovery', () => {
     vi.mocked(GlideClient.createClient).mockImplementation(async () => {
       createCount++;
       switch (createCount) {
-        case 1: return initCommand as any;
-        case 2: return initBlocking as any;
-        case 3: return reconnectCommand as any;
-        case 4: return reconnectBlocking as any;
-        default: return makePendingMockClient() as any;
+        case 1:
+          return initCommand as any;
+        case 2:
+          return initBlocking as any;
+        case 3:
+          return reconnectCommand as any;
+        case 4:
+          return reconnectBlocking as any;
+        default:
+          return makePendingMockClient() as any;
       }
     });
 

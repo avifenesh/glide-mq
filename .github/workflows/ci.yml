@@ -6,135 +6,78 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  NODE_VERSION: "20"
-
 jobs:
-  typecheck:
+  quality:
+    name: Quality Checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout speedkey
-        uses: actions/checkout@v4
-        with:
-          repository: avifenesh/speedkey
-          path: speedkey
-
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "25.1"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install and build speedkey
-        working-directory: speedkey/node
-        run: npm install && npm run build:release
-
-      - name: Install glide-mq dependencies
-        run: npm install --ignore-scripts
-
-      - name: Link speedkey into node_modules
-        run: mkdir -p node_modules/@glidemq && rm -rf node_modules/@glidemq/speedkey && ln -s ${{ github.workspace }}/speedkey/node node_modules/@glidemq/speedkey
-
-      - name: Typecheck
+          node-version: 20
+          cache: 'npm'
+      - name: Install Dependencies
+        run: npm ci
+      - name: Lint Check
+        run: npm run lint
+      - name: Format Check
+        run: npm run format:check
+      - name: Typecheck Source
         run: npx tsc --noEmit
+      - name: Typecheck Tests
+        run: npx tsc -p tsconfig.test.json --noEmit
+      - name: Security Audit
+        run: npm audit --audit-level=high
 
   test-unit:
-    runs-on: ubuntu-latest
+    name: Unit Tests
+    needs: quality
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node-version: [20, 24]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout speedkey
-        uses: actions/checkout@v4
-        with:
-          repository: avifenesh/speedkey
-          path: speedkey
-
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "25.1"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install and build speedkey
-        working-directory: speedkey/node
-        run: npm install && npm run build:release
-
-      - name: Install glide-mq dependencies
-        run: npm install --ignore-scripts
-
-      - name: Link speedkey into node_modules
-        run: mkdir -p node_modules/@glidemq && rm -rf node_modules/@glidemq/speedkey && ln -s ${{ github.workspace }}/speedkey/node node_modules/@glidemq/speedkey
-
-      - name: Run unit tests
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - name: Install Dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Run Unit Tests
         run: npx vitest run tests/connection.test.ts tests/job.test.ts tests/queue.test.ts tests/worker.test.ts tests/shutdown.test.ts tests/telemetry.test.ts tests/recovery.test.ts tests/api-completeness.test.ts
 
   test-integration:
+    name: Integration & Coverage
+    needs: quality
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 24]
     services:
       valkey:
         image: valkey/valkey:8.0
+        ports:
+          - 6379:6379
         options: >-
           --health-cmd "valkey-cli ping"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-        ports:
-          - 6379:6379
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout speedkey
-        uses: actions/checkout@v4
-        with:
-          repository: avifenesh/speedkey
-          path: speedkey
-
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "25.1"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install and build speedkey
-        working-directory: speedkey/node
-        run: npm install && npm run build:release
-
-      - name: Install glide-mq dependencies
-        run: npm install --ignore-scripts
-
-      - name: Link speedkey into node_modules
-        run: mkdir -p node_modules/@glidemq && rm -rf node_modules/@glidemq/speedkey && ln -s ${{ github.workspace }}/speedkey/node node_modules/@glidemq/speedkey
-
-      - name: Compile TypeScript
-        run: npx tsc
-
-      - name: Verify Valkey connection
-        run: |
-          node -e "
-          const { GlideClient } = require('./node_modules/@glidemq/speedkey/build-ts');
-          (async () => {
-            const c = await GlideClient.createClient({ addresses: [{ host: 'localhost', port: 6379 }] });
-            console.log('PING:', await c.ping());
-            c.close();
-          })().catch(e => { console.error('Connection failed:', e.message); process.exit(1); });
-          "
-
-      - name: Run standalone integration tests
-        run: npx vitest run tests/integration.test.ts tests/dedup.test.ts tests/delayed.test.ts tests/priority.test.ts tests/retry.test.ts tests/retention.test.ts tests/concurrency.test.ts tests/rate-limit.test.ts
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - name: Install Dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Run All Tests with Coverage
+        run: npx vitest run --coverage
         env:
-          SKIP_CLUSTER: "1"
+          SKIP_CLUSTER: '1'

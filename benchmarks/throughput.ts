@@ -74,26 +74,28 @@ async function glideProcessThroughput(n: number, concurrency: number): Promise<P
 
   const result = await Promise.race([
     new Promise<ProcessResult>((resolve) => {
-      const worker = new Worker(
-        'bench-proc',
-        async () => {},
-        { connection: GLIDE_CONNECTION, concurrency },
-      );
+      const worker = new Worker('bench-proc', async () => {}, {
+        connection: GLIDE_CONNECTION,
+        concurrency,
+      });
 
       worker.on('completed', () => {
         completed++;
         if (completed >= n) {
           const elapsed = performance.now() - start;
-          worker.close(true).then(() => queue.close()).then(() =>
-            resolve({
-              library: 'glide-mq',
-              target: n,
-              completed: n,
-              concurrency,
-              elapsed,
-              rate: (n / elapsed) * 1000,
-            }),
-          );
+          worker
+            .close(true)
+            .then(() => queue.close())
+            .then(() =>
+              resolve({
+                library: 'glide-mq',
+                target: n,
+                completed: n,
+                concurrency,
+                elapsed,
+                rate: (n / elapsed) * 1000,
+              }),
+            );
         }
       });
 
@@ -116,7 +118,9 @@ async function glideProcessThroughput(n: number, concurrency: number): Promise<P
   ]);
 
   // Force cleanup in case of timeout
-  try { await queue.close(); } catch {}
+  try {
+    await queue.close();
+  } catch {}
   return result;
 }
 
@@ -132,26 +136,28 @@ async function bullProcessThroughput(n: number, concurrency: number): Promise<Pr
 
   const result = await Promise.race([
     new Promise<ProcessResult>((resolve) => {
-      const worker = new BullWorker(
-        'bench-proc-bull',
-        async () => {},
-        { connection: BULL_CONNECTION, concurrency },
-      );
+      const worker = new BullWorker('bench-proc-bull', async () => {}, {
+        connection: BULL_CONNECTION,
+        concurrency,
+      });
 
       worker.on('completed', () => {
         completed++;
         if (completed >= n) {
           const elapsed = performance.now() - start;
-          worker.close(true).then(() => queue.close()).then(() =>
-            resolve({
-              library: 'bullmq',
-              target: n,
-              completed: n,
-              concurrency,
-              elapsed,
-              rate: (n / elapsed) * 1000,
-            }),
-          );
+          worker
+            .close(true)
+            .then(() => queue.close())
+            .then(() =>
+              resolve({
+                library: 'bullmq',
+                target: n,
+                completed: n,
+                concurrency,
+                elapsed,
+                rate: (n / elapsed) * 1000,
+              }),
+            );
         }
       });
 
@@ -172,7 +178,9 @@ async function bullProcessThroughput(n: number, concurrency: number): Promise<Pr
     ),
   ]);
 
-  try { await queue.close(); } catch {}
+  try {
+    await queue.close();
+  } catch {}
   return result;
 }
 

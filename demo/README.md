@@ -5,6 +5,7 @@ Comprehensive demonstration of all glide-mq features simulating a complete e-com
 ## Features Demonstrated
 
 ### Core Queue Operations
+
 - Job processing with progress tracking
 - Bulk operations with Batch API
 - Priority queues with FIFO ordering
@@ -13,6 +14,7 @@ Comprehensive demonstration of all glide-mq features simulating a complete e-com
 - Dead letter queue handling
 
 ### Advanced Features
+
 - Deduplication (simple, throttle, debounce)
 - Rate limiting (sliding window)
 - Global concurrency limits
@@ -21,12 +23,14 @@ Comprehensive demonstration of all glide-mq features simulating a complete e-com
 - Timeout handling
 
 ### Workflows
+
 - FlowProducer for parent-child job trees
 - Chain pattern for sequential pipelines
 - Group pattern for parallel execution
 - Complex nested workflows
 
 ### Observability
+
 - Real-time event streaming
 - Progress tracking
 - Metrics and job counts
@@ -36,12 +40,14 @@ Comprehensive demonstration of all glide-mq features simulating a complete e-com
 ## Setup
 
 1. Install dependencies:
+
 ```bash
 cd demo
 npm install
 ```
 
 2. Ensure Valkey/Redis is running:
+
 ```bash
 # Single node on port 6379
 valkey-server
@@ -53,17 +59,20 @@ valkey-server
 ## Running the Demo
 
 ### Option 1: Full Demo with All Features
+
 ```bash
 npm start
 ```
 
 This launches:
+
 - 10 different queue types (orders, payments, inventory, etc.)
 - 10 specialized workers with different configurations
 - 12 demo scenarios showcasing various features
 - Real-time metrics display every 5 seconds
 
 ### Option 2: Dashboard Server
+
 ```bash
 npm run dashboard
 ```
@@ -71,6 +80,7 @@ npm run dashboard
 Opens dashboard API server on http://localhost:3000
 
 Features:
+
 - REST API for queue management
 - Server-Sent Events for real-time updates
 - Queue pause/resume controls
@@ -122,6 +132,7 @@ Features:
 ## Monitoring
 
 The demo displays real-time metrics including:
+
 - Queue counts (waiting, active, delayed, completed, failed)
 - Job progress updates
 - Success/failure events
@@ -146,6 +157,7 @@ The demo displays real-time metrics including:
 ## Customization
 
 Edit `index.ts` to:
+
 - Add new queue types
 - Modify worker configurations
 - Create custom scenarios

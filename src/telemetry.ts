@@ -35,14 +35,20 @@ interface OTelApi {
 // ------------------------------------------------------------------
 
 const NOOP_SPAN: OTelSpan = {
-  setAttribute() { return this; },
-  setStatus() { return this; },
+  setAttribute() {
+    return this;
+  },
+  setStatus() {
+    return this;
+  },
   recordException() {},
   end() {},
 };
 
 const NOOP_TRACER: OTelTracer = {
-  startSpan() { return NOOP_SPAN; },
+  startSpan() {
+    return NOOP_SPAN;
+  },
 };
 
 // ------------------------------------------------------------------
