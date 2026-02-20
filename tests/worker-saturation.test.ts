@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { GlideClient } from '@glidemq/speedkey';
 import { Worker } from '../src/worker';
 import { LIBRARY_VERSION } from '../src/functions/index';
@@ -55,6 +55,7 @@ describe('Worker Saturation', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     mockCommandClient = makeMockClient();
     mockBlockingClient = makeMockClient();
 
@@ -63,6 +64,10 @@ describe('Worker Saturation', () => {
       callCount++;
       return (callCount === 1 ? mockCommandClient : mockBlockingClient) as any;
     });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('should NOT call pollOnce repeatedly when at capacity', async () => {
@@ -93,8 +98,8 @@ describe('Worker Saturation', () => {
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
     await worker.waitUntilReady();
 
-    // Wait a bit for the worker to pick up jobs and start looping
-    await new Promise(r => setTimeout(r, 100));
+    // Advance timers to allow the worker to pick up jobs and start looping
+    await vi.advanceTimersByTimeAsync(100);
 
     const calls = pollOnceSpy.mock.calls.length;
 
