@@ -180,7 +180,7 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
       expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
 
       const dlqJob = dlqJobs[0];
-      const dlqData = dlqJob.data;
+      const dlqData = dlqJob.data as any;
       expect(dlqData.originalQueue).toBe(Q);
       expect(dlqData.failedReason).toBe('deliberate failure');
 

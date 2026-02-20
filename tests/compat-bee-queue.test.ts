@@ -505,7 +505,7 @@ describeEachMode('Bee-Queue: Health check / job counts', (CONNECTION) => {
         Q,
         async (job: any) => {
           processed++;
-          if (job.data.i >= 3) throw new Error('deliberate fail');
+          if ((job.data as any).i >= 3) throw new Error('deliberate fail');
           return 'ok';
         },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -590,7 +590,7 @@ describeEachMode('Bee-Queue: Job creation', (CONNECTION) => {
     expect(fetched).not.toBeNull();
     expect(fetched!.id).toBe(job!.id);
     expect(fetched!.name).toBe('fetch-task');
-    expect(fetched!.data.x).toBe(42);
+    expect((fetched!.data as any).x).toBe(42);
 
     await queue.close();
   }, 10000);
