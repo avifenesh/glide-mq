@@ -740,6 +740,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
 
     this.closed = true;
+    this.internalEvents.removeAllListeners();
     this.emit('closed');
   }
 
