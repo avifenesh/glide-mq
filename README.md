@@ -39,7 +39,7 @@ Built on [Valkey Streams](https://valkey.io) + consumer groups with [Valkey GLID
 | Server scripts | 1 function library | 53 EVAL scripts |
 | RTT per job | 1 (`completeAndFetchNext`) | 2+ |
 | Cluster support | Built-in hash tags | Afterthought `{braces}` |
-| Client | NAPI Rust core | JS-only client |
+| Client | NAPI Rust core | ioredis |
 | AZ-Affinity | ✓ | ✗ |
 | IAM auth | ✓ | ✗ |
 
