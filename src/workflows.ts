@@ -3,7 +3,7 @@ import type { ConnectionOptions, FlowJob, JobOptions } from './types';
 
 export interface WorkflowJobDef {
   name: string;
-  data: any;
+  data: unknown;
   opts?: JobOptions;
 }
 

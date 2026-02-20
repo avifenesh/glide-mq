@@ -54,7 +54,7 @@ function matchesData(data: Record<string, unknown>, filter: Record<string, unkno
   return true;
 }
 
-export class Queue<D = any, R = any> extends EventEmitter {
+export class Queue<D = unknown, R = unknown> extends EventEmitter {
   readonly name: string;
   private opts: QueueOptions;
   private client: Client | null = null;

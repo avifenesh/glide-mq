@@ -3,7 +3,7 @@ import type { QueueKeys } from './functions/index';
 import { removeJob, failJob } from './functions/index';
 import { calculateBackoff, decompress } from './utils';
 
-export class Job<D = any, R = any> {
+export class Job<D = unknown, R = unknown> {
   readonly id: string;
   readonly name: string;
   data: D;

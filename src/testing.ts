@@ -11,7 +11,7 @@ import type { JobOptions, JobCounts, Processor } from './types';
 
 // ---- Lightweight in-memory Job representation ----
 
-export interface TestJobRecord<D = any, R = any> {
+export interface TestJobRecord<D = unknown, R = unknown> {
   id: string;
   name: string;
   data: D;
@@ -29,7 +29,7 @@ export interface TestJobRecord<D = any, R = any> {
  * Minimal Job-like object returned by TestQueue methods and passed to processors.
  * Mirrors the public surface of the real Job class.
  */
-export class TestJob<D = any, R = any> {
+export class TestJob<D = unknown, R = unknown> {
   readonly id: string;
   readonly name: string;
   data: D;
@@ -92,7 +92,7 @@ export interface TestQueueOptions {
   dedup?: boolean;
 }
 
-export class TestQueue<D = any, R = any> extends EventEmitter {
+export class TestQueue<D = unknown, R = unknown> extends EventEmitter {
   readonly name: string;
   /** @internal */ readonly jobs: Map<string, TestJobRecord<D, R>> = new Map();
   /** @internal */ readonly dedupSet: Set<string> = new Set();
@@ -240,7 +240,7 @@ export interface TestWorkerOptions {
   concurrency?: number;
 }
 
-export class TestWorker<D = any, R = any> extends EventEmitter {
+export class TestWorker<D = unknown, R = unknown> extends EventEmitter {
   private queue: TestQueue<D, R>;
   private processor: Processor<D, R>;
   private concurrency: number;
@@ -303,6 +303,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private processJob(record: TestJobRecord<D, R>): void {
     const job = new TestJob<D, R>(record);
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.processor(job as any)
       .then((result) => {
         record.state = 'completed';

@@ -1193,6 +1193,7 @@ export async function completeAndFetchNext(
   }
   return {
     completed: parsed.completed,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     next: hash as any,
     nextJobId: parsed.nextJobId,
     nextEntryId: parsed.nextEntryId,

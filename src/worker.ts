@@ -29,7 +29,7 @@ import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
 export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed';
 
-export class Worker<D = any, R = any> extends EventEmitter {
+export class Worker<D = unknown, R = unknown> extends EventEmitter {
   readonly name: string;
   private opts: WorkerOptions;
   private processor: Processor<D, R>;
@@ -422,7 +422,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
 
     if (error instanceof Worker.RateLimitError) {
-      const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
+      const delayMs =
+        (error as { delayMs?: number }).delayMs || (this.opts.limiter?.duration ?? 1000);
       this.rateLimitUntil = Date.now() + delayMs;
       try {
         await failJob(

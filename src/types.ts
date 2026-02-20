@@ -103,12 +103,12 @@ export interface JobData {
   [key: string]: unknown;
 }
 
-export type Processor<D = any, R = any> = (job: import('./job').Job<D, R>) => Promise<R>;
+export type Processor<D = unknown, R = unknown> = (job: import('./job').Job<D, R>) => Promise<R>;
 
 export interface FlowJob {
   name: string;
   queueName: string;
-  data: any;
+  data: unknown;
   opts?: JobOptions;
   children?: FlowJob[];
 }
@@ -136,7 +136,7 @@ export interface ScheduleOpts {
 
 export interface JobTemplate {
   name?: string;
-  data?: any;
+  data?: unknown;
   opts?: Omit<JobOptions, 'delay' | 'deduplication' | 'parent'>;
 }
 
