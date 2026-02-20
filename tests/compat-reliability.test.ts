@@ -578,7 +578,8 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     const worker = new Worker(
       Q,
       async () => {
-        await new Promise((r) => setTimeout(r, 2000));
+        // Increase duration to 5s to ensure it definitely overlaps with close()
+        await new Promise((r) => setTimeout(r, 5000));
         jobFinished = true;
         return 'done';
       },
@@ -595,8 +596,8 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     });
 
     // Give it a moment - close should not have resolved yet
-    // The job takes 2000ms, we wait 500ms, so it should still be running
-    await new Promise((r) => setTimeout(r, 500));
+    // The job takes 5000ms, we wait 1000ms, so it should definitely still be running
+    await new Promise((r) => setTimeout(r, 1000));
 
     // Note: If this check fails (is true), it means close() resolved too early
     expect(closeFinished).toBe(false);

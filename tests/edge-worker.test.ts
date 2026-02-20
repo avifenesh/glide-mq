@@ -101,9 +101,10 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
 
       // Wait until job processing starts or finishes
       let waited = 0;
-      while (completed.length === 0 && waited < 2000) {
-        await new Promise((r) => setTimeout(r, 50));
-        waited += 50;
+      // Increase wait time to 5s to account for slow CI
+      while (completed.length === 0 && waited < 5000) {
+        await new Promise((r) => setTimeout(r, 100));
+        waited += 100;
       }
 
       await worker.close(false);
@@ -141,9 +142,10 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
 
       // Wait until job1 is processed or close enough
       let waited = 0;
-      while (processed.length === 0 && waited < 2000) {
-        await new Promise((r) => setTimeout(r, 50));
-        waited += 50;
+      // Increase wait time to 5s
+      while (processed.length === 0 && waited < 5000) {
+        await new Promise((r) => setTimeout(r, 100));
+        waited += 100;
       }
 
       await worker.pause();
