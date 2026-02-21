@@ -1,5 +1,6 @@
+import { Batch, ClusterBatch, GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { Client, SchedulerEntry } from './types';
-import { CONSUMER_GROUP, promote, promoteRateLimited, reclaimStalled, addJob } from './functions/index';
+import { CONSUMER_GROUP, promote, promoteRateLimited, reclaimStalled } from './functions/index';
 import type { buildKeys } from './utils';
 import { nextCronOccurrence } from './utils';
 
@@ -138,6 +139,16 @@ export class Scheduler {
     // hgetall returns { field, value }[] — empty array means no schedulers
     if (!allEntries || allEntries.length === 0) return 0;
 
+    const pendingAdditions: {
+      jobName: string;
+      jobData: string;
+      jobOpts: string;
+      priority: number;
+      maxAttempts: number;
+    }[] = [];
+    const pendingUpdates: Record<string, string> = {};
+    const pendingDeletions: string[] = [];
+
     let fired = 0;
     for (const entry of allEntries) {
       const schedulerName = String(entry.field);
@@ -158,18 +169,7 @@ export class Scheduler {
       const priority = template.opts?.priority ?? 0;
       const maxAttempts = template.opts?.attempts ?? 0;
 
-      await addJob(
-        this.client,
-        this.queueKeys,
-        jobName,
-        jobData,
-        jobOpts,
-        now,
-        0, // no delay - scheduler jobs go directly to stream
-        priority,
-        '', // no parent
-        maxAttempts,
-      );
+      pendingAdditions.push({ jobName, jobData, jobOpts, priority, maxAttempts });
 
       // Compute next run
       let nextRun: number;
@@ -179,15 +179,56 @@ export class Scheduler {
         nextRun = now + config.every;
       } else {
         // No repeat config - remove the scheduler entry
-        await this.client.hdel(this.queueKeys.schedulers, [schedulerName]);
+        pendingDeletions.push(schedulerName);
         fired++;
         continue;
       }
 
       config.lastRun = now;
       config.nextRun = nextRun;
-      await this.client.hset(this.queueKeys.schedulers, { [schedulerName]: JSON.stringify(config) });
+      pendingUpdates[schedulerName] = JSON.stringify(config);
       fired++;
+    }
+
+    if (fired === 0) return 0;
+
+    const isCluster = this.client instanceof GlideClusterClient;
+    const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
+    const k = this.queueKeys;
+    const addJobKeys = [k.id, k.stream, k.scheduled, k.events];
+
+    for (const job of pendingAdditions) {
+      batch.fcall('glidemq_addJob', addJobKeys, [
+        job.jobName,
+        job.jobData,
+        job.jobOpts,
+        now.toString(),
+        '0', // no delay
+        job.priority.toString(),
+        '', // no parent
+        job.maxAttempts.toString(),
+        '', // orderingKey
+        '0', // groupConcurrency
+        '0', // groupRateMax
+        '0', // groupRateDuration
+        '0', // tbCapacity
+        '0', // tbRefillRate
+        '0', // jobCost
+      ]);
+    }
+
+    if (Object.keys(pendingUpdates).length > 0) {
+      batch.hset(k.schedulers, pendingUpdates);
+    }
+
+    if (pendingDeletions.length > 0) {
+      batch.hdel(k.schedulers, pendingDeletions);
+    }
+
+    if (isCluster) {
+      await (this.client as GlideClusterClient).exec(batch as ClusterBatch, true);
+    } else {
+      await (this.client as GlideClient).exec(batch as Batch, true);
     }
 
     return fired;
