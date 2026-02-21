@@ -272,7 +272,7 @@ This is a direct equivalent. No behavioral differences.
 | AZ-affinity routing | No | Yes - pin reads to your AZ |
 | IAM auth (ElastiCache/MemoryDB) | No | Yes |
 | Compression | No | gzip transparent compression |
-| Per-key ordering (sequential) | No (BullMQ Pro groups only) | Yes, `opts.ordering.key` |
+| Per-key ordering + group rate limit | No (BullMQ Pro groups only) | Yes, `opts.ordering.key` with concurrency and rateLimit |
 | In-memory test mode | No | Yes, `TestQueue` / `TestWorker` |
 
 glide-mq is a strict superset of BullMQ's core job queue semantics. At-least-once delivery, consumer groups, stall detection, retries, DLQ, flows, and schedulers all work the same way. The differences are in API shape and some missing conveniences listed in [Gaps and workarounds](#gaps-and-workarounds).
@@ -441,6 +441,9 @@ The processor function signature is identical. The only change is the connection
 | - | `queue.revoke(jobId)` | glide-mq only |
 | - | `queue.getDeadLetterJobs(start, end)` | glide-mq only |
 | - | `queue.searchJobs(opts)` | glide-mq only |
+| - | `queue.setGlobalRateLimit({ max, duration })` | glide-mq only |
+| - | `queue.getGlobalRateLimit()` | glide-mq only |
+| - | `queue.removeGlobalRateLimit()` | glide-mq only |
 
 ### Worker methods and options
 
@@ -505,6 +508,8 @@ The processor function signature is identical. The only change is the connection
 | `repeat` | - | Gap - use `queue.upsertJobScheduler()` |
 | `sizeLimit` | - | 1 MB hard limit enforced internally |
 | - | `ordering.key` | glide-mq only |
+| - | `ordering.concurrency` | glide-mq only |
+| - | `ordering.rateLimit` | glide-mq only |
 
 ### QueueEvents events
 
@@ -618,7 +623,7 @@ await queue.add('job', data, { backoff: { type: 'jitter', delay: 1000 } });
 const worker = new Worker('q', processor, {
   connection,
   concurrency: 10,          // per-worker concurrency
-  globalConcurrency: 50,   // queue-wide cap across all workers (set once, stored in Redis)
+  globalConcurrency: 50,   // queue-wide cap across all workers (set once, stored in Valkey)
 });
 
 // Or set it on the queue separately:
@@ -913,7 +918,39 @@ const worker = new Worker('q', async (job) => {
 }, { connection });
 ```
 
-**BullMQ Pro group-level rate limiting** - Not supported. Tracked in [#22](https://github.com/avifenesh/glide-mq/issues/22).
+**Global rate limiting** - glide-mq supports a queue-wide rate limit stored in Valkey, dynamically picked up by all workers:
+
+```ts
+// glide-mq only - global rate limit across all workers
+await queue.setGlobalRateLimit({ max: 500, duration: 60_000 });
+
+const limit = await queue.getGlobalRateLimit(); // { max, duration } or null
+await queue.removeGlobalRateLimit();
+```
+
+When both global rate limit and `WorkerOptions.limiter` are set, the stricter limit wins.
+
+**Per-group rate limiting** - glide-mq supports rate limiting per ordering key (N jobs per time window), equivalent to BullMQ Pro's group rate limiting:
+
+```ts
+// BullMQ Pro
+await queue.add('sync', data, {
+  group: { id: `tenant-${id}`, limit: { max: 10, duration: 60_000 } },
+});
+```
+
+```ts
+// glide-mq - per-group rate limit (open source)
+await queue.add('sync', data, {
+  ordering: {
+    key: `tenant-${id}`,
+    concurrency: 3,
+    rateLimit: { max: 10, duration: 60_000 },
+  },
+});
+```
+
+Rate-limited jobs are promoted by the scheduler loop (latency up to `promotionInterval`, default 5 s). Retried jobs consume rate slots.
 
 ---
 
@@ -1081,7 +1118,7 @@ Beyond BullMQ parity, glide-mq provides:
 
 **1 RTT per job** - `completeAndFetchNext` is a single FCALL that atomically marks the current job complete and fetches the next one. BullMQ uses 2-3 round-trips for the same operation.
 
-**Cluster-native from day one** - All keys use `glide:{queueName}:*` hash tags. Cross-slot operations (flows, global concurrency, ordering) work correctly in Redis Cluster without any configuration.
+**Cluster-native from day one** - All keys use `glide:{queueName}:*` hash tags. Cross-slot operations (flows, global concurrency, ordering) work correctly in Valkey Cluster without any configuration.
 
 **AZ-affinity routing** - Pin worker reads to replicas in your availability zone to reduce cross-AZ network cost and latency:
 
@@ -1102,7 +1139,9 @@ const connection = {
 
 **Job revocation** - `queue.revoke(jobId)` and `job.abortSignal` allow in-flight jobs to be cancelled cooperatively.
 
-**Per-key ordering** - `opts.ordering.key` guarantees sequential execution per key across any number of workers without a separate lock system.
+**Per-key ordering** - `opts.ordering.key` guarantees sequential execution per key across any number of workers without a separate lock system. Group concurrency and per-group rate limiting are also supported.
+
+**Global rate limiting** - `queue.setGlobalRateLimit()` caps queue-wide throughput across all workers. Stored in Valkey and picked up dynamically.
 
 **`addBulk` via GLIDE Batch API** - 12.7x faster than serial `add()` calls for bulk enqueue operations.
 
