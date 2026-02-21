@@ -196,9 +196,15 @@ export class Worker<D = any, R = any> extends EventEmitter {
             this.opts.connection!.clusterMode ?? false,
           );
         } else {
-          // Injected command client - verify liveness, don't recreate
+          // Injected command client - verify liveness and re-ensure library
           try {
             await this.commandClient!.ping();
+            // Re-ensure function library in case of failover/topology change
+            await ensureFunctionLibrary(
+              this.commandClient!,
+              undefined,
+              this.opts.connection!.clusterMode ?? false,
+            );
           } catch (err) {
             this.emit('error', new ConnectionError(
               'Shared command client is unreachable. The client owner must handle reconnection.',

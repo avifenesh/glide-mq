@@ -63,10 +63,15 @@ export async function createBlockingClient(opts: ConnectionOptions): Promise<Cli
 
 /**
  * Detect whether a client is a GlideClusterClient.
- * Used to resolve clusterMode when an injected client is provided without ConnectionOptions.
+ * Uses instanceof with a duck-type fallback for cases where the client
+ * comes from a different copy/version of @glidemq/speedkey (dependency duplication).
  */
 export function isClusterClient(client: Client): boolean {
-  return client instanceof GlideClusterClient;
+  if (client instanceof GlideClusterClient) return true;
+  // Duck-type fallback: GlideClusterClient has scan(ClusterScanCursor, ...) signature
+  // while GlideClient has scan(cursor: string, ...) - check for cluster-specific method
+  return typeof (client as any).clusterScan === 'function'
+    || client.constructor?.name === 'GlideClusterClient';
 }
 
 const _libraryLoadPromises = new WeakMap<Client, Promise<void>>();
