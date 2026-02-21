@@ -106,7 +106,7 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now)
   if maxConc > 0 then
     available = maxConc - newActive
   else
-    available = waitLen
+    available = math.min(waitLen, 1000)
   end
   -- Cap by rate limit remaining if a window is active
   if rateRemaining > 0 then
@@ -231,6 +231,12 @@ redis.register_function('glidemq_addJob', function(keys, args)
       local curRateDuration = tonumber(redis.call('HGET', groupHashKey, 'rateDuration')) or 0
       if curRateDuration ~= groupRateDuration then
         redis.call('HSET', groupHashKey, 'rateDuration', tostring(groupRateDuration))
+      end
+    else
+      -- Clear stale rate limit fields if group was previously rate-limited
+      local oldRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
+      if oldRateMax > 0 then
+        redis.call('HDEL', groupHashKey, 'rateMax', 'rateDuration', 'rateWindowStart', 'rateCount')
       end
     end
   end
@@ -880,7 +886,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
   local now = tonumber(args[1])
   -- Derive prefix from the server-validated key instead of caller-supplied arg
   local prefix = string.sub(rateLimitedKey, 1, #rateLimitedKey - #'ratelimited')
-  local expired = redis.call('ZRANGEBYSCORE', rateLimitedKey, '0', tostring(now), 'LIMIT', 0, 100)
+  local expired = redis.call('ZRANGEBYSCORE', rateLimitedKey, '0', string.format('%.0f', now), 'LIMIT', 0, 100)
   if not expired or #expired == 0 then return 0 end
   local promoted = 0
   for i = 1, #expired do
@@ -894,7 +900,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
     -- Promote up to min(rateMax, available concurrency) jobs.
     -- Do NOT touch rateCount/rateWindowStart here - moveToActive handles
     -- window reset and counting when the worker picks up the promoted jobs.
-    local canPromote = rateMax
+    local canPromote = math.min(rateMax, 1000)
     if maxConc > 0 then
       canPromote = math.min(canPromote, math.max(0, maxConc - active))
     end

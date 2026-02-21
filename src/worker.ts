@@ -653,15 +653,15 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private async refreshMetaFlags(): Promise<void> {
     if (!this.commandClient) return;
     try {
-      const fields = await this.commandClient.hgetall(this.queueKeys.meta);
-      const meta: Record<string, string> = {};
-      if (fields) {
-        for (const f of fields) meta[String(f.field)] = String(f.value);
-      }
-      this.globalConcurrencyEnabled = meta.globalConcurrency != null && Number(meta.globalConcurrency) > 0;
-      this.globalRateLimitEnabled = meta.rateLimitMax != null && Number(meta.rateLimitMax) > 0;
-      this.cachedRateLimitMax = Number(meta.rateLimitMax) || 0;
-      this.cachedRateLimitDuration = Number(meta.rateLimitDuration) || 0;
+      // Read only the 3 specific fields we need - avoids O(N) on orderdone:* fields
+      const vals = await this.commandClient.hmget(this.queueKeys.meta, ['globalConcurrency', 'rateLimitMax', 'rateLimitDuration']);
+      const gcVal = vals?.[0] != null ? String(vals[0]) : null;
+      const rlMax = vals?.[1] != null ? String(vals[1]) : null;
+      const rlDur = vals?.[2] != null ? String(vals[2]) : null;
+      this.globalConcurrencyEnabled = gcVal != null && Number(gcVal) > 0;
+      this.globalRateLimitEnabled = rlMax != null && Number(rlMax) > 0;
+      this.cachedRateLimitMax = Number(rlMax) || 0;
+      this.cachedRateLimitDuration = Number(rlDur) || 0;
     } catch {
       // Transient error - next tick will retry
     }
