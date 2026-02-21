@@ -75,7 +75,7 @@ worker.on('failed', (job, err) => console.error(`Job ${job.id} failed:`, err.mes
 ## Documentation
 
 - **[docs/USAGE.md](docs/USAGE.md)** — Queue & Worker basics, graceful shutdown, cluster mode, event listeners
-- **[docs/ADVANCED.md](docs/ADVANCED.md)** — Schedulers, ordering, deduplication, global concurrency, revocation, compression, retries & DLQ
+- **[docs/ADVANCED.md](docs/ADVANCED.md)** — Schedulers, ordering, token bucket, deduplication, global concurrency, revocation, compression, retries & DLQ
 - **[docs/WORKFLOWS.md](docs/WORKFLOWS.md)** — FlowProducer, `chain`, `group`, `chord` pipelines
 - **[docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)** — Job logs, metrics, OpenTelemetry, `@glidemq/dashboard`
 - **[docs/TESTING.md](docs/TESTING.md)** — `TestQueue` & `TestWorker`, in-memory testing without Valkey

@@ -272,7 +272,7 @@ This is a direct equivalent. No behavioral differences.
 | AZ-affinity routing | No | Yes - pin reads to your AZ |
 | IAM auth (ElastiCache/MemoryDB) | No | Yes |
 | Compression | No | gzip transparent compression |
-| Per-key ordering + group rate limit | No (BullMQ Pro groups only) | Yes, `opts.ordering.key` with concurrency and rateLimit |
+| Per-key ordering + group rate limit | No (BullMQ Pro groups only) | Yes, `opts.ordering.key` with concurrency, rateLimit, and tokenBucket |
 | In-memory test mode | No | Yes, `TestQueue` / `TestWorker` |
 
 glide-mq is a strict superset of BullMQ's core job queue semantics. At-least-once delivery, consumer groups, stall detection, retries, DLQ, flows, and schedulers all work the same way. The differences are in API shape and some missing conveniences listed in [Gaps and workarounds](#gaps-and-workarounds).
@@ -510,6 +510,8 @@ The processor function signature is identical. The only change is the connection
 | - | `ordering.key` | glide-mq only |
 | - | `ordering.concurrency` | glide-mq only |
 | - | `ordering.rateLimit` | glide-mq only |
+| - | `ordering.tokenBucket` | glide-mq only |
+| - | `cost` | glide-mq only |
 
 ### QueueEvents events
 
@@ -1140,6 +1142,8 @@ const connection = {
 **Job revocation** - `queue.revoke(jobId)` and `job.abortSignal` allow in-flight jobs to be cancelled cooperatively.
 
 **Per-key ordering** - `opts.ordering.key` guarantees sequential execution per key across any number of workers without a separate lock system. Group concurrency and per-group rate limiting are also supported.
+
+**Cost-based token bucket** - `opts.ordering.tokenBucket` with per-job `opts.cost` enables weighted rate limiting per ordering key. Unlike BullMQ Pro's count-based group rate limiting, glide-mq's token bucket assigns a cost to each job and deducts from a continuously refilling bucket. Open-source, no Pro license required.
 
 **Global rate limiting** - `queue.setGlobalRateLimit()` caps queue-wide throughput across all workers. Stored in Valkey and picked up dynamically.
 
