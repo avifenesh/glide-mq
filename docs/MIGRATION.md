@@ -40,7 +40,7 @@ This guide covers migrating a Node.js application from BullMQ to glide-mq. It do
 
 ## Multi-tenant job queue pattern
 
-This section directly addresses the use case from [issue #8](https://github.com/avifenesh/glide-mq/issues/8): per-client job isolation, concurrency caps per client, retries with accumulated data, and worker-level rate limiting.
+A common BullMQ Pro pattern: per-client job isolation, concurrency caps per client, retries with accumulated data, and worker-level rate limiting. This section walks through a full migration of that setup.
 
 ### Job grouping and per-client isolation
 
