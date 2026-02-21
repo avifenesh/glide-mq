@@ -48,6 +48,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private lockDuration: number;
   private heartbeatIntervals: Map<string, ReturnType<typeof setInterval>> = new Map();
   private globalConcurrencyEnabled = false;
+  private globalRateLimitEnabled = false;
+  private cachedRateLimitMax = 0;
+  private cachedRateLimitDuration = 0;
 
   constructor(name: string, processor: Processor<D, R>, opts: WorkerOptions) {
     super();
@@ -91,9 +94,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
       CONSUMER_GROUP,
     );
 
-    // Check if global concurrency is configured (read once, avoid per-poll FCALL)
-    const gcVal = await this.commandClient.hget(this.queueKeys.meta, 'globalConcurrency');
-    this.globalConcurrencyEnabled = gcVal != null && Number(gcVal) > 0;
+    // Check if global concurrency / rate limit are configured (refreshed on scheduler tick)
+    await this.refreshMetaFlags();
 
     // Start the internal scheduler for delayed promotion + stalled recovery
     this.scheduler = new Scheduler(this.commandClient, this.queueKeys, {
@@ -101,6 +103,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
       stalledInterval: this.stalledInterval,
       maxStalledCount: this.maxStalledCount,
       consumerId: this.consumerId,
+      queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
+      onPromotionTick: () => this.refreshMetaFlags(),
     });
     this.scheduler.start();
 
@@ -178,6 +182,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
           stalledInterval: this.stalledInterval,
           maxStalledCount: this.maxStalledCount,
           consumerId: this.consumerId,
+          queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
+          onPromotionTick: () => this.refreshMetaFlags(),
         });
         this.scheduler.start();
       },
@@ -307,7 +313,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
    * Returns true if the result was handled (caller should return), false if the hash is valid.
    */
   private async handleMoveToActiveEdgeCase(
-    moveResult: Record<string, string> | 'REVOKED' | 'GROUP_FULL' | null,
+    moveResult: Record<string, string> | 'REVOKED' | 'GROUP_FULL' | 'GROUP_RATE_LIMITED' | null,
     jobId: string,
     entryId: string,
   ): Promise<boolean> {
@@ -320,7 +326,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
       return true;
     }
-    if (moveResult === 'GROUP_FULL') {
+    if (moveResult === 'GROUP_FULL' || moveResult === 'GROUP_RATE_LIMITED') {
       return true;
     }
     return false;
@@ -334,7 +340,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     job: Job<D, R>,
     jobId: string,
   ): Promise<{ result?: R; error?: Error; aborted: boolean }> {
-    if (this.opts.limiter) await this.waitForRateLimit();
+    if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
 
     const ac = new AbortController();
     this.activeAbortControllers.set(jobId, ac);
@@ -601,12 +607,28 @@ export class Worker<D = any, R = any> extends EventEmitter {
    * Also respects any manual rate limit set via rateLimit(ms).
    */
   private async waitForRateLimit(): Promise<void> {
-    if (!this.commandClient || !this.opts.limiter) return;
+    if (!this.commandClient) return;
 
     // First, respect any manual rate limit
     const now = Date.now();
     if (this.rateLimitUntil > now) {
       await new Promise<void>((resolve) => setTimeout(resolve, this.rateLimitUntil - now));
+    }
+
+    // Determine effective rate limit config.
+    // Valkey-stored (dynamic) config takes precedence over local WorkerOptions.
+    // Values are cached from meta by refreshMetaFlags (runs each scheduler tick).
+    let max: number;
+    let duration: number;
+
+    if (this.globalRateLimitEnabled && this.cachedRateLimitMax > 0) {
+      max = this.cachedRateLimitMax;
+      duration = this.cachedRateLimitDuration;
+    } else if (this.opts.limiter) {
+      max = this.opts.limiter.max;
+      duration = this.opts.limiter.duration;
+    } else {
+      return;
     }
 
     // Server-side sliding window check
@@ -615,8 +637,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const delayMs = await rateLimitFn(
         this.commandClient,
         this.queueKeys,
-        this.opts.limiter.max,
-        this.opts.limiter.duration,
+        max,
+        duration,
         Date.now(),
       );
 
@@ -624,6 +646,24 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
       // Wait for the delay, then re-check
       await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  /** Refresh cached meta flags from Valkey. Called on init and each scheduler tick. */
+  private async refreshMetaFlags(): Promise<void> {
+    if (!this.commandClient) return;
+    try {
+      const fields = await this.commandClient.hgetall(this.queueKeys.meta);
+      const meta: Record<string, string> = {};
+      if (fields) {
+        for (const f of fields) meta[String(f.field)] = String(f.value);
+      }
+      this.globalConcurrencyEnabled = meta.globalConcurrency != null && Number(meta.globalConcurrency) > 0;
+      this.globalRateLimitEnabled = meta.rateLimitMax != null && Number(meta.rateLimitMax) > 0;
+      this.cachedRateLimitMax = Number(meta.rateLimitMax) || 0;
+      this.cachedRateLimitDuration = Number(meta.rateLimitDuration) || 0;
+    } catch {
+      // Transient error - next tick will retry
     }
   }
 

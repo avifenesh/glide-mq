@@ -79,6 +79,13 @@ export class FlowProducer {
       const { addJob } = await import('./functions/index');
       const timestamp = Date.now();
       const opts = flow.opts ?? {};
+      const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
+      const groupRateDuration = opts.ordering?.rateLimit?.duration ?? 0;
+      let groupConcurrency = opts.ordering?.concurrency ?? 0;
+      // Force group path when rate limit is set
+      if (groupRateMax > 0 && groupConcurrency < 1) {
+        groupConcurrency = 1;
+      }
       const jobId = await addJob(
         client,
         parentKeys,
@@ -91,7 +98,9 @@ export class FlowProducer {
         '',
         opts.attempts ?? 0,
         opts.ordering?.key ?? '',
-        opts.ordering?.concurrency ?? 0,
+        groupConcurrency,
+        groupRateMax,
+        groupRateDuration,
       );
       const job = new Job(
         client,

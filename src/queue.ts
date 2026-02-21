@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { InfBoundary, Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
-import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts, SearchJobsOptions } from './types';
+import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts, SearchJobsOptions, RateLimitConfig } from './types';
 import { Job } from './job';
 import { buildKeys, keyPrefix, keyPrefixPattern, nextCronOccurrence, hashDataToRecord, extractJobIdsFromStreamEntries, compress } from './utils';
 import { createClient, ensureFunctionLibrary } from './connection';
@@ -97,7 +97,13 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const parentId = opts?.parent ? opts.parent.id : '';
         const maxAttempts = opts?.attempts ?? 0;
         const orderingKey = opts?.ordering?.key ?? '';
-        const groupConcurrency = opts?.ordering?.concurrency ?? 0;
+        const groupRateMax = opts?.ordering?.rateLimit?.max ?? 0;
+        const groupRateDuration = opts?.ordering?.rateLimit?.duration ?? 0;
+        let groupConcurrency = opts?.ordering?.concurrency ?? 0;
+        // Force group path when rate limit is set
+        if (groupRateMax > 0 && groupConcurrency < 1) {
+          groupConcurrency = 1;
+        }
         validateOrderingKey(orderingKey);
 
         // Payload size validation - prevent DoS via oversized jobs
@@ -130,6 +136,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
             maxAttempts,
             orderingKey,
             groupConcurrency,
+            groupRateMax,
+            groupRateDuration,
           );
           if (result === 'skipped') {
             return null;
@@ -149,6 +157,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
             maxAttempts,
             orderingKey,
             groupConcurrency,
+            groupRateMax,
+            groupRateDuration,
           );
         }
 
@@ -199,8 +209,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
         serializedData = compress(serializedData);
       }
 
-      const groupConcurrency = opts.ordering?.concurrency ?? 0;
-      return { entry, opts, delay, priority, parentId, maxAttempts, orderingKey, groupConcurrency, deduplication, serializedData };
+      const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
+      const groupRateDuration = opts.ordering?.rateLimit?.duration ?? 0;
+      let groupConcurrency = opts.ordering?.concurrency ?? 0;
+      // Force group path when rate limit is set
+      if (groupRateMax > 0 && groupConcurrency < 1) {
+        groupConcurrency = 1;
+      }
+      return { entry, opts, delay, priority, parentId, maxAttempts, orderingKey, groupConcurrency, groupRateMax, groupRateDuration, deduplication, serializedData };
     });
 
     // Build a batch with all fcall commands
@@ -224,6 +240,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.maxAttempts.toString(),
           p.orderingKey,
           p.groupConcurrency.toString(),
+          p.groupRateMax.toString(),
+          p.groupRateDuration.toString(),
         ]);
       } else {
         batch.fcall('glidemq_addJob', keys, [
@@ -237,6 +255,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.maxAttempts.toString(),
           p.orderingKey,
           p.groupConcurrency.toString(),
+          p.groupRateMax.toString(),
+          p.groupRateDuration.toString(),
         ]);
       }
     }
@@ -326,6 +346,42 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async setGlobalConcurrency(n: number): Promise<void> {
     const client = await this.getClient();
     await client.hset(this.keys.meta, { globalConcurrency: n.toString() });
+  }
+
+  /**
+   * Set a global rate limit for this queue.
+   * All workers will respect this limit dynamically (picked up within one scheduler tick).
+   * Takes precedence over WorkerOptions.limiter when set.
+   */
+  async setGlobalRateLimit(config: RateLimitConfig): Promise<void> {
+    const client = await this.getClient();
+    await client.hset(this.keys.meta, {
+      rateLimitMax: config.max.toString(),
+      rateLimitDuration: config.duration.toString(),
+    });
+  }
+
+  /**
+   * Remove the global rate limit for this queue.
+   * Workers fall back to their local WorkerOptions.limiter if configured.
+   */
+  async removeGlobalRateLimit(): Promise<void> {
+    const client = await this.getClient();
+    await client.hdel(this.keys.meta, ['rateLimitMax', 'rateLimitDuration']);
+  }
+
+  /**
+   * Get the current global rate limit for this queue.
+   * Returns null if no global rate limit is configured.
+   */
+  async getGlobalRateLimit(): Promise<RateLimitConfig | null> {
+    const client = await this.getClient();
+    const [max, duration] = await Promise.all([
+      client.hget(this.keys.meta, 'rateLimitMax'),
+      client.hget(this.keys.meta, 'rateLimitDuration'),
+    ]);
+    if (max == null || duration == null) return null;
+    return { max: Number(String(max)), duration: Number(String(duration)) };
   }
 
   /**
@@ -448,7 +504,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       this.keys.id, this.keys.stream, this.keys.scheduled,
       this.keys.completed, this.keys.failed, this.keys.events,
       this.keys.meta, this.keys.dedup, this.keys.rate, this.keys.schedulers,
-      this.keys.ordering,
+      this.keys.ordering, this.keys.ratelimited,
     ];
     await client.del(staticKeys);
 
