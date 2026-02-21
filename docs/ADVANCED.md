@@ -45,7 +45,9 @@ The internal `Scheduler` class fires a promotion loop that converts due schedule
 
 ---
 
-## Sequential Processing
+## Ordering and Group Concurrency
+
+### Sequential processing (concurrency=1)
 
 Add `ordering.key` to a job to guarantee that all jobs with the same key are processed one at a time, in the order they were added.
 
@@ -59,9 +61,36 @@ await queue.add('send-receipt', { userId: 42 }, {
 });
 ```
 
+### Group concurrency (concurrency > 1)
+
+Set `ordering.concurrency` to allow up to N jobs per key to run in parallel across all workers:
+
+```typescript
+// Max 3 concurrent jobs for tenant-42, regardless of worker count
+await queue.add('process', data, {
+  ordering: { key: 'tenant-42', concurrency: 3 },
+});
+```
+
+Jobs exceeding the group limit are parked in a per-group wait list and automatically released when a slot opens.
+
+```typescript
+// Multi-tenant isolation: each client gets max 2 concurrent jobs
+for (const job of jobs) {
+  await queue.add('task', job.data, {
+    ordering: { key: `client-${job.clientId}`, concurrency: 2 },
+  });
+}
+```
+
+### Notes
+
 - Jobs with different ordering keys (or no ordering key) are processed concurrently as normal.
 - Ordering keys are limited to 256 characters.
-- The ordering guarantee applies within a single queue.
+- `concurrency=1` (or omitted) preserves strict FIFO ordering per key.
+- `concurrency > 1` caps parallelism but does not guarantee FIFO within the group.
+- Group concurrency and global concurrency (`setGlobalConcurrency`) compose: both limits are enforced.
+- Group slots are released on job complete, fail, retry, DLQ move, and stall recovery.
 
 ---
 
