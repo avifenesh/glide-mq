@@ -259,7 +259,7 @@ local function extractTokenBucketFromOpts(optsJson)
   if type(tb) ~= 'table' then return 0, 0 end
   local capacity = tonumber(tb['capacity']) or 0
   local refillRate = tonumber(tb['refillRate']) or 0
-  return capacity * 1000, refillRate * 1000
+  return math.floor(capacity * 1000), math.floor(refillRate * 1000)
 end
 
 local function extractCostFromOpts(optsJson)
@@ -267,7 +267,7 @@ local function extractCostFromOpts(optsJson)
   local ok, decoded = pcall(cjson.decode, optsJson)
   if not ok or type(decoded) ~= 'table' then return 0 end
   local cost = tonumber(decoded['cost']) or 0
-  return cost * 1000
+  return math.floor(cost * 1000)
 end
 
 redis.register_function('glidemq_version', function(keys, args)
@@ -349,7 +349,9 @@ redis.register_function('glidemq_addJob', function(keys, args)
           'tbRefillRemainder', '0')
       end
       -- Validate cost <= capacity at enqueue
-      if jobCost > 0 and jobCost > tbCapacity then
+      -- Validate cost (explicit or default 1000 millitokens) against capacity
+      local effectiveCost = (jobCost > 0) and jobCost or 1000
+      if effectiveCost > tbCapacity then
         return 'ERR:COST_EXCEEDS_CAPACITY'
       end
     else
@@ -998,7 +1000,9 @@ redis.register_function('glidemq_dedup', function(keys, args)
           'tbRefillRemainder', '0')
       end
       -- Validate cost <= capacity at enqueue
-      if jobCost > 0 and jobCost > tbCapacity then
+      -- Validate cost (explicit or default 1000 millitokens) against capacity
+      local effectiveCost = (jobCost > 0) and jobCost or 1000
+      if effectiveCost > tbCapacity then
         return 'ERR:COST_EXCEEDS_CAPACITY'
       end
     else
@@ -1389,9 +1393,22 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     parentHash[#parentHash + 1] = tostring(parentCost)
   end
   redis.call('HSET', parentJobKey, unpack(parentHash))
-  local childIds = {}
+  -- Pre-validate all children's cost vs capacity before any child writes
   local childArgOffset = 8
   local childKeyOffset = 4
+  for i = 1, numChildren do
+    local base = childArgOffset + (i - 1) * 8
+    local preChildOpts = args[base + 3]
+    local preChildTbCap, _ = extractTokenBucketFromOpts(preChildOpts)
+    if preChildTbCap > 0 then
+      local preChildCost = extractCostFromOpts(preChildOpts)
+      local preEffective = (preChildCost > 0) and preChildCost or 1000
+      if preEffective > preChildTbCap then
+        return 'ERR:COST_EXCEEDS_CAPACITY'
+      end
+    end
+  end
+  local childIds = {}
   for i = 1, numChildren do
     local base = childArgOffset + (i - 1) * 8
     local childName = args[base + 1]
@@ -1446,9 +1463,6 @@ redis.register_function('glidemq_addFlow', function(keys, args)
         redis.call('HSET', childGroupHashKey, 'rateDuration', tostring(childRateDuration))
       end
       if childTbCapacity > 0 then
-        if childCost > 0 and childCost > childTbCapacity then
-          return 'ERR:COST_EXCEEDS_CAPACITY'
-        end
         redis.call('HSET', childGroupHashKey, 'tbCapacity', tostring(childTbCapacity), 'tbRefillRate', tostring(childTbRefillRate))
         redis.call('HSETNX', childGroupHashKey, 'tbTokens', tostring(childTbCapacity))
         redis.call('HSETNX', childGroupHashKey, 'tbLastRefill', tostring(timestamp))
