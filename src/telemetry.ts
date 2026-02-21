@@ -35,14 +35,20 @@ interface OTelApi {
 // ------------------------------------------------------------------
 
 const NOOP_SPAN: OTelSpan = {
-  setAttribute() { return this; },
-  setStatus() { return this; },
+  setAttribute() {
+    return this;
+  },
+  setStatus() {
+    return this;
+  },
   recordException() {},
   end() {},
 };
 
 const NOOP_TRACER: OTelTracer = {
-  startSpan() { return NOOP_SPAN; },
+  startSpan() {
+    return NOOP_SPAN;
+  },
 };
 
 // ------------------------------------------------------------------
@@ -124,10 +130,6 @@ export async function withSpan<T>(
  * Start a child span for a sub-operation within an already-active span.
  * Same semantics as withSpan but the callback does not receive the span.
  */
-export async function withChildSpan<T>(
-  name: string,
-  attributes: SpanAttributes,
-  fn: () => Promise<T>,
-): Promise<T> {
+export async function withChildSpan<T>(name: string, attributes: SpanAttributes, fn: () => Promise<T>): Promise<T> {
   return withSpan(name, attributes, () => fn());
 }

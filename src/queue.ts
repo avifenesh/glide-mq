@@ -1,9 +1,28 @@
 import { EventEmitter } from 'events';
 import { InfBoundary, Batch, ClusterBatch, ClusterScanCursor } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
-import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts, SearchJobsOptions, RateLimitConfig } from './types';
+import type {
+  QueueOptions,
+  JobOptions,
+  Client,
+  ScheduleOpts,
+  JobTemplate,
+  SchedulerEntry,
+  Metrics,
+  JobCounts,
+  SearchJobsOptions,
+  RateLimitConfig,
+} from './types';
 import { Job } from './job';
-import { buildKeys, keyPrefix, keyPrefixPattern, nextCronOccurrence, hashDataToRecord, extractJobIdsFromStreamEntries, compress } from './utils';
+import {
+  buildKeys,
+  keyPrefix,
+  keyPrefixPattern,
+  nextCronOccurrence,
+  hashDataToRecord,
+  extractJobIdsFromStreamEntries,
+  compress,
+} from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
 import {
@@ -23,9 +42,7 @@ const MAX_ORDERING_KEY_LENGTH = 256;
 
 function validateOrderingKey(orderingKey: string): void {
   if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
-    throw new Error(
-      `Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`,
-    );
+    throw new Error(`Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`);
   }
 }
 
@@ -118,11 +135,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         let client: Client;
         try {
           client = await createClient(this.opts.connection!);
-          await ensureFunctionLibrary(
-            client,
-            LIBRARY_SOURCE,
-            this.opts.connection!.clusterMode ?? false,
-          );
+          await ensureFunctionLibrary(client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
         } catch (err) {
           // Don't cache a failed client - next getClient() call will retry
           this.emit('error', err);
@@ -164,14 +177,17 @@ export class Queue<D = any, R = any> extends EventEmitter {
         let tbCapacity = 0;
         let tbRefillRate = 0;
         if (tb) {
-          if (!Number.isFinite(tb.capacity) || tb.capacity <= 0) throw new Error('tokenBucket.capacity must be a positive finite number');
-          if (!Number.isFinite(tb.refillRate) || tb.refillRate <= 0) throw new Error('tokenBucket.refillRate must be a positive finite number');
+          if (!Number.isFinite(tb.capacity) || tb.capacity <= 0)
+            throw new Error('tokenBucket.capacity must be a positive finite number');
+          if (!Number.isFinite(tb.refillRate) || tb.refillRate <= 0)
+            throw new Error('tokenBucket.refillRate must be a positive finite number');
           tbCapacity = Math.round(tb.capacity * 1000);
           tbRefillRate = Math.round(tb.refillRate * 1000);
         }
         let jobCost = 0;
         if (opts?.cost != null) {
-          if (!Number.isFinite(opts.cost) || opts.cost < 0) throw new Error('cost must be a non-negative finite number');
+          if (!Number.isFinite(opts.cost) || opts.cost < 0)
+            throw new Error('cost must be a non-negative finite number');
           jobCost = Math.round(opts.cost * 1000);
         }
         let groupConcurrency = opts?.ordering?.concurrency ?? 0;
@@ -184,7 +200,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
         // Payload size validation - prevent DoS via oversized jobs
         let serialized = JSON.stringify(data);
         if (serialized.length > 1_048_576) {
-          throw new Error(`Job data exceeds maximum size (${serialized.length} bytes > 1MB). Use smaller payloads or store large data externally.`);
+          throw new Error(
+            `Job data exceeds maximum size (${serialized.length} bytes > 1MB). Use smaller payloads or store large data externally.`,
+          );
         }
 
         if (this.opts.compression === 'gzip') {
@@ -252,14 +270,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
         span.setAttribute('glide-mq.job.id', String(jobId));
 
-        const job = new Job<D, R>(
-          client,
-          this.keys,
-          String(jobId),
-          name,
-          data,
-          opts ?? {},
-        );
+        const job = new Job<D, R>(client, this.keys, String(jobId), name, data, opts ?? {});
         job.timestamp = timestamp;
         job.parentId = parentId || undefined;
         return job;
@@ -272,9 +283,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * Uses GLIDE's Batch API to pipeline all addJob FCALL commands in a single round trip.
    * Non-atomic: each job is independent, but all are sent together for efficiency.
    */
-  async addBulk(
-    jobs: { name: string; data: D; opts?: JobOptions }[],
-  ): Promise<Job<D, R>[]> {
+  async addBulk(jobs: { name: string; data: D; opts?: JobOptions }[]): Promise<Job<D, R>[]> {
     if (jobs.length === 0) return [];
 
     const client = await this.getClient();
@@ -303,8 +312,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
       let tbCapacity = 0;
       let tbRefillRate = 0;
       if (bulkTb) {
-        if (!Number.isFinite(bulkTb.capacity) || bulkTb.capacity <= 0) throw new Error('tokenBucket.capacity must be a positive finite number');
-        if (!Number.isFinite(bulkTb.refillRate) || bulkTb.refillRate <= 0) throw new Error('tokenBucket.refillRate must be a positive finite number');
+        if (!Number.isFinite(bulkTb.capacity) || bulkTb.capacity <= 0)
+          throw new Error('tokenBucket.capacity must be a positive finite number');
+        if (!Number.isFinite(bulkTb.refillRate) || bulkTb.refillRate <= 0)
+          throw new Error('tokenBucket.refillRate must be a positive finite number');
         tbCapacity = Math.round(bulkTb.capacity * 1000);
         tbRefillRate = Math.round(bulkTb.refillRate * 1000);
       }
@@ -317,7 +328,23 @@ export class Queue<D = any, R = any> extends EventEmitter {
       if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
         groupConcurrency = 1;
       }
-      return { entry, opts, delay, priority, parentId, maxAttempts, orderingKey, groupConcurrency, groupRateMax, groupRateDuration, tbCapacity, tbRefillRate, jobCost, deduplication, serializedData };
+      return {
+        entry,
+        opts,
+        delay,
+        priority,
+        parentId,
+        maxAttempts,
+        orderingKey,
+        groupConcurrency,
+        groupRateMax,
+        groupRateDuration,
+        tbCapacity,
+        tbRefillRate,
+        jobCost,
+        deduplication,
+        serializedData,
+      };
     });
 
     // Build a batch with all fcall commands
@@ -392,14 +419,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         throw new Error('Job cost exceeds token bucket capacity');
       }
       const jobId = raw;
-      const job = new Job<D, R>(
-        client,
-        this.keys,
-        jobId,
-        p.entry.name,
-        p.entry.data,
-        p.opts,
-      );
+      const job = new Job<D, R>(client, this.keys, jobId, p.entry.name, p.entry.data, p.opts);
       job.timestamp = timestamp;
       job.parentId = p.parentId || undefined;
       return [job];
@@ -498,11 +518,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * Stores the scheduler config in the schedulers hash.
    * Computes the initial nextRun based on the schedule.
    */
-  async upsertJobScheduler(
-    name: string,
-    schedule: ScheduleOpts,
-    template?: JobTemplate,
-  ): Promise<void> {
+  async upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void> {
     const client = await this.getClient();
     const now = Date.now();
 
@@ -597,7 +613,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const pendingInfo = await client.xpending(this.keys.stream, CONSUMER_GROUP);
         const activeCount = Number(pendingInfo[0]) || 0;
         if (activeCount > 0) {
-          throw new Error(`Cannot obliterate queue "${this.name}": ${activeCount} active jobs. Use { force: true } to override.`);
+          throw new Error(
+            `Cannot obliterate queue "${this.name}": ${activeCount} active jobs. Use { force: true } to override.`,
+          );
         }
       } catch (err) {
         // If the error is our own active-jobs check, re-throw
@@ -610,10 +628,18 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     // Delete all known static keys
     const staticKeys = [
-      this.keys.id, this.keys.stream, this.keys.scheduled,
-      this.keys.completed, this.keys.failed, this.keys.events,
-      this.keys.meta, this.keys.dedup, this.keys.rate, this.keys.schedulers,
-      this.keys.ordering, this.keys.ratelimited,
+      this.keys.id,
+      this.keys.stream,
+      this.keys.scheduled,
+      this.keys.completed,
+      this.keys.failed,
+      this.keys.events,
+      this.keys.meta,
+      this.keys.dedup,
+      this.keys.rate,
+      this.keys.schedulers,
+      this.keys.ordering,
+      this.keys.ratelimited,
     ];
     await client.del(staticKeys);
 
@@ -690,16 +716,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
       }
       case 'active': {
         try {
-          const pendingEntries = await client.xpendingWithOptions(
-            this.keys.stream,
-            CONSUMER_GROUP,
-            {
-              start: InfBoundary.NegativeInfinity,
-              end: InfBoundary.PositiveInfinity,
-              count: end >= 0 ? end + 1 : 10000,
-            },
-          );
-          const entryIds = pendingEntries.slice(start, end >= 0 ? end + 1 : undefined).map(e => String(e[0]));
+          const pendingEntries = await client.xpendingWithOptions(this.keys.stream, CONSUMER_GROUP, {
+            start: InfBoundary.NegativeInfinity,
+            end: InfBoundary.PositiveInfinity,
+            count: end >= 0 ? end + 1 : 10000,
+          });
+          const entryIds = pendingEntries.slice(start, end >= 0 ? end + 1 : undefined).map((e) => String(e[0]));
           jobIds = await this.resolveActiveJobIds(client, entryIds);
         } catch {
           jobIds = [];
@@ -709,11 +731,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
       case 'delayed':
       case 'completed':
       case 'failed': {
-        const members = await client.zrange(
-          this.zsetKeyForState(type),
-          { start: start, end: end >= 0 ? end : -1 },
-        );
-        jobIds = members.map(m => String(m));
+        const members = await client.zrange(this.zsetKeyForState(type), { start: start, end: end >= 0 ? end : -1 });
+        jobIds = members.map((m) => String(m));
         break;
       }
     }
@@ -779,9 +798,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
   /** @internal Map a terminal/zset state to its corresponding key. */
   private zsetKeyForState(state: 'delayed' | 'completed' | 'failed'): string {
     switch (state) {
-      case 'delayed': return this.keys.scheduled;
-      case 'completed': return this.keys.completed;
-      case 'failed': return this.keys.failed;
+      case 'delayed':
+        return this.keys.scheduled;
+      case 'completed':
+        return this.keys.completed;
+      case 'failed':
+        return this.keys.failed;
     }
   }
 
@@ -804,16 +826,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
       }
       case 'active': {
         try {
-          const pendingEntries = await client.xpendingWithOptions(
-            this.keys.stream,
-            CONSUMER_GROUP,
-            {
-              start: InfBoundary.NegativeInfinity,
-              end: InfBoundary.PositiveInfinity,
-              count: limit,
-            },
-          );
-          const entryIds = pendingEntries.map(e => String(e[0]));
+          const pendingEntries = await client.xpendingWithOptions(this.keys.stream, CONSUMER_GROUP, {
+            start: InfBoundary.NegativeInfinity,
+            end: InfBoundary.PositiveInfinity,
+            count: limit,
+          });
+          const entryIds = pendingEntries.map((e) => String(e[0]));
           return this.resolveActiveJobIds(client, entryIds);
         } catch {
           return [];
@@ -823,7 +841,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       case 'completed':
       case 'failed': {
         const members = await client.zrange(this.zsetKeyForState(state), { start: 0, end: limit - 1 });
-        return members.map(m => String(m));
+        return members.map((m) => String(m));
       }
     }
   }
@@ -868,7 +886,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const prefixLen = `${pfx}:job:`.length;
 
     const collectKeys = async (keys: unknown[]): Promise<void> => {
-      const keyStrs = keys.map(k => String(k));
+      const keyStrs = keys.map((k) => String(k));
       if (!nameFilter) {
         for (const k of keyStrs) {
           if (jobIds.length >= limit) break;

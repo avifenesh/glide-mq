@@ -42,14 +42,7 @@ export class Job<D = any, R = any> {
   private queueKeys: QueueKeys;
 
   /** @internal */
-  constructor(
-    client: Client,
-    queueKeys: QueueKeys,
-    id: string,
-    name: string,
-    data: D,
-    opts: JobOptions,
-  ) {
+  constructor(client: Client, queueKeys: QueueKeys, id: string, name: string, data: D, opts: JobOptions) {
     this.client = client;
     this.queueKeys = queueKeys;
     this.id = id;
@@ -72,9 +65,7 @@ export class Job<D = any, R = any> {
    * Update the progress of this job. Persists to the job hash and emits a progress event.
    */
   async updateProgress(progress: number | object): Promise<void> {
-    const progressStr = typeof progress === 'number'
-      ? progress.toString()
-      : JSON.stringify(progress);
+    const progressStr = typeof progress === 'number' ? progress.toString() : JSON.stringify(progress);
     await this.client.hset(this.queueKeys.job(this.id), {
       progress: progressStr,
     });
@@ -169,9 +160,7 @@ export class Job<D = any, R = any> {
     const priority = this.opts.priority ?? 0;
     const PRIORITY_SHIFT = 2 ** 42;
     const score = priority * PRIORITY_SHIFT + now;
-    await this.client.zadd(this.queueKeys.scheduled, [
-      { element: this.id, score },
-    ]);
+    await this.client.zadd(this.queueKeys.scheduled, [{ element: this.id, score }]);
     await this.client.hset(this.queueKeys.job(this.id), {
       state: 'delayed',
       failedReason: '',
@@ -250,18 +239,25 @@ export class Job<D = any, R = any> {
    * Construct a Job instance from a hash returned by HGETALL.
    * @internal
    */
-  static fromHash<D, R>(
-    client: Client,
-    queueKeys: QueueKeys,
-    id: string,
-    hash: Record<string, string>,
-  ): Job<D, R> {
+  static fromHash<D, R>(client: Client, queueKeys: QueueKeys, id: string, hash: Record<string, string>): Job<D, R> {
     let data: D;
     let opts: JobOptions;
     let returnvalue: R | undefined;
-    try { data = JSON.parse(decompress(hash.data || '{}')); } catch { data = {} as D; }
-    try { opts = JSON.parse(hash.opts || '{}'); } catch { opts = {}; }
-    try { returnvalue = hash.returnvalue ? JSON.parse(hash.returnvalue) : undefined; } catch { returnvalue = undefined; }
+    try {
+      data = JSON.parse(decompress(hash.data || '{}'));
+    } catch {
+      data = {} as D;
+    }
+    try {
+      opts = JSON.parse(hash.opts || '{}');
+    } catch {
+      opts = {};
+    }
+    try {
+      returnvalue = hash.returnvalue ? JSON.parse(hash.returnvalue) : undefined;
+    } catch {
+      returnvalue = undefined;
+    }
 
     const job = new Job<D, R>(client, queueKeys, id, hash.name || '', data, opts);
     job.attemptsMade = parseInt(hash.attemptsMade || '0', 10);

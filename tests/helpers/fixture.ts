@@ -46,10 +46,7 @@ const MODES: { name: string; connection: ConnectionConfig }[] = process.env.SKIP
  * Run a describe block against both standalone and cluster.
  * The callback receives the connection config for the current mode.
  */
-export function describeEachMode(
-  name: string,
-  fn: (connection: ConnectionConfig) => void,
-): void {
+export function describeEachMode(name: string, fn: (connection: ConnectionConfig) => void): void {
   for (const mode of MODES) {
     describe(`${name} [${mode.name}]`, () => fn(mode.connection));
   }
@@ -78,18 +75,24 @@ export async function createCleanupClient(connection: ConnectionConfig) {
 /**
  * Flush all keys for a queue. Works for both standalone and cluster.
  */
-export async function flushQueue(
-  client: any,
-  queueName: string,
-  prefix = 'glide',
-): Promise<void> {
+export async function flushQueue(client: any, queueName: string, prefix = 'glide'): Promise<void> {
   const k = buildKeys(queueName, prefix);
   const staticKeys = [
-    k.id, k.stream, k.scheduled, k.completed, k.failed,
-    k.events, k.meta, k.dedup, k.rate, k.schedulers,
+    k.id,
+    k.stream,
+    k.scheduled,
+    k.completed,
+    k.failed,
+    k.events,
+    k.meta,
+    k.dedup,
+    k.rate,
+    k.schedulers,
   ];
   for (const key of staticKeys) {
-    try { await client.del([key]); } catch {}
+    try {
+      await client.del([key]);
+    } catch {}
   }
 
   // Scan and delete job hashes + log keys + deps keys

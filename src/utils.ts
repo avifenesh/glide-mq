@@ -83,12 +83,7 @@ export function decodeScore(score: number): { priority: number; timestampMs: num
   return { priority, timestampMs };
 }
 
-export function calculateBackoff(
-  type: string,
-  delay: number,
-  attemptsMade: number,
-  jitter = 0,
-): number {
+export function calculateBackoff(type: string, delay: number, attemptsMade: number, jitter = 0): number {
   let ms: number;
   switch (type) {
     case 'exponential':
@@ -124,9 +119,7 @@ export function nextReconnectDelay(currentDelay: number, maxMs = 30000): number 
  * Convert a HashDataType array ({ field, value }[]) from hgetall to a plain Record.
  * Returns null if the array is empty or falsy (key does not exist).
  */
-export function hashDataToRecord(
-  hashData: { field: unknown; value: unknown }[] | null,
-): Record<string, string> | null {
+export function hashDataToRecord(hashData: { field: unknown; value: unknown }[] | null): Record<string, string> | null {
   if (!hashData || hashData.length === 0) return null;
   const record: Record<string, string> = {};
   for (const entry of hashData) {
@@ -141,9 +134,7 @@ export function hashDataToRecord(
  * Extract jobId values from stream entries returned by xrange/xreadgroup.
  * The entries object maps entryId -> [field, value][] pairs.
  */
-export function extractJobIdsFromStreamEntries(
-  entries: Record<string, [unknown, unknown][]>,
-): string[] {
+export function extractJobIdsFromStreamEntries(entries: Record<string, [unknown, unknown][]>): string[] {
   const jobIds: string[] = [];
   for (const fieldPairs of Object.values(entries)) {
     for (const [field, value] of fieldPairs) {

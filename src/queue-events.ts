@@ -20,9 +20,9 @@ export class QueueEvents extends EventEmitter {
     super();
     if ((opts as any).client) {
       throw new GlideMQError(
-        'QueueEvents does not accept an injected `client`. '
-        + 'It uses blocking XREAD which requires a dedicated connection. '
-        + 'Provide `connection` instead.',
+        'QueueEvents does not accept an injected `client`. ' +
+          'It uses blocking XREAD which requires a dedicated connection. ' +
+          'Provide `connection` instead.',
       );
     }
     this.name = name;
@@ -43,11 +43,7 @@ export class QueueEvents extends EventEmitter {
 
   private async init(): Promise<void> {
     this.client = await createBlockingClient(this.opts.connection);
-    await ensureFunctionLibrary(
-      this.client,
-      undefined,
-      this.opts.connection.clusterMode ?? false,
-    );
+    await ensureFunctionLibrary(this.client, undefined, this.opts.connection.clusterMode ?? false);
     this.running = true;
     this.pollLoop();
   }
@@ -72,8 +68,12 @@ export class QueueEvents extends EventEmitter {
   private reconnectCtx = {
     isActive: () => this.running && !this.closing,
     getBackoff: () => this.reconnectBackoff,
-    setBackoff: (ms: number) => { this.reconnectBackoff = ms; },
-    onError: (err: unknown) => { this.emit('error', err); },
+    setBackoff: (ms: number) => {
+      this.reconnectBackoff = ms;
+    },
+    onError: (err: unknown) => {
+      this.emit('error', err);
+    },
   };
 
   /**
@@ -84,16 +84,16 @@ export class QueueEvents extends EventEmitter {
       this.reconnectCtx,
       async () => {
         if (this.client) {
-          try { this.client.close(); } catch { /* ignore */ }
+          try {
+            this.client.close();
+          } catch {
+            /* ignore */
+          }
           this.client = null;
         }
 
         this.client = await createBlockingClient(this.opts.connection);
-        await ensureFunctionLibrary(
-          this.client,
-          undefined,
-          this.opts.connection.clusterMode ?? false,
-        );
+        await ensureFunctionLibrary(this.client, undefined, this.opts.connection.clusterMode ?? false);
       },
       () => this.pollLoop(),
     );

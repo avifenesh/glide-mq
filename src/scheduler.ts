@@ -1,6 +1,6 @@
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { Client, SchedulerEntry } from './types';
-import { CONSUMER_GROUP, promote, promoteRateLimited, reclaimStalled, addJob, addJobArgs } from './functions/index';
+import { CONSUMER_GROUP, promote, promoteRateLimited, reclaimStalled, addJobArgs } from './functions/index';
 import type { buildKeys } from './utils';
 import { nextCronOccurrence } from './utils';
 import { isClusterClient } from './connection';
@@ -36,11 +36,7 @@ export class Scheduler {
   private stalledTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
-  constructor(
-    client: Client,
-    queueKeys: ReturnType<typeof buildKeys>,
-    opts: SchedulerOptions = {},
-  ) {
+  constructor(client: Client, queueKeys: ReturnType<typeof buildKeys>, opts: SchedulerOptions = {}) {
     this.client = client;
     this.queueKeys = queueKeys;
     this.promotionInterval = opts.promotionInterval ?? 5000;
@@ -83,7 +79,9 @@ export class Scheduler {
     this.promoteDelayed()
       .then(() => this.promoteRateLimitedGroups())
       .then(() => this.runSchedulers())
-      .then(() => { this.onPromotionTick?.(); })
+      .then(() => {
+        this.onPromotionTick?.();
+      })
       .catch(() => {
         // Scheduler has no EventEmitter - errors are transient connection issues
         // that self-heal on the next interval tick. Worker reconnect handles the rest.
@@ -165,10 +163,7 @@ export class Scheduler {
       const priority = template.opts?.priority ?? 0;
       const maxAttempts = template.opts?.attempts ?? 0;
 
-      pendingJobs.push(addJobArgs(
-        this.queueKeys, jobName, jobData, jobOpts, now,
-        0, priority, '', maxAttempts,
-      ));
+      pendingJobs.push(addJobArgs(this.queueKeys, jobName, jobData, jobOpts, now, 0, priority, '', maxAttempts));
 
       // Compute next run
       let nextRun: number;
@@ -192,8 +187,7 @@ export class Scheduler {
     if (fired === 0) return 0;
 
     // Single-job fast path: avoid Batch overhead
-    if (pendingJobs.length === 1 && pendingDeletions.length === 0
-        && Object.keys(pendingUpdates).length <= 1) {
+    if (pendingJobs.length === 1 && pendingDeletions.length === 0 && Object.keys(pendingUpdates).length <= 1) {
       const { keys, args } = pendingJobs[0];
       await this.client.fcall('glidemq_addJob', keys, args);
       if (Object.keys(pendingUpdates).length === 1) {
@@ -203,8 +197,7 @@ export class Scheduler {
     }
 
     // Batch all operations into a single pipeline RTT
-    const batch = isClusterClient(this.client)
-      ? new ClusterBatch(false) : new Batch(false);
+    const batch = isClusterClient(this.client) ? new ClusterBatch(false) : new Batch(false);
 
     for (const { keys, args } of pendingJobs) {
       batch.fcall('glidemq_addJob', keys, args);

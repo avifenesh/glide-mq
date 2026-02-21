@@ -18,9 +18,7 @@ export type GracefulShutdownHandle = Promise<void> & {
  *   // ... later, on signal or manually:
  *   await shutdown;
  */
-export function gracefulShutdown(
-  components: Closeable[],
-): GracefulShutdownHandle {
+export function gracefulShutdown(components: Closeable[]): GracefulShutdownHandle {
   let done = false;
   let shutdownPromise: Promise<void> | null = null;
 

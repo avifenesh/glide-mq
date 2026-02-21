@@ -3,7 +3,13 @@ import { randomBytes } from 'crypto';
 import type { WorkerOptions, Processor, Client } from './types';
 import { Job } from './job';
 import { buildKeys, calculateBackoff, keyPrefix, nextReconnectDelay, reconnectWithBackoff } from './utils';
-import { createClient, createBlockingClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, createConsumerGroup } from './connection';
+import {
+  createClient,
+  createBlockingClient,
+  ensureFunctionLibrary,
+  ensureFunctionLibraryOnce,
+  createConsumerGroup,
+} from './connection';
 import { GlideMQError, ConnectionError } from './errors';
 import {
   CONSUMER_GROUP,
@@ -69,8 +75,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
     if (!opts.connection && injectedClient) {
       throw new GlideMQError(
-        'Worker requires `connection` even when a shared client is provided, '
-        + 'because the blocking client for XREADGROUP must be auto-created.',
+        'Worker requires `connection` even when a shared client is provided, ' +
+          'because the blocking client for XREADGROUP must be auto-created.',
       );
     }
 
@@ -116,11 +122,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     this.xreadStreams = { [this.queueKeys.stream]: '>' };
 
     // Create consumer group on the stream (idempotent)
-    await createConsumerGroup(
-      this.commandClient,
-      this.queueKeys.stream,
-      CONSUMER_GROUP,
-    );
+    await createConsumerGroup(this.commandClient, this.queueKeys.stream, CONSUMER_GROUP);
 
     // Check if global concurrency / rate limit are configured (refreshed on scheduler tick)
     await this.refreshMetaFlags();
@@ -164,8 +166,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private reconnectCtx = {
     isActive: () => this.running && !this.closing,
     getBackoff: () => this.reconnectBackoff,
-    setBackoff: (ms: number) => { this.reconnectBackoff = ms; },
-    onError: (err: unknown) => { this.emit('error', err); },
+    setBackoff: (ms: number) => {
+      this.reconnectBackoff = ms;
+    },
+    onError: (err: unknown) => {
+      this.emit('error', err);
+    },
   };
 
   /**
@@ -177,37 +183,38 @@ export class Worker<D = any, R = any> extends EventEmitter {
       async () => {
         // Close stale blocking client (always owned)
         if (this.blockingClient) {
-          try { this.blockingClient.close(); } catch { /* ignore */ }
+          try {
+            this.blockingClient.close();
+          } catch {
+            /* ignore */
+          }
           this.blockingClient = null;
         }
 
         if (this.commandClientOwned) {
           // Close and recreate owned command client
           if (this.commandClient) {
-            try { this.commandClient.close(); } catch { /* ignore */ }
+            try {
+              this.commandClient.close();
+            } catch {
+              /* ignore */
+            }
             this.commandClient = null;
           }
           const client = await createClient(this.opts.connection!);
-          await ensureFunctionLibrary(
-            client,
-            undefined,
-            this.opts.connection!.clusterMode ?? false,
-          );
+          await ensureFunctionLibrary(client, undefined, this.opts.connection!.clusterMode ?? false);
           this.commandClient = client;
         } else {
           // Injected command client - verify liveness and re-ensure library
           try {
             await this.commandClient!.ping();
             // Re-ensure function library in case of failover/topology change
-            await ensureFunctionLibrary(
-              this.commandClient!,
-              undefined,
-              this.opts.connection!.clusterMode ?? false,
-            );
+            await ensureFunctionLibrary(this.commandClient!, undefined, this.opts.connection!.clusterMode ?? false);
           } catch (err) {
-            this.emit('error', new ConnectionError(
-              'Shared command client is unreachable. The client owner must handle reconnection.',
-            ));
+            this.emit(
+              'error',
+              new ConnectionError('Shared command client is unreachable. The client owner must handle reconnection.'),
+            );
             throw err;
           }
         }
@@ -215,11 +222,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
         this.blockingClient = await createBlockingClient(this.opts.connection!);
 
         // Re-ensure consumer group
-        await createConsumerGroup(
-          this.commandClient!,
-          this.queueKeys.stream,
-          CONSUMER_GROUP,
-        );
+        await createConsumerGroup(this.commandClient!, this.queueKeys.stream, CONSUMER_GROUP);
 
         // Restart scheduler with the (possibly same) client
         if (this.scheduler) {
@@ -243,6 +246,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     if (this.prefetch - this.activeCount > 0) return;
 
     return new Promise<void>((resolve) => {
+      // eslint-disable-next-line prefer-const
       let timer: ReturnType<typeof setTimeout>;
 
       const done = () => {
@@ -274,11 +278,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     // Only check global concurrency if configured. Skipping this FCALL entirely
     // saves one Valkey round trip per poll cycle (~0.2ms).
     if (this.globalConcurrencyEnabled) {
-      const gcRemaining = await checkConcurrency(
-        this.commandClient,
-        this.queueKeys,
-        CONSUMER_GROUP,
-      );
+      const gcRemaining = await checkConcurrency(this.commandClient, this.queueKeys, CONSUMER_GROUP);
       if (gcRemaining === 0) {
         await new Promise<void>((resolve) => setTimeout(resolve, 20));
         return;
@@ -290,12 +290,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
     // STREAMS {streamKey} >
-    const result = await this.blockingClient.xreadgroup(
-      CONSUMER_GROUP,
-      this.consumerId,
-      this.xreadStreams,
-      { count: fetchCount, block: this.blockTimeout },
-    );
+    const result = await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
+      count: fetchCount,
+      block: this.blockTimeout,
+    });
 
     if (!result) {
       // null means no messages (timeout expired) - just loop again
@@ -361,20 +359,40 @@ export class Worker<D = any, R = any> extends EventEmitter {
    * Returns true if the result was handled (caller should return), false if the hash is valid.
    */
   private async handleMoveToActiveEdgeCase(
-    moveResult: Record<string, string> | 'REVOKED' | 'GROUP_FULL' | 'GROUP_RATE_LIMITED' | 'GROUP_TOKEN_LIMITED' | 'ERR:COST_EXCEEDS_CAPACITY' | null,
+    moveResult:
+      | Record<string, string>
+      | 'REVOKED'
+      | 'GROUP_FULL'
+      | 'GROUP_RATE_LIMITED'
+      | 'GROUP_TOKEN_LIMITED'
+      | 'ERR:COST_EXCEEDS_CAPACITY'
+      | null,
     jobId: string,
     entryId: string,
   ): Promise<boolean> {
     if (!this.commandClient) return true;
     if (moveResult === null) {
-      try { await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', Date.now(), CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
+      try {
+        await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', Date.now(), CONSUMER_GROUP);
+      } catch (err) {
+        this.emit('error', err);
+      }
       return true;
     }
     if (moveResult === 'REVOKED') {
-      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
+      try {
+        await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP);
+      } catch (err) {
+        this.emit('error', err);
+      }
       return true;
     }
-    if (moveResult === 'GROUP_FULL' || moveResult === 'GROUP_RATE_LIMITED' || moveResult === 'GROUP_TOKEN_LIMITED' || moveResult === 'ERR:COST_EXCEEDS_CAPACITY') {
+    if (
+      moveResult === 'GROUP_FULL' ||
+      moveResult === 'GROUP_RATE_LIMITED' ||
+      moveResult === 'GROUP_TOKEN_LIMITED' ||
+      moveResult === 'ERR:COST_EXCEEDS_CAPACITY'
+    ) {
       return true;
     }
     return false;
@@ -384,10 +402,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
    * Run the processor with optional timeout, AbortController, and heartbeat.
    * Returns { result, error } - exactly one will be set.
    */
-  private async runProcessor(
-    job: Job<D, R>,
-    jobId: string,
-  ): Promise<{ result?: R; error?: Error; aborted: boolean }> {
+  private async runProcessor(job: Job<D, R>, jobId: string): Promise<{ result?: R; error?: Error; aborted: boolean }> {
     if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
 
     const ac = new AbortController();
@@ -422,12 +437,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
    * Handle a failed job: applies rate limiting, backoff, DLQ, and emits 'failed'.
    * Returns true when the job reached a terminal failed state, false when it will retry.
    */
-  private async handleJobFailure(
-    job: Job<D, R>,
-    jobId: string,
-    entryId: string,
-    error: Error,
-  ): Promise<boolean> {
+  private async handleJobFailure(job: Job<D, R>, jobId: string, entryId: string, error: Error): Promise<boolean> {
     if (!this.commandClient) {
       job.failedReason = error.message;
       this.emit('failed', job, error);
@@ -437,7 +447,21 @@ export class Worker<D = any, R = any> extends EventEmitter {
     if (error instanceof Worker.RateLimitError) {
       const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
       this.rateLimitUntil = Date.now() + delayMs;
-      try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'rate limited', Date.now(), job.attemptsMade + 2, delayMs, CONSUMER_GROUP); } catch (e) { this.emit('error', e); }
+      try {
+        await failJob(
+          this.commandClient,
+          this.queueKeys,
+          jobId,
+          entryId,
+          'rate limited',
+          Date.now(),
+          job.attemptsMade + 2,
+          delayMs,
+          CONSUMER_GROUP,
+        );
+      } catch (e) {
+        this.emit('error', e);
+      }
       return false;
     }
 
@@ -447,12 +471,25 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
       backoffDelay = strategyFn
         ? strategyFn(job.attemptsMade + 1, error)
-        : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, job.attemptsMade + 1, job.opts.backoff.jitter);
+        : calculateBackoff(
+            job.opts.backoff.type,
+            job.opts.backoff.delay,
+            job.attemptsMade + 1,
+            job.opts.backoff.jitter,
+          );
     }
 
     const failResult = await failJob(
-      this.commandClient, this.queueKeys, jobId, entryId, error.message,
-      Date.now(), maxAttempts, backoffDelay, CONSUMER_GROUP, job.opts.removeOnFail,
+      this.commandClient,
+      this.queueKeys,
+      jobId,
+      entryId,
+      error.message,
+      Date.now(),
+      maxAttempts,
+      backoffDelay,
+      CONSUMER_GROUP,
+      job.opts.removeOnFail,
     );
 
     if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
@@ -525,7 +562,15 @@ export class Worker<D = any, R = any> extends EventEmitter {
     while (this.running && !this.closing && this.commandClient) {
       // Activate the job (skip if we already have a pre-fetched hash from completeAndFetchNext)
       if (!currentHash) {
-        const moveResult = await moveToActive(this.commandClient, this.queueKeys, currentJobId, Date.now(), this.queueKeys.stream, currentEntryId, CONSUMER_GROUP);
+        const moveResult = await moveToActive(
+          this.commandClient,
+          this.queueKeys,
+          currentJobId,
+          Date.now(),
+          this.queueKeys.stream,
+          currentEntryId,
+          CONSUMER_GROUP,
+        );
         if (await this.handleMoveToActiveEdgeCase(moveResult, currentJobId, currentEntryId)) return;
         currentHash = moveResult as Record<string, string>;
       }
@@ -542,12 +587,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
 
       if (processError || aborted) {
-        await this.handleJobFailure(
-          job,
-          currentJobId,
-          currentEntryId,
-          aborted ? new Error('revoked') : processError!,
-        );
+        await this.handleJobFailure(job, currentJobId, currentEntryId, aborted ? new Error('revoked') : processError!);
         return;
       }
 
@@ -557,9 +597,16 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const parentInfo = this.buildParentInfo(job, currentJobId);
 
       const fetchResult = await completeAndFetchNext(
-        this.commandClient, this.queueKeys, currentJobId, currentEntryId,
-        returnvalue, Date.now(), CONSUMER_GROUP, this.consumerId,
-        job.opts.removeOnComplete, parentInfo,
+        this.commandClient,
+        this.queueKeys,
+        currentJobId,
+        currentEntryId,
+        returnvalue,
+        Date.now(),
+        CONSUMER_GROUP,
+        this.consumerId,
+        job.opts.removeOnComplete,
+        parentInfo,
       );
 
       job.returnvalue = processResult;
@@ -571,7 +618,21 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
       if (fetchResult.next === 'REVOKED') {
         if (fetchResult.nextJobId && fetchResult.nextEntryId) {
-          try { await failJob(this.commandClient, this.queueKeys, fetchResult.nextJobId, fetchResult.nextEntryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
+          try {
+            await failJob(
+              this.commandClient,
+              this.queueKeys,
+              fetchResult.nextJobId,
+              fetchResult.nextEntryId,
+              'revoked',
+              Date.now(),
+              0,
+              0,
+              CONSUMER_GROUP,
+            );
+          } catch (err) {
+            this.emit('error', err);
+          }
         }
         return;
       }
@@ -633,18 +694,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
         failedReason: error.message,
         attemptsMade: job.attemptsMade,
       });
-      await addJob(
-        this.commandClient,
-        dlqKeys,
-        job.name,
-        dlqData,
-        JSON.stringify({}),
-        Date.now(),
-        0,
-        0,
-        '',
-        0,
-      );
+      await addJob(this.commandClient, dlqKeys, job.name, dlqData, JSON.stringify({}), Date.now(), 0, 0, '', 0);
     } catch (dlqErr) {
       this.emit('error', dlqErr);
     }
@@ -680,15 +730,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
 
     // Server-side sliding window check
-    // eslint-disable-next-line no-constant-condition
     while (true) {
-      const delayMs = await rateLimitFn(
-        this.commandClient,
-        this.queueKeys,
-        max,
-        duration,
-        Date.now(),
-      );
+      const delayMs = await rateLimitFn(this.commandClient, this.queueKeys, max, duration, Date.now());
 
       if (delayMs <= 0) break;
 
@@ -702,7 +745,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
     if (!this.commandClient) return;
     try {
       // Read only the 3 specific fields we need - avoids O(N) on orderdone:* fields
-      const vals = await this.commandClient.hmget(this.queueKeys.meta, ['globalConcurrency', 'rateLimitMax', 'rateLimitDuration']);
+      const vals = await this.commandClient.hmget(this.queueKeys.meta, [
+        'globalConcurrency',
+        'rateLimitMax',
+        'rateLimitDuration',
+      ]);
       const gcVal = vals?.[0] != null ? String(vals[0]) : null;
       const rlMax = vals?.[1] != null ? String(vals[1]) : null;
       const rlDur = vals?.[2] != null ? String(vals[2]) : null;
@@ -765,7 +812,6 @@ export class Worker<D = any, R = any> extends EventEmitter {
     await this.initPromise;
 
     // Poll until everything is empty
-    // eslint-disable-next-line no-constant-condition
     while (true) {
       if (!this.commandClient) break;
 

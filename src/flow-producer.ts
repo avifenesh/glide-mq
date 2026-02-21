@@ -32,19 +32,14 @@ export class FlowProducer {
     if (!this.client) {
       if (this.opts.client) {
         const injected = this.opts.client;
-        const clusterMode = this.opts.connection?.clusterMode
-          ?? isClusterClient(injected);
+        const clusterMode = this.opts.connection?.clusterMode ?? isClusterClient(injected);
         await ensureFunctionLibraryOnce(injected, LIBRARY_SOURCE, clusterMode);
         this.client = injected;
         this.clientOwned = false;
       } else {
         this.client = await createClient(this.opts.connection!);
         this.clientOwned = true;
-        await ensureFunctionLibrary(
-          this.client,
-          LIBRARY_SOURCE,
-          this.opts.connection!.clusterMode ?? false,
-        );
+        await ensureFunctionLibrary(this.client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
       }
     }
     return this.client;
@@ -98,12 +93,9 @@ export class FlowProducer {
       const opts = flow.opts ?? {};
       const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
       const groupRateDuration = opts.ordering?.rateLimit?.duration ?? 0;
-      const tbCapacity = opts.ordering?.tokenBucket
-        ? Math.round(opts.ordering.tokenBucket.capacity * 1000) : 0;
-      const tbRefillRate = opts.ordering?.tokenBucket
-        ? Math.round(opts.ordering.tokenBucket.refillRate * 1000) : 0;
-      const jobCost = opts.cost != null
-        ? Math.round(opts.cost * 1000) : 0;
+      const tbCapacity = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.capacity * 1000) : 0;
+      const tbRefillRate = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.refillRate * 1000) : 0;
+      const jobCost = opts.cost != null ? Math.round(opts.cost * 1000) : 0;
       let groupConcurrency = opts.ordering?.concurrency ?? 0;
       // Force group path when rate limit or token bucket is set
       if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
@@ -131,14 +123,7 @@ export class FlowProducer {
       if (String(jobId) === 'ERR:COST_EXCEEDS_CAPACITY') {
         throw new Error('Job cost exceeds token bucket capacity');
       }
-      const job = new Job(
-        client,
-        parentKeys,
-        String(jobId),
-        flow.name,
-        flow.data,
-        opts,
-      );
+      const job = new Job(client, parentKeys, String(jobId), flow.name, flow.data, opts);
       job.timestamp = timestamp;
       return { job };
     }
@@ -233,14 +218,7 @@ export class FlowProducer {
       }
     }
 
-    const parentJob = new Job(
-      client,
-      parentKeys,
-      parentId,
-      flow.name,
-      flow.data,
-      parentOpts,
-    );
+    const parentJob = new Job(client, parentKeys, parentId, flow.name, flow.data, parentOpts);
     parentJob.timestamp = timestamp;
 
     return { job: parentJob, children: childNodes };
