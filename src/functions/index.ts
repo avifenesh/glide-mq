@@ -806,6 +806,11 @@ redis.register_function('glidemq_dedup', function(keys, args)
       if curRateDuration ~= groupRateDuration then
         redis.call('HSET', groupHashKey, 'rateDuration', tostring(groupRateDuration))
       end
+    else
+      local oldRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
+      if oldRateMax > 0 then
+        redis.call('HDEL', groupHashKey, 'rateMax', 'rateDuration', 'rateWindowStart', 'rateCount')
+      end
     end
   end
   local hashFields = {
