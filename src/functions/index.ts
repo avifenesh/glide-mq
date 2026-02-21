@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '16';
+export const LIBRARY_VERSION = '18';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -60,19 +60,62 @@ local function markOrderingDone(jobKey, jobId)
   end
 end
 
-local function releaseGroupSlotAndPromote(jobKey, jobId)
+local function releaseGroupSlotAndPromote(jobKey, jobId, now)
   local gk = redis.call('HGET', jobKey, 'groupKey')
   if not gk or gk == '' then return end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   local groupHashKey = prefix .. 'group:' .. gk
-  local cur = tonumber(redis.call('HGET', groupHashKey, 'active')) or 0
+  -- Load all group fields in one call
+  local gFields = redis.call('HGETALL', groupHashKey)
+  local g = {}
+  for gf = 1, #gFields, 2 do g[gFields[gf]] = gFields[gf + 1] end
+  local cur = tonumber(g.active) or 0
+  local newActive = (cur > 0) and (cur - 1) or 0
   if cur > 0 then
-    redis.call('HSET', groupHashKey, 'active', tostring(cur - 1))
+    redis.call('HSET', groupHashKey, 'active', tostring(newActive))
   end
   local waitListKey = prefix .. 'groupq:' .. gk
-  local nextJobId = redis.call('LPOP', waitListKey)
-  if nextJobId then
-    local streamKey = prefix .. 'stream'
+  local waitLen = redis.call('LLEN', waitListKey)
+  if waitLen == 0 then return end
+  -- Concurrency gate: if still at or above max after decrement, do not promote
+  local maxConc = tonumber(g.maxConcurrency) or 0
+  if maxConc > 0 and newActive >= maxConc then return end
+  -- Rate limit gate (skip if now is nil or 0 for safe fallback)
+  -- Only blocks promotion; does NOT increment rateCount. moveToActive handles counting.
+  local rateMax = tonumber(g.rateMax) or 0
+  local rateRemaining = 0
+  local ts = tonumber(now) or 0
+  if ts > 0 and rateMax > 0 then
+    local rateDuration = tonumber(g.rateDuration) or 0
+    if rateDuration > 0 then
+      local rateWindowStart = tonumber(g.rateWindowStart) or 0
+      local rateCount = tonumber(g.rateCount) or 0
+      if ts - rateWindowStart < rateDuration then
+        if rateCount >= rateMax then
+          -- Window active and at capacity: do not promote, register for scheduler
+          local rateLimitedKey = prefix .. 'ratelimited'
+          redis.call('ZADD', rateLimitedKey, rateWindowStart + rateDuration, gk)
+          return
+        end
+        rateRemaining = rateMax - rateCount
+      end
+    end
+  end
+  -- Calculate how many slots are available for promotion
+  local available = 1
+  if maxConc > 0 then
+    available = maxConc - newActive
+  else
+    available = math.min(waitLen, 1000)
+  end
+  -- Cap by rate limit remaining if a window is active
+  if rateRemaining > 0 then
+    available = math.min(available, rateRemaining)
+  end
+  local streamKey = prefix .. 'stream'
+  for p = 1, available do
+    local nextJobId = redis.call('LPOP', waitListKey)
+    if not nextJobId then break end
     redis.call('XADD', streamKey, '*', 'jobId', nextJobId)
     local nextJobKey = prefix .. 'job:' .. nextJobId
     redis.call('HSET', nextJobKey, 'state', 'waiting')
@@ -117,6 +160,27 @@ local function extractGroupConcurrencyFromOpts(optsJson)
   return tonumber(conc) or 0
 end
 
+local function extractGroupRateLimitFromOpts(optsJson)
+  if not optsJson or optsJson == '' then
+    return 0, 0
+  end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then
+    return 0, 0
+  end
+  local ordering = decoded['ordering']
+  if type(ordering) ~= 'table' then
+    return 0, 0
+  end
+  local rl = ordering['rateLimit']
+  if type(rl) ~= 'table' then
+    return 0, 0
+  end
+  local max = tonumber(rl['max']) or 0
+  local duration = tonumber(rl['duration']) or 0
+  return max, duration
+end
+
 redis.register_function('glidemq_version', function(keys, args)
   return '${LIBRARY_VERSION}'
 end)
@@ -136,11 +200,13 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local maxAttempts = tonumber(args[8]) or 0
   local orderingKey = args[9] or ''
   local groupConcurrency = tonumber(args[10]) or 0
+  local groupRateMax = tonumber(args[11]) or 0
+  local groupRateDuration = tonumber(args[12]) or 0
   local jobId = redis.call('INCR', idKey)
   local jobIdStr = tostring(jobId)
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local jobKey = prefix .. 'job:' .. jobIdStr
-  local useGroupConcurrency = (orderingKey ~= '' and groupConcurrency > 1)
+  local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0))
   local orderingSeq = 0
   if orderingKey ~= '' and not useGroupConcurrency then
     local orderingMetaKey = prefix .. 'ordering'
@@ -151,6 +217,27 @@ redis.register_function('glidemq_addJob', function(keys, args)
     local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
     if curMax ~= groupConcurrency then
       redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
+    end
+    -- When rate limit forces group path but concurrency is 0 or 1, ensure maxConcurrency >= 1
+    if curMax == 0 and groupConcurrency <= 1 then
+      redis.call('HSET', groupHashKey, 'maxConcurrency', '1')
+    end
+    -- Upsert rate limit fields on group hash
+    if groupRateMax > 0 then
+      local curRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
+      if curRateMax ~= groupRateMax then
+        redis.call('HSET', groupHashKey, 'rateMax', tostring(groupRateMax))
+      end
+      local curRateDuration = tonumber(redis.call('HGET', groupHashKey, 'rateDuration')) or 0
+      if curRateDuration ~= groupRateDuration then
+        redis.call('HSET', groupHashKey, 'rateDuration', tostring(groupRateDuration))
+      end
+    else
+      -- Clear stale rate limit fields if group was previously rate-limited
+      local oldRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
+      if oldRateMax > 0 then
+        redis.call('HDEL', groupHashKey, 'rateMax', 'rateDuration', 'rateWindowStart', 'rateCount')
+      end
     end
   end
   local hashFields = {
@@ -264,7 +351,7 @@ redis.register_function('glidemq_complete', function(keys, args)
     'finishedOn', tostring(timestamp)
   )
   markOrderingDone(jobKey, jobId)
-  releaseGroupSlotAndPromote(jobKey, jobId)
+  releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   if removeMode == 'true' then
@@ -346,7 +433,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     'finishedOn', tostring(timestamp)
   )
   markOrderingDone(jobKey, jobId)
-  releaseGroupSlotAndPromote(jobKey, jobId)
+  releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
 
@@ -417,8 +504,14 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local nextGroupKey = redis.call('HGET', nextJobKey, 'groupKey')
   if nextGroupKey and nextGroupKey ~= '' then
     local nextGroupHashKey = prefix .. 'group:' .. nextGroupKey
-    local nextMaxConc = tonumber(redis.call('HGET', nextGroupHashKey, 'maxConcurrency')) or 0
-    local nextActive = tonumber(redis.call('HGET', nextGroupHashKey, 'active')) or 0
+    -- Load all group fields in one call
+    local nGrpFields = redis.call('HGETALL', nextGroupHashKey)
+    local nGrp = {}
+    for nf = 1, #nGrpFields, 2 do nGrp[nGrpFields[nf]] = nGrpFields[nf + 1] end
+    local nextMaxConc = tonumber(nGrp.maxConcurrency) or 0
+    local nextActive = tonumber(nGrp.active) or 0
+    local nextRateMax = tonumber(nGrp.rateMax) or 0
+    -- Concurrency gate first (avoids burning rate slots on parked jobs)
     if nextMaxConc > 0 and nextActive >= nextMaxConc then
       redis.call('XACK', streamKey, group, nextEntryId)
       redis.call('XDEL', streamKey, nextEntryId)
@@ -426,6 +519,31 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       redis.call('RPUSH', nextWaitListKey, nextJobId)
       redis.call('HSET', nextJobKey, 'state', 'group-waiting')
       return cjson.encode({completed = jobId, next = false})
+    end
+    -- Rate limit gate (only after concurrency passes)
+    if nextRateMax > 0 then
+      local nextRateDuration = tonumber(nGrp.rateDuration) or 0
+      local nextRateWindowStart = tonumber(nGrp.rateWindowStart) or 0
+      local nextRateCount = tonumber(nGrp.rateCount) or 0
+      if nextRateDuration > 0 and timestamp - nextRateWindowStart < nextRateDuration and nextRateCount >= nextRateMax then
+        -- Rate limited: park the next job
+        redis.call('XACK', streamKey, group, nextEntryId)
+        redis.call('XDEL', streamKey, nextEntryId)
+        local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
+        redis.call('RPUSH', nextWaitListKey, nextJobId)
+        redis.call('HSET', nextJobKey, 'state', 'group-waiting')
+        local rateLimitedKey = prefix .. 'ratelimited'
+        redis.call('ZADD', rateLimitedKey, nextRateWindowStart + nextRateDuration, nextGroupKey)
+        return cjson.encode({completed = jobId, next = false})
+      end
+      -- Window expired or under limit: increment count
+      if nextRateDuration > 0 then
+        if timestamp - nextRateWindowStart >= nextRateDuration then
+          redis.call('HSET', nextGroupHashKey, 'rateWindowStart', tostring(timestamp), 'rateCount', '1')
+        else
+          redis.call('HINCRBY', nextGroupHashKey, 'rateCount', 1)
+        end
+      end
     end
     redis.call('HINCRBY', nextGroupHashKey, 'active', 1)
   end
@@ -463,7 +581,7 @@ redis.register_function('glidemq_fail', function(keys, args)
       'failedReason', failedReason,
       'processedOn', tostring(timestamp)
     )
-    releaseGroupSlotAndPromote(jobKey, jobId)
+    releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
     emitEvent(eventsKey, 'retrying', jobId, {
       'failedReason', failedReason,
       'attemptsMade', tostring(attemptsMade),
@@ -479,7 +597,7 @@ redis.register_function('glidemq_fail', function(keys, args)
       'processedOn', tostring(timestamp)
     )
     markOrderingDone(jobKey, jobId)
-    releaseGroupSlotAndPromote(jobKey, jobId)
+    releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     if removeMode == 'true' then
@@ -567,7 +685,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
           'finishedOn', tostring(timestamp)
         )
         markOrderingDone(jobKey, jobId)
-        releaseGroupSlotAndPromote(jobKey, jobId)
+        releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
         emitEvent(eventsKey, 'failed', jobId, {
           'failedReason', 'job stalled more than maxStalledCount'
         })
@@ -617,6 +735,8 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local maxAttempts = tonumber(args[11]) or 0
   local orderingKey = args[12] or ''
   local groupConcurrency = tonumber(args[13]) or 0
+  local groupRateMax = tonumber(args[14]) or 0
+  local groupRateDuration = tonumber(args[15]) or 0
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local existing = redis.call('HGET', dedupKey, dedupId)
   if mode == 'simple' then
@@ -662,7 +782,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local jobId = redis.call('INCR', idKey)
   local jobIdStr = tostring(jobId)
   local jobKey = prefix .. 'job:' .. jobIdStr
-  local useGroupConcurrency = (orderingKey ~= '' and groupConcurrency > 1)
+  local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0))
   local orderingSeq = 0
   if orderingKey ~= '' and not useGroupConcurrency then
     local orderingMetaKey = prefix .. 'ordering'
@@ -673,6 +793,24 @@ redis.register_function('glidemq_dedup', function(keys, args)
     local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
     if curMax ~= groupConcurrency then
       redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
+    end
+    if curMax == 0 and groupConcurrency <= 1 then
+      redis.call('HSET', groupHashKey, 'maxConcurrency', '1')
+    end
+    if groupRateMax > 0 then
+      local curRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
+      if curRateMax ~= groupRateMax then
+        redis.call('HSET', groupHashKey, 'rateMax', tostring(groupRateMax))
+      end
+      local curRateDuration = tonumber(redis.call('HGET', groupHashKey, 'rateDuration')) or 0
+      if curRateDuration ~= groupRateDuration then
+        redis.call('HSET', groupHashKey, 'rateDuration', tostring(groupRateDuration))
+      end
+    else
+      local oldRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
+      if oldRateMax > 0 then
+        redis.call('HDEL', groupHashKey, 'rateMax', 'rateDuration', 'rateWindowStart', 'rateCount')
+      end
     end
   end
   local hashFields = {
@@ -727,6 +865,12 @@ redis.register_function('glidemq_rateLimit', function(keys, args)
   local maxPerWindow = tonumber(args[1])
   local windowDuration = tonumber(args[2])
   local now = tonumber(args[3])
+  -- Fallback: read rate limit config from meta if not provided inline
+  if maxPerWindow <= 0 then
+    maxPerWindow = tonumber(redis.call('HGET', metaKey, 'rateLimitMax')) or 0
+    windowDuration = tonumber(redis.call('HGET', metaKey, 'rateLimitDuration')) or 0
+    if maxPerWindow <= 0 then return 0 end
+  end
   local windowStart = tonumber(redis.call('HGET', rateKey, 'windowStart')) or 0
   local count = tonumber(redis.call('HGET', rateKey, 'count')) or 0
   if now - windowStart >= windowDuration then
@@ -739,6 +883,42 @@ redis.register_function('glidemq_rateLimit', function(keys, args)
   end
   redis.call('HSET', rateKey, 'count', tostring(count + 1))
   return 0
+end)
+
+redis.register_function('glidemq_promoteRateLimited', function(keys, args)
+  local rateLimitedKey = keys[1]
+  local streamKey = keys[2]
+  local now = tonumber(args[1])
+  -- Derive prefix from the server-validated key instead of caller-supplied arg
+  local prefix = string.sub(rateLimitedKey, 1, #rateLimitedKey - #'ratelimited')
+  local expired = redis.call('ZRANGEBYSCORE', rateLimitedKey, '0', string.format('%.0f', now), 'LIMIT', 0, 100)
+  if not expired or #expired == 0 then return 0 end
+  local promoted = 0
+  for i = 1, #expired do
+    local gk = expired[i]
+    redis.call('ZREM', rateLimitedKey, gk)
+    local groupHashKey = prefix .. 'group:' .. gk
+    local waitListKey = prefix .. 'groupq:' .. gk
+    local rateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
+    local maxConc = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
+    local active = tonumber(redis.call('HGET', groupHashKey, 'active')) or 0
+    -- Promote up to min(rateMax, available concurrency) jobs.
+    -- Do NOT touch rateCount/rateWindowStart here - moveToActive handles
+    -- window reset and counting when the worker picks up the promoted jobs.
+    local canPromote = math.min(rateMax, 1000)
+    if maxConc > 0 then
+      canPromote = math.min(canPromote, math.max(0, maxConc - active))
+    end
+    for j = 1, canPromote do
+      local nextJobId = redis.call('LPOP', waitListKey)
+      if not nextJobId then break end
+      redis.call('XADD', streamKey, '*', 'jobId', nextJobId)
+      local nextJobKey = prefix .. 'job:' .. nextJobId
+      redis.call('HSET', nextJobKey, 'state', 'waiting')
+      promoted = promoted + 1
+    end
+  end
+  return promoted
 end)
 
 redis.register_function('glidemq_checkConcurrency', function(keys, args)
@@ -777,8 +957,14 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
   if groupKey and groupKey ~= '' then
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     local groupHashKey = prefix .. 'group:' .. groupKey
-    local maxConc = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
-    local active = tonumber(redis.call('HGET', groupHashKey, 'active')) or 0
+    -- Load all group fields in one call
+    local grpFields = redis.call('HGETALL', groupHashKey)
+    local grp = {}
+    for f = 1, #grpFields, 2 do grp[grpFields[f]] = grpFields[f + 1] end
+    local maxConc = tonumber(grp.maxConcurrency) or 0
+    local active = tonumber(grp.active) or 0
+    local rateMax = tonumber(grp.rateMax) or 0
+    -- Concurrency gate (checked first to avoid burning rate slots on parked jobs)
     if maxConc > 0 and active >= maxConc then
       if streamKey ~= '' and entryId ~= '' and group ~= '' then
         redis.call('XACK', streamKey, group, entryId)
@@ -788,6 +974,34 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       redis.call('RPUSH', waitListKey, jobId)
       redis.call('HSET', jobKey, 'state', 'group-waiting')
       return 'GROUP_FULL'
+    end
+    -- Rate limit gate (only after concurrency passes)
+    if rateMax > 0 then
+      local rateDuration = tonumber(grp.rateDuration) or 0
+      local rateWindowStart = tonumber(grp.rateWindowStart) or 0
+      local rateCount = tonumber(grp.rateCount) or 0
+      local now = tonumber(timestamp)
+      if rateDuration > 0 and now - rateWindowStart < rateDuration and rateCount >= rateMax then
+        -- Rate limited: park in groupq
+        if streamKey ~= '' and entryId ~= '' and group ~= '' then
+          redis.call('XACK', streamKey, group, entryId)
+          redis.call('XDEL', streamKey, entryId)
+        end
+        local waitListKey = prefix .. 'groupq:' .. groupKey
+        redis.call('RPUSH', waitListKey, jobId)
+        redis.call('HSET', jobKey, 'state', 'group-waiting')
+        local rateLimitedKey = prefix .. 'ratelimited'
+        redis.call('ZADD', rateLimitedKey, rateWindowStart + rateDuration, groupKey)
+        return 'GROUP_RATE_LIMITED'
+      end
+      -- Window expired or under limit: increment count
+      if rateDuration > 0 then
+        if now - rateWindowStart >= rateDuration then
+          redis.call('HSET', groupHashKey, 'rateWindowStart', tostring(now), 'rateCount', '1')
+        else
+          redis.call('HINCRBY', groupHashKey, 'rateCount', 1)
+        end
+      end
     end
     redis.call('HINCRBY', groupHashKey, 'active', 1)
   end
@@ -833,8 +1047,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   local depsKey = parentPrefix .. 'deps:' .. parentJobIdStr
   local parentOrderingKey = extractOrderingKeyFromOpts(parentOpts)
   local parentGroupConc = extractGroupConcurrencyFromOpts(parentOpts)
+  local parentRateMax, parentRateDuration = extractGroupRateLimitFromOpts(parentOpts)
+  local parentUseGroup = (parentOrderingKey ~= '' and (parentGroupConc > 1 or parentRateMax > 0))
   local parentOrderingSeq = 0
-  if parentOrderingKey ~= '' and parentGroupConc <= 1 then
+  if parentOrderingKey ~= '' and not parentUseGroup then
     local parentOrderingMetaKey = parentPrefix .. 'ordering'
     parentOrderingSeq = redis.call('HINCRBY', parentOrderingMetaKey, parentOrderingKey, 1)
   end
@@ -850,12 +1066,16 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     'maxAttempts', tostring(parentMaxAttempts),
     'state', 'waiting-children'
   }
-  if parentOrderingKey ~= '' and parentGroupConc > 1 then
+  if parentUseGroup then
     parentHash[#parentHash + 1] = 'groupKey'
     parentHash[#parentHash + 1] = parentOrderingKey
     local groupHashKey = parentPrefix .. 'group:' .. parentOrderingKey
-    redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(parentGroupConc))
+    redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(parentGroupConc > 1 and parentGroupConc or 1))
     redis.call('HSETNX', groupHashKey, 'active', '0')
+    if parentRateMax > 0 then
+      redis.call('HSET', groupHashKey, 'rateMax', tostring(parentRateMax))
+      redis.call('HSET', groupHashKey, 'rateDuration', tostring(parentRateDuration))
+    end
   elseif parentOrderingKey ~= '' then
     parentHash[#parentHash + 1] = 'orderingKey'
     parentHash[#parentHash + 1] = parentOrderingKey
@@ -887,8 +1107,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     local childJobKey = childPrefix .. 'job:' .. childJobIdStr
     local childOrderingKey = extractOrderingKeyFromOpts(childOpts)
     local childGroupConc = extractGroupConcurrencyFromOpts(childOpts)
+    local childRateMax, childRateDuration = extractGroupRateLimitFromOpts(childOpts)
+    local childUseGroup = (childOrderingKey ~= '' and (childGroupConc > 1 or childRateMax > 0))
     local childOrderingSeq = 0
-    if childOrderingKey ~= '' and childGroupConc <= 1 then
+    if childOrderingKey ~= '' and not childUseGroup then
       local childOrderingMetaKey = childPrefix .. 'ordering'
       childOrderingSeq = redis.call('HINCRBY', childOrderingMetaKey, childOrderingKey, 1)
     end
@@ -905,12 +1127,16 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       'parentId', parentJobIdStr,
       'parentQueue', childParentQueue
     }
-    if childOrderingKey ~= '' and childGroupConc > 1 then
+    if childUseGroup then
       childHash[#childHash + 1] = 'groupKey'
       childHash[#childHash + 1] = childOrderingKey
       local childGroupHashKey = childPrefix .. 'group:' .. childOrderingKey
-      redis.call('HSETNX', childGroupHashKey, 'maxConcurrency', tostring(childGroupConc))
+      redis.call('HSETNX', childGroupHashKey, 'maxConcurrency', tostring(childGroupConc > 1 and childGroupConc or 1))
       redis.call('HSETNX', childGroupHashKey, 'active', '0')
+      if childRateMax > 0 then
+        redis.call('HSET', childGroupHashKey, 'rateMax', tostring(childRateMax))
+        redis.call('HSET', childGroupHashKey, 'rateDuration', tostring(childRateDuration))
+      end
     elseif childOrderingKey ~= '' then
       childHash[#childHash + 1] = 'orderingKey'
       childHash[#childHash + 1] = childOrderingKey
@@ -988,7 +1214,7 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   local groupKey = redis.call('HGET', jobKey, 'groupKey')
   if groupKey and groupKey ~= '' then
     if state == 'active' then
-      releaseGroupSlotAndPromote(jobKey, jobId)
+      releaseGroupSlotAndPromote(jobKey, jobId, 0)
     elseif state == 'group-waiting' then
       local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
       local waitListKey = prefix .. 'groupq:' .. groupKey
@@ -1130,6 +1356,8 @@ export async function addJob(
   maxAttempts: number,
   orderingKey: string = '',
   groupConcurrency: number = 0,
+  groupRateMax: number = 0,
+  groupRateDuration: number = 0,
 ): Promise<string> {
   const result = await client.fcall(
     'glidemq_addJob',
@@ -1145,6 +1373,8 @@ export async function addJob(
       maxAttempts.toString(),
       orderingKey,
       groupConcurrency.toString(),
+      groupRateMax.toString(),
+      groupRateDuration.toString(),
     ],
   );
   return result as string;
@@ -1170,6 +1400,8 @@ export async function dedup(
   maxAttempts: number,
   orderingKey: string = '',
   groupConcurrency: number = 0,
+  groupRateMax: number = 0,
+  groupRateDuration: number = 0,
 ): Promise<string> {
   const result = await client.fcall(
     'glidemq_dedup',
@@ -1188,6 +1420,8 @@ export async function dedup(
       maxAttempts.toString(),
       orderingKey,
       groupConcurrency.toString(),
+      groupRateMax.toString(),
+      groupRateDuration.toString(),
     ],
   );
   return result as string;
@@ -1478,10 +1712,12 @@ export async function checkConcurrency(
  * Reads the full job hash, checks revoked flag, sets state=active + processedOn + lastActive.
  * For group-concurrency jobs, checks if the group has capacity. If not, parks the job
  * in the group wait list and returns 'GROUP_FULL'.
+ * For rate-limited groups, parks the job and returns 'GROUP_RATE_LIMITED'.
  * Returns:
  * - null if job hash doesn't exist
  * - 'REVOKED' if the job's revoked flag is set
  * - 'GROUP_FULL' if the job's group is at max concurrency (job was parked)
+ * - 'GROUP_RATE_LIMITED' if the job's group exceeded its rate limit (job was parked)
  * - Record<string, string> with all job fields otherwise
  */
 export async function moveToActive(
@@ -1492,7 +1728,7 @@ export async function moveToActive(
   streamKey: string = '',
   entryId: string = '',
   group: string = '',
-): Promise<Record<string, string> | 'REVOKED' | 'GROUP_FULL' | null> {
+): Promise<Record<string, string> | 'REVOKED' | 'GROUP_FULL' | 'GROUP_RATE_LIMITED' | null> {
   const keys: string[] = [k.job(jobId)];
   const args: string[] = [timestamp.toString()];
   if (streamKey) {
@@ -1508,6 +1744,7 @@ export async function moveToActive(
   if (str === '' || str === 'null') return null;
   if (str === 'REVOKED') return 'REVOKED';
   if (str === 'GROUP_FULL') return 'GROUP_FULL';
+  if (str === 'GROUP_RATE_LIMITED') return 'GROUP_RATE_LIMITED';
   // Parse the cjson.encode output: [field1, value1, field2, value2, ...]
   const arr = JSON.parse(str) as string[];
   const hash: Record<string, string> = {};
@@ -1515,6 +1752,24 @@ export async function moveToActive(
     hash[String(arr[i])] = String(arr[i + 1]);
   }
   return hash;
+}
+
+/**
+ * Promote rate-limited groups whose window has expired.
+ * Moves waiting jobs from the group queue back into the stream.
+ * Returns the number of jobs promoted.
+ */
+export async function promoteRateLimited(
+  client: Client,
+  k: QueueKeys,
+  timestamp: number,
+): Promise<number> {
+  const result = await client.fcall(
+    'glidemq_promoteRateLimited',
+    [k.ratelimited, k.stream],
+    [timestamp.toString()],
+  );
+  return Number(result) || 0;
 }
 
 /**

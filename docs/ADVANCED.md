@@ -6,6 +6,7 @@
 - [Sequential Processing (Per-Key Ordering)](#sequential-processing)
 - [Deduplication](#deduplication)
 - [Global Concurrency](#global-concurrency)
+- [Global Rate Limiting](#global-rate-limiting)
 - [Job Revocation (Cooperative Cancellation)](#job-revocation)
 - [Transparent Compression](#transparent-compression)
 - [Retries and Backoff](#retries-and-backoff)
@@ -83,6 +84,26 @@ for (const job of jobs) {
 }
 ```
 
+### Per-group rate limiting
+
+Limit how many jobs per ordering key can start within a time window, independent of concurrency:
+
+```typescript
+// Max 10 jobs per 60 seconds for each tenant
+await queue.add('sync', data, {
+  ordering: {
+    key: `tenant-${tenantId}`,
+    concurrency: 3,
+    rateLimit: { max: 10, duration: 60_000 },
+  },
+});
+```
+
+When both `concurrency` and `rateLimit` are set, both gates apply - a job must have a free concurrency slot *and* remaining rate capacity to start. Jobs that hit the rate limit are parked in a scheduler-managed promotion queue and released when the window resets.
+
+- **Promotion latency**: rate-limited jobs are promoted by the scheduler loop. Worst-case latency is one `promotionInterval` (default 5 s). Lower `promotionInterval` on the worker if tighter latency is needed.
+- **Retried jobs consume rate slots** - a retried job counts against the rate window like any new job.
+
 ### Notes
 
 - Jobs with different ordering keys (or no ordering key) are processed concurrently as normal.
@@ -90,6 +111,7 @@ for (const job of jobs) {
 - `concurrency=1` (or omitted) preserves strict FIFO ordering per key.
 - `concurrency > 1` caps parallelism but does not guarantee FIFO within the group.
 - Group concurrency and global concurrency (`setGlobalConcurrency`) compose: both limits are enforced.
+- Per-group rate limiting, group concurrency, and global concurrency all compose: all applicable limits are enforced.
 - Group slots are released on job complete, fail, retry, DLQ move, and stall recovery.
 
 ---
@@ -140,6 +162,29 @@ await queue.setGlobalConcurrency(0);
 ```
 
 Workers check this limit atomically before picking up each job via the `checkConcurrency` server function.
+
+---
+
+## Global Rate Limiting
+
+Cap the total job throughput across all workers sharing a queue. The config is stored in the Valkey meta hash and picked up dynamically by workers within one scheduler tick.
+
+```typescript
+const queue = new Queue('tasks', { connection });
+
+// Max 500 jobs per minute across all workers
+await queue.setGlobalRateLimit({ max: 500, duration: 60_000 });
+
+// Read current config
+const limit = await queue.getGlobalRateLimit();
+// { max: 500, duration: 60000 } or null if not set
+
+// Remove the limit
+await queue.removeGlobalRateLimit();
+```
+
+- Global rate limit takes precedence over `WorkerOptions.limiter`. When both are set, the stricter limit wins.
+- Changes are picked up by workers within one scheduler tick (no restart needed).
 
 ---
 

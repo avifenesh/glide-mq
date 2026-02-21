@@ -1,5 +1,5 @@
 import type { Client, SchedulerEntry } from './types';
-import { CONSUMER_GROUP, promote, reclaimStalled, addJob } from './functions/index';
+import { CONSUMER_GROUP, promote, promoteRateLimited, reclaimStalled, addJob } from './functions/index';
 import type { buildKeys } from './utils';
 import { nextCronOccurrence } from './utils';
 
@@ -8,6 +8,10 @@ export interface SchedulerOptions {
   stalledInterval?: number;
   maxStalledCount?: number;
   consumerId?: string;
+  /** @deprecated No longer needed - prefix is derived from Valkey keys server-side. */
+  queuePrefix?: string;
+  /** Called at the end of each promotion tick to refresh cached meta flags. */
+  onPromotionTick?: () => void;
 }
 
 /**
@@ -25,6 +29,7 @@ export class Scheduler {
   private stalledInterval: number;
   private maxStalledCount: number;
   private consumerId: string;
+  private onPromotionTick?: () => void;
   private promotionTimer: ReturnType<typeof setInterval> | null = null;
   private stalledTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
@@ -40,6 +45,7 @@ export class Scheduler {
     this.stalledInterval = opts.stalledInterval ?? 30000;
     this.maxStalledCount = opts.maxStalledCount ?? 1;
     this.consumerId = opts.consumerId ?? 'scheduler';
+    this.onPromotionTick = opts.onPromotionTick;
   }
 
   start(): void {
@@ -73,7 +79,9 @@ export class Scheduler {
 
   private runPromotion(): void {
     this.promoteDelayed()
+      .then(() => this.promoteRateLimitedGroups())
       .then(() => this.runSchedulers())
+      .then(() => { this.onPromotionTick?.(); })
       .catch(() => {
         // Scheduler has no EventEmitter - errors are transient connection issues
         // that self-heal on the next interval tick. Worker reconnect handles the rest.
@@ -93,6 +101,14 @@ export class Scheduler {
    */
   async promoteDelayed(): Promise<number> {
     return promote(this.client, this.queueKeys, Date.now());
+  }
+
+  /**
+   * Promote rate-limited groups whose time window has expired.
+   * Moves waiting jobs from group queues back into the stream.
+   */
+  async promoteRateLimitedGroups(): Promise<number> {
+    return promoteRateLimited(this.client, this.queueKeys, Date.now());
   }
 
   /**

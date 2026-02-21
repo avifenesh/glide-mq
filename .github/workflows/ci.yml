@@ -123,7 +123,7 @@ jobs:
       - name: Compile TypeScript
         run: npx tsc
 
-      - name: Verify Valkey connection
+      - name: Verify Valkey standalone connection
         run: |
           node -e "
           const { GlideClient } = require('./node_modules/@glidemq/speedkey/build-ts');
@@ -134,7 +134,18 @@ jobs:
           })().catch(e => { console.error('Connection failed:', e.message); process.exit(1); });
           "
 
-      - name: Run standalone integration tests
+      - name: Install Valkey binaries for cluster
+        run: |
+          id=$(docker create valkey/valkey:8.0)
+          sudo docker cp "$id:/usr/local/bin/valkey-server" /usr/local/bin/valkey-server
+          sudo docker cp "$id:/usr/local/bin/valkey-cli" /usr/local/bin/valkey-cli
+          docker rm "$id"
+          sudo chmod +x /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
+          valkey-server --version
+          valkey-cli --version
+
+      - name: Start Valkey cluster
+        run: bash tests/helpers/start-cluster.sh
+
+      - name: Run integration tests (standalone + cluster)
         run: npx vitest run tests/integration.test.ts tests/dedup.test.ts tests/delayed.test.ts tests/priority.test.ts tests/retry.test.ts tests/retention.test.ts tests/concurrency.test.ts tests/rate-limit.test.ts
-        env:
-          SKIP_CLUSTER: "1"

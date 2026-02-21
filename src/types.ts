@@ -94,6 +94,8 @@ export interface JobOptions {
     key: string;
     /** Max concurrent jobs for this ordering key. Default: 1 (sequential). */
     concurrency?: number;
+    /** Per-group rate limit: max N jobs per time window for this ordering key. */
+    rateLimit?: RateLimitConfig;
   };
   attempts?: number;
   backoff?: { type: 'fixed' | 'exponential' | string; delay: number; jitter?: number };
@@ -102,6 +104,13 @@ export interface JobOptions {
   removeOnFail?: boolean | number | { age: number; count: number };
   deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
   parent?: { queue: string; id: string };
+}
+
+export interface RateLimitConfig {
+  /** Maximum jobs allowed within the time window. */
+  max: number;
+  /** Time window in milliseconds. */
+  duration: number;
 }
 
 export interface JobData {

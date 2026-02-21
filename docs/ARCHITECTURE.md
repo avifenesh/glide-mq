@@ -16,7 +16,8 @@ glide:{q}:job:{id}              # Hash - job data, opts, state, timestamps, retu
 glide:{q}:completed             # ZSet - score = completed timestamp
 glide:{q}:failed                # ZSet - score = failed timestamp
 glide:{q}:events                # Stream - lifecycle events (completed, failed, progress, etc.)
-glide:{q}:meta                  # Hash - queue metadata (paused, concurrency, rate limiter state)
+glide:{q}:meta                  # Hash - queue metadata (paused, concurrency, rate limiter state,
+                                #        rateLimitMax, rateLimitDuration for global rate limit)
 glide:{q}:deps:{id}             # Set - child job IDs for parent (flows)
 glide:{q}:parent:{id}           # Hash - parent queue + job ID reference
 glide:{q}:dedup                 # Hash - field=dedup_id, value=job_id|timestamp
@@ -24,8 +25,11 @@ glide:{q}:rate                  # Hash - rate limiter counters (window start, co
 glide:{q}:schedulers            # Hash - field=scheduler_name, value=next_run_ts
 glide:{q}:ordering              # Hash - per-key sequence counters (for concurrency=1)
 glide:{q}:orderdone:pending:{k} # Hash - pending sequence tracking per ordering key
-glide:{q}:group:{key}           # Hash - group state (active count, maxConcurrency)
+glide:{q}:group:{key}           # Hash - group state (active count, maxConcurrency,
+                                #        rateMax, rateDuration, rateWindowStart, rateCount)
 glide:{q}:groupq:{key}          # List - FIFO wait list for group-limited jobs
+glide:{q}:ratelimited           # ZSet - scheduler-managed promotion queue for rate-limited jobs
+                                #        (score = earliest eligible timestamp)
 ```
 
 ## Job State Machine
@@ -47,12 +51,19 @@ added --> stream (ready) --> PEL (active) --> completed (ZSet)
                 |                     stream (re-queued)
                 |
                 +--> group-waiting (groupq:{key} list)
+                |      |
+                |      v (slot freed on complete/fail)
+                |    stream (re-queued)
+                |
+                +--> rate-limited (ratelimited ZSet)
                        |
-                       v (slot freed on complete/fail)
+                       v (window reset, scheduler promotes)
                      stream (re-queued)
 ```
 
-States map to Redis structures:
+`moveToActive` may return `GROUP_RATE_LIMITED` when a job's ordering-key rate limit is exceeded. The job is parked in the `glide:{q}:ratelimited` ZSet with a score equal to the earliest eligible timestamp. The scheduler's promotion loop picks it up once the window resets.
+
+States map to Valkey structures:
 - **waiting**: In stream, not yet claimed by consumer group
 - **active**: In PEL (Pending Entries List) - claimed via XREADGROUP
 - **delayed**: In scheduled ZSet with future timestamp as score
@@ -85,7 +96,7 @@ Use Valkey Functions (FUNCTION LOAD / FCALL) instead of EVAL/EVALSHA scripts.
 ### Loading Strategy
 1. On Queue/Worker creation, check if library exists: `FUNCTION LIST LIBRARYNAME glidemq`
 2. If missing, load via `FUNCTION LOAD` with the full library source
-3. If version mismatch (we track a version field in the library), reload with `FUNCTION LOAD REPLACE`
+3. If version mismatch (we track a version field in the library - currently `LIBRARY_VERSION = 17`), reload with `FUNCTION LOAD REPLACE`
 4. Library source is embedded in the npm package as a string constant (built from .lua source files at compile time)
 5. In cluster mode, `FUNCTION LOAD` must be sent to all nodes (use route: "allNodes")
 

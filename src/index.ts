@@ -25,6 +25,7 @@ export type {
   Metrics,
   JobCounts,
   DeadLetterQueueOptions,
+  RateLimitConfig,
   ReadFrom,
   SearchJobsOptions,
 } from './types';
