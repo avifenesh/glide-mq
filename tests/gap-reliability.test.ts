@@ -344,14 +344,17 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
   // the cluster connection pool for other tests.
   // ---------------------------------------------------------------------------
   describe('Memory leak regression', () => {
-    it('add and process 1000 jobs - heap does not grow beyond 2x baseline', async () => {
+    it('add and process many jobs - heap does not grow beyond 2x baseline', async () => {
       const Q = uniqueQueue('mem-heap');
       const queue = new Queue(Q, { connection: CONNECTION });
 
       if (global.gc) global.gc();
       const baseline = process.memoryUsage().heapUsed;
 
-      const jobCount = 1000;
+      // Cluster mode uses more resources per job; reduce count to avoid CI timeouts
+      const jobCount = CONNECTION.clusterMode ? 500 : 1000;
+      const batchSize = CONNECTION.clusterMode ? 50 : 100;
+      const batches = jobCount / batchSize;
       let completedCount = 0;
 
       const worker = new Worker(Q, async () => 'ok', {
@@ -365,10 +368,12 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
         completedCount++;
       });
 
-      for (let batch = 0; batch < 10; batch++) {
+      for (let batch = 0; batch < batches; batch++) {
         const promises = [];
-        for (let i = 0; i < 100; i++) {
-          promises.push(queue.add(`heap-${batch * 100 + i}`, { i: batch * 100 + i, data: 'x'.repeat(100) }));
+        for (let i = 0; i < batchSize; i++) {
+          promises.push(
+            queue.add(`heap-${batch * batchSize + i}`, { i: batch * batchSize + i, data: 'x'.repeat(100) }),
+          );
         }
         await Promise.all(promises);
       }

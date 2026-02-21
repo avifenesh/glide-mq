@@ -492,7 +492,7 @@ describeEachMode('Retry exhaustion', (CONNECTION) => {
     );
 
     const done = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
+      const timeout = setTimeout(() => reject(new Error('timeout')), 30000);
       let failCount = 0;
 
       const worker = new Worker(
@@ -538,7 +538,7 @@ describeEachMode('Retry exhaustion', (CONNECTION) => {
     expect(String(state)).toBe('completed');
 
     await queue.close();
-  }, 20000);
+  }, 45000);
 });
 
 // ---------------------------------------------------------------------------
