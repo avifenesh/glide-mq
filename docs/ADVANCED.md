@@ -2,6 +2,7 @@
 
 ## Table of Contents
 
+- [Shared Client (Connection Reuse)](#shared-client)
 - [Job Schedulers (Repeatable / Cron Jobs)](#job-schedulers)
 - [Sequential Processing (Per-Key Ordering)](#sequential-processing)
 - [Deduplication](#deduplication)
@@ -12,6 +13,109 @@
 - [Transparent Compression](#transparent-compression)
 - [Retries and Backoff](#retries-and-backoff)
 - [Dead Letter Queues](#dead-letter-queues)
+
+---
+
+## Shared Client
+
+By default, each glide-mq component creates its own GLIDE client (one TCP connection). You can optionally inject a shared client to reduce connection count.
+
+### Default behavior (dedicated connections)
+
+```typescript
+const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
+
+const queue  = new Queue('jobs', { connection });        // 1 connection
+const flow   = new FlowProducer({ connection });          // 1 connection
+const worker = new Worker('jobs', handler, { connection });// 2 connections (command + blocking)
+const events = new QueueEvents('jobs', { connection });   // 1 connection
+// Total: 5 TCP connections
+```
+
+### Shared client (opt-in)
+
+```typescript
+import { GlideClient } from '@glidemq/speedkey';
+
+const client = await GlideClient.createClient({ addresses: [{ host: 'localhost' }] });
+const connection = { addresses: [{ host: 'localhost' }] };
+
+const queue  = new Queue('jobs', { client });
+const flow   = new FlowProducer({ client });
+const worker = new Worker('jobs', handler, { connection, commandClient: client });
+const events = new QueueEvents('jobs', { connection });
+// Total: 2 TCP connections (shared + Worker's blocking client)
+```
+
+### What can share
+
+Queue, FlowProducer, and Worker's command client all perform non-blocking operations (FCALL, HGET, ZADD, etc.) and can safely share a single GLIDE client. GLIDE's Rust core multiplexes commands over one TCP connection with up to 1000 concurrent in-flight requests.
+
+### What cannot share
+
+Worker's blocking client (`XREADGROUP BLOCK`) and QueueEvents (`XREAD BLOCK`) tie up the connection's read loop. These always get their own dedicated connection - you cannot inject a shared client into them.
+
+QueueEvents will throw if you try to pass a `client`:
+
+```typescript
+// Throws: "QueueEvents does not accept an injected `client`"
+new QueueEvents('jobs', { connection, client } as any);
+```
+
+### Tradeoffs
+
+| | Dedicated (default) | Shared |
+|---|---|---|
+| **Connections** | N+2 per setup (1 per Queue/FlowProducer + 2 per Worker + 1 per QueueEvents) | 2 (shared + blocking) |
+| **Throughput** | Baseline | Same or slightly better (fewer NAPI wake callbacks) |
+| **Latency** | Baseline | Same (p50/p95/p99 identical in benchmarks) |
+| **Isolation** | Each component has its own connection - failures are independent | All components sharing a client are affected by a disconnect |
+| **Reconnection** | Each component reconnects independently | Worker emits error if shared client is unreachable - you manage reconnection |
+| **Lifecycle** | Component creates and closes its own client | You create the client, you close it. `close()` on a component does not destroy the shared client. |
+| **Simplicity** | Pass `connection` - done | Must create client upfront, pass it around, close in correct order |
+| **Memory** | Slightly higher (N client objects + Rust state machines) | Lower (1 client object shared) |
+
+### When to use shared
+
+- Many Queue instances pointing to different queue names (e.g., multi-tenant routing)
+- Queue + FlowProducer on the same process - saves 1 connection
+- Connection count is a concern (cloud Valkey with connection limits)
+
+### When to stick with dedicated
+
+- Simple setup with one Queue and one Worker - the default is fine
+- You want full isolation between components
+- You don't want to manage client lifecycle manually
+
+### Constraints
+
+- **Worker always requires `connection`** even when `commandClient` is provided, because the blocking client must be auto-created.
+- **Don't close the shared client while components are alive.** Close components first, then the client.
+- **Don't mutate shared client state externally** (e.g., `SELECT` to change database).
+- **`commandClient` and `client` are aliases on Worker** - provide one or the other, not both.
+
+### Close order
+
+```typescript
+// Correct: close components first, then shared client
+await queue.close();    // detaches from shared client (does not close it)
+await worker.close();   // closes only the auto-created blocking client
+await flow.close();     // detaches from shared client
+client.close();         // now safe - no components using it
+```
+
+### `inflightRequestsLimit`
+
+GLIDE defaults to 1000 concurrent in-flight requests per client. For high-concurrency setups, you can tune this:
+
+```typescript
+const connection = {
+  addresses: [{ host: 'localhost' }],
+  inflightRequestsLimit: 2000,
+};
+```
+
+At Worker concurrency=50, peak inflight is ~55 commands. The 1000 default supports up to ~950 concurrent job activations across all components sharing one client.
 
 ---
 
