@@ -1,4 +1,5 @@
 import { gzipSync, gunzipSync } from 'zlib';
+import { randomBytes } from 'crypto';
 
 const DEFAULT_PREFIX = 'glide';
 
@@ -105,7 +106,7 @@ export function calculateBackoff(
 }
 
 export function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${Date.now()}-${randomBytes(4).toString('hex')}`;
 }
 
 /**
