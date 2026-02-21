@@ -26,6 +26,7 @@ export type {
   JobCounts,
   DeadLetterQueueOptions,
   RateLimitConfig,
+  TokenBucketConfig,
   ReadFrom,
   SearchJobsOptions,
 } from './types';

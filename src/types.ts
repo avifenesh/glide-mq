@@ -96,7 +96,11 @@ export interface JobOptions {
     concurrency?: number;
     /** Per-group rate limit: max N jobs per time window for this ordering key. */
     rateLimit?: RateLimitConfig;
+    /** Cost-based token bucket: capacity + refill rate. Jobs consume tokens based on cost. */
+    tokenBucket?: TokenBucketConfig;
   };
+  /** Job cost in tokens for token bucket rate limiting. Default: 1. */
+  cost?: number;
   attempts?: number;
   backoff?: { type: 'fixed' | 'exponential' | string; delay: number; jitter?: number };
   timeout?: number;
@@ -111,6 +115,13 @@ export interface RateLimitConfig {
   max: number;
   /** Time window in milliseconds. */
   duration: number;
+}
+
+export interface TokenBucketConfig {
+  /** Maximum bucket capacity in tokens (burst size). */
+  capacity: number;
+  /** Refill rate in tokens per second. */
+  refillRate: number;
 }
 
 export interface JobData {
