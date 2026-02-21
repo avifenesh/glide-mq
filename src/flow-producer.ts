@@ -111,6 +111,9 @@ export class FlowProducer {
         tbRefillRate,
         jobCost,
       );
+      if (String(jobId) === 'ERR:COST_EXCEEDS_CAPACITY') {
+        throw new Error('Job cost exceeds token bucket capacity');
+      }
       const job = new Job(
         client,
         parentKeys,

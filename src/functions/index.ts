@@ -72,6 +72,9 @@ local function tbRefill(groupHashKey, g, now)
   local tbRefillRemainder = tonumber(g.tbRefillRemainder) or 0
   local elapsed = now - tbLastRefill
   if elapsed <= 0 or tbRefillRate <= 0 then return tbTokens end
+  -- Cap elapsed to prevent overflow in long-idle buckets
+  local maxElapsed = math.ceil(tbCapacity * 1000 / tbRefillRate)
+  if elapsed > maxElapsed then elapsed = maxElapsed end
   local raw = elapsed * tbRefillRate + tbRefillRemainder
   local added = math.floor(raw / 1000)
   local newRemainder = raw % 1000
@@ -1367,8 +1370,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       redis.call('HSET', groupHashKey, 'rateDuration', tostring(parentRateDuration))
     end
     if parentTbCapacity > 0 then
-      redis.call('HSET', groupHashKey, 'tbCapacity', tostring(parentTbCapacity))
-      redis.call('HSET', groupHashKey, 'tbRefillRate', tostring(parentTbRefillRate))
+      if parentCost > 0 and parentCost > parentTbCapacity then
+        return 'ERR:COST_EXCEEDS_CAPACITY'
+      end
+      redis.call('HSET', groupHashKey, 'tbCapacity', tostring(parentTbCapacity), 'tbRefillRate', tostring(parentTbRefillRate))
       redis.call('HSETNX', groupHashKey, 'tbTokens', tostring(parentTbCapacity))
       redis.call('HSETNX', groupHashKey, 'tbLastRefill', tostring(timestamp))
       redis.call('HSETNX', groupHashKey, 'tbRefillRemainder', '0')
@@ -1441,8 +1446,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
         redis.call('HSET', childGroupHashKey, 'rateDuration', tostring(childRateDuration))
       end
       if childTbCapacity > 0 then
-        redis.call('HSET', childGroupHashKey, 'tbCapacity', tostring(childTbCapacity))
-        redis.call('HSET', childGroupHashKey, 'tbRefillRate', tostring(childTbRefillRate))
+        if childCost > 0 and childCost > childTbCapacity then
+          return 'ERR:COST_EXCEEDS_CAPACITY'
+        end
+        redis.call('HSET', childGroupHashKey, 'tbCapacity', tostring(childTbCapacity), 'tbRefillRate', tostring(childTbRefillRate))
         redis.call('HSETNX', childGroupHashKey, 'tbTokens', tostring(childTbCapacity))
         redis.call('HSETNX', childGroupHashKey, 'tbLastRefill', tostring(timestamp))
         redis.call('HSETNX', childGroupHashKey, 'tbRefillRemainder', '0')
