@@ -832,8 +832,9 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   local parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
   local depsKey = parentPrefix .. 'deps:' .. parentJobIdStr
   local parentOrderingKey = extractOrderingKeyFromOpts(parentOpts)
+  local parentGroupConc = extractGroupConcurrencyFromOpts(parentOpts)
   local parentOrderingSeq = 0
-  if parentOrderingKey ~= '' then
+  if parentOrderingKey ~= '' and parentGroupConc <= 1 then
     local parentOrderingMetaKey = parentPrefix .. 'ordering'
     parentOrderingSeq = redis.call('HINCRBY', parentOrderingMetaKey, parentOrderingKey, 1)
   end
@@ -849,7 +850,13 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     'maxAttempts', tostring(parentMaxAttempts),
     'state', 'waiting-children'
   }
-  if parentOrderingKey ~= '' then
+  if parentOrderingKey ~= '' and parentGroupConc > 1 then
+    parentHash[#parentHash + 1] = 'groupKey'
+    parentHash[#parentHash + 1] = parentOrderingKey
+    local groupHashKey = parentPrefix .. 'group:' .. parentOrderingKey
+    redis.call('HSETNX', groupHashKey, 'maxConcurrency', tostring(parentGroupConc))
+    redis.call('HSETNX', groupHashKey, 'active', '0')
+  elseif parentOrderingKey ~= '' then
     parentHash[#parentHash + 1] = 'orderingKey'
     parentHash[#parentHash + 1] = parentOrderingKey
     parentHash[#parentHash + 1] = 'orderingSeq'
@@ -879,8 +886,9 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     local childPrefix = string.sub(childIdKey, 1, #childIdKey - 2)
     local childJobKey = childPrefix .. 'job:' .. childJobIdStr
     local childOrderingKey = extractOrderingKeyFromOpts(childOpts)
+    local childGroupConc = extractGroupConcurrencyFromOpts(childOpts)
     local childOrderingSeq = 0
-    if childOrderingKey ~= '' then
+    if childOrderingKey ~= '' and childGroupConc <= 1 then
       local childOrderingMetaKey = childPrefix .. 'ordering'
       childOrderingSeq = redis.call('HINCRBY', childOrderingMetaKey, childOrderingKey, 1)
     end
@@ -897,7 +905,13 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       'parentId', parentJobIdStr,
       'parentQueue', childParentQueue
     }
-    if childOrderingKey ~= '' then
+    if childOrderingKey ~= '' and childGroupConc > 1 then
+      childHash[#childHash + 1] = 'groupKey'
+      childHash[#childHash + 1] = childOrderingKey
+      local childGroupHashKey = childPrefix .. 'group:' .. childOrderingKey
+      redis.call('HSETNX', childGroupHashKey, 'maxConcurrency', tostring(childGroupConc))
+      redis.call('HSETNX', childGroupHashKey, 'active', '0')
+    elseif childOrderingKey ~= '' then
       childHash[#childHash + 1] = 'orderingKey'
       childHash[#childHash + 1] = childOrderingKey
       childHash[#childHash + 1] = 'orderingSeq'
@@ -1006,6 +1020,22 @@ redis.register_function('glidemq_revoke', function(keys, args)
   end
   redis.call('HSET', jobKey, 'revoked', '1')
   local state = redis.call('HGET', jobKey, 'state')
+  if state == 'group-waiting' then
+    local gk = redis.call('HGET', jobKey, 'groupKey')
+    if gk and gk ~= '' then
+      local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+      local waitListKey = prefix .. 'groupq:' .. gk
+      redis.call('LREM', waitListKey, 1, jobId)
+    end
+    redis.call('ZADD', failedKey, timestamp, jobId)
+    redis.call('HSET', jobKey,
+      'state', 'failed',
+      'failedReason', 'revoked',
+      'finishedOn', tostring(timestamp)
+    )
+    emitEvent(eventsKey, 'revoked', jobId, nil)
+    return 'revoked'
+  end
   if state == 'waiting' or state == 'delayed' or state == 'prioritized' then
     redis.call('ZREM', scheduledKey, jobId)
     local entries = redis.call('XRANGE', streamKey, '-', '+')

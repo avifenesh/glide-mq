@@ -91,6 +91,7 @@ export class FlowProducer {
         '',
         opts.attempts ?? 0,
         opts.ordering?.key ?? '',
+        opts.ordering?.concurrency ?? 0,
       );
       const job = new Job(
         client,
