@@ -20,6 +20,7 @@ export class Job<D = any, R = any> {
   orderingKey?: string;
   orderingSeq?: number;
   groupKey?: string;
+  cost?: number;
 
   /**
    * AbortSignal that fires when this job is revoked during processing.
@@ -274,6 +275,7 @@ export class Job<D = any, R = any> {
     job.orderingKey = hash.orderingKey || undefined;
     job.orderingSeq = hash.orderingSeq ? parseInt(hash.orderingSeq, 10) : undefined;
     job.groupKey = hash.groupKey || undefined;
+    job.cost = hash.cost ? parseInt(hash.cost, 10) : undefined;
     if (hash.progress) {
       try {
         job.progress = JSON.parse(hash.progress);

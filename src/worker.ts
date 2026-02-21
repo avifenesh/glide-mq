@@ -313,7 +313,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
    * Returns true if the result was handled (caller should return), false if the hash is valid.
    */
   private async handleMoveToActiveEdgeCase(
-    moveResult: Record<string, string> | 'REVOKED' | 'GROUP_FULL' | 'GROUP_RATE_LIMITED' | null,
+    moveResult: Record<string, string> | 'REVOKED' | 'GROUP_FULL' | 'GROUP_RATE_LIMITED' | 'GROUP_TOKEN_LIMITED' | 'ERR:COST_EXCEEDS_CAPACITY' | null,
     jobId: string,
     entryId: string,
   ): Promise<boolean> {
@@ -326,7 +326,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
       return true;
     }
-    if (moveResult === 'GROUP_FULL' || moveResult === 'GROUP_RATE_LIMITED') {
+    if (moveResult === 'GROUP_FULL' || moveResult === 'GROUP_RATE_LIMITED' || moveResult === 'GROUP_TOKEN_LIMITED' || moveResult === 'ERR:COST_EXCEEDS_CAPACITY') {
       return true;
     }
     return false;

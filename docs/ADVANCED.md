@@ -5,6 +5,7 @@
 - [Job Schedulers (Repeatable / Cron Jobs)](#job-schedulers)
 - [Sequential Processing (Per-Key Ordering)](#sequential-processing)
 - [Deduplication](#deduplication)
+- [Token Bucket Rate Limiting](#token-bucket-rate-limiting)
 - [Global Concurrency](#global-concurrency)
 - [Global Rate Limiting](#global-rate-limiting)
 - [Job Revocation (Cooperative Cancellation)](#job-revocation)
@@ -104,6 +105,50 @@ When both `concurrency` and `rateLimit` are set, both gates apply - a job must h
 - **Promotion latency**: rate-limited jobs are promoted by the scheduler loop. Worst-case latency is one `promotionInterval` (default 5 s). Lower `promotionInterval` on the worker if tighter latency is needed.
 - **Retried jobs consume rate slots** - a retried job counts against the rate window like any new job.
 
+### Token bucket rate limiting
+
+Use `ordering.tokenBucket` to enforce cost-based rate limiting per ordering key. Unlike the sliding window (`rateLimit`), which counts jobs, the token bucket assigns a `cost` to each job and deducts from a refilling bucket:
+
+```typescript
+// Each API call costs 1 token (default), bulk exports cost 10
+await queue.add('api-call', data, {
+  ordering: {
+    key: `tenant-${tenantId}`,
+    concurrency: 5,
+    tokenBucket: { capacity: 100, refillRate: 10 }, // 100 tokens max, 10 tokens/s
+  },
+  cost: 1,
+});
+
+await queue.add('bulk-export', data, {
+  ordering: {
+    key: `tenant-${tenantId}`,
+    concurrency: 5,
+    tokenBucket: { capacity: 100, refillRate: 10 },
+  },
+  cost: 10, // consumes 10 tokens
+});
+```
+
+**How it works**: tokens refill at `refillRate` tokens per second up to `capacity`. When a job is activated, its `cost` is deducted from the bucket. If insufficient tokens remain, the job is parked and promoted once enough tokens have refilled. Internally, tokens are tracked as millitokens (1 token = 1000 millitokens) for sub-integer precision.
+
+**Check order**: when both concurrency, token bucket, and sliding window are configured, the gates are checked in order: concurrency -> token bucket -> sliding window. All applicable limits must pass. Strict FIFO is maintained - jobs never skip ahead of earlier jobs in the same group.
+
+**Cost validation**: a job with `cost` greater than `capacity` is rejected at enqueue time. If a previously valid job becomes invalid (e.g., capacity was lowered), it is moved to the DLQ at activation.
+
+**Differences from sliding window** (`rateLimit`):
+
+| | Sliding window (`rateLimit`) | Token bucket (`tokenBucket`) |
+|---|---|---|
+| Unit | Job count | Weighted cost per job |
+| Config | `{ max, duration }` | `{ capacity, refillRate }` |
+| Default cost | 1 job | `cost: 1` token |
+| Refill | Window resets after `duration` ms | Continuous refill at `refillRate`/s |
+| Use case | "Max N jobs per window" | "Max N units of work per second" |
+
+- **Promotion latency**: same as sliding window - worst-case one `promotionInterval` (default 5 s).
+- **Composition**: token bucket composes with concurrency, sliding window, and global rate limits. All gates are enforced.
+
 ### Notes
 
 - Jobs with different ordering keys (or no ordering key) are processed concurrently as normal.
@@ -111,7 +156,7 @@ When both `concurrency` and `rateLimit` are set, both gates apply - a job must h
 - `concurrency=1` (or omitted) preserves strict FIFO ordering per key.
 - `concurrency > 1` caps parallelism but does not guarantee FIFO within the group.
 - Group concurrency and global concurrency (`setGlobalConcurrency`) compose: both limits are enforced.
-- Per-group rate limiting, group concurrency, and global concurrency all compose: all applicable limits are enforced.
+- Per-group rate limiting, token bucket, group concurrency, and global concurrency all compose: all applicable limits are enforced.
 - Group slots are released on job complete, fail, retry, DLQ move, and stall recovery.
 
 ---

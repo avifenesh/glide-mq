@@ -99,9 +99,23 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const orderingKey = opts?.ordering?.key ?? '';
         const groupRateMax = opts?.ordering?.rateLimit?.max ?? 0;
         const groupRateDuration = opts?.ordering?.rateLimit?.duration ?? 0;
+        const tb = opts?.ordering?.tokenBucket;
+        let tbCapacity = 0;
+        let tbRefillRate = 0;
+        if (tb) {
+          if (!Number.isFinite(tb.capacity) || tb.capacity <= 0) throw new Error('tokenBucket.capacity must be a positive finite number');
+          if (!Number.isFinite(tb.refillRate) || tb.refillRate <= 0) throw new Error('tokenBucket.refillRate must be a positive finite number');
+          tbCapacity = Math.round(tb.capacity * 1000);
+          tbRefillRate = Math.round(tb.refillRate * 1000);
+        }
+        let jobCost = 0;
+        if (opts?.cost != null) {
+          if (!Number.isFinite(opts.cost) || opts.cost < 0) throw new Error('cost must be a non-negative finite number');
+          jobCost = Math.round(opts.cost * 1000);
+        }
         let groupConcurrency = opts?.ordering?.concurrency ?? 0;
-        // Force group path when rate limit is set
-        if (groupRateMax > 0 && groupConcurrency < 1) {
+        // Force group path when rate limit or token bucket is set
+        if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
           groupConcurrency = 1;
         }
         validateOrderingKey(orderingKey);
@@ -138,13 +152,19 @@ export class Queue<D = any, R = any> extends EventEmitter {
             groupConcurrency,
             groupRateMax,
             groupRateDuration,
+            tbCapacity,
+            tbRefillRate,
+            jobCost,
           );
           if (result === 'skipped') {
             return null;
           }
+          if (result === 'ERR:COST_EXCEEDS_CAPACITY') {
+            throw new Error('Job cost exceeds token bucket capacity');
+          }
           jobId = result;
         } else {
-          jobId = await addJob(
+          const result = await addJob(
             client,
             this.keys,
             name,
@@ -159,7 +179,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
             groupConcurrency,
             groupRateMax,
             groupRateDuration,
+            tbCapacity,
+            tbRefillRate,
+            jobCost,
           );
+          if (result === 'ERR:COST_EXCEEDS_CAPACITY') {
+            throw new Error('Job cost exceeds token bucket capacity');
+          }
+          jobId = result;
         }
 
         span.setAttribute('glide-mq.job.id', String(jobId));
@@ -211,12 +238,25 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
       const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
       const groupRateDuration = opts.ordering?.rateLimit?.duration ?? 0;
+      const bulkTb = opts.ordering?.tokenBucket;
+      let tbCapacity = 0;
+      let tbRefillRate = 0;
+      if (bulkTb) {
+        if (!Number.isFinite(bulkTb.capacity) || bulkTb.capacity <= 0) throw new Error('tokenBucket.capacity must be a positive finite number');
+        if (!Number.isFinite(bulkTb.refillRate) || bulkTb.refillRate <= 0) throw new Error('tokenBucket.refillRate must be a positive finite number');
+        tbCapacity = Math.round(bulkTb.capacity * 1000);
+        tbRefillRate = Math.round(bulkTb.refillRate * 1000);
+      }
+      let jobCost = 0;
+      if (opts.cost != null) {
+        if (!Number.isFinite(opts.cost) || opts.cost < 0) throw new Error('cost must be a non-negative finite number');
+        jobCost = Math.round(opts.cost * 1000);
+      }
       let groupConcurrency = opts.ordering?.concurrency ?? 0;
-      // Force group path when rate limit is set
-      if (groupRateMax > 0 && groupConcurrency < 1) {
+      if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
         groupConcurrency = 1;
       }
-      return { entry, opts, delay, priority, parentId, maxAttempts, orderingKey, groupConcurrency, groupRateMax, groupRateDuration, deduplication, serializedData };
+      return { entry, opts, delay, priority, parentId, maxAttempts, orderingKey, groupConcurrency, groupRateMax, groupRateDuration, tbCapacity, tbRefillRate, jobCost, deduplication, serializedData };
     });
 
     // Build a batch with all fcall commands
@@ -242,6 +282,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.groupConcurrency.toString(),
           p.groupRateMax.toString(),
           p.groupRateDuration.toString(),
+          p.tbCapacity.toString(),
+          p.tbRefillRate.toString(),
+          p.jobCost.toString(),
         ]);
       } else {
         batch.fcall('glidemq_addJob', keys, [
@@ -257,6 +300,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.groupConcurrency.toString(),
           p.groupRateMax.toString(),
           p.groupRateDuration.toString(),
+          p.tbCapacity.toString(),
+          p.tbRefillRate.toString(),
+          p.jobCost.toString(),
         ]);
       }
     }
@@ -281,6 +327,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
     return prepared.flatMap((p, i) => {
       const raw = String(rawResults[i]);
       if (raw === 'skipped') return [];
+      if (raw === 'ERR:COST_EXCEEDS_CAPACITY') {
+        throw new Error('Job cost exceeds token bucket capacity');
+      }
       const jobId = raw;
       const job = new Job<D, R>(
         client,

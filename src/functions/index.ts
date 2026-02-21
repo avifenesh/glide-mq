@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '18';
+export const LIBRARY_VERSION = '19';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -60,6 +60,32 @@ local function markOrderingDone(jobKey, jobId)
   end
 end
 
+-- Refill token bucket using remainder accumulator for precision.
+-- tbRefillRate is in millitokens/second. Returns current millitokens after refill.
+-- Side effect: updates tbTokens, tbLastRefill, tbRefillRemainder on the group hash.
+local function tbRefill(groupHashKey, g, now)
+  local tbCapacity = tonumber(g.tbCapacity) or 0
+  if tbCapacity <= 0 then return 0 end
+  local tbTokens = tonumber(g.tbTokens) or tbCapacity
+  local tbRefillRate = tonumber(g.tbRefillRate) or 0
+  local tbLastRefill = tonumber(g.tbLastRefill) or now
+  local tbRefillRemainder = tonumber(g.tbRefillRemainder) or 0
+  local elapsed = now - tbLastRefill
+  if elapsed <= 0 or tbRefillRate <= 0 then return tbTokens end
+  -- Cap elapsed to prevent overflow in long-idle buckets
+  local maxElapsed = math.ceil(tbCapacity * 1000 / tbRefillRate)
+  if elapsed > maxElapsed then elapsed = maxElapsed end
+  local raw = elapsed * tbRefillRate + tbRefillRemainder
+  local added = math.floor(raw / 1000)
+  local newRemainder = raw % 1000
+  local newTokens = math.min(tbCapacity, tbTokens + added)
+  redis.call('HSET', groupHashKey,
+    'tbTokens', tostring(newTokens),
+    'tbLastRefill', tostring(now),
+    'tbRefillRemainder', tostring(newRemainder))
+  return newTokens
+end
+
 local function releaseGroupSlotAndPromote(jobKey, jobId, now)
   local gk = redis.call('HGET', jobKey, 'groupKey')
   if not gk or gk == '' then return end
@@ -100,6 +126,48 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now)
         rateRemaining = rateMax - rateCount
       end
     end
+  end
+  -- Token bucket gate: check head job cost before promoting
+  local tbCap = tonumber(g.tbCapacity) or 0
+  if ts > 0 and tbCap > 0 then
+    local tbTokensCur = tbRefill(groupHashKey, g, ts)
+    -- Peek at head job, skipping tombstones and DLQ'd jobs (up to 10 iterations)
+    local tbCheckPasses = 0
+    local tbOk = false
+    while tbCheckPasses < 10 do
+      tbCheckPasses = tbCheckPasses + 1
+      local headJobId = redis.call('LINDEX', waitListKey, 0)
+      if not headJobId then break end
+      local headJobKey = prefix .. 'job:' .. headJobId
+      -- Tombstone guard: job hash deleted - pop and check next
+      if redis.call('EXISTS', headJobKey) == 0 then
+        redis.call('LPOP', waitListKey)
+      else
+        local headCost = tonumber(redis.call('HGET', headJobKey, 'cost')) or 1000
+        -- DLQ guard: cost > capacity - pop, fail, check next
+        if headCost > tbCap then
+          redis.call('LPOP', waitListKey)
+          redis.call('ZADD', prefix .. 'failed', ts, headJobId)
+          redis.call('HSET', headJobKey,
+            'state', 'failed',
+            'failedReason', 'cost exceeds token bucket capacity',
+            'finishedOn', tostring(ts))
+          emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
+        elseif tbTokensCur < headCost then
+          -- Not enough tokens: register delay and skip promotion
+          local tbRateVal = tonumber(g.tbRefillRate) or 0
+          if tbRateVal <= 0 then break end
+          local tbDelayMs = math.ceil((headCost - tbTokensCur) * 1000 / tbRateVal)
+          local rateLimitedKey = prefix .. 'ratelimited'
+          redis.call('ZADD', rateLimitedKey, ts + tbDelayMs, gk)
+          return
+        else
+          tbOk = true
+          break
+        end
+      end
+    end
+    if not tbOk and tbCheckPasses >= 10 then return end
   end
   -- Calculate how many slots are available for promotion
   local available = 1
@@ -181,6 +249,27 @@ local function extractGroupRateLimitFromOpts(optsJson)
   return max, duration
 end
 
+local function extractTokenBucketFromOpts(optsJson)
+  if not optsJson or optsJson == '' then return 0, 0 end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then return 0, 0 end
+  local ordering = decoded['ordering']
+  if type(ordering) ~= 'table' then return 0, 0 end
+  local tb = ordering['tokenBucket']
+  if type(tb) ~= 'table' then return 0, 0 end
+  local capacity = tonumber(tb['capacity']) or 0
+  local refillRate = tonumber(tb['refillRate']) or 0
+  return math.floor(capacity * 1000), math.floor(refillRate * 1000)
+end
+
+local function extractCostFromOpts(optsJson)
+  if not optsJson or optsJson == '' then return 0 end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then return 0 end
+  local cost = tonumber(decoded['cost']) or 0
+  return math.floor(cost * 1000)
+end
+
 redis.register_function('glidemq_version', function(keys, args)
   return '${LIBRARY_VERSION}'
 end)
@@ -202,11 +291,14 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local groupConcurrency = tonumber(args[10]) or 0
   local groupRateMax = tonumber(args[11]) or 0
   local groupRateDuration = tonumber(args[12]) or 0
+  local tbCapacity = tonumber(args[13]) or 0
+  local tbRefillRate = tonumber(args[14]) or 0
+  local jobCost = tonumber(args[15]) or 0
   local jobId = redis.call('INCR', idKey)
   local jobIdStr = tostring(jobId)
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local jobKey = prefix .. 'job:' .. jobIdStr
-  local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0))
+  local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0 or tbCapacity > 0))
   local orderingSeq = 0
   if orderingKey ~= '' and not useGroupConcurrency then
     local orderingMetaKey = prefix .. 'ordering'
@@ -218,7 +310,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
     if curMax ~= groupConcurrency then
       redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
     end
-    -- When rate limit forces group path but concurrency is 0 or 1, ensure maxConcurrency >= 1
+    -- When rate limit or token bucket forces group path but concurrency is 0 or 1, ensure maxConcurrency >= 1
     if curMax == 0 and groupConcurrency <= 1 then
       redis.call('HSET', groupHashKey, 'maxConcurrency', '1')
     end
@@ -237,6 +329,36 @@ redis.register_function('glidemq_addJob', function(keys, args)
       local oldRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
       if oldRateMax > 0 then
         redis.call('HDEL', groupHashKey, 'rateMax', 'rateDuration', 'rateWindowStart', 'rateCount')
+      end
+    end
+    -- Upsert token bucket fields on group hash
+    if tbCapacity > 0 then
+      local curTbCap = tonumber(redis.call('HGET', groupHashKey, 'tbCapacity')) or 0
+      if curTbCap ~= tbCapacity then
+        redis.call('HSET', groupHashKey, 'tbCapacity', tostring(tbCapacity))
+      end
+      local curTbRate = tonumber(redis.call('HGET', groupHashKey, 'tbRefillRate')) or 0
+      if curTbRate ~= tbRefillRate then
+        redis.call('HSET', groupHashKey, 'tbRefillRate', tostring(tbRefillRate))
+      end
+      -- Initialize tokens on first setup
+      if curTbCap == 0 then
+        redis.call('HSET', groupHashKey,
+          'tbTokens', tostring(tbCapacity),
+          'tbLastRefill', tostring(timestamp),
+          'tbRefillRemainder', '0')
+      end
+      -- Validate cost <= capacity at enqueue
+      -- Validate cost (explicit or default 1000 millitokens) against capacity
+      local effectiveCost = (jobCost > 0) and jobCost or 1000
+      if effectiveCost > tbCapacity then
+        return 'ERR:COST_EXCEEDS_CAPACITY'
+      end
+    else
+      -- Clear stale tb fields
+      local oldTbCap = tonumber(redis.call('HGET', groupHashKey, 'tbCapacity')) or 0
+      if oldTbCap > 0 then
+        redis.call('HDEL', groupHashKey, 'tbCapacity', 'tbRefillRate', 'tbTokens', 'tbLastRefill', 'tbRefillRemainder')
       end
     end
   end
@@ -259,6 +381,10 @@ redis.register_function('glidemq_addJob', function(keys, args)
     hashFields[#hashFields + 1] = orderingKey
     hashFields[#hashFields + 1] = 'orderingSeq'
     hashFields[#hashFields + 1] = tostring(orderingSeq)
+  end
+  if jobCost > 0 then
+    hashFields[#hashFields + 1] = 'cost'
+    hashFields[#hashFields + 1] = tostring(jobCost)
   end
   if parentId ~= '' then
     hashFields[#hashFields + 1] = 'parentId'
@@ -510,8 +636,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     for nf = 1, #nGrpFields, 2 do nGrp[nGrpFields[nf]] = nGrpFields[nf + 1] end
     local nextMaxConc = tonumber(nGrp.maxConcurrency) or 0
     local nextActive = tonumber(nGrp.active) or 0
-    local nextRateMax = tonumber(nGrp.rateMax) or 0
-    -- Concurrency gate first (avoids burning rate slots on parked jobs)
+    -- Concurrency gate first (avoids burning rate/token slots on parked jobs)
     if nextMaxConc > 0 and nextActive >= nextMaxConc then
       redis.call('XACK', streamKey, group, nextEntryId)
       redis.call('XDEL', streamKey, nextEntryId)
@@ -520,24 +645,66 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       redis.call('HSET', nextJobKey, 'state', 'group-waiting')
       return cjson.encode({completed = jobId, next = false})
     end
-    -- Rate limit gate (only after concurrency passes)
+    -- Token bucket gate (read-only)
+    local nextTbCapacity = tonumber(nGrp.tbCapacity) or 0
+    local nextTbBlocked = false
+    local nextTbDelay = 0
+    local nextTbTokens = 0
+    local nextJobCostVal = 0
+    if nextTbCapacity > 0 then
+      nextTbTokens = tbRefill(nextGroupHashKey, nGrp, tonumber(timestamp))
+      nextJobCostVal = tonumber(redis.call('HGET', nextJobKey, 'cost')) or 1000
+      -- DLQ guard: cost > capacity
+      if nextJobCostVal > nextTbCapacity then
+        redis.call('XACK', streamKey, group, nextEntryId)
+        redis.call('XDEL', streamKey, nextEntryId)
+        redis.call('ZADD', prefix .. 'failed', tonumber(timestamp), nextJobId)
+        redis.call('HSET', nextJobKey,
+          'state', 'failed',
+          'failedReason', 'cost exceeds token bucket capacity',
+          'finishedOn', tostring(timestamp))
+        emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'})
+        return cjson.encode({completed = jobId, next = false})
+      end
+      if nextTbTokens < nextJobCostVal then
+        nextTbBlocked = true
+        local nextTbRefillRateVal = math.max(tonumber(nGrp.tbRefillRate) or 0, 1)
+        nextTbDelay = math.ceil((nextJobCostVal - nextTbTokens) * 1000 / nextTbRefillRateVal)
+      end
+    end
+    -- Sliding window gate (read-only)
+    local nextRateMax = tonumber(nGrp.rateMax) or 0
+    local nextRlBlocked = false
+    local nextRlDelay = 0
     if nextRateMax > 0 then
       local nextRateDuration = tonumber(nGrp.rateDuration) or 0
       local nextRateWindowStart = tonumber(nGrp.rateWindowStart) or 0
       local nextRateCount = tonumber(nGrp.rateCount) or 0
       if nextRateDuration > 0 and timestamp - nextRateWindowStart < nextRateDuration and nextRateCount >= nextRateMax then
-        -- Rate limited: park the next job
-        redis.call('XACK', streamKey, group, nextEntryId)
-        redis.call('XDEL', streamKey, nextEntryId)
-        local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
-        redis.call('RPUSH', nextWaitListKey, nextJobId)
-        redis.call('HSET', nextJobKey, 'state', 'group-waiting')
-        local rateLimitedKey = prefix .. 'ratelimited'
-        redis.call('ZADD', rateLimitedKey, nextRateWindowStart + nextRateDuration, nextGroupKey)
-        return cjson.encode({completed = jobId, next = false})
+        nextRlBlocked = true
+        nextRlDelay = (nextRateWindowStart + nextRateDuration) - timestamp
       end
-      -- Window expired or under limit: increment count
+    end
+    -- If ANY gate blocked: park + register
+    if nextTbBlocked or nextRlBlocked then
+      redis.call('XACK', streamKey, group, nextEntryId)
+      redis.call('XDEL', streamKey, nextEntryId)
+      local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
+      redis.call('RPUSH', nextWaitListKey, nextJobId)
+      redis.call('HSET', nextJobKey, 'state', 'group-waiting')
+      local nextMaxDelay = math.max(nextTbDelay, nextRlDelay)
+      local rateLimitedKey = prefix .. 'ratelimited'
+      redis.call('ZADD', rateLimitedKey, tonumber(timestamp) + nextMaxDelay, nextGroupKey)
+      return cjson.encode({completed = jobId, next = false})
+    end
+    -- All gates passed: mutate state
+    if nextTbCapacity > 0 then
+      redis.call('HINCRBY', nextGroupHashKey, 'tbTokens', -nextJobCostVal)
+    end
+    if nextRateMax > 0 then
+      local nextRateDuration = tonumber(nGrp.rateDuration) or 0
       if nextRateDuration > 0 then
+        local nextRateWindowStart = tonumber(nGrp.rateWindowStart) or 0
         if timestamp - nextRateWindowStart >= nextRateDuration then
           redis.call('HSET', nextGroupHashKey, 'rateWindowStart', tostring(timestamp), 'rateCount', '1')
         else
@@ -737,6 +904,9 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local groupConcurrency = tonumber(args[13]) or 0
   local groupRateMax = tonumber(args[14]) or 0
   local groupRateDuration = tonumber(args[15]) or 0
+  local tbCapacity = tonumber(args[16]) or 0
+  local tbRefillRate = tonumber(args[17]) or 0
+  local jobCost = tonumber(args[18]) or 0
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local existing = redis.call('HGET', dedupKey, dedupId)
   if mode == 'simple' then
@@ -782,7 +952,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local jobId = redis.call('INCR', idKey)
   local jobIdStr = tostring(jobId)
   local jobKey = prefix .. 'job:' .. jobIdStr
-  local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0))
+  local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0 or tbCapacity > 0))
   local orderingSeq = 0
   if orderingKey ~= '' and not useGroupConcurrency then
     local orderingMetaKey = prefix .. 'ordering'
@@ -812,6 +982,36 @@ redis.register_function('glidemq_dedup', function(keys, args)
         redis.call('HDEL', groupHashKey, 'rateMax', 'rateDuration', 'rateWindowStart', 'rateCount')
       end
     end
+    -- Upsert token bucket fields on group hash
+    if tbCapacity > 0 then
+      local curTbCap = tonumber(redis.call('HGET', groupHashKey, 'tbCapacity')) or 0
+      if curTbCap ~= tbCapacity then
+        redis.call('HSET', groupHashKey, 'tbCapacity', tostring(tbCapacity))
+      end
+      local curTbRate = tonumber(redis.call('HGET', groupHashKey, 'tbRefillRate')) or 0
+      if curTbRate ~= tbRefillRate then
+        redis.call('HSET', groupHashKey, 'tbRefillRate', tostring(tbRefillRate))
+      end
+      -- Initialize tokens on first setup
+      if curTbCap == 0 then
+        redis.call('HSET', groupHashKey,
+          'tbTokens', tostring(tbCapacity),
+          'tbLastRefill', tostring(timestamp),
+          'tbRefillRemainder', '0')
+      end
+      -- Validate cost <= capacity at enqueue
+      -- Validate cost (explicit or default 1000 millitokens) against capacity
+      local effectiveCost = (jobCost > 0) and jobCost or 1000
+      if effectiveCost > tbCapacity then
+        return 'ERR:COST_EXCEEDS_CAPACITY'
+      end
+    else
+      -- Clear stale tb fields
+      local oldTbCap = tonumber(redis.call('HGET', groupHashKey, 'tbCapacity')) or 0
+      if oldTbCap > 0 then
+        redis.call('HDEL', groupHashKey, 'tbCapacity', 'tbRefillRate', 'tbTokens', 'tbLastRefill', 'tbRefillRemainder')
+      end
+    end
   end
   local hashFields = {
     'id', jobIdStr,
@@ -832,6 +1032,10 @@ redis.register_function('glidemq_dedup', function(keys, args)
     hashFields[#hashFields + 1] = orderingKey
     hashFields[#hashFields + 1] = 'orderingSeq'
     hashFields[#hashFields + 1] = tostring(orderingSeq)
+  end
+  if jobCost > 0 then
+    hashFields[#hashFields + 1] = 'cost'
+    hashFields[#hashFields + 1] = tostring(jobCost)
   end
   if parentId ~= '' then
     hashFields[#hashFields + 1] = 'parentId'
@@ -899,23 +1103,68 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
     redis.call('ZREM', rateLimitedKey, gk)
     local groupHashKey = prefix .. 'group:' .. gk
     local waitListKey = prefix .. 'groupq:' .. gk
-    local rateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
-    local maxConc = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
-    local active = tonumber(redis.call('HGET', groupHashKey, 'active')) or 0
-    -- Promote up to min(rateMax, available concurrency) jobs.
-    -- Do NOT touch rateCount/rateWindowStart here - moveToActive handles
-    -- window reset and counting when the worker picks up the promoted jobs.
-    local canPromote = math.min(rateMax, 1000)
-    if maxConc > 0 then
-      canPromote = math.min(canPromote, math.max(0, maxConc - active))
+    -- Load all group fields in one call for rate limit + token bucket checks
+    local prGrpFields = redis.call('HGETALL', groupHashKey)
+    local prGrp = {}
+    for pf = 1, #prGrpFields, 2 do prGrp[prGrpFields[pf]] = prGrpFields[pf + 1] end
+    local rateMax = tonumber(prGrp.rateMax) or 0
+    local maxConc = tonumber(prGrp.maxConcurrency) or 0
+    local active = tonumber(prGrp.active) or 0
+    -- Token bucket pre-check: peek head job cost before promoting
+    local prTbCap = tonumber(prGrp.tbCapacity) or 0
+    local tbCheckPassed = true
+    if prTbCap > 0 then
+      local prTbTokens = tbRefill(groupHashKey, prGrp, now)
+      local headJobId = redis.call('LINDEX', waitListKey, 0)
+      if headJobId then
+        local headJobKey = prefix .. 'job:' .. headJobId
+        -- Tombstone guard
+        if redis.call('EXISTS', headJobKey) == 0 then
+          redis.call('LPOP', waitListKey)
+          tbCheckPassed = false
+        end
+        if tbCheckPassed then
+          local headCost = tonumber(redis.call('HGET', headJobKey, 'cost')) or 1000
+          -- DLQ guard: cost > capacity
+          if headCost > prTbCap then
+            redis.call('LPOP', waitListKey)
+            redis.call('ZADD', prefix .. 'failed', now, headJobId)
+            redis.call('HSET', headJobKey,
+              'state', 'failed',
+              'failedReason', 'cost exceeds token bucket capacity',
+              'finishedOn', tostring(now))
+            emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
+            tbCheckPassed = false
+          end
+          if tbCheckPassed and prTbTokens < headCost then
+            -- Not enough tokens: re-register with calculated delay
+            local prTbRate = math.max(tonumber(prGrp.tbRefillRate) or 0, 1)
+            local prTbDelay = math.ceil((headCost - prTbTokens) * 1000 / prTbRate)
+            redis.call('ZADD', rateLimitedKey, now + prTbDelay, gk)
+            tbCheckPassed = false
+          end
+        end
+      end
     end
-    for j = 1, canPromote do
-      local nextJobId = redis.call('LPOP', waitListKey)
-      if not nextJobId then break end
-      redis.call('XADD', streamKey, '*', 'jobId', nextJobId)
-      local nextJobKey = prefix .. 'job:' .. nextJobId
-      redis.call('HSET', nextJobKey, 'state', 'waiting')
-      promoted = promoted + 1
+    if tbCheckPassed then
+      -- Promote up to min(rateMax, available concurrency) jobs.
+      -- Do NOT touch rateCount/rateWindowStart here - moveToActive handles
+      -- window reset and counting when the worker picks up the promoted jobs.
+      local canPromote = 1000
+      if rateMax > 0 then
+        canPromote = math.min(canPromote, rateMax)
+      end
+      if maxConc > 0 then
+        canPromote = math.min(canPromote, math.max(0, maxConc - active))
+      end
+      for j = 1, canPromote do
+        local nextJobId = redis.call('LPOP', waitListKey)
+        if not nextJobId then break end
+        redis.call('XADD', streamKey, '*', 'jobId', nextJobId)
+        local nextJobKey = prefix .. 'job:' .. nextJobId
+        redis.call('HSET', nextJobKey, 'state', 'waiting')
+        promoted = promoted + 1
+      end
     end
   end
   return promoted
@@ -963,8 +1212,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     for f = 1, #grpFields, 2 do grp[grpFields[f]] = grpFields[f + 1] end
     local maxConc = tonumber(grp.maxConcurrency) or 0
     local active = tonumber(grp.active) or 0
-    local rateMax = tonumber(grp.rateMax) or 0
-    -- Concurrency gate (checked first to avoid burning rate slots on parked jobs)
+    -- Concurrency gate (checked first to avoid burning rate/token slots on parked jobs)
     if maxConc > 0 and active >= maxConc then
       if streamKey ~= '' and entryId ~= '' and group ~= '' then
         redis.call('XACK', streamKey, group, entryId)
@@ -975,27 +1223,74 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       redis.call('HSET', jobKey, 'state', 'group-waiting')
       return 'GROUP_FULL'
     end
-    -- Rate limit gate (only after concurrency passes)
+    -- Token bucket gate (read-only)
+    local tbCapacity = tonumber(grp.tbCapacity) or 0
+    local tbBlocked = false
+    local tbDelay = 0
+    local tbTokens = 0
+    local jobCostVal = 0
+    if tbCapacity > 0 then
+      tbTokens = tbRefill(groupHashKey, grp, tonumber(timestamp))
+      jobCostVal = tonumber(redis.call('HGET', jobKey, 'cost')) or 1000
+      -- DLQ guard: cost > capacity
+      if jobCostVal > tbCapacity then
+        if streamKey ~= '' and entryId ~= '' and group ~= '' then
+          redis.call('XACK', streamKey, group, entryId)
+          redis.call('XDEL', streamKey, entryId)
+        end
+        redis.call('ZADD', prefix .. 'failed', tonumber(timestamp), jobId)
+        redis.call('HSET', jobKey,
+          'state', 'failed',
+          'failedReason', 'cost exceeds token bucket capacity',
+          'finishedOn', timestamp)
+        emitEvent(prefix .. 'events', 'failed', jobId, {'failedReason', 'cost exceeds token bucket capacity'})
+        return 'ERR:COST_EXCEEDS_CAPACITY'
+      end
+      if tbTokens < jobCostVal then
+        tbBlocked = true
+        local tbRefillRateVal = tonumber(grp.tbRefillRate) or 0
+        if tbRefillRateVal <= 0 then tbRefillRateVal = 1 end
+        tbDelay = math.ceil((jobCostVal - tbTokens) * 1000 / tbRefillRateVal)
+      end
+    end
+    -- Sliding window gate (read-only)
+    local rateMax = tonumber(grp.rateMax) or 0
+    local rlBlocked = false
+    local rlDelay = 0
     if rateMax > 0 then
       local rateDuration = tonumber(grp.rateDuration) or 0
       local rateWindowStart = tonumber(grp.rateWindowStart) or 0
       local rateCount = tonumber(grp.rateCount) or 0
       local now = tonumber(timestamp)
       if rateDuration > 0 and now - rateWindowStart < rateDuration and rateCount >= rateMax then
-        -- Rate limited: park in groupq
-        if streamKey ~= '' and entryId ~= '' and group ~= '' then
-          redis.call('XACK', streamKey, group, entryId)
-          redis.call('XDEL', streamKey, entryId)
-        end
-        local waitListKey = prefix .. 'groupq:' .. groupKey
-        redis.call('RPUSH', waitListKey, jobId)
-        redis.call('HSET', jobKey, 'state', 'group-waiting')
-        local rateLimitedKey = prefix .. 'ratelimited'
-        redis.call('ZADD', rateLimitedKey, rateWindowStart + rateDuration, groupKey)
-        return 'GROUP_RATE_LIMITED'
+        rlBlocked = true
+        rlDelay = (rateWindowStart + rateDuration) - now
       end
-      -- Window expired or under limit: increment count
+    end
+    -- If ANY gate blocked: park + register
+    if tbBlocked or rlBlocked then
+      if streamKey ~= '' and entryId ~= '' and group ~= '' then
+        redis.call('XACK', streamKey, group, entryId)
+        redis.call('XDEL', streamKey, entryId)
+      end
+      local waitListKey = prefix .. 'groupq:' .. groupKey
+      redis.call('RPUSH', waitListKey, jobId)
+      redis.call('HSET', jobKey, 'state', 'group-waiting')
+      local maxDelay = math.max(tbDelay, rlDelay)
+      local rateLimitedKey = prefix .. 'ratelimited'
+      redis.call('ZADD', rateLimitedKey, tonumber(timestamp) + maxDelay, groupKey)
+      if tbBlocked then return 'GROUP_TOKEN_LIMITED' end
+      return 'GROUP_RATE_LIMITED'
+    end
+    -- All gates passed: mutate state
+    if tbCapacity > 0 then
+      redis.call('HINCRBY', groupHashKey, 'tbTokens', -jobCostVal)
+    end
+    if rateMax > 0 then
+      local rateDuration = tonumber(grp.rateDuration) or 0
       if rateDuration > 0 then
+        local rateWindowStart = tonumber(grp.rateWindowStart) or 0
+        local now = tonumber(timestamp)
         if now - rateWindowStart >= rateDuration then
           redis.call('HSET', groupHashKey, 'rateWindowStart', tostring(now), 'rateCount', '1')
         else
@@ -1048,7 +1343,9 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   local parentOrderingKey = extractOrderingKeyFromOpts(parentOpts)
   local parentGroupConc = extractGroupConcurrencyFromOpts(parentOpts)
   local parentRateMax, parentRateDuration = extractGroupRateLimitFromOpts(parentOpts)
-  local parentUseGroup = (parentOrderingKey ~= '' and (parentGroupConc > 1 or parentRateMax > 0))
+  local parentTbCapacity, parentTbRefillRate = extractTokenBucketFromOpts(parentOpts)
+  local parentCost = extractCostFromOpts(parentOpts)
+  local parentUseGroup = (parentOrderingKey ~= '' and (parentGroupConc > 1 or parentRateMax > 0 or parentTbCapacity > 0))
   local parentOrderingSeq = 0
   if parentOrderingKey ~= '' and not parentUseGroup then
     local parentOrderingMetaKey = parentPrefix .. 'ordering'
@@ -1076,16 +1373,42 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       redis.call('HSET', groupHashKey, 'rateMax', tostring(parentRateMax))
       redis.call('HSET', groupHashKey, 'rateDuration', tostring(parentRateDuration))
     end
+    if parentTbCapacity > 0 then
+      if parentCost > 0 and parentCost > parentTbCapacity then
+        return 'ERR:COST_EXCEEDS_CAPACITY'
+      end
+      redis.call('HSET', groupHashKey, 'tbCapacity', tostring(parentTbCapacity), 'tbRefillRate', tostring(parentTbRefillRate))
+      redis.call('HSETNX', groupHashKey, 'tbTokens', tostring(parentTbCapacity))
+      redis.call('HSETNX', groupHashKey, 'tbLastRefill', tostring(timestamp))
+      redis.call('HSETNX', groupHashKey, 'tbRefillRemainder', '0')
+    end
   elseif parentOrderingKey ~= '' then
     parentHash[#parentHash + 1] = 'orderingKey'
     parentHash[#parentHash + 1] = parentOrderingKey
     parentHash[#parentHash + 1] = 'orderingSeq'
     parentHash[#parentHash + 1] = tostring(parentOrderingSeq)
   end
+  if parentCost > 0 then
+    parentHash[#parentHash + 1] = 'cost'
+    parentHash[#parentHash + 1] = tostring(parentCost)
+  end
   redis.call('HSET', parentJobKey, unpack(parentHash))
-  local childIds = {}
+  -- Pre-validate all children's cost vs capacity before any child writes
   local childArgOffset = 8
   local childKeyOffset = 4
+  for i = 1, numChildren do
+    local base = childArgOffset + (i - 1) * 8
+    local preChildOpts = args[base + 3]
+    local preChildTbCap, _ = extractTokenBucketFromOpts(preChildOpts)
+    if preChildTbCap > 0 then
+      local preChildCost = extractCostFromOpts(preChildOpts)
+      local preEffective = (preChildCost > 0) and preChildCost or 1000
+      if preEffective > preChildTbCap then
+        return 'ERR:COST_EXCEEDS_CAPACITY'
+      end
+    end
+  end
+  local childIds = {}
   for i = 1, numChildren do
     local base = childArgOffset + (i - 1) * 8
     local childName = args[base + 1]
@@ -1108,7 +1431,9 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     local childOrderingKey = extractOrderingKeyFromOpts(childOpts)
     local childGroupConc = extractGroupConcurrencyFromOpts(childOpts)
     local childRateMax, childRateDuration = extractGroupRateLimitFromOpts(childOpts)
-    local childUseGroup = (childOrderingKey ~= '' and (childGroupConc > 1 or childRateMax > 0))
+    local childTbCapacity, childTbRefillRate = extractTokenBucketFromOpts(childOpts)
+    local childCost = extractCostFromOpts(childOpts)
+    local childUseGroup = (childOrderingKey ~= '' and (childGroupConc > 1 or childRateMax > 0 or childTbCapacity > 0))
     local childOrderingSeq = 0
     if childOrderingKey ~= '' and not childUseGroup then
       local childOrderingMetaKey = childPrefix .. 'ordering'
@@ -1137,11 +1462,21 @@ redis.register_function('glidemq_addFlow', function(keys, args)
         redis.call('HSET', childGroupHashKey, 'rateMax', tostring(childRateMax))
         redis.call('HSET', childGroupHashKey, 'rateDuration', tostring(childRateDuration))
       end
+      if childTbCapacity > 0 then
+        redis.call('HSET', childGroupHashKey, 'tbCapacity', tostring(childTbCapacity), 'tbRefillRate', tostring(childTbRefillRate))
+        redis.call('HSETNX', childGroupHashKey, 'tbTokens', tostring(childTbCapacity))
+        redis.call('HSETNX', childGroupHashKey, 'tbLastRefill', tostring(timestamp))
+        redis.call('HSETNX', childGroupHashKey, 'tbRefillRemainder', '0')
+      end
     elseif childOrderingKey ~= '' then
       childHash[#childHash + 1] = 'orderingKey'
       childHash[#childHash + 1] = childOrderingKey
       childHash[#childHash + 1] = 'orderingSeq'
       childHash[#childHash + 1] = tostring(childOrderingSeq)
+    end
+    if childCost > 0 then
+      childHash[#childHash + 1] = 'cost'
+      childHash[#childHash + 1] = tostring(childCost)
     end
     if childDelay > 0 or childPriority > 0 then
       childHash[#childHash + 1] = 'state'
@@ -1358,6 +1693,9 @@ export async function addJob(
   groupConcurrency: number = 0,
   groupRateMax: number = 0,
   groupRateDuration: number = 0,
+  tbCapacity: number = 0,
+  tbRefillRate: number = 0,
+  jobCost: number = 0,
 ): Promise<string> {
   const result = await client.fcall(
     'glidemq_addJob',
@@ -1375,6 +1713,9 @@ export async function addJob(
       groupConcurrency.toString(),
       groupRateMax.toString(),
       groupRateDuration.toString(),
+      tbCapacity.toString(),
+      tbRefillRate.toString(),
+      jobCost.toString(),
     ],
   );
   return result as string;
@@ -1402,6 +1743,9 @@ export async function dedup(
   groupConcurrency: number = 0,
   groupRateMax: number = 0,
   groupRateDuration: number = 0,
+  tbCapacity: number = 0,
+  tbRefillRate: number = 0,
+  jobCost: number = 0,
 ): Promise<string> {
   const result = await client.fcall(
     'glidemq_dedup',
@@ -1422,6 +1766,9 @@ export async function dedup(
       groupConcurrency.toString(),
       groupRateMax.toString(),
       groupRateDuration.toString(),
+      tbCapacity.toString(),
+      tbRefillRate.toString(),
+      jobCost.toString(),
     ],
   );
   return result as string;
@@ -1718,6 +2065,8 @@ export async function checkConcurrency(
  * - 'REVOKED' if the job's revoked flag is set
  * - 'GROUP_FULL' if the job's group is at max concurrency (job was parked)
  * - 'GROUP_RATE_LIMITED' if the job's group exceeded its rate limit (job was parked)
+ * - 'GROUP_TOKEN_LIMITED' if the job's group has insufficient tokens (job was parked)
+ * - 'ERR:COST_EXCEEDS_CAPACITY' if the job cost exceeds token bucket capacity (job was failed)
  * - Record<string, string> with all job fields otherwise
  */
 export async function moveToActive(
@@ -1728,7 +2077,7 @@ export async function moveToActive(
   streamKey: string = '',
   entryId: string = '',
   group: string = '',
-): Promise<Record<string, string> | 'REVOKED' | 'GROUP_FULL' | 'GROUP_RATE_LIMITED' | null> {
+): Promise<Record<string, string> | 'REVOKED' | 'GROUP_FULL' | 'GROUP_RATE_LIMITED' | 'GROUP_TOKEN_LIMITED' | 'ERR:COST_EXCEEDS_CAPACITY' | null> {
   const keys: string[] = [k.job(jobId)];
   const args: string[] = [timestamp.toString()];
   if (streamKey) {
@@ -1745,6 +2094,8 @@ export async function moveToActive(
   if (str === 'REVOKED') return 'REVOKED';
   if (str === 'GROUP_FULL') return 'GROUP_FULL';
   if (str === 'GROUP_RATE_LIMITED') return 'GROUP_RATE_LIMITED';
+  if (str === 'GROUP_TOKEN_LIMITED') return 'GROUP_TOKEN_LIMITED';
+  if (str === 'ERR:COST_EXCEEDS_CAPACITY') return 'ERR:COST_EXCEEDS_CAPACITY';
   // Parse the cjson.encode output: [field1, value1, field2, value2, ...]
   const arr = JSON.parse(str) as string[];
   const hash: Record<string, string> = {};

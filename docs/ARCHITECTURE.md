@@ -12,7 +12,7 @@ All keys share a hash tag `{q}` where q = queue name. Cluster-safe by design.
 glide:{q}:id                    # String - auto-increment job ID counter
 glide:{q}:stream                # Stream - ready jobs (primary queue)
 glide:{q}:scheduled             # ZSet - delayed + priority staging (score = timestamp | priority-encoded)
-glide:{q}:job:{id}              # Hash - job data, opts, state, timestamps, return value, stacktrace
+glide:{q}:job:{id}              # Hash - job data, opts, state, timestamps, return value, stacktrace, cost
 glide:{q}:completed             # ZSet - score = completed timestamp
 glide:{q}:failed                # ZSet - score = failed timestamp
 glide:{q}:events                # Stream - lifecycle events (completed, failed, progress, etc.)
@@ -26,7 +26,9 @@ glide:{q}:schedulers            # Hash - field=scheduler_name, value=next_run_ts
 glide:{q}:ordering              # Hash - per-key sequence counters (for concurrency=1)
 glide:{q}:orderdone:pending:{k} # Hash - pending sequence tracking per ordering key
 glide:{q}:group:{key}           # Hash - group state (active count, maxConcurrency,
-                                #        rateMax, rateDuration, rateWindowStart, rateCount)
+                                #        rateMax, rateDuration, rateWindowStart, rateCount,
+                                #        tbCapacity, tbTokens, tbRefillRate, tbLastRefill,
+                                #        tbRefillRemainder)
 glide:{q}:groupq:{key}          # List - FIFO wait list for group-limited jobs
 glide:{q}:ratelimited           # ZSet - scheduler-managed promotion queue for rate-limited jobs
                                 #        (score = earliest eligible timestamp)
@@ -61,7 +63,7 @@ added --> stream (ready) --> PEL (active) --> completed (ZSet)
                      stream (re-queued)
 ```
 
-`moveToActive` may return `GROUP_RATE_LIMITED` when a job's ordering-key rate limit is exceeded. The job is parked in the `glide:{q}:ratelimited` ZSet with a score equal to the earliest eligible timestamp. The scheduler's promotion loop picks it up once the window resets.
+`moveToActive` may return `GROUP_RATE_LIMITED` when a job's ordering-key sliding window rate limit is exceeded, or `GROUP_TOKEN_LIMITED` when the token bucket has insufficient tokens. In both cases, the job is parked in the `glide:{q}:ratelimited` ZSet with a score equal to the earliest eligible timestamp. The scheduler's promotion loop picks it up once capacity is available. If a job's `cost` exceeds the bucket's `tbCapacity`, `moveToActive` moves the job to the DLQ instead.
 
 States map to Valkey structures:
 - **waiting**: In stream, not yet claimed by consumer group
@@ -96,7 +98,7 @@ Use Valkey Functions (FUNCTION LOAD / FCALL) instead of EVAL/EVALSHA scripts.
 ### Loading Strategy
 1. On Queue/Worker creation, check if library exists: `FUNCTION LIST LIBRARYNAME glidemq`
 2. If missing, load via `FUNCTION LOAD` with the full library source
-3. If version mismatch (we track a version field in the library - currently `LIBRARY_VERSION = 17`), reload with `FUNCTION LOAD REPLACE`
+3. If version mismatch (we track a version field in the library - currently `LIBRARY_VERSION = 19`), reload with `FUNCTION LOAD REPLACE`
 4. Library source is embedded in the npm package as a string constant (built from .lua source files at compile time)
 5. In cluster mode, `FUNCTION LOAD` must be sent to all nodes (use route: "allNodes")
 

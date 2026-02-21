@@ -81,9 +81,15 @@ export class FlowProducer {
       const opts = flow.opts ?? {};
       const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
       const groupRateDuration = opts.ordering?.rateLimit?.duration ?? 0;
+      const tbCapacity = opts.ordering?.tokenBucket
+        ? Math.round(opts.ordering.tokenBucket.capacity * 1000) : 0;
+      const tbRefillRate = opts.ordering?.tokenBucket
+        ? Math.round(opts.ordering.tokenBucket.refillRate * 1000) : 0;
+      const jobCost = opts.cost != null
+        ? Math.round(opts.cost * 1000) : 0;
       let groupConcurrency = opts.ordering?.concurrency ?? 0;
-      // Force group path when rate limit is set
-      if (groupRateMax > 0 && groupConcurrency < 1) {
+      // Force group path when rate limit or token bucket is set
+      if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
         groupConcurrency = 1;
       }
       const jobId = await addJob(
@@ -101,7 +107,13 @@ export class FlowProducer {
         groupConcurrency,
         groupRateMax,
         groupRateDuration,
+        tbCapacity,
+        tbRefillRate,
+        jobCost,
       );
+      if (String(jobId) === 'ERR:COST_EXCEEDS_CAPACITY') {
+        throw new Error('Job cost exceeds token bucket capacity');
+      }
       const job = new Job(
         client,
         parentKeys,
