@@ -72,7 +72,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   /** @internal */
   async getClient(): Promise<Client> {
     if (this.closing) {
-      throw new Error('Queue is closing');
+      throw new GlideMQError('Queue is closing');
     }
     if (!this.client) {
       if (this.opts.client) {

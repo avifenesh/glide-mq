@@ -98,22 +98,16 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
   private async init(): Promise<void> {
     const injectedClient = this.opts.commandClient ?? this.opts.client;
+    const clusterMode = this.opts.connection!.clusterMode ?? false;
     if (injectedClient) {
+      await ensureFunctionLibraryOnce(injectedClient, undefined, clusterMode);
       this.commandClient = injectedClient;
       this.commandClientOwned = false;
-      await ensureFunctionLibraryOnce(
-        this.commandClient,
-        undefined,
-        this.opts.connection!.clusterMode ?? false,
-      );
     } else {
-      this.commandClient = await createClient(this.opts.connection!);
+      const client = await createClient(this.opts.connection!);
+      await ensureFunctionLibrary(client, undefined, clusterMode);
+      this.commandClient = client;
       this.commandClientOwned = true;
-      await ensureFunctionLibrary(
-        this.commandClient,
-        undefined,
-        this.opts.connection!.clusterMode ?? false,
-      );
     }
     this.blockingClient = await createBlockingClient(this.opts.connection!);
 
@@ -189,12 +183,13 @@ export class Worker<D = any, R = any> extends EventEmitter {
             try { this.commandClient.close(); } catch { /* ignore */ }
             this.commandClient = null;
           }
-          this.commandClient = await createClient(this.opts.connection!);
+          const client = await createClient(this.opts.connection!);
           await ensureFunctionLibrary(
-            this.commandClient,
+            client,
             undefined,
             this.opts.connection!.clusterMode ?? false,
           );
+          this.commandClient = client;
         } else {
           // Injected command client - verify liveness and re-ensure library
           try {
