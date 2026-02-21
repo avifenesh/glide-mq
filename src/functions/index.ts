@@ -128,36 +128,43 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now)
   local tbCap = tonumber(g.tbCapacity) or 0
   if ts > 0 and tbCap > 0 then
     local tbTokensCur = tbRefill(groupHashKey, g, ts)
-    -- Peek at head job without popping
-    local headJobId = redis.call('LINDEX', waitListKey, 0)
-    if headJobId then
+    -- Peek at head job, skipping tombstones and DLQ'd jobs (up to 10 iterations)
+    local tbCheckPasses = 0
+    local tbOk = false
+    while tbCheckPasses < 10 do
+      tbCheckPasses = tbCheckPasses + 1
+      local headJobId = redis.call('LINDEX', waitListKey, 0)
+      if not headJobId then break end
       local headJobKey = prefix .. 'job:' .. headJobId
-      -- Tombstone guard: job hash deleted
+      -- Tombstone guard: job hash deleted - pop and check next
       if redis.call('EXISTS', headJobKey) == 0 then
         redis.call('LPOP', waitListKey)
-        return
-      end
-      local headCost = tonumber(redis.call('HGET', headJobKey, 'cost')) or 1000
-      -- DLQ guard: cost > capacity
-      if headCost > tbCap then
-        redis.call('LPOP', waitListKey)
-        redis.call('ZADD', prefix .. 'failed', ts, headJobId)
-        redis.call('HSET', headJobKey,
-          'state', 'failed',
-          'failedReason', 'cost exceeds token bucket capacity',
-          'finishedOn', tostring(ts))
-        emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
-        return
-      end
-      -- Not enough tokens: register delay and skip promotion
-      if tbTokensCur < headCost then
-        local tbRateVal = tonumber(g.tbRefillRate) or 1
-        local tbDelayMs = math.ceil((headCost - tbTokensCur) * 1000 / tbRateVal)
-        local rateLimitedKey = prefix .. 'ratelimited'
-        redis.call('ZADD', rateLimitedKey, ts + tbDelayMs, gk)
-        return
+      else
+        local headCost = tonumber(redis.call('HGET', headJobKey, 'cost')) or 1000
+        -- DLQ guard: cost > capacity - pop, fail, check next
+        if headCost > tbCap then
+          redis.call('LPOP', waitListKey)
+          redis.call('ZADD', prefix .. 'failed', ts, headJobId)
+          redis.call('HSET', headJobKey,
+            'state', 'failed',
+            'failedReason', 'cost exceeds token bucket capacity',
+            'finishedOn', tostring(ts))
+          emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
+        elseif tbTokensCur < headCost then
+          -- Not enough tokens: register delay and skip promotion
+          local tbRateVal = tonumber(g.tbRefillRate) or 0
+          if tbRateVal <= 0 then break end
+          local tbDelayMs = math.ceil((headCost - tbTokensCur) * 1000 / tbRateVal)
+          local rateLimitedKey = prefix .. 'ratelimited'
+          redis.call('ZADD', rateLimitedKey, ts + tbDelayMs, gk)
+          return
+        else
+          tbOk = true
+          break
+        end
       end
     end
+    if not tbOk and tbCheckPasses >= 10 then return end
   end
   -- Calculate how many slots are available for promotion
   local available = 1
@@ -656,7 +663,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       end
       if nextTbTokens < nextJobCostVal then
         nextTbBlocked = true
-        local nextTbRefillRateVal = tonumber(nGrp.tbRefillRate) or 1
+        local nextTbRefillRateVal = math.max(tonumber(nGrp.tbRefillRate) or 0, 1)
         nextTbDelay = math.ceil((nextJobCostVal - nextTbTokens) * 1000 / nextTbRefillRateVal)
       end
     end
@@ -1124,7 +1131,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
           end
           if tbCheckPassed and prTbTokens < headCost then
             -- Not enough tokens: re-register with calculated delay
-            local prTbRate = tonumber(prGrp.tbRefillRate) or 1
+            local prTbRate = math.max(tonumber(prGrp.tbRefillRate) or 0, 1)
             local prTbDelay = math.ceil((headCost - prTbTokens) * 1000 / prTbRate)
             redis.call('ZADD', rateLimitedKey, now + prTbDelay, gk)
             tbCheckPassed = false
@@ -1234,7 +1241,8 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       end
       if tbTokens < jobCostVal then
         tbBlocked = true
-        local tbRefillRateVal = tonumber(grp.tbRefillRate) or 1
+        local tbRefillRateVal = tonumber(grp.tbRefillRate) or 0
+        if tbRefillRateVal <= 0 then tbRefillRateVal = 1 end
         tbDelay = math.ceil((jobCostVal - tbTokens) * 1000 / tbRefillRateVal)
       end
     end

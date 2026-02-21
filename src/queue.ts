@@ -99,12 +99,20 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const orderingKey = opts?.ordering?.key ?? '';
         const groupRateMax = opts?.ordering?.rateLimit?.max ?? 0;
         const groupRateDuration = opts?.ordering?.rateLimit?.duration ?? 0;
-        const tbCapacity = opts?.ordering?.tokenBucket
-          ? Math.round(opts.ordering.tokenBucket.capacity * 1000) : 0;
-        const tbRefillRate = opts?.ordering?.tokenBucket
-          ? Math.round(opts.ordering.tokenBucket.refillRate * 1000) : 0;
-        const jobCost = opts?.cost != null
-          ? Math.round(opts.cost * 1000) : 0;
+        const tb = opts?.ordering?.tokenBucket;
+        let tbCapacity = 0;
+        let tbRefillRate = 0;
+        if (tb) {
+          if (!Number.isFinite(tb.capacity) || tb.capacity <= 0) throw new Error('tokenBucket.capacity must be a positive finite number');
+          if (!Number.isFinite(tb.refillRate) || tb.refillRate <= 0) throw new Error('tokenBucket.refillRate must be a positive finite number');
+          tbCapacity = Math.round(tb.capacity * 1000);
+          tbRefillRate = Math.round(tb.refillRate * 1000);
+        }
+        let jobCost = 0;
+        if (opts?.cost != null) {
+          if (!Number.isFinite(opts.cost) || opts.cost < 0) throw new Error('cost must be a non-negative finite number');
+          jobCost = Math.round(opts.cost * 1000);
+        }
         let groupConcurrency = opts?.ordering?.concurrency ?? 0;
         // Force group path when rate limit or token bucket is set
         if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
@@ -230,14 +238,21 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
       const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
       const groupRateDuration = opts.ordering?.rateLimit?.duration ?? 0;
-      const tbCapacity = opts.ordering?.tokenBucket
-        ? Math.round(opts.ordering.tokenBucket.capacity * 1000) : 0;
-      const tbRefillRate = opts.ordering?.tokenBucket
-        ? Math.round(opts.ordering.tokenBucket.refillRate * 1000) : 0;
-      const jobCost = opts.cost != null
-        ? Math.round(opts.cost * 1000) : 0;
+      const bulkTb = opts.ordering?.tokenBucket;
+      let tbCapacity = 0;
+      let tbRefillRate = 0;
+      if (bulkTb) {
+        if (!Number.isFinite(bulkTb.capacity) || bulkTb.capacity <= 0) throw new Error('tokenBucket.capacity must be a positive finite number');
+        if (!Number.isFinite(bulkTb.refillRate) || bulkTb.refillRate <= 0) throw new Error('tokenBucket.refillRate must be a positive finite number');
+        tbCapacity = Math.round(bulkTb.capacity * 1000);
+        tbRefillRate = Math.round(bulkTb.refillRate * 1000);
+      }
+      let jobCost = 0;
+      if (opts.cost != null) {
+        if (!Number.isFinite(opts.cost) || opts.cost < 0) throw new Error('cost must be a non-negative finite number');
+        jobCost = Math.round(opts.cost * 1000);
+      }
       let groupConcurrency = opts.ordering?.concurrency ?? 0;
-      // Force group path when rate limit or token bucket is set
       if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
         groupConcurrency = 1;
       }
