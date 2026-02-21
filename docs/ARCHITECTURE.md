@@ -22,6 +22,10 @@ glide:{q}:parent:{id}           # Hash - parent queue + job ID reference
 glide:{q}:dedup                 # Hash - field=dedup_id, value=job_id|timestamp
 glide:{q}:rate                  # Hash - rate limiter counters (window start, count)
 glide:{q}:schedulers            # Hash - field=scheduler_name, value=next_run_ts
+glide:{q}:ordering              # Hash - per-key sequence counters (for concurrency=1)
+glide:{q}:orderdone:pending:{k} # Hash - pending sequence tracking per ordering key
+glide:{q}:group:{key}           # Hash - group state (active count, maxConcurrency)
+glide:{q}:groupq:{key}          # List - FIFO wait list for group-limited jobs
 ```
 
 ## Job State Machine
@@ -31,16 +35,21 @@ glide:{q}:schedulers            # Hash - field=scheduler_name, value=next_run_ts
                |
                v (promotion loop)
 added --> stream (ready) --> PEL (active) --> completed (ZSet)
-                                |
-                                +--> failed (ZSet)
-                                |      |
-                                |      v (retry)
-                                |    scheduled (with backoff delay)
-                                |
-                                +--> waiting-children (deps:{id} non-empty)
-                                       |
-                                       v (all children done)
-                                     stream (re-queued)
+                |                |
+                |                +--> failed (ZSet)
+                |                |      |
+                |                |      v (retry)
+                |                |    scheduled (with backoff delay)
+                |                |
+                |                +--> waiting-children (deps:{id} non-empty)
+                |                       |
+                |                       v (all children done)
+                |                     stream (re-queued)
+                |
+                +--> group-waiting (groupq:{key} list)
+                       |
+                       v (slot freed on complete/fail)
+                     stream (re-queued)
 ```
 
 States map to Redis structures:

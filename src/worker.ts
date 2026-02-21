@@ -307,7 +307,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
    * Returns true if the result was handled (caller should return), false if the hash is valid.
    */
   private async handleMoveToActiveEdgeCase(
-    moveResult: Record<string, string> | 'REVOKED' | null,
+    moveResult: Record<string, string> | 'REVOKED' | 'GROUP_FULL' | null,
     jobId: string,
     entryId: string,
   ): Promise<boolean> {
@@ -318,6 +318,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
     if (moveResult === 'REVOKED') {
       try { await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP); } catch (err) { this.emit('error', err); }
+      return true;
+    }
+    if (moveResult === 'GROUP_FULL') {
       return true;
     }
     return false;
@@ -468,7 +471,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     while (this.running && !this.closing && this.commandClient) {
       // Activate the job (skip if we already have a pre-fetched hash from completeAndFetchNext)
       if (!currentHash) {
-        const moveResult = await moveToActive(this.commandClient, this.queueKeys, currentJobId, Date.now());
+        const moveResult = await moveToActive(this.commandClient, this.queueKeys, currentJobId, Date.now(), this.queueKeys.stream, currentEntryId, CONSUMER_GROUP);
         if (await this.handleMoveToActiveEdgeCase(moveResult, currentJobId, currentEntryId)) return;
         currentHash = moveResult as Record<string, string>;
       }

@@ -79,6 +79,7 @@ worker.on('failed', (job, err) => console.error(`Job ${job.id} failed:`, err.mes
 - **[docs/WORKFLOWS.md](docs/WORKFLOWS.md)** — FlowProducer, `chain`, `group`, `chord` pipelines
 - **[docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)** — Job logs, metrics, OpenTelemetry, `@glidemq/dashboard`
 - **[docs/TESTING.md](docs/TESTING.md)** — `TestQueue` & `TestWorker`, in-memory testing without Valkey
+- **[docs/MIGRATION.md](docs/MIGRATION.md)** — Migrating from BullMQ: API mapping, gaps, and workarounds
 
 ## License
 
