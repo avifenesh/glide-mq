@@ -854,7 +854,7 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     parentHash[#parentHash + 1] = 'groupKey'
     parentHash[#parentHash + 1] = parentOrderingKey
     local groupHashKey = parentPrefix .. 'group:' .. parentOrderingKey
-    redis.call('HSETNX', groupHashKey, 'maxConcurrency', tostring(parentGroupConc))
+    redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(parentGroupConc))
     redis.call('HSETNX', groupHashKey, 'active', '0')
   elseif parentOrderingKey ~= '' then
     parentHash[#parentHash + 1] = 'orderingKey'
