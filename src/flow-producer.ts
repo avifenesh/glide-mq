@@ -1,7 +1,8 @@
 import type { FlowProducerOptions, FlowJob, Client } from './types';
 import { Job } from './job';
 import { buildKeys, keyPrefix } from './utils';
-import { createClient, ensureFunctionLibrary } from './connection';
+import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
+import { GlideMQError } from './errors';
 import { LIBRARY_SOURCE, addFlow } from './functions/index';
 import { withSpan } from './telemetry';
 
@@ -13,21 +14,38 @@ export interface JobNode {
 export class FlowProducer {
   private opts: FlowProducerOptions;
   private client: Client | null = null;
+  private clientOwned = true;
   private closing = false;
 
   constructor(opts: FlowProducerOptions) {
+    if (!opts.connection && !opts.client) {
+      throw new GlideMQError('Either `connection` or `client` must be provided.');
+    }
     this.opts = opts;
   }
 
   /** @internal */
   private async getClient(): Promise<Client> {
+    if (this.closing) {
+      throw new GlideMQError('FlowProducer is closing');
+    }
     if (!this.client) {
-      this.client = await createClient(this.opts.connection);
-      await ensureFunctionLibrary(
-        this.client,
-        LIBRARY_SOURCE,
-        this.opts.connection.clusterMode ?? false,
-      );
+      if (this.opts.client) {
+        const injected = this.opts.client;
+        const clusterMode = this.opts.connection?.clusterMode
+          ?? isClusterClient(injected);
+        await ensureFunctionLibraryOnce(injected, LIBRARY_SOURCE, clusterMode);
+        this.client = injected;
+        this.clientOwned = false;
+      } else {
+        this.client = await createClient(this.opts.connection!);
+        this.clientOwned = true;
+        await ensureFunctionLibrary(
+          this.client,
+          LIBRARY_SOURCE,
+          this.opts.connection!.clusterMode ?? false,
+        );
+      }
     }
     return this.client;
   }
@@ -237,7 +255,9 @@ export class FlowProducer {
     if (this.closing) return;
     this.closing = true;
     if (this.client) {
-      this.client.close();
+      if (this.clientOwned) {
+        this.client.close();
+      }
       this.client = null;
     }
   }

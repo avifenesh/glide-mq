@@ -32,6 +32,7 @@ export type {
 } from './types';
 
 export { GlideMQError, ConnectionError } from './errors';
+export { isClusterClient } from './connection';
 export { gracefulShutdown } from './graceful-shutdown';
 export type { GracefulShutdownHandle } from './graceful-shutdown';
 

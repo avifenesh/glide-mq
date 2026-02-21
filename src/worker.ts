@@ -2,7 +2,8 @@ import { EventEmitter } from 'events';
 import type { WorkerOptions, Processor, Client } from './types';
 import { Job } from './job';
 import { buildKeys, calculateBackoff, keyPrefix, nextReconnectDelay, reconnectWithBackoff } from './utils';
-import { createClient, createBlockingClient, ensureFunctionLibrary, createConsumerGroup } from './connection';
+import { createClient, createBlockingClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, createConsumerGroup } from './connection';
+import { GlideMQError, ConnectionError } from './errors';
 import {
   CONSUMER_GROUP,
   completeJob,
@@ -23,6 +24,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private opts: WorkerOptions;
   private processor: Processor<D, R>;
   private commandClient: Client | null = null;
+  private commandClientOwned = true;
   private blockingClient: Client | null = null;
   private running = false;
   private paused = false;
@@ -54,6 +56,22 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
   constructor(name: string, processor: Processor<D, R>, opts: WorkerOptions) {
     super();
+
+    // Validate client injection options
+    if (opts.client && opts.commandClient) {
+      throw new GlideMQError('Provide either `client` or `commandClient`, not both.');
+    }
+    const injectedClient = opts.commandClient ?? opts.client;
+    if (!opts.connection && !injectedClient) {
+      throw new GlideMQError('Either `connection` or `client`/`commandClient` must be provided.');
+    }
+    if (!opts.connection && injectedClient) {
+      throw new GlideMQError(
+        'Worker requires `connection` even when a shared client is provided, '
+        + 'because the blocking client for XREADGROUP must be auto-created.',
+      );
+    }
+
     this.name = name;
     this.processor = processor;
     this.opts = opts;
@@ -79,13 +97,25 @@ export class Worker<D = any, R = any> extends EventEmitter {
   }
 
   private async init(): Promise<void> {
-    this.commandClient = await createClient(this.opts.connection);
-    this.blockingClient = await createBlockingClient(this.opts.connection);
-    await ensureFunctionLibrary(
-      this.commandClient,
-      undefined,
-      this.opts.connection.clusterMode ?? false,
-    );
+    const injectedClient = this.opts.commandClient ?? this.opts.client;
+    if (injectedClient) {
+      this.commandClient = injectedClient;
+      this.commandClientOwned = false;
+      await ensureFunctionLibraryOnce(
+        this.commandClient,
+        undefined,
+        this.opts.connection!.clusterMode ?? false,
+      );
+    } else {
+      this.commandClient = await createClient(this.opts.connection!);
+      this.commandClientOwned = true;
+      await ensureFunctionLibrary(
+        this.commandClient,
+        undefined,
+        this.opts.connection!.clusterMode ?? false,
+      );
+    }
+    this.blockingClient = await createBlockingClient(this.opts.connection!);
 
     // Create consumer group on the stream (idempotent)
     await createConsumerGroup(
@@ -147,37 +177,50 @@ export class Worker<D = any, R = any> extends EventEmitter {
     await reconnectWithBackoff(
       this.reconnectCtx,
       async () => {
-        // Close stale clients
-        if (this.commandClient) {
-          try { this.commandClient.close(); } catch { /* ignore */ }
-          this.commandClient = null;
-        }
+        // Close stale blocking client (always owned)
         if (this.blockingClient) {
           try { this.blockingClient.close(); } catch { /* ignore */ }
           this.blockingClient = null;
         }
 
-        // Recreate clients
-        this.commandClient = await createClient(this.opts.connection);
-        this.blockingClient = await createBlockingClient(this.opts.connection);
-        await ensureFunctionLibrary(
-          this.commandClient,
-          undefined,
-          this.opts.connection.clusterMode ?? false,
-        );
+        if (this.commandClientOwned) {
+          // Close and recreate owned command client
+          if (this.commandClient) {
+            try { this.commandClient.close(); } catch { /* ignore */ }
+            this.commandClient = null;
+          }
+          this.commandClient = await createClient(this.opts.connection!);
+          await ensureFunctionLibrary(
+            this.commandClient,
+            undefined,
+            this.opts.connection!.clusterMode ?? false,
+          );
+        } else {
+          // Injected command client - verify liveness, don't recreate
+          try {
+            await this.commandClient!.ping();
+          } catch (err) {
+            this.emit('error', new ConnectionError(
+              'Shared command client is unreachable. The client owner must handle reconnection.',
+            ));
+            throw err;
+          }
+        }
+
+        this.blockingClient = await createBlockingClient(this.opts.connection!);
 
         // Re-ensure consumer group
         await createConsumerGroup(
-          this.commandClient,
+          this.commandClient!,
           this.queueKeys.stream,
           CONSUMER_GROUP,
         );
 
-        // Restart scheduler with the new client
+        // Restart scheduler with the (possibly same) client
         if (this.scheduler) {
           this.scheduler.stop();
         }
-        this.scheduler = new Scheduler(this.commandClient, this.queueKeys, {
+        this.scheduler = new Scheduler(this.commandClient!, this.queueKeys, {
           promotionInterval: this.opts.promotionInterval,
           stalledInterval: this.stalledInterval,
           maxStalledCount: this.maxStalledCount,
@@ -774,7 +817,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
     this.heartbeatIntervals.clear();
 
     if (this.commandClient) {
-      this.commandClient.close();
+      if (this.commandClientOwned) {
+        this.commandClient.close();
+      }
       this.commandClient = null;
     }
     if (this.blockingClient) {

@@ -38,6 +38,7 @@ export async function createClient(opts: ConnectionOptions): Promise<Client> {
     credentials: buildCredentials(opts.credentials),
     readFrom: opts.readFrom,
     clientAz: opts.clientAz,
+    inflightRequestsLimit: opts.inflightRequestsLimit,
   };
 
   try {
@@ -58,6 +59,39 @@ export async function createClient(opts: ConnectionOptions): Promise<Client> {
  */
 export async function createBlockingClient(opts: ConnectionOptions): Promise<Client> {
   return createClient(opts);
+}
+
+/**
+ * Detect whether a client is a GlideClusterClient.
+ * Used to resolve clusterMode when an injected client is provided without ConnectionOptions.
+ */
+export function isClusterClient(client: Client): boolean {
+  return client instanceof GlideClusterClient;
+}
+
+const _libraryLoadPromises = new WeakMap<Client, Promise<void>>();
+
+/**
+ * Ensure the function library is loaded, deduplicating concurrent calls for the same client.
+ * Uses a WeakMap so entries are GC'd when the client is collected.
+ * On failure, removes from cache so the next caller can retry.
+ */
+export async function ensureFunctionLibraryOnce(
+  client: Client,
+  librarySource: string = LIBRARY_SOURCE,
+  clusterMode?: boolean,
+): Promise<void> {
+  const existing = _libraryLoadPromises.get(client);
+  if (existing) return existing;
+
+  const cluster = clusterMode ?? isClusterClient(client);
+  const promise = ensureFunctionLibrary(client, librarySource, cluster).catch((err) => {
+    _libraryLoadPromises.delete(client);
+    throw err;
+  });
+
+  _libraryLoadPromises.set(client, promise);
+  return promise;
 }
 
 /**

@@ -24,7 +24,8 @@
     "bench": "npx tsx benchmarks/run.ts all",
     "bench:throughput": "npx tsx benchmarks/run.ts throughput",
     "bench:latency": "npx tsx benchmarks/run.ts latency",
-    "bench:memory": "npx tsx benchmarks/run.ts memory"
+    "bench:memory": "npx tsx benchmarks/run.ts memory",
+    "bench:sharing": "npx tsx benchmarks/run.ts sharing"
   },
   "engines": {
     "node": ">=20"

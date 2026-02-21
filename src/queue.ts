@@ -4,7 +4,8 @@ import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts, SearchJobsOptions, RateLimitConfig } from './types';
 import { Job } from './job';
 import { buildKeys, keyPrefix, keyPrefixPattern, nextCronOccurrence, hashDataToRecord, extractJobIdsFromStreamEntries, compress } from './utils';
-import { createClient, ensureFunctionLibrary } from './connection';
+import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
+import { GlideMQError } from './errors';
 import {
   LIBRARY_SOURCE,
   CONSUMER_GROUP,
@@ -40,14 +41,32 @@ export class Queue<D = any, R = any> extends EventEmitter {
   readonly name: string;
   private opts: QueueOptions;
   private client: Client | null = null;
+  private clientOwned = true;
+  private _clusterMode: boolean | undefined;
   private closing = false;
   private keys: QueueKeys;
 
   constructor(name: string, opts: QueueOptions) {
     super();
+    if (!opts.connection && !opts.client) {
+      throw new GlideMQError('Either `connection` or `client` must be provided.');
+    }
     this.name = name;
     this.opts = opts;
     this.keys = buildKeys(name, opts.prefix);
+    if (opts.connection) {
+      this._clusterMode = opts.connection.clusterMode ?? false;
+    }
+  }
+
+  /** Resolve clusterMode (cached after first resolution). */
+  private get clusterMode(): boolean {
+    if (this._clusterMode !== undefined) return this._clusterMode;
+    if (this.client) {
+      this._clusterMode = isClusterClient(this.client);
+      return this._clusterMode;
+    }
+    return false;
   }
 
   /** @internal */
@@ -56,20 +75,37 @@ export class Queue<D = any, R = any> extends EventEmitter {
       throw new Error('Queue is closing');
     }
     if (!this.client) {
-      let client: Client;
-      try {
-        client = await createClient(this.opts.connection);
-        await ensureFunctionLibrary(
-          client,
-          LIBRARY_SOURCE,
-          this.opts.connection.clusterMode ?? false,
-        );
-      } catch (err) {
-        // Don't cache a failed client - next getClient() call will retry
-        this.emit('error', err);
-        throw err;
+      if (this.opts.client) {
+        const injected = this.opts.client;
+        try {
+          await ensureFunctionLibraryOnce(
+            injected,
+            LIBRARY_SOURCE,
+            this.opts.connection?.clusterMode ?? isClusterClient(injected),
+          );
+        } catch (err) {
+          this.emit('error', err);
+          throw err;
+        }
+        this.client = injected;
+        this.clientOwned = false;
+      } else {
+        let client: Client;
+        try {
+          client = await createClient(this.opts.connection!);
+          await ensureFunctionLibrary(
+            client,
+            LIBRARY_SOURCE,
+            this.opts.connection!.clusterMode ?? false,
+          );
+        } catch (err) {
+          // Don't cache a failed client - next getClient() call will retry
+          this.emit('error', err);
+          throw err;
+        }
+        this.client = client;
+        this.clientOwned = true;
       }
-      this.client = client;
     }
     return this.client;
   }
@@ -217,7 +253,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (jobs.length === 0) return [];
 
     const client = await this.getClient();
-    const isCluster = this.opts.connection.clusterMode ?? false;
+    const isCluster = this.clusterMode;
     const timestamp = Date.now();
 
     // Prepare job metadata for each entry
@@ -578,7 +614,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * @internal
    */
   private async scanAndDelete(client: Client, pattern: string): Promise<void> {
-    if (this.opts.connection.clusterMode) {
+    if (this.clusterMode) {
       const { ClusterScanCursor } = await import('@glidemq/speedkey');
       const clusterClient = client as GlideClusterClient;
       let cursor = new ClusterScanCursor();
@@ -838,7 +874,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       }
     };
 
-    if (this.opts.connection.clusterMode) {
+    if (this.clusterMode) {
       const { ClusterScanCursor } = await import('@glidemq/speedkey');
       const clusterClient = client as GlideClusterClient;
       let cursor = new ClusterScanCursor();
@@ -952,7 +988,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (this.closing) return;
     this.closing = true;
     if (this.client) {
-      this.client.close();
+      if (this.clientOwned) {
+        this.client.close();
+      }
       this.client = null;
     }
   }

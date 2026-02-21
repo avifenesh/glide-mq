@@ -6,11 +6,13 @@
 import { runThroughput } from './throughput';
 import { runLatency } from './latency';
 import { runMemory } from './memory';
+import { runSharing } from './client-sharing';
 
 const SUITES: Record<string, () => Promise<void>> = {
   throughput: runThroughput,
   latency: runLatency,
   memory: runMemory,
+  sharing: runSharing,
 };
 
 async function main(): Promise<void> {
