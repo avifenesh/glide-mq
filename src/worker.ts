@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import { randomBytes } from 'crypto';
 import type { WorkerOptions, Processor, Client } from './types';
 import { Job } from './job';
 import { buildKeys, calculateBackoff, keyPrefix, nextReconnectDelay, reconnectWithBackoff } from './utils';
@@ -77,7 +78,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     this.processor = processor;
     this.opts = opts;
     this.queueKeys = buildKeys(name, opts.prefix);
-    this.consumerId = `worker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this.consumerId = `worker-${Date.now()}-${randomBytes(4).toString('hex')}`;
 
     this.concurrency = opts.concurrency ?? 1;
     this.prefetch = opts.prefetch ?? this.concurrency;
