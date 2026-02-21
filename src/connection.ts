@@ -38,6 +38,7 @@ export async function createClient(opts: ConnectionOptions): Promise<Client> {
     credentials: buildCredentials(opts.credentials),
     readFrom: opts.readFrom,
     clientAz: opts.clientAz,
+    inflightRequestsLimit: opts.inflightRequestsLimit,
   };
 
   try {
@@ -58,6 +59,44 @@ export async function createClient(opts: ConnectionOptions): Promise<Client> {
  */
 export async function createBlockingClient(opts: ConnectionOptions): Promise<Client> {
   return createClient(opts);
+}
+
+/**
+ * Detect whether a client is a GlideClusterClient.
+ * Uses instanceof with a duck-type fallback for cases where the client
+ * comes from a different copy/version of @glidemq/speedkey (dependency duplication).
+ */
+export function isClusterClient(client: Client): boolean {
+  if (client instanceof GlideClusterClient) return true;
+  // Duck-type fallback: GlideClusterClient has scan(ClusterScanCursor, ...) signature
+  // while GlideClient has scan(cursor: string, ...) - check for cluster-specific method
+  return typeof (client as any).clusterScan === 'function'
+    || client.constructor?.name === 'GlideClusterClient';
+}
+
+const _libraryLoadPromises = new WeakMap<Client, Promise<void>>();
+
+/**
+ * Ensure the function library is loaded, deduplicating concurrent calls for the same client.
+ * Uses a WeakMap so entries are GC'd when the client is collected.
+ * On failure, removes from cache so the next caller can retry.
+ */
+export async function ensureFunctionLibraryOnce(
+  client: Client,
+  librarySource: string = LIBRARY_SOURCE,
+  clusterMode?: boolean,
+): Promise<void> {
+  const existing = _libraryLoadPromises.get(client);
+  if (existing) return existing;
+
+  const cluster = clusterMode ?? isClusterClient(client);
+  const promise = ensureFunctionLibrary(client, librarySource, cluster).catch((err) => {
+    _libraryLoadPromises.delete(client);
+    throw err;
+  });
+
+  _libraryLoadPromises.set(client, promise);
+  return promise;
 }
 
 /**
