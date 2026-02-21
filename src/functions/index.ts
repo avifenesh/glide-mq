@@ -1678,6 +1678,49 @@ export type QueueKeys = ReturnType<typeof import('../utils').buildKeys>;
  * Add a job to the queue atomically.
  * Returns the new job ID (string).
  */
+/**
+ * Build the keys and args arrays for glidemq_addJob, shared by addJob() and Batch callers.
+ */
+export function addJobArgs(
+  k: QueueKeys,
+  jobName: string,
+  data: string,
+  opts: string,
+  timestamp: number,
+  delay: number,
+  priority: number,
+  parentId: string,
+  maxAttempts: number,
+  orderingKey: string = '',
+  groupConcurrency: number = 0,
+  groupRateMax: number = 0,
+  groupRateDuration: number = 0,
+  tbCapacity: number = 0,
+  tbRefillRate: number = 0,
+  jobCost: number = 0,
+): { keys: string[]; args: string[] } {
+  return {
+    keys: [k.id, k.stream, k.scheduled, k.events],
+    args: [
+      jobName,
+      data,
+      opts,
+      timestamp.toString(),
+      delay.toString(),
+      priority.toString(),
+      parentId,
+      maxAttempts.toString(),
+      orderingKey,
+      groupConcurrency.toString(),
+      groupRateMax.toString(),
+      groupRateDuration.toString(),
+      tbCapacity.toString(),
+      tbRefillRate.toString(),
+      jobCost.toString(),
+    ],
+  };
+}
+
 export async function addJob(
   client: Client,
   k: QueueKeys,
@@ -1697,27 +1740,12 @@ export async function addJob(
   tbRefillRate: number = 0,
   jobCost: number = 0,
 ): Promise<string> {
-  const result = await client.fcall(
-    'glidemq_addJob',
-    [k.id, k.stream, k.scheduled, k.events],
-    [
-      jobName,
-      data,
-      opts,
-      timestamp.toString(),
-      delay.toString(),
-      priority.toString(),
-      parentId,
-      maxAttempts.toString(),
-      orderingKey,
-      groupConcurrency.toString(),
-      groupRateMax.toString(),
-      groupRateDuration.toString(),
-      tbCapacity.toString(),
-      tbRefillRate.toString(),
-      jobCost.toString(),
-    ],
+  const { keys, args } = addJobArgs(
+    k, jobName, data, opts, timestamp, delay, priority,
+    parentId, maxAttempts, orderingKey, groupConcurrency,
+    groupRateMax, groupRateDuration, tbCapacity, tbRefillRate, jobCost,
   );
+  const result = await client.fcall('glidemq_addJob', keys, args);
   return result as string;
 }
 

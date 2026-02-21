@@ -1,7 +1,9 @@
+import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { Client, SchedulerEntry } from './types';
-import { CONSUMER_GROUP, promote, promoteRateLimited, reclaimStalled, addJob } from './functions/index';
+import { CONSUMER_GROUP, promote, promoteRateLimited, reclaimStalled, addJob, addJobArgs } from './functions/index';
 import type { buildKeys } from './utils';
 import { nextCronOccurrence } from './utils';
+import { isClusterClient } from './connection';
 
 export interface SchedulerOptions {
   promotionInterval?: number;
@@ -138,6 +140,11 @@ export class Scheduler {
     // hgetall returns { field, value }[] — empty array means no schedulers
     if (!allEntries || allEntries.length === 0) return 0;
 
+    // Collect operations to batch into a single pipeline
+    const pendingJobs: { keys: string[]; args: string[] }[] = [];
+    const pendingUpdates: Record<string, string> = {};
+    const pendingDeletions: string[] = [];
+
     let fired = 0;
     for (const entry of allEntries) {
       const schedulerName = String(entry.field);
@@ -158,18 +165,10 @@ export class Scheduler {
       const priority = template.opts?.priority ?? 0;
       const maxAttempts = template.opts?.attempts ?? 0;
 
-      await addJob(
-        this.client,
-        this.queueKeys,
-        jobName,
-        jobData,
-        jobOpts,
-        now,
-        0, // no delay - scheduler jobs go directly to stream
-        priority,
-        '', // no parent
-        maxAttempts,
-      );
+      pendingJobs.push(addJobArgs(
+        this.queueKeys, jobName, jobData, jobOpts, now,
+        0, priority, '', maxAttempts,
+      ));
 
       // Compute next run
       let nextRun: number;
@@ -179,16 +178,45 @@ export class Scheduler {
         nextRun = now + config.every;
       } else {
         // No repeat config - remove the scheduler entry
-        await this.client.hdel(this.queueKeys.schedulers, [schedulerName]);
+        pendingDeletions.push(schedulerName);
         fired++;
         continue;
       }
 
       config.lastRun = now;
       config.nextRun = nextRun;
-      await this.client.hset(this.queueKeys.schedulers, { [schedulerName]: JSON.stringify(config) });
+      pendingUpdates[schedulerName] = JSON.stringify(config);
       fired++;
     }
+
+    if (fired === 0) return 0;
+
+    // Single-job fast path: avoid Batch overhead
+    if (pendingJobs.length === 1 && pendingDeletions.length === 0
+        && Object.keys(pendingUpdates).length <= 1) {
+      const { keys, args } = pendingJobs[0];
+      await this.client.fcall('glidemq_addJob', keys, args);
+      if (Object.keys(pendingUpdates).length === 1) {
+        await this.client.hset(this.queueKeys.schedulers, pendingUpdates);
+      }
+      return fired;
+    }
+
+    // Batch all operations into a single pipeline RTT
+    const batch = isClusterClient(this.client)
+      ? new ClusterBatch(false) : new Batch(false);
+
+    for (const { keys, args } of pendingJobs) {
+      batch.fcall('glidemq_addJob', keys, args);
+    }
+    if (Object.keys(pendingUpdates).length > 0) {
+      batch.hset(this.queueKeys.schedulers, pendingUpdates);
+    }
+    if (pendingDeletions.length > 0) {
+      batch.hdel(this.queueKeys.schedulers, pendingDeletions);
+    }
+
+    await this.client.exec(batch as any, false);
 
     return fired;
   }
