@@ -14,7 +14,7 @@ const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 const { gracefulShutdown } = require('../dist/graceful-shutdown') as typeof import('../src/graceful-shutdown');
 
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 // ---------------------------------------------------------------------------
 // STALLED JOB RECOVERY (from BullMQ/Celery patterns)
@@ -569,6 +569,7 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     const Q = uniqueQueue('shutdown-graceful');
     const queue = new Queue(Q, { connection: CONNECTION });
 
+    let jobStarted = false;
     let jobFinished = false;
     let closeFinished = false;
 
@@ -577,6 +578,7 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     const worker = new Worker(
       Q,
       async () => {
+        jobStarted = true;
         await new Promise((r) => setTimeout(r, 2000));
         jobFinished = true;
         return 'done';
@@ -586,7 +588,7 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
     worker.on('error', () => {});
 
     // Wait for job to start processing
-    await new Promise((r) => setTimeout(r, 1000));
+    await waitFor(() => jobStarted);
 
     // close(false) should wait for the active job
     const closePromise = worker.close(false).then(() => {

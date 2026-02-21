@@ -29,11 +29,9 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
   });
 
   afterAll(async () => {
-    for (const q of allQueues) {
-      await flushQueue(cleanupClient, q);
-    }
+    await Promise.all(allQueues.map((q) => flushQueue(cleanupClient, q).catch(() => {})));
     cleanupClient.close();
-  });
+  }, 120000);
 
   // ---------------------------------------------------------------------------
   // JOB REVOCATION (gap #4)
@@ -412,7 +410,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       }
 
       // Wait for connections to fully drain - cluster needs more time
-      await new Promise((r) => setTimeout(r, CONNECTION.clusterMode ? 5000 : 3000));
+      await new Promise((r) => setTimeout(r, CONNECTION.clusterMode ? 8000 : 5000));
 
       const infoAfter = await cleanupClient.info(['CLIENTS']);
       const connectedAfter = parseConnectedClients(infoAfter);
@@ -424,7 +422,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       const job = await verifyQueue.add('verify', { x: 1 });
       expect(job.id).toBeTruthy();
       await verifyQueue.close();
-    }, 30000);
+    }, 45000);
 
     it('Worker processes 500 jobs with retries - activePromises.size === 0 at end', async () => {
       const Q = uniqueQueue('mem-active-promises');

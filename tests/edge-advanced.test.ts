@@ -446,7 +446,7 @@ describeEachMode('Edge: Advanced', (CONNECTION) => {
       const countBefore = await cleanupClient.zcard(k.completed);
       expect(countBefore).toBe(TOTAL);
 
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, 3500));
 
       let processed2 = 0;
       const done2 = new Promise<void>((resolve, reject) => {

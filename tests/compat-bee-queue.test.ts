@@ -15,7 +15,7 @@ const { QueueEvents } = require('../dist/queue-events') as typeof import('../src
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 // ---------------------------------------------------------------------------
 // 1. Stall detection with many stalled jobs
@@ -921,6 +921,10 @@ describeEachMode('node-resque: Failed job management', (CONNECTION) => {
     await done;
 
     // List failed jobs
+    await waitFor(async () => {
+      const jobs = await queue.getJobs('failed');
+      return jobs.length === 3;
+    });
     const failedJobs = await queue.getJobs('failed');
     expect(failedJobs.length).toBe(3);
     for (const job of failedJobs) {
@@ -1088,6 +1092,12 @@ describeEachMode('node-resque: getJobs by state', (CONNECTION) => {
     });
 
     await done;
+
+    await waitFor(async () => {
+      const completed = await queue.getJobs('completed');
+      const failed = await queue.getJobs('failed');
+      return completed.length === 1 && failed.length === 1;
+    });
 
     const delayedJobs = await queue.getJobs('delayed');
     expect(delayedJobs.length).toBe(1);

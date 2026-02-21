@@ -3,7 +3,7 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor, ConnectionConfig } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -152,6 +152,10 @@ describeEachMode('Queue.searchJobs', (CONNECTION) => {
     await done;
 
     // Search without state filter for name 'target'
+    await waitFor(async () => {
+      const r = await q.searchJobs({ name: 'target' });
+      return r.length >= 1;
+    });
     const results = await q.searchJobs({ name: 'target' });
     // Should find at least the delayed job + completed jobs (waiting ones may have been consumed)
     expect(results.length).toBeGreaterThanOrEqual(1);
@@ -193,6 +197,10 @@ describeEachMode('Queue.searchJobs', (CONNECTION) => {
 
     await done;
 
+    await waitFor(async () => {
+      const r = await q.searchJobs({ state: 'completed', name: 'done-job' });
+      return r.length >= 2;
+    });
     const results = await q.searchJobs({ state: 'completed', name: 'done-job' });
     expect(results).toHaveLength(2);
     for (const job of results) {

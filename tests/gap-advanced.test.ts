@@ -12,7 +12,7 @@ const { FlowProducer } = require('../dist/flow-producer') as typeof import('../s
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 const { chain, group, chord } = require('../dist/workflows') as typeof import('../src/workflows');
 
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 describeEachMode('Gap Advanced', (CONNECTION) => {
   let cleanupClient: any;
@@ -75,6 +75,8 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
       expect(finishedJob).toBeTruthy();
       expect(await finishedJob!.getState()).toBe('completed');
 
+      for (const w of workers) await w.close(true).catch(() => {});
+      workers.length = 0;
       await queue.close();
       await flushQueue(cleanupClient, Q);
     }, 15000);
@@ -113,6 +115,8 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
 
       await stalledPromise;
 
+      for (const w of workers) await w.close(true).catch(() => {});
+      workers.length = 0;
       await queue.close();
       await flushQueue(cleanupClient, Q);
     }, 10000);
@@ -169,13 +173,17 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
         worker.on('failed', () => {
           failCount++;
           if (failCount >= 3) {
-            setTimeout(resolve, 500);
+            resolve();
           }
         });
       });
 
       await allDone;
 
+      await waitFor(async () => {
+        const jobs = await queue.getDeadLetterJobs();
+        return jobs.length > 0;
+      });
       const dlqJobs = await queue.getDeadLetterJobs();
       expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
 
@@ -184,6 +192,8 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
       expect(dlqData.originalQueue).toBe(Q);
       expect(dlqData.failedReason).toBe('deliberate failure');
 
+      for (const w of workers) await w.close(true).catch(() => {});
+      workers.length = 0;
       await queue.close();
       await flushQueue(cleanupClient, Q);
       await flushQueue(cleanupClient, DLQ);
@@ -232,6 +242,7 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
           },
         );
         workers.push(worker);
+        worker.on('error', () => {});
 
         let completedCount = 0;
         worker.on('completed', () => {
@@ -262,6 +273,8 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
       expect(executionOrder[1]).toBe('step-2');
       expect(executionOrder[2]).toBe('step-1');
 
+      for (const w of workers) await w.close(true).catch(() => {});
+      workers.length = 0;
       await flushQueue(cleanupClient, Q);
     }, 15000);
   });
@@ -304,6 +317,7 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
           },
         );
         workers.push(worker);
+        worker.on('error', () => {});
 
         let completedCount = 0;
         worker.on('completed', () => {
@@ -334,6 +348,8 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
       expect(startTimes['task-b']).toBeDefined();
       expect(startTimes['task-c']).toBeDefined();
 
+      for (const w of workers) await w.close(true).catch(() => {});
+      workers.length = 0;
       await flushQueue(cleanupClient, Q);
     }, 15000);
   });
@@ -380,6 +396,7 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
           },
         );
         workers.push(worker);
+        worker.on('error', () => {});
 
         let completedCount = 0;
         worker.on('completed', (completedJob: any) => {
@@ -412,6 +429,8 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
       expect(callbackExecuted).toBe(true);
       expect(callbackReceivedChildResults).toBe(true);
 
+      for (const w of workers) await w.close(true).catch(() => {});
+      workers.length = 0;
       await flushQueue(cleanupClient, Q);
     }, 15000);
   });

@@ -424,6 +424,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       expect(idExists).toBe(1);
 
       await queue.close();
+      await new Promise((r) => setTimeout(r, 200));
 
       await flushQueue(cleanupClient, Q);
 
