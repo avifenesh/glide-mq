@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { InfBoundary, Batch, ClusterBatch } from '@glidemq/speedkey';
+import { InfBoundary, Batch, ClusterBatch, ClusterScanCursor } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { QueueOptions, JobOptions, Client, ScheduleOpts, JobTemplate, SchedulerEntry, Metrics, JobCounts, SearchJobsOptions, RateLimitConfig } from './types';
 import { Job } from './job';
@@ -67,6 +67,31 @@ export class Queue<D = any, R = any> extends EventEmitter {
       return this._clusterMode;
     }
     return false;
+  }
+
+  /** @internal Create a Batch appropriate for the client type. */
+  private newBatch(): InstanceType<typeof Batch> | InstanceType<typeof ClusterBatch> {
+    return this.clusterMode ? new ClusterBatch(false) : new Batch(false);
+  }
+
+  /**
+   * @internal Resolve active job IDs from pending entry IDs via pipelined xrange.
+   * Replaces the N+1 serial xrange pattern with a single Batch pipeline.
+   */
+  private async resolveActiveJobIds(client: Client, entryIds: string[]): Promise<string[]> {
+    if (entryIds.length === 0) return [];
+    const batch = this.newBatch();
+    for (const eid of entryIds) {
+      (batch as any).xrange(this.keys.stream, { value: eid }, { value: eid }, 1);
+    }
+    const results = await client.exec(batch as any, false);
+    const jobIds: string[] = [];
+    if (results) {
+      for (const result of results) {
+        if (result) jobIds.push(...extractJobIdsFromStreamEntries(result as any));
+      }
+    }
+    return jobIds;
   }
 
   /** @internal */
@@ -461,10 +486,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
    */
   async getGlobalRateLimit(): Promise<RateLimitConfig | null> {
     const client = await this.getClient();
-    const [max, duration] = await Promise.all([
-      client.hget(this.keys.meta, 'rateLimitMax'),
-      client.hget(this.keys.meta, 'rateLimitDuration'),
-    ]);
+    const fields = await client.hmget(this.keys.meta, ['rateLimitMax', 'rateLimitDuration']);
+    const max = fields?.[0];
+    const duration = fields?.[1];
     if (max == null || duration == null) return null;
     return { max: Number(String(max)), duration: Number(String(duration)) };
   }
@@ -615,7 +639,6 @@ export class Queue<D = any, R = any> extends EventEmitter {
    */
   private async scanAndDelete(client: Client, pattern: string): Promise<void> {
     if (this.clusterMode) {
-      const { ClusterScanCursor } = await import('@glidemq/speedkey');
       const clusterClient = client as GlideClusterClient;
       let cursor = new ClusterScanCursor();
       while (!cursor.isFinished()) {
@@ -666,7 +689,6 @@ export class Queue<D = any, R = any> extends EventEmitter {
         break;
       }
       case 'active': {
-        // XPENDING extended form to get active job entry IDs, then read jobId from entries
         try {
           const pendingEntries = await client.xpendingWithOptions(
             this.keys.stream,
@@ -678,20 +700,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
             },
           );
           const entryIds = pendingEntries.slice(start, end >= 0 ? end + 1 : undefined).map(e => String(e[0]));
-          jobIds = [];
-          for (const entryId of entryIds) {
-            const entryData = await client.xrange(
-              this.keys.stream,
-              { value: entryId },
-              { value: entryId },
-              { count: 1 },
-            );
-            if (entryData) {
-              jobIds.push(...extractJobIdsFromStreamEntries(entryData));
-            }
-          }
+          jobIds = await this.resolveActiveJobIds(client, entryIds);
         } catch {
-          // Consumer group may not exist
           jobIds = [];
         }
         break;
@@ -708,9 +718,18 @@ export class Queue<D = any, R = any> extends EventEmitter {
       }
     }
 
-    // Fetch job hashes in parallel (avoids N+1 serial HGETALL)
-    const results = await Promise.all(jobIds.map(id => this.getJob(id)));
-    return results.filter((job): job is Job<D, R> => job !== null);
+    if (jobIds.length === 0) return [];
+    const batch = this.newBatch();
+    for (const id of jobIds) (batch as any).hgetall(this.keys.job(id));
+    const batchResults = await client.exec(batch as any, false);
+    const jobs: Job<D, R>[] = [];
+    if (batchResults) {
+      for (let i = 0; i < batchResults.length; i++) {
+        const hash = hashDataToRecord(batchResults[i] as any);
+        if (hash) jobs.push(Job.fromHash<D, R>(client, this.keys, jobIds[i], hash));
+      }
+    }
+    return jobs;
   }
 
   /**
@@ -795,19 +814,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             },
           );
           const entryIds = pendingEntries.map(e => String(e[0]));
-          const jobIds: string[] = [];
-          for (const entryId of entryIds) {
-            const entryData = await client.xrange(
-              this.keys.stream,
-              { value: entryId },
-              { value: entryId },
-              { count: 1 },
-            );
-            if (entryData) {
-              jobIds.push(...extractJobIdsFromStreamEntries(entryData));
-            }
-          }
-          return jobIds;
+          return this.resolveActiveJobIds(client, entryIds);
         } catch {
           return [];
         }
@@ -829,16 +836,15 @@ export class Queue<D = any, R = any> extends EventEmitter {
     limit: number,
     pfx: string,
   ): Promise<string[]> {
-    // Active state must be handled in TS since it requires consumer group interaction
     if (state === 'active') {
       const allIds = await this.getJobIdsForState(client, 'active', 10000);
+      if (allIds.length === 0) return [];
+      const batch = this.newBatch();
+      for (const id of allIds) (batch as any).hget(this.keys.job(id), 'name');
+      const names = await client.exec(batch as any, false);
       const matched: string[] = [];
-      for (const id of allIds) {
-        if (matched.length >= limit) break;
-        const jobName = await client.hget(this.keys.job(id), 'name');
-        if (String(jobName) === name) {
-          matched.push(id);
-        }
+      for (let i = 0; i < allIds.length && matched.length < limit; i++) {
+        if (String(names?.[i]) === name) matched.push(allIds[i]);
       }
       return matched;
     }
@@ -862,20 +868,23 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const prefixLen = `${pfx}:job:`.length;
 
     const collectKeys = async (keys: unknown[]): Promise<void> => {
-      for (const key of keys) {
-        if (jobIds.length >= limit) break;
-        const keyStr = String(key);
-        const id = keyStr.substring(prefixLen);
-        if (nameFilter) {
-          const jobName = await client.hget(keyStr, 'name');
-          if (String(jobName) !== nameFilter) continue;
+      const keyStrs = keys.map(k => String(k));
+      if (!nameFilter) {
+        for (const k of keyStrs) {
+          if (jobIds.length >= limit) break;
+          jobIds.push(k.substring(prefixLen));
         }
-        jobIds.push(id);
+        return;
+      }
+      const batch = this.newBatch();
+      for (const k of keyStrs) (batch as any).hget(k, 'name');
+      const names = await client.exec(batch as any, false);
+      for (let i = 0; i < keyStrs.length && jobIds.length < limit; i++) {
+        if (String(names?.[i]) === nameFilter) jobIds.push(keyStrs[i].substring(prefixLen));
       }
     };
 
     if (this.clusterMode) {
-      const { ClusterScanCursor } = await import('@glidemq/speedkey');
       const clusterClient = client as GlideClusterClient;
       let cursor = new ClusterScanCursor();
       while (!cursor.isFinished() && jobIds.length < limit) {
@@ -941,12 +950,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
    */
   async getJobLogs(id: string, start = 0, end = -1): Promise<{ logs: string[]; count: number }> {
     const client = await this.getClient();
-    const logs = await client.lrange(this.keys.log(id), start, end);
-    const count = await client.llen(this.keys.log(id));
-    return {
-      logs: logs.map((l) => String(l)),
-      count,
-    };
+    const batch = this.newBatch();
+    const logKey = this.keys.log(id);
+    (batch as any).lrange(logKey, start, end);
+    (batch as any).llen(logKey);
+    const results = await client.exec(batch as any, false);
+    const logs = ((results?.[0] as any[]) ?? []).map((l: any) => String(l));
+    const count = Number(results?.[1] ?? 0);
+    return { logs, count };
   }
 
   /**
@@ -970,12 +981,17 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     const jobIds = extractJobIdsFromStreamEntries(entries);
     const sliced = jobIds.slice(start, end >= 0 ? end + 1 : undefined);
+    if (sliced.length === 0) return [];
+    const batch = this.newBatch();
+    for (const id of sliced) (batch as any).hgetall(dlqKeys.job(id));
+    const batchResults = await client.exec(batch as any, false);
     const jobs: Job<D, R>[] = [];
-    for (const id of sliced) {
-      const hashData = await client.hgetall(dlqKeys.job(id));
-      const hash = hashDataToRecord(hashData);
-      if (!hash) continue;
-      jobs.push(Job.fromHash<D, R>(client, dlqKeys, id, hash));
+    if (batchResults) {
+      for (let i = 0; i < batchResults.length; i++) {
+        const hash = hashDataToRecord(batchResults[i] as any);
+        if (!hash) continue;
+        jobs.push(Job.fromHash<D, R>(client, dlqKeys, sliced[i], hash));
+      }
     }
     return jobs;
   }

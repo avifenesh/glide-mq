@@ -49,6 +49,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private maxStalledCount: number;
   private lockDuration: number;
   private heartbeatIntervals: Map<string, ReturnType<typeof setInterval>> = new Map();
+  private xreadStreams: Record<string, string> = {};
   private globalConcurrencyEnabled = false;
   private globalRateLimitEnabled = false;
   private cachedRateLimitMax = 0;
@@ -110,6 +111,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
       this.commandClientOwned = true;
     }
     this.blockingClient = await createBlockingClient(this.opts.connection!);
+
+    this.xreadStreams = { [this.queueKeys.stream]: '>' };
 
     // Create consumer group on the stream (idempotent)
     await createConsumerGroup(
@@ -289,7 +292,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     const result = await this.blockingClient.xreadgroup(
       CONSUMER_GROUP,
       this.consumerId,
-      { [this.queueKeys.stream]: '>' },
+      this.xreadStreams,
       { count: fetchCount, block: this.blockTimeout },
     );
 

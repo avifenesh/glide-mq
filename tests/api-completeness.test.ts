@@ -13,6 +13,21 @@ vi.mock('@glidemq/speedkey', () => {
   const MockGlideClusterClient = {
     createClient: vi.fn(),
   };
+  // Mock Batch: accumulate commands, exec returns results
+  class MockBatch {
+    commands: any[] = [];
+    constructor(_isAtomic?: boolean) {}
+    xrange(...args: any[]) { this.commands.push({ cmd: 'xrange', args }); return this; }
+    hgetall(...args: any[]) { this.commands.push({ cmd: 'hgetall', args }); return this; }
+    hget(...args: any[]) { this.commands.push({ cmd: 'hget', args }); return this; }
+    lrange(...args: any[]) { this.commands.push({ cmd: 'lrange', args }); return this; }
+    llen(...args: any[]) { this.commands.push({ cmd: 'llen', args }); return this; }
+  }
+  class MockClusterScanCursor {
+    private done = true;
+    isFinished() { return this.done; }
+    getCursor() { return '0'; }
+  }
   return {
     GlideClient: MockGlideClient,
     GlideClusterClient: MockGlideClusterClient,
@@ -20,11 +35,14 @@ vi.mock('@glidemq/speedkey', () => {
       PositiveInfinity: '+',
       NegativeInfinity: '-',
     },
+    Batch: MockBatch,
+    ClusterBatch: MockBatch,
+    ClusterScanCursor: MockClusterScanCursor,
   };
 });
 
 function makeMockClient(overrides: Record<string, unknown> = {}) {
-  return {
+  const client: any = {
     fcall: vi.fn().mockResolvedValue(LIBRARY_VERSION),
     functionLoad: vi.fn(),
     hset: vi.fn(),
@@ -44,9 +62,23 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     del: vi.fn(),
     scan: vi.fn().mockResolvedValue(['0', []]),
     smembers: vi.fn().mockResolvedValue(new Set()),
+    hmget: vi.fn().mockResolvedValue([null, null]),
     close: vi.fn(),
     ...overrides,
   };
+  client.exec = vi.fn().mockImplementation(async (batch: any) => {
+    const results: any[] = [];
+    for (const cmd of (batch.commands ?? [])) {
+      const method = client[cmd.cmd];
+      if (method) {
+        results.push(await method(...cmd.args));
+      } else {
+        results.push(null);
+      }
+    }
+    return results;
+  });
+  return client;
 }
 
 const connOpts = {

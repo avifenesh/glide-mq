@@ -3,7 +3,7 @@ import { Job } from './job';
 import { buildKeys, keyPrefix } from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
-import { LIBRARY_SOURCE, addFlow } from './functions/index';
+import { LIBRARY_SOURCE, addFlow, addJob } from './functions/index';
 import { withSpan } from './telemetry';
 
 export interface JobNode {
@@ -94,7 +94,6 @@ export class FlowProducer {
 
     // If no children, this is a leaf - add as a regular job (not a flow)
     if (!flow.children || flow.children.length === 0) {
-      const { addJob } = await import('./functions/index');
       const timestamp = Date.now();
       const opts = flow.opts ?? {};
       const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
