@@ -6,80 +6,61 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  NODE_VERSION: "20"
-
 jobs:
-  typecheck:
+  quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout speedkey
-        uses: actions/checkout@v4
-        with:
-          repository: avifenesh/speedkey
-          path: speedkey
-
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: 22
+          cache: npm
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "25.1"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install and build speedkey
-        working-directory: speedkey/node
-        run: npm install && npm run build:release
-
-      - name: Install glide-mq dependencies
-        run: npm install --ignore-scripts
-
-      - name: Link speedkey into node_modules
-        run: mkdir -p node_modules/@glidemq && rm -rf node_modules/@glidemq/speedkey && ln -s ${{ github.workspace }}/speedkey/node node_modules/@glidemq/speedkey
+      - run: npm ci
 
       - name: Typecheck
         run: npx tsc --noEmit
 
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npx prettier --check "src/**/*.ts" "tests/**/*.ts"
+
   test-unit:
+    needs: quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout speedkey
-        uses: actions/checkout@v4
-        with:
-          repository: avifenesh/speedkey
-          path: speedkey
-
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: 22
+          cache: npm
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "25.1"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm ci
 
-      - name: Install and build speedkey
-        working-directory: speedkey/node
-        run: npm install && npm run build:release
-
-      - name: Install glide-mq dependencies
-        run: npm install --ignore-scripts
-
-      - name: Link speedkey into node_modules
-        run: mkdir -p node_modules/@glidemq && rm -rf node_modules/@glidemq/speedkey && ln -s ${{ github.workspace }}/speedkey/node node_modules/@glidemq/speedkey
-
-      - name: Run unit tests
-        run: npx vitest run tests/connection.test.ts tests/job.test.ts tests/queue.test.ts tests/worker.test.ts tests/shutdown.test.ts tests/telemetry.test.ts tests/recovery.test.ts tests/api-completeness.test.ts
+      - name: Run unit tests (no Valkey needed)
+        run: >-
+          npx vitest run
+          tests/api-completeness.test.ts
+          tests/az-affinity.test.ts
+          tests/connection.test.ts
+          tests/job.test.ts
+          tests/queue.test.ts
+          tests/recovery.test.ts
+          tests/shutdown.test.ts
+          tests/telemetry.test.ts
+          tests/testing-mode.test.ts
+          tests/worker-saturation.test.ts
+          tests/worker.test.ts
 
   test-integration:
+    needs: quality
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+      fail-fast: false
     services:
       valkey:
         image: valkey/valkey:8.0
@@ -90,48 +71,25 @@ jobs:
           --health-retries 5
         ports:
           - 6379:6379
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout speedkey
-        uses: actions/checkout@v4
-        with:
-          repository: avifenesh/speedkey
-          path: speedkey
-
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: ${{ matrix.node-version }}
+          cache: npm
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "25.1"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm ci
+      - run: npm run build
 
-      - name: Install and build speedkey
-        working-directory: speedkey/node
-        run: npm install && npm run build:release
-
-      - name: Install glide-mq dependencies
-        run: npm install --ignore-scripts
-
-      - name: Link speedkey into node_modules
-        run: mkdir -p node_modules/@glidemq && rm -rf node_modules/@glidemq/speedkey && ln -s ${{ github.workspace }}/speedkey/node node_modules/@glidemq/speedkey
-
-      - name: Compile TypeScript
-        run: npx tsc
-
-      - name: Verify Valkey standalone connection
+      - name: Verify Valkey standalone
         run: |
           node -e "
-          const { GlideClient } = require('./node_modules/@glidemq/speedkey/build-ts');
+          const { GlideClient } = require('@glidemq/speedkey');
           (async () => {
             const c = await GlideClient.createClient({ addresses: [{ host: 'localhost', port: 6379 }] });
             console.log('PING:', await c.ping());
             c.close();
-          })().catch(e => { console.error('Connection failed:', e.message); process.exit(1); });
+          })().catch(e => { console.error(e.message); process.exit(1); });
           "
 
       - name: Install Valkey binaries for cluster
@@ -142,10 +100,21 @@ jobs:
           docker rm "$id"
           sudo chmod +x /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
           valkey-server --version
-          valkey-cli --version
 
-      - name: Start Valkey cluster
+      - name: Start Valkey cluster (7000-7005)
         run: bash tests/helpers/start-cluster.sh
 
       - name: Run integration tests (standalone + cluster)
-        run: npx vitest run tests/integration.test.ts tests/dedup.test.ts tests/delayed.test.ts tests/priority.test.ts tests/retry.test.ts tests/retention.test.ts tests/concurrency.test.ts tests/rate-limit.test.ts
+        run: >-
+          npx vitest run
+          --exclude 'tests/api-completeness.test.ts'
+          --exclude 'tests/az-affinity.test.ts'
+          --exclude 'tests/connection.test.ts'
+          --exclude 'tests/job.test.ts'
+          --exclude 'tests/queue.test.ts'
+          --exclude 'tests/recovery.test.ts'
+          --exclude 'tests/shutdown.test.ts'
+          --exclude 'tests/telemetry.test.ts'
+          --exclude 'tests/testing-mode.test.ts'
+          --exclude 'tests/worker-saturation.test.ts'
+          --exclude 'tests/worker.test.ts'
