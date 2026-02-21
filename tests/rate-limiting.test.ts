@@ -82,9 +82,13 @@ describeEachMode('Rate limiting', (CONNECTION) => {
       await q.add('rl-job', { i });
     }
 
-    const worker = new Worker(Q2, async () => {
-      completionTimes.push(Date.now() - start);
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      Q2,
+      async () => {
+        completionTimes.push(Date.now() - start);
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 15000;
     while (completionTimes.length < 6 && Date.now() < deadline) {
@@ -118,9 +122,13 @@ describeEachMode('Rate limiting', (CONNECTION) => {
     }
 
     const completed: number[] = [];
-    const worker = new Worker(Q3, async () => {
-      completed.push(Date.now());
-    }, { connection: CONNECTION, concurrency: 5 });
+    const worker = new Worker(
+      Q3,
+      async () => {
+        completed.push(Date.now());
+      },
+      { connection: CONNECTION, concurrency: 5 },
+    );
 
     // Wait for first job to complete
     while (completed.length < 1) {
@@ -156,14 +164,22 @@ describeEachMode('Rate limiting', (CONNECTION) => {
     const start = Date.now();
 
     for (let i = 0; i < JOB_COUNT; i++) {
-      await q.add('pgrl-job', { i }, {
-        ordering: { key: 'grpRL', concurrency: 10, rateLimit: { max: RATE_MAX, duration: WINDOW } },
-      });
+      await q.add(
+        'pgrl-job',
+        { i },
+        {
+          ordering: { key: 'grpRL', concurrency: 10, rateLimit: { max: RATE_MAX, duration: WINDOW } },
+        },
+      );
     }
 
-    const worker = new Worker(Q4, async () => {
-      completionTimes.push(Date.now() - start);
-    }, { connection: CONNECTION, concurrency: 20 });
+    const worker = new Worker(
+      Q4,
+      async () => {
+        completionTimes.push(Date.now() - start);
+      },
+      { connection: CONNECTION, concurrency: 20 },
+    );
 
     const deadline = Date.now() + 20000;
     while (completionTimes.length < JOB_COUNT && Date.now() < deadline) {
@@ -194,21 +210,33 @@ describeEachMode('Rate limiting', (CONNECTION) => {
 
     // Group A: max 2 per 500ms window
     for (let i = 0; i < 4; i++) {
-      await q.add('a-job', { group: 'A' }, {
-        ordering: { key: 'rlA', concurrency: 10, rateLimit: { max: 2, duration: 500 } },
-      });
+      await q.add(
+        'a-job',
+        { group: 'A' },
+        {
+          ordering: { key: 'rlA', concurrency: 10, rateLimit: { max: 2, duration: 500 } },
+        },
+      );
     }
     // Group B: max 4 per 500ms window (all 4 should complete in first window)
     for (let i = 0; i < 4; i++) {
-      await q.add('b-job', { group: 'B' }, {
-        ordering: { key: 'rlB', concurrency: 10, rateLimit: { max: 4, duration: 500 } },
-      });
+      await q.add(
+        'b-job',
+        { group: 'B' },
+        {
+          ordering: { key: 'rlB', concurrency: 10, rateLimit: { max: 4, duration: 500 } },
+        },
+      );
     }
 
-    const worker = new Worker(Q5, async (job: any) => {
-      if (job.data.group === 'A') completedA++;
-      else completedB++;
-    }, { connection: CONNECTION, concurrency: 20 });
+    const worker = new Worker(
+      Q5,
+      async (job: any) => {
+        if (job.data.group === 'A') completedA++;
+        else completedB++;
+      },
+      { connection: CONNECTION, concurrency: 20 },
+    );
 
     const deadline = Date.now() + 20000;
     while ((completedA < 4 || completedB < 4) && Date.now() < deadline) {
@@ -234,18 +262,26 @@ describeEachMode('Rate limiting', (CONNECTION) => {
 
     // concurrency=2 limits parallel jobs, rateLimit max=3 per 800ms limits throughput
     for (let i = 0; i < TOTAL; i++) {
-      await q.add('rlconc-job', { i }, {
-        ordering: { key: 'rlconcGrp', concurrency: 2, rateLimit: { max: 3, duration: 800 } },
-      });
+      await q.add(
+        'rlconc-job',
+        { i },
+        {
+          ordering: { key: 'rlconcGrp', concurrency: 2, rateLimit: { max: 3, duration: 800 } },
+        },
+      );
     }
 
-    const worker = new Worker(Q6, async () => {
-      currentConcurrent++;
-      peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
-      await sleep(50);
-      currentConcurrent--;
-      completed++;
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      Q6,
+      async () => {
+        currentConcurrent++;
+        peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
+        await sleep(50);
+        currentConcurrent--;
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 20000;
     while (completed < TOTAL && Date.now() < deadline) {
@@ -271,21 +307,33 @@ describeEachMode('Rate limiting', (CONNECTION) => {
 
     // Group A: very restrictive (1 per 1000ms)
     for (let i = 0; i < 3; i++) {
-      await q.add('slow-grp', { group: 'A' }, {
-        ordering: { key: 'slowGrp', concurrency: 10, rateLimit: { max: 1, duration: 1000 } },
-      });
+      await q.add(
+        'slow-grp',
+        { group: 'A' },
+        {
+          ordering: { key: 'slowGrp', concurrency: 10, rateLimit: { max: 1, duration: 1000 } },
+        },
+      );
     }
     // Group B: generous (10 per 1000ms) - should all complete quickly
     for (let i = 0; i < 3; i++) {
-      await q.add('fast-grp', { group: 'B' }, {
-        ordering: { key: 'fastGrp', concurrency: 10, rateLimit: { max: 10, duration: 1000 } },
-      });
+      await q.add(
+        'fast-grp',
+        { group: 'B' },
+        {
+          ordering: { key: 'fastGrp', concurrency: 10, rateLimit: { max: 10, duration: 1000 } },
+        },
+      );
     }
 
-    const worker = new Worker(Q7, async (job: any) => {
-      if (job.data.group === 'A') completedA.push(Date.now() - start);
-      else completedB.push(Date.now() - start);
-    }, { connection: CONNECTION, concurrency: 20 });
+    const worker = new Worker(
+      Q7,
+      async (job: any) => {
+        if (job.data.group === 'A') completedA.push(Date.now() - start);
+        else completedB.push(Date.now() - start);
+      },
+      { connection: CONNECTION, concurrency: 20 },
+    );
 
     const deadline = Date.now() + 25000;
     while ((completedA.length < 3 || completedB.length < 3) && Date.now() < deadline) {
@@ -309,20 +357,36 @@ describeEachMode('Rate limiting', (CONNECTION) => {
     const completed: string[] = [];
 
     // 3 jobs: first fails, next 2 should succeed
-    await q.add('fail-job', { shouldFail: true }, {
-      ordering: { key: 'failRlGrp', concurrency: 5, rateLimit: { max: 5, duration: 2000 } },
-    });
-    await q.add('ok-job-1', { shouldFail: false }, {
-      ordering: { key: 'failRlGrp', concurrency: 5, rateLimit: { max: 5, duration: 2000 } },
-    });
-    await q.add('ok-job-2', { shouldFail: false }, {
-      ordering: { key: 'failRlGrp', concurrency: 5, rateLimit: { max: 5, duration: 2000 } },
-    });
+    await q.add(
+      'fail-job',
+      { shouldFail: true },
+      {
+        ordering: { key: 'failRlGrp', concurrency: 5, rateLimit: { max: 5, duration: 2000 } },
+      },
+    );
+    await q.add(
+      'ok-job-1',
+      { shouldFail: false },
+      {
+        ordering: { key: 'failRlGrp', concurrency: 5, rateLimit: { max: 5, duration: 2000 } },
+      },
+    );
+    await q.add(
+      'ok-job-2',
+      { shouldFail: false },
+      {
+        ordering: { key: 'failRlGrp', concurrency: 5, rateLimit: { max: 5, duration: 2000 } },
+      },
+    );
 
-    const worker = new Worker(Q8, async (job: any) => {
-      if (job.data.shouldFail) throw new Error('intentional');
-      completed.push(job.id);
-    }, { connection: CONNECTION, concurrency: 5 });
+    const worker = new Worker(
+      Q8,
+      async (job: any) => {
+        if (job.data.shouldFail) throw new Error('intentional');
+        completed.push(job.id);
+      },
+      { connection: CONNECTION, concurrency: 5 },
+    );
 
     const deadline = Date.now() + 10000;
     while (completed.length < 2 && Date.now() < deadline) {
@@ -345,18 +409,26 @@ describeEachMode('Rate limiting', (CONNECTION) => {
     let completed = 0;
 
     for (let i = 0; i < 4; i++) {
-      await q.add('rl-seq', { i }, {
-        ordering: { key: 'rlSeq', rateLimit: { max: 10, duration: 5000 } },
-      });
+      await q.add(
+        'rl-seq',
+        { i },
+        {
+          ordering: { key: 'rlSeq', rateLimit: { max: 10, duration: 5000 } },
+        },
+      );
     }
 
-    const worker = new Worker(Q9, async () => {
-      currentConcurrent++;
-      peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
-      await sleep(30);
-      currentConcurrent--;
-      completed++;
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      Q9,
+      async () => {
+        currentConcurrent++;
+        peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
+        await sleep(30);
+        currentConcurrent--;
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 10000;
     while (completed < 4 && Date.now() < deadline) {
@@ -378,15 +450,23 @@ describeEachMode('Rate limiting', (CONNECTION) => {
 
     // Add jobs with a very restrictive rate limit so some get parked
     for (let i = 0; i < 5; i++) {
-      await q.add('obl-job', { i }, {
-        ordering: { key: 'oblGrp', concurrency: 10, rateLimit: { max: 1, duration: 10000 } },
-      });
+      await q.add(
+        'obl-job',
+        { i },
+        {
+          ordering: { key: 'oblGrp', concurrency: 10, rateLimit: { max: 1, duration: 10000 } },
+        },
+      );
     }
 
     let completed = 0;
-    const worker = new Worker(Q10, async () => {
-      completed++;
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      Q10,
+      async () => {
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     // Wait for at least 1 to process (others should be parked)
     while (completed < 1) {
@@ -414,19 +494,27 @@ describeEachMode('Rate limiting', (CONNECTION) => {
 
     // Rate-limited group
     for (let i = 0; i < 3; i++) {
-      await q.add('rl-job', { rateLimited: true }, {
-        ordering: { key: 'mixRlGrp', concurrency: 5, rateLimit: { max: 5, duration: 2000 } },
-      });
+      await q.add(
+        'rl-job',
+        { rateLimited: true },
+        {
+          ordering: { key: 'mixRlGrp', concurrency: 5, rateLimit: { max: 5, duration: 2000 } },
+        },
+      );
     }
     // Normal jobs (no ordering, no rate limit)
     for (let i = 0; i < 3; i++) {
       await q.add('normal-job', { rateLimited: false });
     }
 
-    const worker = new Worker(Q11, async (job: any) => {
-      if (job.data.rateLimited) completedRateLimited++;
-      else completedNormal++;
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      Q11,
+      async (job: any) => {
+        if (job.data.rateLimited) completedRateLimited++;
+        else completedNormal++;
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 10000;
     while ((completedRateLimited < 3 || completedNormal < 3) && Date.now() < deadline) {
@@ -454,14 +542,22 @@ describeEachMode('Rate limiting', (CONNECTION) => {
     const start = Date.now();
 
     for (let i = 0; i < 3; i++) {
-      await q.add('cfn-job', { i }, {
-        ordering: { key: 'cfnGrp', concurrency: 1, rateLimit: { max: 1, duration: 800 } },
-      });
+      await q.add(
+        'cfn-job',
+        { i },
+        {
+          ordering: { key: 'cfnGrp', concurrency: 1, rateLimit: { max: 1, duration: 800 } },
+        },
+      );
     }
 
-    const worker = new Worker(Q, async () => {
-      completed.push(Date.now() - start);
-    }, { connection: CONNECTION, concurrency: 1 }); // concurrency=1 forces chaining
+    const worker = new Worker(
+      Q,
+      async () => {
+        completed.push(Date.now() - start);
+      },
+      { connection: CONNECTION, concurrency: 1 },
+    ); // concurrency=1 forces chaining
 
     // Wait for all 3
     const deadline = Date.now() + 20000;
@@ -507,9 +603,13 @@ describeEachMode('Rate limiting', (CONNECTION) => {
       ],
     });
 
-    const worker = new Worker(Q, async (job: any) => {
-      completed.push(job.name);
-    }, { connection: CONNECTION, concurrency: 5 });
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        completed.push(job.name);
+      },
+      { connection: CONNECTION, concurrency: 5 },
+    );
 
     const deadline = Date.now() + 10000;
     while (completed.length < 3 && Date.now() < deadline) await sleep(50);
@@ -569,15 +669,23 @@ describeEachMode('Rate limiting', (CONNECTION) => {
 
     // rateLimit max=3, 3 jobs: first fails, next 2 succeed
     for (let i = 0; i < 3; i++) {
-      await q.add('ctr-job', { shouldFail: i === 0 }, {
-        ordering: { key: 'failCtrGrp', concurrency: 5, rateLimit: { max: 3, duration: 5000 } },
-      });
+      await q.add(
+        'ctr-job',
+        { shouldFail: i === 0 },
+        {
+          ordering: { key: 'failCtrGrp', concurrency: 5, rateLimit: { max: 3, duration: 5000 } },
+        },
+      );
     }
 
-    const worker = new Worker(Q, async (job: any) => {
-      if (job.data.shouldFail) throw new Error('intentional');
-      completed++;
-    }, { connection: CONNECTION, concurrency: 5 });
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        if (job.data.shouldFail) throw new Error('intentional');
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: 5 },
+    );
 
     const deadline = Date.now() + 10000;
     while (completed < 2 && Date.now() < deadline) await sleep(100);

@@ -113,11 +113,15 @@ describeEachMode('Gap Tier 1', (CONNECTION) => {
     const Q = 'test-timeout-retry-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
-    await queue.add('timeout-retry', { x: 3 }, {
-      timeout: 300,
-      attempts: 2,
-      backoff: { type: 'fixed', delay: 100 },
-    });
+    await queue.add(
+      'timeout-retry',
+      { x: 3 },
+      {
+        timeout: 300,
+        attempts: 2,
+        backoff: { type: 'fixed', delay: 100 },
+      },
+    );
 
     let attemptCount = 0;
     const completedJobs: any[] = [];
@@ -319,11 +323,7 @@ describeEachMode('Gap Tier 1', (CONNECTION) => {
   it('worker state: isRunning() and isPaused() reflect correct state', async () => {
     const Q = 'test-worker-state-' + Date.now();
 
-    const worker = new Worker(
-      Q,
-      async () => 'result',
-      { connection: CONNECTION, stalledInterval: 60000 },
-    );
+    const worker = new Worker(Q, async () => 'result', { connection: CONNECTION, stalledInterval: 60000 });
     await worker.waitUntilReady();
 
     expect(worker.isRunning()).toBe(true);
@@ -351,10 +351,14 @@ describeEachMode('Gap Tier 1', (CONNECTION) => {
 
     const backoffDelays: number[] = [];
 
-    await queue.add('custom-backoff-task', { x: 1 }, {
-      attempts: 3,
-      backoff: { type: 'linear', delay: 100 },
-    });
+    await queue.add(
+      'custom-backoff-task',
+      { x: 1 },
+      {
+        attempts: 3,
+        backoff: { type: 'linear', delay: 100 },
+      },
+    );
 
     let attemptCount = 0;
     const completedJobs: any[] = [];
@@ -410,10 +414,14 @@ describeEachMode('Gap Tier 1', (CONNECTION) => {
     const Q = 'test-builtin-fallback-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
-    await queue.add('fixed-backoff-task', { x: 1 }, {
-      attempts: 2,
-      backoff: { type: 'fixed', delay: 200 },
-    });
+    await queue.add(
+      'fixed-backoff-task',
+      { x: 1 },
+      {
+        attempts: 2,
+        backoff: { type: 'fixed', delay: 200 },
+      },
+    );
 
     let attemptCount = 0;
     const completedJobs: any[] = [];

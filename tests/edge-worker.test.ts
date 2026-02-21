@@ -57,9 +57,7 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
       await worker.close(true);
 
       const k = buildKeys(Q);
-      const pending = await cleanupClient.customCommand([
-        'XPENDING', k.stream, CONSUMER_GROUP,
-      ]) as any[];
+      const pending = (await cleanupClient.customCommand(['XPENDING', k.stream, CONSUMER_GROUP])) as any[];
       expect(Number(pending[0])).toBeGreaterThanOrEqual(1);
 
       await queue.close();
@@ -469,9 +467,7 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
 
       await worker1.close(true);
 
-      const pending = await cleanupClient.customCommand([
-        'XPENDING', k.stream, CONSUMER_GROUP,
-      ]) as any[];
+      const pending = (await cleanupClient.customCommand(['XPENDING', k.stream, CONSUMER_GROUP])) as any[];
       expect(Number(pending[0])).toBeGreaterThanOrEqual(1);
 
       const worker2 = new Worker(

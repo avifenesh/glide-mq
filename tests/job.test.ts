@@ -29,14 +29,7 @@ describe('Job', () => {
 
   describe('constructor', () => {
     it('should initialize all basic properties', () => {
-      const job = new Job(
-        mockClient as any,
-        keys,
-        '1',
-        'send-email',
-        { to: 'user@test.com' },
-        {},
-      );
+      const job = new Job(mockClient as any, keys, '1', 'send-email', { to: 'user@test.com' }, {});
 
       expect(job.id).toBe('1');
       expect(job.name).toBe('send-email');
@@ -57,18 +50,12 @@ describe('Job', () => {
 
       await job.updateProgress(50);
 
-      expect(mockClient.hset).toHaveBeenCalledWith(
-        'glide:{test-queue}:job:1',
-        { progress: '50' },
-      );
-      expect(mockClient.xadd).toHaveBeenCalledWith(
-        'glide:{test-queue}:events',
-        [
-          ['event', 'progress'],
-          ['jobId', '1'],
-          ['data', '50'],
-        ],
-      );
+      expect(mockClient.hset).toHaveBeenCalledWith('glide:{test-queue}:job:1', { progress: '50' });
+      expect(mockClient.xadd).toHaveBeenCalledWith('glide:{test-queue}:events', [
+        ['event', 'progress'],
+        ['jobId', '1'],
+        ['data', '50'],
+      ]);
       expect(job.progress).toBe(50);
     });
 
@@ -78,10 +65,9 @@ describe('Job', () => {
 
       await job.updateProgress(progressObj);
 
-      expect(mockClient.hset).toHaveBeenCalledWith(
-        'glide:{test-queue}:job:2',
-        { progress: JSON.stringify(progressObj) },
-      );
+      expect(mockClient.hset).toHaveBeenCalledWith('glide:{test-queue}:job:2', {
+        progress: JSON.stringify(progressObj),
+      });
       expect(job.progress).toEqual(progressObj);
     });
   });
@@ -93,10 +79,7 @@ describe('Job', () => {
       const newData = { updated: true, count: 5 };
       await job.updateData(newData);
 
-      expect(mockClient.hset).toHaveBeenCalledWith(
-        'glide:{test-queue}:job:1',
-        { data: JSON.stringify(newData) },
-      );
+      expect(mockClient.hset).toHaveBeenCalledWith('glide:{test-queue}:job:1', { data: JSON.stringify(newData) });
       expect(job.data).toEqual(newData);
     });
   });
@@ -112,9 +95,7 @@ describe('Job', () => {
 
     it('should fetch return values from child jobs', async () => {
       mockClient.smembers.mockResolvedValue(new Set(['glide:{test-queue}:10', 'glide:{test-queue}:11']));
-      mockClient.hget
-        .mockResolvedValueOnce('"result-a"')
-        .mockResolvedValueOnce('"result-b"');
+      mockClient.hget.mockResolvedValueOnce('"result-a"').mockResolvedValueOnce('"result-b"');
       const job = new Job(mockClient as any, keys, '1', 'parent', {}, {});
 
       const values = await job.getChildrenValues();
@@ -125,9 +106,7 @@ describe('Job', () => {
 
     it('should skip children with null returnvalue', async () => {
       mockClient.smembers.mockResolvedValue(new Set(['glide:{test-queue}:10', 'glide:{test-queue}:11']));
-      mockClient.hget
-        .mockResolvedValueOnce('"done"')
-        .mockResolvedValueOnce(null);
+      mockClient.hget.mockResolvedValueOnce('"done"').mockResolvedValueOnce(null);
       const job = new Job(mockClient as any, keys, '1', 'parent', {}, {});
 
       const values = await job.getChildrenValues();
@@ -176,10 +155,17 @@ describe('Job', () => {
 
     it('should calculate backoff delay when backoff option is set', async () => {
       mockClient.fcall.mockResolvedValue('retrying');
-      const job = new Job(mockClient as any, keys, '5', 'job', {}, {
-        attempts: 5,
-        backoff: { type: 'fixed', delay: 1000 },
-      });
+      const job = new Job(
+        mockClient as any,
+        keys,
+        '5',
+        'job',
+        {},
+        {
+          attempts: 5,
+          backoff: { type: 'fixed', delay: 1000 },
+        },
+      );
       job.entryId = '1-0';
       job.attemptsMade = 1;
 
@@ -191,10 +177,17 @@ describe('Job', () => {
 
     it('should increment attemptsMade when result is retrying', async () => {
       mockClient.fcall.mockResolvedValue('retrying');
-      const job = new Job(mockClient as any, keys, '5', 'job', {}, {
-        attempts: 3,
-        backoff: { type: 'fixed', delay: 500 },
-      });
+      const job = new Job(
+        mockClient as any,
+        keys,
+        '5',
+        'job',
+        {},
+        {
+          attempts: 3,
+          backoff: { type: 'fixed', delay: 500 },
+        },
+      );
       job.entryId = '1-0';
       job.attemptsMade = 0;
 
@@ -253,10 +246,7 @@ describe('Job', () => {
       expect(score).toBeGreaterThan(0);
       expect(score).toBeLessThan(Date.now() + 1000); // should be roughly now
 
-      expect(mockClient.hset).toHaveBeenCalledWith(
-        'glide:{test-queue}:job:3',
-        { state: 'delayed', failedReason: '' },
-      );
+      expect(mockClient.hset).toHaveBeenCalledWith('glide:{test-queue}:job:3', { state: 'delayed', failedReason: '' });
     });
 
     it('should encode priority into the score', async () => {

@@ -46,11 +46,7 @@ describeEachMode('glidemq_rateLimit Lua function', (CONNECTION) => {
     const now = Date.now();
 
     for (let i = 0; i < 2; i++) {
-      const result = await cleanupClient.fcall(
-        'glidemq_rateLimit',
-        [k.rate, k.meta],
-        ['2', '5000', now.toString()],
-      );
+      const result = await cleanupClient.fcall('glidemq_rateLimit', [k.rate, k.meta], ['2', '5000', now.toString()]);
       expect(Number(result)).toBe(0);
     }
 

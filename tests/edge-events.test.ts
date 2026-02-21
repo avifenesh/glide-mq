@@ -33,7 +33,7 @@ describeEachMode('Edge: QueueEvents', (CONNECTION) => {
       const job1 = await queue.add('hist-1', { i: 1 });
       const job2 = await queue.add('hist-2', { i: 2 });
 
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 300));
 
       const replayedEvents: any[] = [];
       const queueEvents = new QueueEvents(Q, {
@@ -49,9 +49,9 @@ describeEachMode('Edge: QueueEvents', (CONNECTION) => {
 
       await queueEvents.waitUntilReady();
 
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 2000));
 
-      const replayedJobIds = replayedEvents.map(e => e.jobId);
+      const replayedJobIds = replayedEvents.map((e) => e.jobId);
       expect(replayedJobIds).toContain(job1!.id);
       expect(replayedJobIds).toContain(job2!.id);
 
@@ -76,7 +76,7 @@ describeEachMode('Edge: QueueEvents', (CONNECTION) => {
 
       await queueEvents.waitUntilReady();
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
 
       await queueEvents.close();
 
@@ -102,19 +102,23 @@ describeEachMode('Edge: QueueEvents', (CONNECTION) => {
       qe1.on('error', () => {});
       qe2.on('error', () => {});
 
-      qe1.on('added', (data: any) => { instance1Events.push(data); });
-      qe2.on('added', (data: any) => { instance2Events.push(data); });
+      qe1.on('added', (data: any) => {
+        instance1Events.push(data);
+      });
+      qe2.on('added', (data: any) => {
+        instance2Events.push(data);
+      });
 
       await qe1.waitUntilReady();
       await qe2.waitUntilReady();
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 300));
 
       const job = await queue.add('multi-qe-test', { x: 1 });
 
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 2000));
 
-      const ids1 = instance1Events.map(e => e.jobId);
-      const ids2 = instance2Events.map(e => e.jobId);
+      const ids1 = instance1Events.map((e) => e.jobId);
+      const ids2 = instance2Events.map((e) => e.jobId);
 
       expect(ids1).toContain(job!.id);
       expect(ids2).toContain(job!.id);
@@ -140,11 +144,15 @@ describeEachMode('Edge: QueueEvents', (CONNECTION) => {
       const retryingEvents: any[] = [];
       const failedEvents: any[] = [];
 
-      queueEvents.on('retrying', (data: any) => { retryingEvents.push(data); });
-      queueEvents.on('failed', (data: any) => { failedEvents.push(data); });
+      queueEvents.on('retrying', (data: any) => {
+        retryingEvents.push(data);
+      });
+      queueEvents.on('failed', (data: any) => {
+        failedEvents.push(data);
+      });
 
       await queueEvents.waitUntilReady();
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 300));
 
       let attemptCount = 0;
       const worker = new Worker(
@@ -167,14 +175,18 @@ describeEachMode('Edge: QueueEvents', (CONNECTION) => {
       worker.on('error', () => {});
       worker.on('failed', () => {});
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
 
-      const job = await queue.add('retry-job', { x: 1 }, {
-        attempts: 3,
-        backoff: { type: 'fixed', delay: 200 },
-      });
+      const job = await queue.add(
+        'retry-job',
+        { x: 1 },
+        {
+          attempts: 3,
+          backoff: { type: 'fixed', delay: 200 },
+        },
+      );
 
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise((r) => setTimeout(r, 5000));
 
       const k = buildKeys(Q);
       const state = await cleanupClient.hget(k.job(job!.id), 'state');
@@ -201,7 +213,7 @@ describeEachMode('Edge: QueueEvents', (CONNECTION) => {
       const stallWorker = new Worker(
         Q,
         async () => {
-          await new Promise(r => setTimeout(r, 60000));
+          await new Promise((r) => setTimeout(r, 60000));
           return 'never';
         },
         {
@@ -213,7 +225,7 @@ describeEachMode('Edge: QueueEvents', (CONNECTION) => {
       );
       stallWorker.on('error', () => {});
 
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 2000));
 
       await stallWorker.close(true);
 
@@ -237,7 +249,7 @@ describeEachMode('Edge: QueueEvents', (CONNECTION) => {
         stalledIds.push(jobId);
       });
 
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise((r) => setTimeout(r, 5000));
 
       await recoveryWorker.close(true);
 

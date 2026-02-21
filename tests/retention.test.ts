@@ -29,11 +29,7 @@ describeEachMode('removeOnComplete: true', (CONNECTION) => {
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
-      const worker = new Worker(
-        Q,
-        async () => 'done',
-        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
-      );
+      const worker = new Worker(Q, async () => 'done', { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 });
       worker.on('completed', () => {
         clearTimeout(timeout);
         worker.close(true).then(resolve);
@@ -41,7 +37,7 @@ describeEachMode('removeOnComplete: true', (CONNECTION) => {
       worker.on('error', () => {});
     });
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     const job = await queue.add('work', { v: 1 }, { removeOnComplete: true });
 
     await done;
@@ -95,14 +91,14 @@ describeEachMode('removeOnComplete: count', (CONNECTION) => {
       worker.on('error', () => {});
     });
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     for (let i = 0; i < TOTAL; i++) {
       await queue.add(`job-${i}`, { i }, { removeOnComplete: KEEP });
     }
 
     await done;
 
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 200));
 
     const completedCount = await cleanupClient.zcard(k.completed);
     expect(completedCount).toBeLessThanOrEqual(KEEP);
@@ -144,7 +140,7 @@ describeEachMode('removeOnFail: true', (CONNECTION) => {
       worker.on('error', () => {});
     });
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     const job = await queue.add('work', { v: 1 }, { removeOnFail: true });
 
     await done;
@@ -198,14 +194,14 @@ describeEachMode('removeOnFail: count', (CONNECTION) => {
       worker.on('error', () => {});
     });
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     for (let i = 0; i < TOTAL; i++) {
       await queue.add(`job-${i}`, { i }, { removeOnFail: KEEP });
     }
 
     await done;
 
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 200));
 
     const failedCount = await cleanupClient.zcard(k.failed);
     expect(failedCount).toBeLessThanOrEqual(KEEP);

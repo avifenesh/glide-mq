@@ -31,10 +31,14 @@ describeEachMode('Edge: Cron scheduler fires on schedule', (CONNECTION) => {
     // Use a cron pattern that matches every minute. Since we can't wait a full
     // minute in a test, we instead verify the scheduler entry is stored correctly
     // and has a valid nextRun within the next 60 seconds.
-    await queue.upsertJobScheduler('every-min', { pattern: '* * * * *' }, {
-      name: 'cron-tick',
-      data: { cron: true },
-    });
+    await queue.upsertJobScheduler(
+      'every-min',
+      { pattern: '* * * * *' },
+      {
+        name: 'cron-tick',
+        data: { cron: true },
+      },
+    );
 
     const k = buildKeys(Q);
     const raw = await cleanupClient.hget(k.schedulers, 'every-min');
@@ -50,10 +54,14 @@ describeEachMode('Edge: Cron scheduler fires on schedule', (CONNECTION) => {
     expect(config.nextRun).toBeLessThanOrEqual(now + 61000);
 
     // Now set a short interval scheduler and verify it actually fires via a worker
-    await queue.upsertJobScheduler('fast-cron-test', { every: 300 }, {
-      name: 'fast-tick',
-      data: { fast: true },
-    });
+    await queue.upsertJobScheduler(
+      'fast-cron-test',
+      { every: 300 },
+      {
+        name: 'fast-tick',
+        data: { fast: true },
+      },
+    );
 
     const processed: string[] = [];
     const worker = new Worker(
@@ -73,11 +81,11 @@ describeEachMode('Edge: Cron scheduler fires on schedule', (CONNECTION) => {
     worker.on('error', () => {});
 
     // Wait for scheduler to fire at least once
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
 
     await worker.close(true);
 
-    expect(processed.filter(n => n === 'fast-tick').length).toBeGreaterThanOrEqual(1);
+    expect(processed.filter((n) => n === 'fast-tick').length).toBeGreaterThanOrEqual(1);
 
     await queue.removeJobScheduler('every-min');
     await queue.removeJobScheduler('fast-cron-test');
@@ -101,10 +109,14 @@ describeEachMode('Edge: Remove scheduler while running', (CONNECTION) => {
   it('stops creating jobs after scheduler is removed', async () => {
     const queue = new Queue(Q, { connection: CONNECTION });
 
-    await queue.upsertJobScheduler('removable', { every: 300 }, {
-      name: 'will-stop',
-      data: { x: 1 },
-    });
+    await queue.upsertJobScheduler(
+      'removable',
+      { every: 300 },
+      {
+        name: 'will-stop',
+        data: { x: 1 },
+      },
+    );
 
     const processed: string[] = [];
     const worker = new Worker(
@@ -124,7 +136,7 @@ describeEachMode('Edge: Remove scheduler while running', (CONNECTION) => {
     worker.on('error', () => {});
 
     // Let it fire a couple times
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 2000));
     const countBefore = processed.length;
     expect(countBefore).toBeGreaterThanOrEqual(1);
 
@@ -138,7 +150,7 @@ describeEachMode('Edge: Remove scheduler while running', (CONNECTION) => {
 
     // Wait and verify no new jobs are created
     const countAfterRemoval = processed.length;
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 2000));
     const countFinal = processed.length;
 
     // Should have at most 1 more job (from in-flight scheduler tick)
@@ -167,10 +179,14 @@ describeEachMode('Edge: Upsert scheduler with changed interval', (CONNECTION) =>
     const k = buildKeys(Q);
 
     // Create with 1000ms interval
-    await queue.upsertJobScheduler('changeable', { every: 1000 }, {
-      name: 'v1-tick',
-      data: { version: 1 },
-    });
+    await queue.upsertJobScheduler(
+      'changeable',
+      { every: 1000 },
+      {
+        name: 'v1-tick',
+        data: { version: 1 },
+      },
+    );
 
     let raw = await cleanupClient.hget(k.schedulers, 'changeable');
     let config = JSON.parse(String(raw));
@@ -179,10 +195,14 @@ describeEachMode('Edge: Upsert scheduler with changed interval', (CONNECTION) =>
     const originalNextRun = config.nextRun;
 
     // Upsert with new interval
-    await queue.upsertJobScheduler('changeable', { every: 200 }, {
-      name: 'v2-tick',
-      data: { version: 2 },
-    });
+    await queue.upsertJobScheduler(
+      'changeable',
+      { every: 200 },
+      {
+        name: 'v2-tick',
+        data: { version: 2 },
+      },
+    );
 
     raw = await cleanupClient.hget(k.schedulers, 'changeable');
     config = JSON.parse(String(raw));
@@ -210,12 +230,12 @@ describeEachMode('Edge: Upsert scheduler with changed interval', (CONNECTION) =>
     );
     worker.on('error', () => {});
 
-    await new Promise(r => setTimeout(r, 2500));
+    await new Promise((r) => setTimeout(r, 2500));
 
     await worker.close(true);
 
     // With 200ms interval, should fire multiple times in 2.5s
-    const v2Ticks = processed.filter(n => n === 'v2-tick');
+    const v2Ticks = processed.filter((n) => n === 'v2-tick');
     expect(v2Ticks.length).toBeGreaterThanOrEqual(2);
 
     await queue.removeJobScheduler('changeable');
@@ -239,15 +259,23 @@ describeEachMode('Edge: Two schedulers on same queue', (CONNECTION) => {
   it('both schedulers fire independently', async () => {
     const queue = new Queue(Q, { connection: CONNECTION });
 
-    await queue.upsertJobScheduler('sched-A', { every: 400 }, {
-      name: 'tick-A',
-      data: { sched: 'A' },
-    });
+    await queue.upsertJobScheduler(
+      'sched-A',
+      { every: 400 },
+      {
+        name: 'tick-A',
+        data: { sched: 'A' },
+      },
+    );
 
-    await queue.upsertJobScheduler('sched-B', { every: 400 }, {
-      name: 'tick-B',
-      data: { sched: 'B' },
-    });
+    await queue.upsertJobScheduler(
+      'sched-B',
+      { every: 400 },
+      {
+        name: 'tick-B',
+        data: { sched: 'B' },
+      },
+    );
 
     const k = buildKeys(Q);
     // Verify both exist
@@ -277,7 +305,7 @@ describeEachMode('Edge: Two schedulers on same queue', (CONNECTION) => {
     worker.on('error', () => {});
 
     // Wait for both to fire multiple times
-    await new Promise(r => setTimeout(r, 3500));
+    await new Promise((r) => setTimeout(r, 3500));
 
     await worker.close(true);
 

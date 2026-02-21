@@ -141,9 +141,7 @@ describe('Telemetry', () => {
 
       await expect(queue.add('email', {})).rejects.toThrow('connection lost');
 
-      expect(span.setStatus).toHaveBeenCalledWith(
-        expect.objectContaining({ code: 1, message: 'connection lost' }),
-      );
+      expect(span.setStatus).toHaveBeenCalledWith(expect.objectContaining({ code: 1, message: 'connection lost' }));
       expect(span.recordException).toHaveBeenCalled();
       expect(span.end).toHaveBeenCalled();
 
@@ -233,11 +231,7 @@ describe('Telemetry', () => {
       const { withSpan, setTracer } = await import('../src/telemetry');
       setTracer(tracer);
 
-      const result = await withSpan(
-        'test.operation',
-        { attr1: 'value1', attr2: 42 },
-        async () => 'done',
-      );
+      const result = await withSpan('test.operation', { attr1: 'value1', attr2: 42 }, async () => 'done');
 
       expect(tracer.startSpan).toHaveBeenCalledWith('test.operation');
       expect(span.setAttribute).toHaveBeenCalledWith('attr1', 'value1');
@@ -258,12 +252,12 @@ describe('Telemetry', () => {
 
       const error = new Error('boom');
       await expect(
-        withSpan('test.fail', {}, async () => { throw error; }),
+        withSpan('test.fail', {}, async () => {
+          throw error;
+        }),
       ).rejects.toThrow('boom');
 
-      expect(span.setStatus).toHaveBeenCalledWith(
-        expect.objectContaining({ code: 1, message: 'boom' }),
-      );
+      expect(span.setStatus).toHaveBeenCalledWith(expect.objectContaining({ code: 1, message: 'boom' }));
       expect(span.recordException).toHaveBeenCalledWith(error);
       expect(span.end).toHaveBeenCalled();
 
@@ -279,11 +273,7 @@ describe('Telemetry', () => {
       const { withChildSpan, setTracer } = await import('../src/telemetry');
       setTracer(tracer);
 
-      const result = await withChildSpan(
-        'test.child',
-        { childAttr: 'yes' },
-        async () => 123,
-      );
+      const result = await withChildSpan('test.child', { childAttr: 'yes' }, async () => 123);
 
       expect(tracer.startSpan).toHaveBeenCalledWith('test.child');
       expect(span.setAttribute).toHaveBeenCalledWith('childAttr', 'yes');

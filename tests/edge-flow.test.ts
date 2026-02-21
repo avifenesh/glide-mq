@@ -33,9 +33,7 @@ describeEachMode('Edge: Flow with single child', (CONNECTION) => {
       name: 'single-parent',
       queueName: Q,
       data: { role: 'parent' },
-      children: [
-        { name: 'only-child', queueName: Q, data: { role: 'child' } },
-      ],
+      children: [{ name: 'only-child', queueName: Q, data: { role: 'child' } }],
     });
 
     const parentId = node.job.id;
@@ -265,25 +263,19 @@ describeEachMode('Edge: FlowProducer.addBulk with 3 independent flows', (CONNECT
         name: 'flow-a',
         queueName: Q,
         data: { f: 'a' },
-        children: [
-          { name: 'a-child', queueName: Q, data: { c: 'a1' } },
-        ],
+        children: [{ name: 'a-child', queueName: Q, data: { c: 'a1' } }],
       },
       {
         name: 'flow-b',
         queueName: Q,
         data: { f: 'b' },
-        children: [
-          { name: 'b-child', queueName: Q, data: { c: 'b1' } },
-        ],
+        children: [{ name: 'b-child', queueName: Q, data: { c: 'b1' } }],
       },
       {
         name: 'flow-c',
         queueName: Q,
         data: { f: 'c' },
-        children: [
-          { name: 'c-child', queueName: Q, data: { c: 'c1' } },
-        ],
+        children: [{ name: 'c-child', queueName: Q, data: { c: 'c1' } }],
       },
     ]);
 
@@ -298,7 +290,7 @@ describeEachMode('Edge: FlowProducer.addBulk with 3 independent flows', (CONNECT
     }
 
     // All parent IDs should be unique
-    const parentIds = new Set(nodes.map(n => n.job.id));
+    const parentIds = new Set(nodes.map((n) => n.job.id));
     expect(parentIds.size).toBe(3);
 
     // All parents should be in waiting-children state
@@ -309,7 +301,7 @@ describeEachMode('Edge: FlowProducer.addBulk with 3 independent flows', (CONNECT
     }
 
     // All child IDs should be unique
-    const childIds = new Set(nodes.map(n => n.children![0].job.id));
+    const childIds = new Set(nodes.map((n) => n.children![0].job.id));
     expect(childIds.size).toBe(3);
 
     await flow.close();
@@ -374,10 +366,7 @@ describeEachMode('Edge: Flow with same queueName for parent and children', (CONN
 
     // Children complete before parent
     expect(completedNames.indexOf('same-q-parent')).toBeGreaterThan(
-      Math.max(
-        completedNames.indexOf('same-q-child-1'),
-        completedNames.indexOf('same-q-child-2'),
-      ),
+      Math.max(completedNames.indexOf('same-q-child-1'), completedNames.indexOf('same-q-child-2')),
     );
 
     // Parent state should be completed

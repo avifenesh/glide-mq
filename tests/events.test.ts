@@ -49,7 +49,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       // Wait for QueueEvents to connect and start listening
       await queueEvents.waitUntilReady();
       // Small delay to ensure XREAD BLOCK is active
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const job = await queue.add('test-job', { x: 1 });
 
@@ -84,7 +84,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       });
 
       await queueEvents.waitUntilReady();
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const worker = new Worker(
         Q,
@@ -95,7 +95,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       );
       worker.on('error', () => {});
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       const job = await queue.add('compute', { input: 1 });
 
       const event = await received;
@@ -131,7 +131,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       });
 
       await queueEvents.waitUntilReady();
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const worker = new Worker(
         Q,
@@ -143,7 +143,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       worker.on('error', () => {});
       worker.on('failed', () => {});
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       const job = await queue.add('fail-job', { input: 1 });
 
       const event = await received;
@@ -188,7 +188,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       });
 
       await queueEvents.waitUntilReady();
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const worker = new Worker(
         Q,
@@ -199,7 +199,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       );
       worker.on('error', () => {});
 
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
       const job1 = await queue.add('multi-1', { i: 1 });
       const job2 = await queue.add('multi-2', { i: 2 });
 

@@ -79,15 +79,17 @@ describe('Queue', () => {
     });
 
     it('should pass delay and priority to addJob', async () => {
-      mockClient.fcall
-        .mockResolvedValueOnce(LIBRARY_VERSION)
-        .mockResolvedValueOnce('2');
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('2');
       const queue = new Queue('test-queue', connOpts);
 
-      const job = await queue.add('report', { type: 'daily' }, {
-        delay: 5000,
-        priority: 3,
-      });
+      const job = await queue.add(
+        'report',
+        { type: 'daily' },
+        {
+          delay: 5000,
+          priority: 3,
+        },
+      );
 
       expect(job.id).toBe('2');
       // Verify the fcall was called with correct args
@@ -103,14 +105,16 @@ describe('Queue', () => {
     });
 
     it('should pass parent ID when parent option is set', async () => {
-      mockClient.fcall
-        .mockResolvedValueOnce(LIBRARY_VERSION)
-        .mockResolvedValueOnce('3');
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('3');
       const queue = new Queue('test-queue', connOpts);
 
-      const job = await queue.add('child-task', { x: 1 }, {
-        parent: { queue: 'parent-queue', id: '42' },
-      });
+      const job = await queue.add(
+        'child-task',
+        { x: 1 },
+        {
+          parent: { queue: 'parent-queue', id: '42' },
+        },
+      );
 
       expect(job.parentId).toBe('42');
       const args = mockClient.fcall.mock.calls[1][2];
@@ -118,9 +122,7 @@ describe('Queue', () => {
     });
 
     it('should pass maxAttempts from opts.attempts', async () => {
-      mockClient.fcall
-        .mockResolvedValueOnce(LIBRARY_VERSION)
-        .mockResolvedValueOnce('4');
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('4');
       const queue = new Queue('test-queue', connOpts);
 
       await queue.add('retryable', {}, { attempts: 5 });
@@ -130,9 +132,7 @@ describe('Queue', () => {
     });
 
     it('should create client lazily on first add call', async () => {
-      mockClient.fcall
-        .mockResolvedValueOnce(LIBRARY_VERSION)
-        .mockResolvedValueOnce('1');
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1');
       const queue = new Queue('test-queue', connOpts);
       expect(GlideClient.createClient).not.toHaveBeenCalled();
 
@@ -159,9 +159,9 @@ describe('Queue', () => {
       const queue = new Queue('test-queue', connOpts);
       const orderingKey = 'x'.repeat(257);
 
-      await expect(
-        queue.add('ordered', { x: 1 }, { ordering: { key: orderingKey } }),
-      ).rejects.toThrow('Ordering key exceeds maximum length');
+      await expect(queue.add('ordered', { x: 1 }, { ordering: { key: orderingKey } })).rejects.toThrow(
+        'Ordering key exceeds maximum length',
+      );
       expect(mockClient.fcall).toHaveBeenCalledTimes(1);
     });
   });
@@ -199,9 +199,7 @@ describe('Queue', () => {
       const orderingKey = 'x'.repeat(257);
 
       await expect(
-        queue.addBulk([
-          { name: 'a', data: { x: 1 }, opts: { ordering: { key: orderingKey } } },
-        ]),
+        queue.addBulk([{ name: 'a', data: { x: 1 }, opts: { ordering: { key: orderingKey } } }]),
       ).rejects.toThrow('Ordering key exceeds maximum length');
       expect(mockClient.exec).not.toHaveBeenCalled();
     });
@@ -293,36 +291,26 @@ describe('Queue', () => {
 
       const pauseCall = mockClient.fcall.mock.calls[1];
       expect(pauseCall[0]).toBe('glidemq_pause');
-      expect(pauseCall[1]).toEqual([
-        'glide:{test-queue}:meta',
-        'glide:{test-queue}:events',
-      ]);
+      expect(pauseCall[1]).toEqual(['glide:{test-queue}:meta', 'glide:{test-queue}:events']);
     });
   });
 
   describe('resume', () => {
     it('should call glidemq_resume FCALL with meta and events keys', async () => {
-      mockClient.fcall
-        .mockResolvedValueOnce(LIBRARY_VERSION)
-        .mockResolvedValueOnce(1);
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce(1);
       const queue = new Queue('test-queue', connOpts);
 
       await queue.resume();
 
       const resumeCall = mockClient.fcall.mock.calls[1];
       expect(resumeCall[0]).toBe('glidemq_resume');
-      expect(resumeCall[1]).toEqual([
-        'glide:{test-queue}:meta',
-        'glide:{test-queue}:events',
-      ]);
+      expect(resumeCall[1]).toEqual(['glide:{test-queue}:meta', 'glide:{test-queue}:events']);
     });
   });
 
   describe('close', () => {
     it('should close the client connection', async () => {
-      mockClient.fcall
-        .mockResolvedValueOnce(LIBRARY_VERSION)
-        .mockResolvedValueOnce('1');
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1');
       const queue = new Queue('test-queue', connOpts);
 
       // Force client creation
@@ -339,9 +327,7 @@ describe('Queue', () => {
     });
 
     it('should reject operations after close', async () => {
-      mockClient.fcall
-        .mockResolvedValueOnce(LIBRARY_VERSION)
-        .mockResolvedValueOnce('1');
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1');
 
       const queue = new Queue('test-queue', connOpts);
 
@@ -355,9 +341,7 @@ describe('Queue', () => {
 
   describe('key generation', () => {
     it('should use default prefix "glide" when no prefix specified', async () => {
-      mockClient.fcall
-        .mockResolvedValueOnce(LIBRARY_VERSION)
-        .mockResolvedValueOnce('1');
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1');
       const queue = new Queue('my-queue', connOpts);
       await queue.add('test', {});
 
@@ -370,9 +354,7 @@ describe('Queue', () => {
     });
 
     it('should use custom prefix when specified', async () => {
-      mockClient.fcall
-        .mockResolvedValueOnce(LIBRARY_VERSION)
-        .mockResolvedValueOnce('1');
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1');
       const queue = new Queue('orders', {
         ...connOpts,
         prefix: 'myapp',

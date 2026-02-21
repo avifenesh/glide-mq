@@ -113,7 +113,9 @@ describe('Worker.close()', () => {
 
   it('should wait for active jobs before closing (force=false)', async () => {
     let resolveJob!: () => void;
-    const jobPromise = new Promise<void>((r) => { resolveJob = r; });
+    const jobPromise = new Promise<void>((r) => {
+      resolveJob = r;
+    });
     const processor = vi.fn().mockReturnValue(jobPromise);
 
     // Set up a mock that returns one job entry, then blocks forever
@@ -121,12 +123,14 @@ describe('Worker.close()', () => {
     mockBlockingClient.xreadgroup.mockImplementation(async () => {
       callIdx++;
       if (callIdx === 1) {
-        return [{
-          key: 'glide:{test-queue}:stream',
-          value: {
-            '1-0': [['jobId', '1']],
+        return [
+          {
+            key: 'glide:{test-queue}:stream',
+            value: {
+              '1-0': [['jobId', '1']],
+            },
           },
-        }];
+        ];
       }
       return new Promise(() => {}); // block forever
     });
@@ -159,7 +163,9 @@ describe('Worker.close()', () => {
 
     // Start close (should wait for active job)
     let closed = false;
-    const closePromise = worker.close().then(() => { closed = true; });
+    const closePromise = worker.close().then(() => {
+      closed = true;
+    });
 
     // Job still active - close should not have resolved
     await vi.advanceTimersByTimeAsync(50);
@@ -174,19 +180,23 @@ describe('Worker.close()', () => {
 
   it('should close immediately with force=true even with active jobs', async () => {
     let resolveJob!: (v: string) => void;
-    const jobPromise = new Promise<string>((r) => { resolveJob = r; });
+    const jobPromise = new Promise<string>((r) => {
+      resolveJob = r;
+    });
     const processor = vi.fn().mockReturnValue(jobPromise);
 
     let callIdx = 0;
     mockBlockingClient.xreadgroup.mockImplementation(async () => {
       callIdx++;
       if (callIdx === 1) {
-        return [{
-          key: 'glide:{test-queue}:stream',
-          value: {
-            '1-0': [['jobId', '1']],
+        return [
+          {
+            key: 'glide:{test-queue}:stream',
+            value: {
+              '1-0': [['jobId', '1']],
+            },
           },
-        }];
+        ];
       }
       return null;
     });
@@ -248,9 +258,7 @@ describe('Queue.close()', () => {
   });
 
   it('should be idempotent', async () => {
-    mockClient.fcall
-      .mockResolvedValueOnce(LIBRARY_VERSION)
-      .mockResolvedValueOnce('1');
+    mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1');
     const queue = new Queue('test-queue', { connection: connectionOpts });
 
     // Force client creation
@@ -340,9 +348,7 @@ describe('FlowProducer.close()', () => {
   });
 
   it('should be idempotent', async () => {
-    mockClient.fcall
-      .mockResolvedValueOnce(LIBRARY_VERSION)
-      .mockResolvedValueOnce('1');
+    mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1');
     const fp = new FlowProducer({ connection: connectionOpts });
 
     // Force client creation via add

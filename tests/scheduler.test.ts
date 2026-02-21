@@ -70,10 +70,14 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     const qName = Q + '-repeat';
     const localQueue = new Queue(qName, { connection: CONNECTION });
 
-    await localQueue.upsertJobScheduler('fast-repeat', { every: 500 }, {
-      name: 'tick',
-      data: { seq: true },
-    });
+    await localQueue.upsertJobScheduler(
+      'fast-repeat',
+      { every: 500 },
+      {
+        name: 'tick',
+        data: { seq: true },
+      },
+    );
 
     const processed: string[] = [];
     let worker: InstanceType<typeof Worker>;
@@ -109,8 +113,8 @@ describeEachMode('Job schedulers', (CONNECTION) => {
   }, 15000);
 
   it('upsertJobScheduler rejects missing schedule', async () => {
-    await expect(
-      queue.upsertJobScheduler('bad', {} as any),
-    ).rejects.toThrow('Schedule must have either pattern (cron) or every (ms interval)');
+    await expect(queue.upsertJobScheduler('bad', {} as any)).rejects.toThrow(
+      'Schedule must have either pattern (cron) or every (ms interval)',
+    );
   });
 });

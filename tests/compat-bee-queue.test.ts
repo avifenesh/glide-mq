@@ -67,7 +67,7 @@ describeEachMode('Bee-Queue: Stall detection', (CONNECTION) => {
 
     await stalledWorker.waitUntilReady();
     // Let it pick up some jobs
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1500));
     // Force-close without waiting for active jobs
     await stalledWorker.close(true);
 
@@ -157,7 +157,9 @@ describeEachMode('Bee-Queue: Backoff strategies', (CONNECTION) => {
       worker.on('failed', () => {
         // Promote immediately since delay=0
         setTimeout(async () => {
-          try { await promote(cleanupClient, buildKeys(Q), Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, buildKeys(Q), Date.now());
+          } catch {}
         }, 100);
       });
 
@@ -201,7 +203,9 @@ describeEachMode('Bee-Queue: Backoff strategies', (CONNECTION) => {
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, buildKeys(Q), Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, buildKeys(Q), Date.now());
+          } catch {}
         }, 400);
       });
 
@@ -253,7 +257,9 @@ describeEachMode('Bee-Queue: Backoff strategies', (CONNECTION) => {
       worker.on('failed', () => {
         // Wait a bit longer than the backoff to allow promote to work
         setTimeout(async () => {
-          try { await promote(cleanupClient, buildKeys(Q), Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, buildKeys(Q), Date.now());
+          } catch {}
         }, 600);
       });
 
@@ -370,7 +376,7 @@ describeEachMode('Bee-Queue: Graceful shutdown', (CONNECTION) => {
       Q,
       async () => {
         jobStarted = true;
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise((r) => setTimeout(r, 1000));
         jobCompleted = true;
         return 'done';
       },
@@ -413,7 +419,7 @@ describeEachMode('Bee-Queue: Graceful shutdown', (CONNECTION) => {
       Q,
       async () => {
         jobStarted = true;
-        await new Promise(r => setTimeout(r, 5000));
+        await new Promise((r) => setTimeout(r, 5000));
         return 'done';
       },
       { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
@@ -613,7 +619,7 @@ describeEachMode('Bee-Queue: Job progress events', (CONNECTION) => {
 
     await queueEvents.waitUntilReady();
     // Small delay to ensure QueueEvents is actively polling
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 300));
 
     const job = await queue.add('progress-task', { v: 1 });
 
@@ -624,9 +630,9 @@ describeEachMode('Bee-Queue: Job progress events', (CONNECTION) => {
         Q,
         async (j: any) => {
           await j.updateProgress(0);
-          await new Promise(r => setTimeout(r, 100));
+          await new Promise((r) => setTimeout(r, 100));
           await j.updateProgress(50);
-          await new Promise(r => setTimeout(r, 100));
+          await new Promise((r) => setTimeout(r, 100));
           await j.updateProgress(100);
           return 'done';
         },
@@ -643,7 +649,7 @@ describeEachMode('Bee-Queue: Job progress events', (CONNECTION) => {
 
     await done;
     // Wait for QueueEvents to catch up
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1000));
 
     expect(progressValues).toContain(0);
     expect(progressValues).toContain(50);
@@ -678,17 +684,18 @@ describeEachMode('Bee-Queue: Short poll intervals', (CONNECTION) => {
     const queue = new Queue(Q, { connection: CONNECTION });
 
     const errors: Error[] = [];
-    const worker = new Worker(
-      Q,
-      async () => 'ok',
-      { connection: CONNECTION, concurrency: 1, blockTimeout: 100, stalledInterval: 60000 },
-    );
+    const worker = new Worker(Q, async () => 'ok', {
+      connection: CONNECTION,
+      concurrency: 1,
+      blockTimeout: 100,
+      stalledInterval: 60000,
+    });
     worker.on('error', (err: Error) => errors.push(err));
 
     await worker.waitUntilReady();
 
     // Let it poll several times with no jobs
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1000));
 
     // Add a job to verify it still works
     await queue.add('quick-task', { v: 1 });
@@ -746,7 +753,7 @@ describeEachMode('node-resque: Competing consumers - no duplicates', (CONNECTION
           Q,
           async (job: any) => {
             // Small random delay to increase chance of contention
-            await new Promise(r => setTimeout(r, Math.random() * 50));
+            await new Promise((r) => setTimeout(r, Math.random() * 50));
             return { workerId };
           },
           { connection: CONNECTION, concurrency: 3, blockTimeout: 500, stalledInterval: 60000 },
@@ -764,8 +771,8 @@ describeEachMode('node-resque: Competing consumers - no duplicates', (CONNECTION
         return w;
       };
 
-      var worker1 = makeWorker('w1');
-      var worker2 = makeWorker('w2');
+      const worker1 = makeWorker('w1');
+      const worker2 = makeWorker('w2');
     });
 
     await done;
@@ -776,8 +783,8 @@ describeEachMode('node-resque: Competing consumers - no duplicates', (CONNECTION
     expect(uniqueIds.size).toBe(JOB_COUNT);
 
     // Verify both workers got some jobs (not guaranteed but likely with 20 jobs)
-    const w1Count = Object.values(workerIds).filter(w => w === 'w1').length;
-    const w2Count = Object.values(workerIds).filter(w => w === 'w2').length;
+    const w1Count = Object.values(workerIds).filter((w) => w === 'w1').length;
+    const w2Count = Object.values(workerIds).filter((w) => w === 'w2').length;
     expect(w1Count + w2Count).toBe(JOB_COUNT);
 
     await queue.close();
@@ -828,29 +835,25 @@ describeEachMode('node-resque: Stalled worker heartbeat', (CONNECTION) => {
 
     await stalledWorker.waitUntilReady();
     // Let it pick up the job so it enters the PEL
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1500));
     // Force-close without waiting for active jobs
     await stalledWorker.close(true);
 
     // Wait for the PEL entry to become idle long enough for XAUTOCLAIM
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1000));
 
     // Worker 2: its scheduler will detect the stalled entry via XAUTOCLAIM.
-    const recoveryWorker = new Worker(
-      Q,
-      async () => 'ok',
-      {
-        connection: CONNECTION,
-        concurrency: 1,
-        blockTimeout: 500,
-        stalledInterval: 500,
-        maxStalledCount: 1,
-      },
-    );
+    const recoveryWorker = new Worker(Q, async () => 'ok', {
+      connection: CONNECTION,
+      concurrency: 1,
+      blockTimeout: 500,
+      stalledInterval: 500,
+      maxStalledCount: 1,
+    });
     recoveryWorker.on('error', () => {});
 
     // Wait for enough stall detection cycles to run
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
 
     await recoveryWorker.close();
 
@@ -900,7 +903,9 @@ describeEachMode('node-resque: Failed job management', (CONNECTION) => {
 
       const worker = new Worker(
         Q,
-        async () => { throw new Error('deliberate failure'); },
+        async () => {
+          throw new Error('deliberate failure');
+        },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
       );
       worker.on('error', () => {});
@@ -936,7 +941,9 @@ describeEachMode('node-resque: Failed job management', (CONNECTION) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
       const worker = new Worker(
         Q,
-        async () => { throw new Error('fail'); },
+        async () => {
+          throw new Error('fail');
+        },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
       );
       worker.on('error', () => {});
@@ -991,7 +998,7 @@ describeEachMode('node-resque: Failed job management', (CONNECTION) => {
     await failDone;
 
     // Verify job is in failed state
-    let fetched = await queue.getJob(job!.id);
+    const fetched = await queue.getJob(job!.id);
     expect(await fetched!.isFailed()).toBe(true);
 
     // Retry the job
@@ -1216,28 +1223,24 @@ describeEachMode('RedisSMQ: Job timeout / TTL', (CONNECTION) => {
 
     await stalledWorker.waitUntilReady();
     // Let it pick up the job
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1000));
     // Kill the worker - job stays in PEL
     await stalledWorker.close(true);
 
     // Start another worker that will run stall detection and fail the job
-    const cleanupWorker = new Worker(
-      Q,
-      async () => 'ok',
-      {
-        connection: CONNECTION,
-        concurrency: 1,
-        blockTimeout: 500,
-        stalledInterval: 1000,
-        maxStalledCount: 1,
-      },
-    );
+    const cleanupWorker = new Worker(Q, async () => 'ok', {
+      connection: CONNECTION,
+      concurrency: 1,
+      blockTimeout: 500,
+      stalledInterval: 1000,
+      maxStalledCount: 1,
+    });
     cleanupWorker.on('error', () => {});
 
     await cleanupWorker.waitUntilReady();
 
     // Wait for stall detection to run and reclaim+fail the job
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 3000));
 
     await cleanupWorker.close();
 
@@ -1318,11 +1321,12 @@ describeEachMode('Bee-Queue: Job state queries', (CONNECTION) => {
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
-      const worker = new Worker(
-        Q,
-        async () => 'done',
-        { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
-      );
+      const worker = new Worker(Q, async () => 'done', {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: 60000,
+      });
       worker.on('error', () => {});
       worker.on('completed', () => {
         clearTimeout(timeout);
@@ -1350,7 +1354,9 @@ describeEachMode('Bee-Queue: Job state queries', (CONNECTION) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
       const worker = new Worker(
         Q,
-        async () => { throw new Error('fail'); },
+        async () => {
+          throw new Error('fail');
+        },
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
       );
       worker.on('error', () => {});

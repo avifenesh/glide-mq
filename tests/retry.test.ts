@@ -170,11 +170,7 @@ describeEachMode('Retry lifecycle', (CONNECTION) => {
 
     const failTimestamps: number[] = [];
 
-    const job = await queue.add(
-      'exp-backoff',
-      { x: 1 },
-      { attempts: 4, backoff: { type: 'exponential', delay: 100 } },
-    );
+    const job = await queue.add('exp-backoff', { x: 1 }, { attempts: 4, backoff: { type: 'exponential', delay: 100 } });
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 30000);
@@ -275,11 +271,7 @@ describeEachMode('Retry lifecycle', (CONNECTION) => {
 
     let attemptCount = 0;
 
-    const job = await queue.add(
-      'event-retry',
-      { x: 1 },
-      { attempts: 2, backoff: { type: 'fixed', delay: 100 } },
-    );
+    const job = await queue.add('event-retry', { x: 1 }, { attempts: 2, backoff: { type: 'fixed', delay: 100 } });
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
@@ -314,7 +306,7 @@ describeEachMode('Retry lifecycle', (CONNECTION) => {
 
     await done;
 
-    const entries = await cleanupClient.xrange(k.events, '-', '+') as Record<string, [string, string][]>;
+    const entries = (await cleanupClient.xrange(k.events, '-', '+')) as Record<string, [string, string][]>;
     const events: { event: string; jobId: string }[] = [];
     for (const entryId of Object.keys(entries)) {
       const fields = entries[entryId];
@@ -327,7 +319,7 @@ describeEachMode('Retry lifecycle', (CONNECTION) => {
       }
     }
 
-    const eventTypes = events.map(e => e.event);
+    const eventTypes = events.map((e) => e.event);
     expect(eventTypes).toContain('added');
     expect(eventTypes).toContain('retrying');
     expect(eventTypes).toContain('completed');

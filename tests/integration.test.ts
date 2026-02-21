@@ -10,7 +10,8 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { Job } = require('../dist/job') as typeof import('../src/job');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { LIBRARY_VERSION, CONSUMER_GROUP } = require('../dist/functions/index') as typeof import('../src/functions/index');
+const { LIBRARY_VERSION, CONSUMER_GROUP } =
+  require('../dist/functions/index') as typeof import('../src/functions/index');
 
 import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
@@ -71,7 +72,7 @@ describeEachMode('Queue.add + getJob', (CONNECTION) => {
     const k = buildKeys(Q);
     const score = await cleanupClient.zscore(k.scheduled, job.id);
     expect(score).not.toBeNull();
-    expect(Number(score)).toBeGreaterThan(5 * (2 ** 42) - 1);
+    expect(Number(score)).toBeGreaterThan(5 * 2 ** 42 - 1);
   });
 
   it('addBulk creates multiple jobs with unique IDs', async () => {
@@ -81,7 +82,7 @@ describeEachMode('Queue.add + getJob', (CONNECTION) => {
       { name: 'b3', data: { i: 3 } },
     ]);
     expect(jobs).toHaveLength(3);
-    const ids = new Set(jobs.map(j => j.id));
+    const ids = new Set(jobs.map((j) => j.id));
     expect(ids.size).toBe(3);
   });
 
@@ -150,7 +151,7 @@ describeEachMode('Worker processes jobs', (CONNECTION) => {
       worker.on('error', () => {});
     });
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     const job = await queue.add('work', { v: 1 });
     await done;
 
@@ -178,7 +179,7 @@ describeEachMode('Worker processes jobs', (CONNECTION) => {
         async (job: any) => {
           current++;
           if (current > maxConcurrent) maxConcurrent = current;
-          await new Promise(r => setTimeout(r, 50));
+          await new Promise((r) => setTimeout(r, 50));
           processed.push(job.id);
           current--;
           if (processed.length >= 5) {
@@ -192,7 +193,7 @@ describeEachMode('Worker processes jobs', (CONNECTION) => {
       worker.on('error', () => {});
     });
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     for (let i = 0; i < 5; i++) {
       await queue.add(`c-${i}`, { i });
     }
@@ -273,7 +274,7 @@ describeEachMode('Events stream', (CONNECTION) => {
     const job = await queue.add('ev-test', { x: 1 });
     const k = buildKeys(Q);
 
-    const entries = await cleanupClient.xrange(k.events, '-', '+') as Record<string, [string, string][]>;
+    const entries = (await cleanupClient.xrange(k.events, '-', '+')) as Record<string, [string, string][]>;
     const entryIds = Object.keys(entries);
     expect(entryIds.length).toBeGreaterThan(0);
 

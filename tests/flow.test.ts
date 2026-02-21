@@ -154,9 +154,7 @@ describeEachMode('FlowProducer', (CONNECTION) => {
           name: 'parent-child',
           queueName: qName,
           data: { level: 1 },
-          children: [
-            { name: 'grandchild', queueName: qName, data: { level: 2 } },
-          ],
+          children: [{ name: 'grandchild', queueName: qName, data: { level: 2 } }],
         },
       ],
     });
@@ -266,17 +264,13 @@ describeEachMode('FlowProducer', (CONNECTION) => {
         name: 'flow-1',
         queueName: qName,
         data: { f: 1 },
-        children: [
-          { name: 'f1-child', queueName: qName, data: { c: 1 } },
-        ],
+        children: [{ name: 'f1-child', queueName: qName, data: { c: 1 } }],
       },
       {
         name: 'flow-2',
         queueName: qName,
         data: { f: 2 },
-        children: [
-          { name: 'f2-child', queueName: qName, data: { c: 2 } },
-        ],
+        children: [{ name: 'f2-child', queueName: qName, data: { c: 2 } }],
       },
     ]);
 

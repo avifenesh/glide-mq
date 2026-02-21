@@ -498,12 +498,7 @@ describeEachMode('Workflows', (CONNECTION) => {
   it('chord: single group job works', async () => {
     const Q = 'deep-chord-single-' + Date.now();
 
-    const node = await chord(
-      Q,
-      [{ name: 'sole-task', data: { x: 7 } }],
-      { name: 'finish', data: {} },
-      CONNECTION,
-    );
+    const node = await chord(Q, [{ name: 'sole-task', data: { x: 7 } }], { name: 'finish', data: {} }, CONNECTION);
 
     const callbackId = node.job.id;
     let finishValues: any = null;
@@ -532,12 +527,7 @@ describeEachMode('Workflows', (CONNECTION) => {
   it('chord: callback opts are preserved', async () => {
     const Q = 'deep-chord-opts-' + Date.now();
 
-    const node = await chord(
-      Q,
-      [{ name: 'w', data: {} }],
-      { name: 'cb', data: {}, opts: { priority: 3 } },
-      CONNECTION,
-    );
+    const node = await chord(Q, [{ name: 'w', data: {} }], { name: 'cb', data: {}, opts: { priority: 3 } }, CONNECTION);
 
     const k = buildKeys(Q);
     const optsRaw = await cleanupClient.hget(k.job(node.job.id), 'opts');
@@ -560,9 +550,7 @@ describeEachMode('Workflows', (CONNECTION) => {
         name: 'flow-A',
         queueName: Q,
         data: { f: 'A' },
-        children: [
-          { name: 'a-child', queueName: Q, data: {} },
-        ],
+        children: [{ name: 'a-child', queueName: Q, data: {} }],
       },
       {
         name: 'flow-B',

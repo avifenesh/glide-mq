@@ -100,9 +100,7 @@ describeEachMode('Shared client', (CONNECTION) => {
       name: 'parent',
       queueName: QN,
       data: { type: 'flow' },
-      children: [
-        { name: 'child1', queueName: QN, data: { idx: 1 } },
-      ],
+      children: [{ name: 'child1', queueName: QN, data: { idx: 1 } }],
     });
 
     expect(result.job.id).toBeDefined();
@@ -133,11 +131,17 @@ describeEachMode('Shared client', (CONNECTION) => {
     await q.add('work', { val: 1 });
     await q.add('work', { val: 2 });
 
-    const worker = new Worker(QN, async () => { completed++; }, {
-      connection: CONNECTION,
-      commandClient: cleanupClient,
-      concurrency: 5,
-    });
+    const worker = new Worker(
+      QN,
+      async () => {
+        completed++;
+      },
+      {
+        connection: CONNECTION,
+        commandClient: cleanupClient,
+        concurrency: 5,
+      },
+    );
 
     const deadline = Date.now() + 10000;
     while (completed < 2 && Date.now() < deadline) await sleep(50);
@@ -180,13 +184,17 @@ describeEachMode('Shared client', (CONNECTION) => {
       await q.add('shared-job', { i });
     }
 
-    const worker = new Worker(QN, async (job: any) => {
-      results.push(job.data.i);
-    }, {
-      connection: CONNECTION,
-      commandClient: cleanupClient,
-      concurrency: 5,
-    });
+    const worker = new Worker(
+      QN,
+      async (job: any) => {
+        results.push(job.data.i);
+      },
+      {
+        connection: CONNECTION,
+        commandClient: cleanupClient,
+        concurrency: 5,
+      },
+    );
 
     const deadline = Date.now() + 10000;
     while (results.length < 5 && Date.now() < deadline) await sleep(50);
@@ -248,9 +256,7 @@ describeEachMode('Shared client', (CONNECTION) => {
     const { ensureFunctionLibraryOnce } = require('../dist/connection') as typeof import('../src/connection');
 
     // Call 10 times concurrently on the same client - should not throw
-    const promises = Array.from({ length: 10 }, () =>
-      ensureFunctionLibraryOnce(cleanupClient),
-    );
+    const promises = Array.from({ length: 10 }, () => ensureFunctionLibraryOnce(cleanupClient));
     await Promise.all(promises);
 
     // All resolved successfully - library loaded once, others got cached promise
@@ -268,7 +274,9 @@ describeEachMode('Shared client', (CONNECTION) => {
       connection: CONNECTION,
       commandClient: cleanupClient,
     });
-    worker.on('error', (err: Error) => { errors.push(err); });
+    worker.on('error', (err: Error) => {
+      errors.push(err);
+    });
     await worker.waitUntilReady();
 
     // Worker is running with injected command client + auto-created blocking client.

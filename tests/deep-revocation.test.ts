@@ -29,10 +29,14 @@ describeEachMode('Job Revocation', (CONNECTION) => {
 
   afterEach(async () => {
     if (worker) {
-      try { await worker.close(true); } catch {}
+      try {
+        await worker.close(true);
+      } catch {}
     }
     if (queue) {
-      try { await queue.close(); } catch {}
+      try {
+        await queue.close();
+      } catch {}
     }
     if (queueName) await flushQueue(cleanupClient, queueName);
   });
@@ -148,15 +152,19 @@ describeEachMode('Job Revocation', (CONNECTION) => {
     await queue.revoke(job!.id);
 
     let processed = false;
-    worker = new Worker(queueName, async () => {
-      processed = true;
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      stalledInterval: 60000,
-    });
+    worker = new Worker(
+      queueName,
+      async () => {
+        processed = true;
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        stalledInterval: 60000,
+      },
+    );
 
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1000));
     expect(processed).toBe(false);
   });
 
@@ -169,17 +177,21 @@ describeEachMode('Job Revocation', (CONNECTION) => {
     await cleanupClient.hset(k.job(job!.id), { revoked: '1' });
 
     const events: string[] = [];
-    worker = new Worker(queueName, async () => {
-      events.push('processed');
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      stalledInterval: 60000,
-    });
+    worker = new Worker(
+      queueName,
+      async () => {
+        events.push('processed');
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        stalledInterval: 60000,
+      },
+    );
     worker.on('completed', () => events.push('completed'));
     worker.on('failed', () => events.push('failed'));
 
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1500));
 
     expect(events).not.toContain('processed');
     expect(events).not.toContain('completed');

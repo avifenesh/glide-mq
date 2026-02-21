@@ -213,14 +213,18 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
     });
 
     it('accepts a job with delay + priority + attempts + backoff + removeOnComplete + dedup', async () => {
-      const job = await queue.add('all-opts', { v: 1 }, {
-        delay: 5000,
-        priority: 3,
-        attempts: 5,
-        backoff: { type: 'exponential', delay: 1000, jitter: 0.1 },
-        removeOnComplete: true,
-        deduplication: { id: 'combo-1', ttl: 60000, mode: 'throttle' },
-      });
+      const job = await queue.add(
+        'all-opts',
+        { v: 1 },
+        {
+          delay: 5000,
+          priority: 3,
+          attempts: 5,
+          backoff: { type: 'exponential', delay: 1000, jitter: 0.1 },
+          removeOnComplete: true,
+          deduplication: { id: 'combo-1', ttl: 60000, mode: 'throttle' },
+        },
+      );
 
       expect(job).not.toBeNull();
       expect(job!.id).toBeTruthy();
@@ -267,7 +271,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       const allJobs = [...jobs1, ...jobs2, ...jobs3].filter(Boolean);
       expect(allJobs).toHaveLength(JOBS_PER_QUEUE * 3);
 
-      const ids = allJobs.map(j => j!.id);
+      const ids = allJobs.map((j) => j!.id);
       const uniqueIds = new Set(ids);
       expect(uniqueIds.size).toBe(JOBS_PER_QUEUE * 3);
     });
@@ -338,7 +342,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
 
       await done;
 
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 200));
 
       const fetched = await queue.getJob(job!.id);
       expect(fetched).toBeNull();
@@ -383,7 +387,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       );
       worker.on('error', () => {});
 
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 2000));
 
       await queue.resume();
 
@@ -430,7 +434,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
         cleanupClient.exists([k.events]),
         cleanupClient.exists([k.meta]),
       ]);
-      expect(checks.every(c => c === 0)).toBe(true);
+      expect(checks.every((c) => c === 0)).toBe(true);
 
       const jobKey = k.job('1');
       const jobExists = await cleanupClient.exists([jobKey]);
@@ -455,18 +459,16 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
     });
 
     it('100 rapid adds yield unique incrementing IDs', async () => {
-      const jobs = await Promise.all(
-        Array.from({ length: 100 }, (_, i) => queue.add(`rapid-${i}`, { i })),
-      );
+      const jobs = await Promise.all(Array.from({ length: 100 }, (_, i) => queue.add(`rapid-${i}`, { i })));
 
       expect(jobs).toHaveLength(100);
-      const ids = jobs.map(j => j!.id);
+      const ids = jobs.map((j) => j!.id);
 
       const uniqueIds = new Set(ids);
       expect(uniqueIds.size).toBe(100);
 
       const numericIds = ids.map(Number);
-      expect(numericIds.every(n => !isNaN(n) && n > 0)).toBe(true);
+      expect(numericIds.every((n) => !isNaN(n) && n > 0)).toBe(true);
 
       const sorted = [...numericIds].sort((a, b) => a - b);
       for (let i = 1; i < sorted.length; i++) {
@@ -622,11 +624,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       const done = new Promise<void>((resolve, reject) => {
         let completed = 0;
         const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
-        const worker = new Worker(
-          Q,
-          async () => 'ok',
-          { connection: CONNECTION, concurrency: 3, blockTimeout: 1000 },
-        );
+        const worker = new Worker(Q, async () => 'ok', { connection: CONNECTION, concurrency: 3, blockTimeout: 1000 });
         worker.on('completed', () => {
           completed++;
           if (completed >= 3) {

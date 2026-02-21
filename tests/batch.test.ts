@@ -34,9 +34,7 @@ describeEachMode('addBulk batch pipelining', (CONNECTION) => {
   });
 
   it('addBulk with single job works', async () => {
-    const jobs = await queue.addBulk([
-      { name: 'single', data: { x: 1 } },
-    ]);
+    const jobs = await queue.addBulk([{ name: 'single', data: { x: 1 } }]);
     expect(jobs).toHaveLength(1);
     expect(jobs[0].name).toBe('single');
     expect(jobs[0].data).toEqual({ x: 1 });
@@ -57,11 +55,11 @@ describeEachMode('addBulk batch pipelining', (CONNECTION) => {
     expect(jobs).toHaveLength(5);
 
     // All IDs should be unique
-    const ids = new Set(jobs.map(j => j.id));
+    const ids = new Set(jobs.map((j) => j.id));
     expect(ids.size).toBe(5);
 
     // IDs should be sequential (all created in same batch)
-    const numericIds = jobs.map(j => Number(j.id));
+    const numericIds = jobs.map((j) => Number(j.id));
     for (let i = 1; i < numericIds.length; i++) {
       expect(numericIds[i]).toBe(numericIds[i - 1] + 1);
     }
@@ -174,12 +172,16 @@ describeEachMode('addBulk batch - worker processing', (CONNECTION) => {
     const processed: string[] = [];
     const done = new Promise<void>((resolve) => {
       let count = 0;
-      worker = new Worker(Q, async (job) => {
-        processed.push(job.name);
-        count++;
-        if (count === 3) resolve();
-        return `done-${job.name}`;
-      }, { connection: CONNECTION, concurrency: 1 });
+      worker = new Worker(
+        Q,
+        async (job) => {
+          processed.push(job.name);
+          count++;
+          if (count === 3) resolve();
+          return `done-${job.name}`;
+        },
+        { connection: CONNECTION, concurrency: 1 },
+      );
     });
 
     await queue.addBulk([

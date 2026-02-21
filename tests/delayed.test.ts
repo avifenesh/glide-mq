@@ -36,7 +36,7 @@ describeEachMode('Delayed jobs', (CONNECTION) => {
     const score = await cleanupClient.zscore(k.scheduled, job.id);
     expect(score).not.toBeNull();
 
-    const streamEntries = await cleanupClient.xrange(k.stream, '-', '+') as Record<string, [string, string][]>;
+    const streamEntries = (await cleanupClient.xrange(k.stream, '-', '+')) as Record<string, [string, string][]>;
     const streamJobIds: string[] = [];
     for (const entryId of Object.keys(streamEntries)) {
       const fields = streamEntries[entryId];
@@ -60,7 +60,7 @@ describeEachMode('Delayed jobs', (CONNECTION) => {
     const scoreBefore = await cleanupClient.zscore(k.scheduled, job.id);
     expect(scoreBefore).not.toBeNull();
 
-    await new Promise(r => setTimeout(r, delayMs + 100));
+    await new Promise((r) => setTimeout(r, delayMs + 100));
 
     const promoted = await promote(cleanupClient, buildKeys(Q), Date.now());
     expect(promoted).toBeGreaterThanOrEqual(1);
@@ -111,20 +111,20 @@ describeEachMode('Delayed jobs', (CONNECTION) => {
     expect(await cleanupClient.zscore(k.scheduled, job2.id)).not.toBeNull();
     expect(await cleanupClient.zscore(k.scheduled, job3.id)).not.toBeNull();
 
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 300));
     const promoted1 = await promote(cleanupClient, buildKeys(qName), Date.now());
     expect(promoted1).toBe(1);
     expect(await cleanupClient.zscore(k.scheduled, job1.id)).toBeNull();
     expect(await cleanupClient.zscore(k.scheduled, job2.id)).not.toBeNull();
     expect(await cleanupClient.zscore(k.scheduled, job3.id)).not.toBeNull();
 
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 200));
     const promoted2 = await promote(cleanupClient, buildKeys(qName), Date.now());
     expect(promoted2).toBe(1);
     expect(await cleanupClient.zscore(k.scheduled, job2.id)).toBeNull();
     expect(await cleanupClient.zscore(k.scheduled, job3.id)).not.toBeNull();
 
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 400));
     const promoted3 = await promote(cleanupClient, buildKeys(qName), Date.now());
     expect(promoted3).toBe(1);
     expect(await cleanupClient.zscore(k.scheduled, job3.id)).toBeNull();

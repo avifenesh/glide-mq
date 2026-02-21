@@ -43,18 +43,26 @@ describeEachMode('Group concurrency', (CONNECTION) => {
     const completed: string[] = [];
 
     for (let i = 0; i < JOB_COUNT; i++) {
-      await queue.add('grp-job', { i }, {
-        ordering: { key: 'grpA', concurrency: MAX_CONC },
-      });
+      await queue.add(
+        'grp-job',
+        { i },
+        {
+          ordering: { key: 'grpA', concurrency: MAX_CONC },
+        },
+      );
     }
 
-    const worker = new Worker(Q, async (job: any) => {
-      currentConcurrent++;
-      peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
-      await sleep(JOB_DURATION);
-      currentConcurrent--;
-      completed.push(job.id);
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        currentConcurrent++;
+        peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
+        await sleep(JOB_DURATION);
+        currentConcurrent--;
+        completed.push(job.id);
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     // Wait for all jobs to complete
     while (completed.length < JOB_COUNT) {
@@ -73,15 +81,23 @@ describeEachMode('Group concurrency', (CONNECTION) => {
     const order: number[] = [];
 
     for (let i = 0; i < 10; i++) {
-      await queue2.add('seq-job', { i }, {
-        ordering: { key: 'seqKey', concurrency: 1 },
-      });
+      await queue2.add(
+        'seq-job',
+        { i },
+        {
+          ordering: { key: 'seqKey', concurrency: 1 },
+        },
+      );
     }
 
-    const worker = new Worker(Q2, async (job: any) => {
-      order.push(job.data.i);
-      await sleep(30);
-    }, { connection: CONNECTION, concurrency: 5 });
+    const worker = new Worker(
+      Q2,
+      async (job: any) => {
+        order.push(job.data.i);
+        await sleep(30);
+      },
+      { connection: CONNECTION, concurrency: 5 },
+    );
 
     while (order.length < 10) {
       await sleep(50);
@@ -105,18 +121,26 @@ describeEachMode('Group concurrency', (CONNECTION) => {
     let completed = 0;
 
     for (let i = 0; i < 5; i++) {
-      await queue3.add('def-job', { i }, {
-        ordering: { key: 'defKey' },
-      });
+      await queue3.add(
+        'def-job',
+        { i },
+        {
+          ordering: { key: 'defKey' },
+        },
+      );
     }
 
-    const worker = new Worker(Q3, async () => {
-      currentConcurrent++;
-      peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
-      await sleep(50);
-      currentConcurrent--;
-      completed++;
-    }, { connection: CONNECTION, concurrency: 5 });
+    const worker = new Worker(
+      Q3,
+      async () => {
+        currentConcurrent++;
+        peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
+        await sleep(50);
+        currentConcurrent--;
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: 5 },
+    );
 
     while (completed < 5) {
       await sleep(50);
@@ -136,19 +160,31 @@ describeEachMode('Group concurrency', (CONNECTION) => {
     const groupBCompletions: number[] = [];
 
     for (let i = 0; i < 3; i++) {
-      await queue4.add('grpA', { group: 'A', i }, {
-        ordering: { key: 'groupA', concurrency: 1 },
-      });
-      await queue4.add('grpB', { group: 'B', i }, {
-        ordering: { key: 'groupB', concurrency: 1 },
-      });
+      await queue4.add(
+        'grpA',
+        { group: 'A', i },
+        {
+          ordering: { key: 'groupA', concurrency: 1 },
+        },
+      );
+      await queue4.add(
+        'grpB',
+        { group: 'B', i },
+        {
+          ordering: { key: 'groupB', concurrency: 1 },
+        },
+      );
     }
 
-    const worker = new Worker(Q4, async (job: any) => {
-      await sleep(80);
-      if (job.data.group === 'A') groupACompletions.push(Date.now());
-      else groupBCompletions.push(Date.now());
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      Q4,
+      async (job: any) => {
+        await sleep(80);
+        if (job.data.group === 'A') groupACompletions.push(Date.now());
+        else groupBCompletions.push(Date.now());
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     while (groupACompletions.length < 3 || groupBCompletions.length < 3) {
       await sleep(50);
@@ -183,31 +219,43 @@ describeEachMode('Group concurrency', (CONNECTION) => {
     let completedY = 0;
 
     for (let i = 0; i < 8; i++) {
-      await queue5.add('xjob', { group: 'X' }, {
-        ordering: { key: 'grpX', concurrency: 2 },
-      });
+      await queue5.add(
+        'xjob',
+        { group: 'X' },
+        {
+          ordering: { key: 'grpX', concurrency: 2 },
+        },
+      );
     }
     for (let i = 0; i < 8; i++) {
-      await queue5.add('yjob', { group: 'Y' }, {
-        ordering: { key: 'grpY', concurrency: 4 },
-      });
+      await queue5.add(
+        'yjob',
+        { group: 'Y' },
+        {
+          ordering: { key: 'grpY', concurrency: 4 },
+        },
+      );
     }
 
-    const worker = new Worker(Q5, async (job: any) => {
-      if (job.data.group === 'X') {
-        currentX++;
-        peakX = Math.max(peakX, currentX);
-        await sleep(80);
-        currentX--;
-        completedX++;
-      } else {
-        currentY++;
-        peakY = Math.max(peakY, currentY);
-        await sleep(80);
-        currentY--;
-        completedY++;
-      }
-    }, { connection: CONNECTION, concurrency: 20 });
+    const worker = new Worker(
+      Q5,
+      async (job: any) => {
+        if (job.data.group === 'X') {
+          currentX++;
+          peakX = Math.max(peakX, currentX);
+          await sleep(80);
+          currentX--;
+          completedX++;
+        } else {
+          currentY++;
+          peakY = Math.max(peakY, currentY);
+          await sleep(80);
+          currentY--;
+          completedY++;
+        }
+      },
+      { connection: CONNECTION, concurrency: 20 },
+    );
 
     while (completedX < 8 || completedY < 8) {
       await sleep(50);
@@ -228,19 +276,31 @@ describeEachMode('Group concurrency', (CONNECTION) => {
     const queue6 = new Queue(Q6, { connection: CONNECTION });
     const completed: string[] = [];
 
-    await queue6.add('fail-job', { shouldFail: true }, {
-      ordering: { key: 'failGrp', concurrency: 1 },
-    });
-    await queue6.add('ok-job', { shouldFail: false }, {
-      ordering: { key: 'failGrp', concurrency: 1 },
-    });
+    await queue6.add(
+      'fail-job',
+      { shouldFail: true },
+      {
+        ordering: { key: 'failGrp', concurrency: 1 },
+      },
+    );
+    await queue6.add(
+      'ok-job',
+      { shouldFail: false },
+      {
+        ordering: { key: 'failGrp', concurrency: 1 },
+      },
+    );
 
-    const worker = new Worker(Q6, async (job: any) => {
-      if (job.data.shouldFail) {
-        throw new Error('intentional failure');
-      }
-      completed.push(job.id);
-    }, { connection: CONNECTION, concurrency: 5 });
+    const worker = new Worker(
+      Q6,
+      async (job: any) => {
+        if (job.data.shouldFail) {
+          throw new Error('intentional failure');
+        }
+        completed.push(job.id);
+      },
+      { connection: CONNECTION, concurrency: 5 },
+    );
 
     // Wait for the second job to complete (first fails, should release slot)
     const deadline = Date.now() + 10000;
@@ -264,26 +324,34 @@ describeEachMode('Group concurrency', (CONNECTION) => {
     let completedUngrouped = 0;
 
     for (let i = 0; i < 4; i++) {
-      await queue7.add('grouped', { grouped: true }, {
-        ordering: { key: 'mixGrp', concurrency: 1 },
-      });
+      await queue7.add(
+        'grouped',
+        { grouped: true },
+        {
+          ordering: { key: 'mixGrp', concurrency: 1 },
+        },
+      );
     }
     for (let i = 0; i < 4; i++) {
       await queue7.add('ungrouped', { grouped: false });
     }
 
-    const worker = new Worker(Q7, async (job: any) => {
-      if (job.data.grouped) {
-        currentGrouped++;
-        peakGrouped = Math.max(peakGrouped, currentGrouped);
-        await sleep(60);
-        currentGrouped--;
-        completedGrouped++;
-      } else {
-        await sleep(30);
-        completedUngrouped++;
-      }
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      Q7,
+      async (job: any) => {
+        if (job.data.grouped) {
+          currentGrouped++;
+          peakGrouped = Math.max(peakGrouped, currentGrouped);
+          await sleep(60);
+          currentGrouped--;
+          completedGrouped++;
+        } else {
+          await sleep(30);
+          completedUngrouped++;
+        }
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 15000;
     while ((completedGrouped < 4 || completedUngrouped < 4) && Date.now() < deadline) {
@@ -306,15 +374,23 @@ describeEachMode('Group concurrency', (CONNECTION) => {
     const TOTAL = 10;
 
     for (let i = 0; i < TOTAL; i++) {
-      await queue8.add('ctr-job', { i }, {
-        ordering: { key: 'zeroGrp', concurrency: 3 },
-      });
+      await queue8.add(
+        'ctr-job',
+        { i },
+        {
+          ordering: { key: 'zeroGrp', concurrency: 3 },
+        },
+      );
     }
 
-    const worker = new Worker(Q8, async () => {
-      await sleep(30);
-      completed++;
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      Q8,
+      async () => {
+        await sleep(30);
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     while (completed < TOTAL) {
       await sleep(50);
@@ -340,15 +416,23 @@ describeEachMode('Group concurrency', (CONNECTION) => {
 
     // Add some group jobs and let them complete
     for (let i = 0; i < 3; i++) {
-      await queue9.add('obl-job', { i }, {
-        ordering: { key: 'oblGrp', concurrency: 2 },
-      });
+      await queue9.add(
+        'obl-job',
+        { i },
+        {
+          ordering: { key: 'oblGrp', concurrency: 2 },
+        },
+      );
     }
 
     let completed = 0;
-    const worker = new Worker(Q9, async () => {
-      completed++;
-    }, { connection: CONNECTION, concurrency: 5 });
+    const worker = new Worker(
+      Q9,
+      async () => {
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: 5 },
+    );
 
     while (completed < 3) {
       await sleep(50);
@@ -377,18 +461,26 @@ describeEachMode('Group concurrency', (CONNECTION) => {
     const WORKER_CONC = 8;
 
     for (let i = 0; i < TOTAL; i++) {
-      await queue10.add('hi-job', { i }, {
-        ordering: { key: 'hiGrp', concurrency: 100 },
-      });
+      await queue10.add(
+        'hi-job',
+        { i },
+        {
+          ordering: { key: 'hiGrp', concurrency: 100 },
+        },
+      );
     }
 
-    const worker = new Worker(Q10, async () => {
-      currentConcurrent++;
-      peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
-      await sleep(100);
-      currentConcurrent--;
-      completed++;
-    }, { connection: CONNECTION, concurrency: WORKER_CONC });
+    const worker = new Worker(
+      Q10,
+      async () => {
+        currentConcurrent++;
+        peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
+        await sleep(100);
+        currentConcurrent--;
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: WORKER_CONC },
+    );
 
     while (completed < TOTAL) {
       await sleep(50);

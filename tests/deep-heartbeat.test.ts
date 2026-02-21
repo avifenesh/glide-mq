@@ -34,7 +34,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       if (await fn()) return;
-      await new Promise(r => setTimeout(r, pollMs));
+      await new Promise((r) => setTimeout(r, pollMs));
     }
     throw new Error(`waitFor timed out after ${timeoutMs}ms`);
   }
@@ -45,18 +45,24 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
   afterEach(async () => {
     for (const w of workers) {
-      try { await w.close(true); } catch {}
+      try {
+        await w.close(true);
+      } catch {}
     }
     workers.length = 0;
     for (const q of queues) {
-      try { await q.close(); } catch {}
+      try {
+        await q.close();
+      } catch {}
     }
     queues.length = 0;
   });
 
   afterAll(async () => {
     for (const name of queueNames) {
-      try { await flushQueue(cleanupClient, name); } catch {}
+      try {
+        await flushQueue(cleanupClient, name);
+      } catch {}
     }
     cleanupClient.close();
   });
@@ -70,15 +76,19 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     const completed: string[] = [];
     const stalled: string[] = [];
 
-    const worker = new Worker(Q, async (job: any) => {
-      await new Promise(r => setTimeout(r, 3000));
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      lockDuration: 2000,
-      stalledInterval: 2000,
-      maxStalledCount: 1,
-    });
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        await new Promise((r) => setTimeout(r, 3000));
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        lockDuration: 2000,
+        stalledInterval: 2000,
+        maxStalledCount: 1,
+      },
+    );
     workers.push(worker);
 
     worker.on('completed', (job: any) => completed.push(job.id));
@@ -100,17 +110,21 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     queues.push(queue);
     const k = buildKeys(Q);
 
-    const jobStarted = new Promise<string>(resolve => {
-      const w1 = new Worker(Q, async (job: any) => {
-        resolve(job.id);
-        await new Promise(() => {}); // hang forever
-        return 'never';
-      }, {
-        connection: CONNECTION,
-        lockDuration: 60000,
-        stalledInterval: 60000,
-        maxStalledCount: 2,
-      });
+    const jobStarted = new Promise<string>((resolve) => {
+      const w1 = new Worker(
+        Q,
+        async (job: any) => {
+          resolve(job.id);
+          await new Promise(() => {}); // hang forever
+          return 'never';
+        },
+        {
+          connection: CONNECTION,
+          lockDuration: 60000,
+          stalledInterval: 60000,
+          maxStalledCount: 2,
+        },
+      );
       workers.push(w1);
     });
 
@@ -121,7 +135,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     await cleanupClient.hdel(k.job(jobId), ['lastActive']);
 
-    await new Promise(r => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 600));
 
     const reclaimClient = await createCleanupClient(CONNECTION);
     try {
@@ -129,12 +143,12 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
       const sc1 = await cleanupClient.hget(k.job(jobId), 'stalledCount');
       expect(Number(sc1)).toBe(1);
 
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise((r) => setTimeout(r, 600));
       await reclaimStalled(reclaimClient, k, 'test-consumer', 500, 2, Date.now(), CONSUMER_GROUP);
       const sc2 = await cleanupClient.hget(k.job(jobId), 'stalledCount');
       expect(Number(sc2)).toBe(2);
 
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise((r) => setTimeout(r, 600));
       await reclaimStalled(reclaimClient, k, 'test-consumer', 500, 2, Date.now(), CONSUMER_GROUP);
 
       const state = await cleanupClient.hget(k.job(jobId), 'state');
@@ -156,21 +170,25 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     let jobId: string | undefined;
     const timestamps: number[] = [];
 
-    const worker = new Worker(Q, async (job: any) => {
-      jobId = job.id;
-      for (let i = 0; i < 8; i++) {
-        await new Promise(r => setTimeout(r, 200));
-        const val = await cleanupClient.hget(k.job(job.id), 'lastActive');
-        if (val) timestamps.push(Number(val));
-      }
-      return 'ok';
-    }, {
-      connection: CONNECTION,
-      lockDuration: 1000,
-    });
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        jobId = job.id;
+        for (let i = 0; i < 8; i++) {
+          await new Promise((r) => setTimeout(r, 200));
+          const val = await cleanupClient.hget(k.job(job.id), 'lastActive');
+          if (val) timestamps.push(Number(val));
+        }
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        lockDuration: 1000,
+      },
+    );
     workers.push(worker);
 
-    const completed = new Promise<void>(resolve => {
+    const completed = new Promise<void>((resolve) => {
       worker.on('completed', () => resolve());
     });
 
@@ -192,20 +210,24 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     let recentCheck = false;
 
-    const worker = new Worker(Q, async (job: any) => {
-      await new Promise(r => setTimeout(r, 600));
-      const val = await cleanupClient.hget(k.job(job.id), 'lastActive');
-      const lastActive = Number(val);
-      const now = Date.now();
-      recentCheck = (now - lastActive) < 1000;
-      return 'ok';
-    }, {
-      connection: CONNECTION,
-      lockDuration: 1000,
-    });
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        await new Promise((r) => setTimeout(r, 600));
+        const val = await cleanupClient.hget(k.job(job.id), 'lastActive');
+        const lastActive = Number(val);
+        const now = Date.now();
+        recentCheck = now - lastActive < 1000;
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        lockDuration: 1000,
+      },
+    );
     workers.push(worker);
 
-    const completed = new Promise<void>(resolve => {
+    const completed = new Promise<void>((resolve) => {
       worker.on('completed', () => resolve());
     });
 
@@ -225,17 +247,21 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     let jobId = '';
 
-    const worker = new Worker(Q, async (job: any) => {
-      jobId = job.id;
-      await new Promise(r => setTimeout(r, 300));
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      lockDuration: 500,
-    });
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        jobId = job.id;
+        await new Promise((r) => setTimeout(r, 300));
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        lockDuration: 500,
+      },
+    );
     workers.push(worker);
 
-    const completed = new Promise<void>(resolve => {
+    const completed = new Promise<void>((resolve) => {
       worker.on('completed', () => resolve());
     });
 
@@ -246,7 +272,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     const afterComplete = await cleanupClient.hget(k.job(jobId), 'lastActive');
     const ts1 = Number(afterComplete);
 
-    await new Promise(r => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 600));
 
     const afterWait = await cleanupClient.hget(k.job(jobId), 'lastActive');
     const ts2 = Number(afterWait);
@@ -263,17 +289,21 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     let jobId = '';
 
-    const worker = new Worker(Q, async (job: any) => {
-      jobId = job.id;
-      await new Promise(r => setTimeout(r, 300));
-      throw new Error('intentional failure');
-    }, {
-      connection: CONNECTION,
-      lockDuration: 500,
-    });
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        jobId = job.id;
+        await new Promise((r) => setTimeout(r, 300));
+        throw new Error('intentional failure');
+      },
+      {
+        connection: CONNECTION,
+        lockDuration: 500,
+      },
+    );
     workers.push(worker);
 
-    const failed = new Promise<void>(resolve => {
+    const failed = new Promise<void>((resolve) => {
       worker.on('failed', () => resolve());
     });
 
@@ -284,7 +314,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     const afterFail = await cleanupClient.hget(k.job(jobId), 'lastActive');
     const ts1 = Number(afterFail);
 
-    await new Promise(r => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 600));
 
     const afterWait = await cleanupClient.hget(k.job(jobId), 'lastActive');
     const ts2 = Number(afterWait);
@@ -300,23 +330,27 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     const k = buildKeys(Q);
 
     let jobId = '';
-    const jobStarted = new Promise<void>(resolve => {
-      const worker = new Worker(Q, async (job: any) => {
-        jobId = job.id;
-        resolve();
-        await new Promise(() => {});
-        return 'never';
-      }, {
-        connection: CONNECTION,
-        lockDuration: 500,
-      });
+    const jobStarted = new Promise<void>((resolve) => {
+      const worker = new Worker(
+        Q,
+        async (job: any) => {
+          jobId = job.id;
+          resolve();
+          await new Promise(() => {});
+          return 'never';
+        },
+        {
+          connection: CONNECTION,
+          lockDuration: 500,
+        },
+      );
       workers.push(worker);
     });
 
     await queue.add('task', { data: 1 });
     await jobStarted;
 
-    await new Promise(r => setTimeout(r, 350));
+    await new Promise((r) => setTimeout(r, 350));
 
     const beforeClose = await cleanupClient.hget(k.job(jobId), 'lastActive');
     expect(beforeClose).not.toBeNull();
@@ -325,7 +359,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     const ts1 = Number(await cleanupClient.hget(k.job(jobId), 'lastActive'));
 
-    await new Promise(r => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 600));
 
     const ts2 = Number(await cleanupClient.hget(k.job(jobId), 'lastActive'));
     expect(ts2).toBe(ts1);
@@ -340,33 +374,35 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     const jobIds: string[] = [];
     let resolveAll: () => void;
-    const allProcessing = new Promise<void>(r => { resolveAll = r; });
+    const allProcessing = new Promise<void>((r) => {
+      resolveAll = r;
+    });
     let count = 0;
 
-    const worker = new Worker(Q, async (job: any) => {
-      jobIds.push(job.id);
-      count++;
-      if (count >= 3) resolveAll!();
-      await new Promise(r => setTimeout(r, 1500));
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      concurrency: 3,
-      lockDuration: 500,
-    });
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        jobIds.push(job.id);
+        count++;
+        if (count >= 3) resolveAll!();
+        await new Promise((r) => setTimeout(r, 1500));
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 3,
+        lockDuration: 500,
+      },
+    );
     workers.push(worker);
 
     await worker.waitUntilReady();
 
-    await Promise.all([
-      queue.add('task', { i: 1 }),
-      queue.add('task', { i: 2 }),
-      queue.add('task', { i: 3 }),
-    ]);
+    await Promise.all([queue.add('task', { i: 1 }), queue.add('task', { i: 2 }), queue.add('task', { i: 3 })]);
 
     await allProcessing;
 
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 400));
 
     for (const id of jobIds) {
       const val = await cleanupClient.hget(k.job(id), 'lastActive');
@@ -388,23 +424,27 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     const snapshots: { time: number; lastActive: number }[] = [];
 
-    const worker = new Worker(Q, async (job: any) => {
-      const start = Date.now();
-      for (let i = 0; i < 20; i++) {
-        await new Promise(r => setTimeout(r, 100));
-        const val = await cleanupClient.hget(k.job(job.id), 'lastActive');
-        if (val) {
-          snapshots.push({ time: Date.now() - start, lastActive: Number(val) });
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        const start = Date.now();
+        for (let i = 0; i < 20; i++) {
+          await new Promise((r) => setTimeout(r, 100));
+          const val = await cleanupClient.hget(k.job(job.id), 'lastActive');
+          if (val) {
+            snapshots.push({ time: Date.now() - start, lastActive: Number(val) });
+          }
         }
-      }
-      return 'ok';
-    }, {
-      connection: CONNECTION,
-      lockDuration: 1000,
-    });
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        lockDuration: 1000,
+      },
+    );
     workers.push(worker);
 
-    const completed = new Promise<void>(resolve => {
+    const completed = new Promise<void>((resolve) => {
       worker.on('completed', () => resolve());
     });
 
@@ -412,7 +452,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     await queue.add('task', { data: 1 });
     await completed;
 
-    const distinctTs = [...new Set(snapshots.map(s => s.lastActive))].sort();
+    const distinctTs = [...new Set(snapshots.map((s) => s.lastActive))].sort();
 
     expect(distinctTs.length).toBeGreaterThanOrEqual(3);
 
@@ -432,17 +472,21 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     let jobId = '';
 
-    const worker = new Worker(Q, async (job: any) => {
-      jobId = job.id;
-      await new Promise(r => setTimeout(r, 200));
-      return 'ok';
-    }, {
-      connection: CONNECTION,
-      lockDuration: 60000,
-    });
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        jobId = job.id;
+        await new Promise((r) => setTimeout(r, 200));
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        lockDuration: 60000,
+      },
+    );
     workers.push(worker);
 
-    const completed = new Promise<void>(resolve => {
+    const completed = new Promise<void>((resolve) => {
       worker.on('completed', () => resolve());
     });
 
@@ -464,16 +508,20 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     queues.push(queue);
     const k = buildKeys(Q);
 
-    const jobStarted = new Promise<string>(resolve => {
-      const w = new Worker(Q, async (job: any) => {
-        resolve(job.id);
-        await new Promise(() => {});
-        return 'never';
-      }, {
-        connection: CONNECTION,
-        lockDuration: 60000,
-        stalledInterval: 60000,
-      });
+    const jobStarted = new Promise<string>((resolve) => {
+      const w = new Worker(
+        Q,
+        async (job: any) => {
+          resolve(job.id);
+          await new Promise(() => {});
+          return 'never';
+        },
+        {
+          connection: CONNECTION,
+          lockDuration: 60000,
+          stalledInterval: 60000,
+        },
+      );
       workers.push(w);
     });
 
@@ -486,9 +534,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     const reclaimClient = await createCleanupClient(CONNECTION);
     try {
-      const reclaimed = await reclaimStalled(
-        reclaimClient, k, 'test-consumer', 1000, 1, Date.now(), CONSUMER_GROUP,
-      );
+      const reclaimed = await reclaimStalled(reclaimClient, k, 'test-consumer', 1000, 1, Date.now(), CONSUMER_GROUP);
 
       const failScore = await cleanupClient.zscore(k.failed, jobId);
       expect(failScore).toBeNull();
@@ -509,19 +555,25 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     const jobIds: string[] = [];
     let resolveAll: () => void;
-    const allStarted = new Promise<void>(r => { resolveAll = r; });
-
-    const w = new Worker(Q, async (job: any) => {
-      jobIds.push(job.id);
-      if (jobIds.length >= 2) resolveAll!();
-      await new Promise(() => {});
-      return 'never';
-    }, {
-      connection: CONNECTION,
-      concurrency: 2,
-      lockDuration: 60000,
-      stalledInterval: 60000,
+    const allStarted = new Promise<void>((r) => {
+      resolveAll = r;
     });
+
+    const w = new Worker(
+      Q,
+      async (job: any) => {
+        jobIds.push(job.id);
+        if (jobIds.length >= 2) resolveAll!();
+        await new Promise(() => {});
+        return 'never';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 2,
+        lockDuration: 60000,
+        stalledInterval: 60000,
+      },
+    );
     workers.push(w);
 
     await queue.add('task', { tag: 'protected' });
@@ -535,7 +587,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     await cleanupClient.hdel(k.job(unprotectedId), ['lastActive']);
 
-    await new Promise(r => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 600));
 
     await cleanupClient.hset(k.job(protectedId), { lastActive: Date.now().toString() });
 
@@ -562,17 +614,21 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     let earlyLastActive: string | null = null;
 
-    const worker = new Worker(Q, async (job: any) => {
-      await new Promise(r => setTimeout(r, 50));
-      earlyLastActive = await cleanupClient.hget(k.job(job.id), 'lastActive') as string | null;
-      return 'ok';
-    }, {
-      connection: CONNECTION,
-      lockDuration: 10000,
-    });
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        await new Promise((r) => setTimeout(r, 50));
+        earlyLastActive = (await cleanupClient.hget(k.job(job.id), 'lastActive')) as string | null;
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        lockDuration: 10000,
+      },
+    );
     workers.push(worker);
 
-    const completed = new Promise<void>(resolve => {
+    const completed = new Promise<void>((resolve) => {
       worker.on('completed', () => resolve());
     });
 
@@ -589,16 +645,20 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     const queue = new Queue(Q, { connection: CONNECTION });
     queues.push(queue);
 
-    const worker = new Worker(Q, async () => {
-      await new Promise(r => setTimeout(r, 300));
-      return 'ok';
-    }, {
-      connection: CONNECTION,
-      lockDuration: 500,
-    });
+    const worker = new Worker(
+      Q,
+      async () => {
+        await new Promise((r) => setTimeout(r, 300));
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        lockDuration: 500,
+      },
+    );
     workers.push(worker);
 
-    const completed = new Promise<void>(resolve => {
+    const completed = new Promise<void>((resolve) => {
       worker.on('completed', () => resolve());
     });
 
@@ -606,7 +666,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     await queue.add('task', { data: 1 });
     await completed;
 
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 50));
 
     const map = (worker as any).heartbeatIntervals as Map<string, any>;
     expect(map.size).toBe(0);
@@ -619,17 +679,21 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     queues.push(queue);
 
     let started = 0;
-    const allStarted = new Promise<void>(resolve => {
-      const worker = new Worker(Q, async () => {
-        started++;
-        if (started >= 2) resolve();
-        await new Promise(() => {});
-        return 'never';
-      }, {
-        connection: CONNECTION,
-        concurrency: 3,
-        lockDuration: 500,
-      });
+    const allStarted = new Promise<void>((resolve) => {
+      const worker = new Worker(
+        Q,
+        async () => {
+          started++;
+          if (started >= 2) resolve();
+          await new Promise(() => {});
+          return 'never';
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 3,
+          lockDuration: 500,
+        },
+      );
       workers.push(worker);
     });
 
@@ -654,15 +718,19 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     const completed: string[] = [];
     const stalled: string[] = [];
 
-    const worker = new Worker(Q, async () => {
-      await new Promise(r => setTimeout(r, 2000));
-      return 'alive';
-    }, {
-      connection: CONNECTION,
-      lockDuration: 800,
-      stalledInterval: 500,
-      maxStalledCount: 1,
-    });
+    const worker = new Worker(
+      Q,
+      async () => {
+        await new Promise((r) => setTimeout(r, 2000));
+        return 'alive';
+      },
+      {
+        connection: CONNECTION,
+        lockDuration: 800,
+        stalledInterval: 500,
+        maxStalledCount: 1,
+      },
+    );
     workers.push(worker);
 
     worker.on('completed', (job: any) => completed.push(job.id));
@@ -685,18 +753,22 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     const errors: Error[] = [];
 
-    const worker = new Worker(Q, async () => {
-      await new Promise(r => setTimeout(r, 150));
-      return 'ok';
-    }, {
-      connection: CONNECTION,
-      lockDuration: 200,
-    });
+    const worker = new Worker(
+      Q,
+      async () => {
+        await new Promise((r) => setTimeout(r, 150));
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        lockDuration: 200,
+      },
+    );
     workers.push(worker);
 
     worker.on('error', (err: Error) => errors.push(err));
 
-    const completed = new Promise<void>(resolve => {
+    const completed = new Promise<void>((resolve) => {
       worker.on('completed', () => resolve());
     });
 
@@ -704,7 +776,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     await queue.add('task', { data: 1 });
     await completed;
 
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 300));
 
     expect(errors.length).toBe(0);
   }, 10000);
@@ -729,16 +801,20 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     queues.push(queue);
     const k = buildKeys(Q);
 
-    const jobStarted = new Promise<string>(resolve => {
-      const w = new Worker(Q, async (job: any) => {
-        resolve(job.id);
-        await new Promise(() => {});
-        return 'never';
-      }, {
-        connection: CONNECTION,
-        lockDuration: 60000,
-        stalledInterval: 60000,
-      });
+    const jobStarted = new Promise<string>((resolve) => {
+      const w = new Worker(
+        Q,
+        async (job: any) => {
+          resolve(job.id);
+          await new Promise(() => {});
+          return 'never';
+        },
+        {
+          connection: CONNECTION,
+          lockDuration: 60000,
+          stalledInterval: 60000,
+        },
+      );
       workers.push(w);
     });
 
@@ -749,7 +825,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     await workers[0].close(true);
 
-    await new Promise(r => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 600));
 
     const reclaimClient = await createCleanupClient(CONNECTION);
     try {
@@ -770,15 +846,19 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     const completed: string[] = [];
 
-    const worker = new Worker(Q, async () => {
-      await new Promise(r => setTimeout(r, 1000));
-      return 'survived';
-    }, {
-      connection: CONNECTION,
-      lockDuration: 200,
-      stalledInterval: 200,
-      maxStalledCount: 1,
-    });
+    const worker = new Worker(
+      Q,
+      async () => {
+        await new Promise((r) => setTimeout(r, 1000));
+        return 'survived';
+      },
+      {
+        connection: CONNECTION,
+        lockDuration: 200,
+        stalledInterval: 200,
+        maxStalledCount: 1,
+      },
+    );
     workers.push(worker);
 
     worker.on('completed', (job: any) => completed.push(job.id));

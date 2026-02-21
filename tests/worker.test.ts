@@ -110,9 +110,7 @@ describe('Worker', () => {
 
   it('should ensure function library is loaded during init', async () => {
     const processor = vi.fn().mockResolvedValue('done');
-    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(
-      () => new Promise(() => {}),
-    );
+    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(() => new Promise(() => {}));
 
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
     await worker.waitUntilReady();
@@ -125,19 +123,12 @@ describe('Worker', () => {
 
   it('should create consumer group during init', async () => {
     const processor = vi.fn().mockResolvedValue('done');
-    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(
-      () => new Promise(() => {}),
-    );
+    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(() => new Promise(() => {}));
 
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
     await worker.waitUntilReady();
 
-    expect(mockCommandClient.xgroupCreate).toHaveBeenCalledWith(
-      keys.stream,
-      CONSUMER_GROUP,
-      '0',
-      { mkStream: true },
-    );
+    expect(mockCommandClient.xgroupCreate).toHaveBeenCalledWith(keys.stream, CONSUMER_GROUP, '0', { mkStream: true });
 
     await worker.close(true);
   });
@@ -198,9 +189,20 @@ describe('Worker', () => {
     // At c=1, processJobFastPath calls moveToActive (fcall glidemq_moveToActive)
     // which returns a JSON-encoded hash array, then completeAndFetchNext.
     const jobHash = JSON.stringify([
-      'id', '1', 'name', 'test-job', 'data', '{"foo":"bar"}',
-      'opts', '{}', 'timestamp', '1000', 'attemptsMade', '0',
-      'state', 'active',
+      'id',
+      '1',
+      'name',
+      'test-job',
+      'data',
+      '{"foo":"bar"}',
+      'opts',
+      '{}',
+      'timestamp',
+      '1000',
+      'attemptsMade',
+      '0',
+      'state',
+      'active',
     ]);
 
     mockCommandClient.fcall = vi.fn().mockImplementation((func: string, _keys?: string[], args?: string[]) => {
@@ -502,9 +504,7 @@ describe('Worker', () => {
   it('pause should stop the poll loop', async () => {
     const processor = vi.fn().mockResolvedValue('done');
 
-    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(
-      () => new Promise(() => {}),
-    );
+    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(() => new Promise(() => {}));
 
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
     await worker.waitUntilReady();
@@ -524,9 +524,7 @@ describe('Worker', () => {
 
   it('close should stop scheduler and close clients', async () => {
     const processor = vi.fn().mockResolvedValue('done');
-    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(
-      () => new Promise(() => {}),
-    );
+    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(() => new Promise(() => {}));
 
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
     await worker.waitUntilReady();
@@ -584,16 +582,12 @@ describe('Scheduler', () => {
       [expect.any(String)],
     );
 
-    const initialCalls = mockClient.fcall.mock.calls.filter(
-      (c: any[]) => c[0] === 'glidemq_promote',
-    ).length;
+    const initialCalls = mockClient.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_promote').length;
 
     // Advance by promotionInterval
     await vi.advanceTimersByTimeAsync(1000);
 
-    const afterCalls = mockClient.fcall.mock.calls.filter(
-      (c: any[]) => c[0] === 'glidemq_promote',
-    ).length;
+    const afterCalls = mockClient.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_promote').length;
 
     expect(afterCalls).toBeGreaterThan(initialCalls);
 
@@ -659,9 +653,7 @@ describe('Scheduler', () => {
     scheduler.start(); // Should be a no-op
 
     // Only one immediate round of calls
-    const promoteCalls = mockClient.fcall.mock.calls.filter(
-      (c: any[]) => c[0] === 'glidemq_promote',
-    ).length;
+    const promoteCalls = mockClient.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_promote').length;
     expect(promoteCalls).toBe(1);
 
     scheduler.stop();
@@ -717,14 +709,7 @@ describe('Scheduler', () => {
     expect(mockClient.fcall).toHaveBeenCalledWith(
       'glidemq_reclaimStalled',
       [queueKeys.stream, queueKeys.events],
-      [
-        CONSUMER_GROUP,
-        'my-consumer',
-        '15000',
-        '3',
-        now.toString(),
-        queueKeys.failed,
-      ],
+      [CONSUMER_GROUP, 'my-consumer', '15000', '3', now.toString(), queueKeys.failed],
     );
   });
 });

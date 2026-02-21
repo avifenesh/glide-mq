@@ -1,11 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
-import {
-  createClient,
-  createBlockingClient,
-  ensureFunctionLibrary,
-  createConsumerGroup,
-} from '../src/connection';
+import { createClient, createBlockingClient, ensureFunctionLibrary, createConsumerGroup } from '../src/connection';
 import { ConnectionError } from '../src/errors';
 import { LIBRARY_SOURCE, LIBRARY_VERSION } from '../src/functions/index';
 
@@ -237,10 +232,7 @@ describe('ensureFunctionLibrary', () => {
 
     await ensureFunctionLibrary(mockClient as any);
 
-    expect(mockClient.functionLoad).toHaveBeenCalledWith(
-      LIBRARY_SOURCE,
-      { replace: true },
-    );
+    expect(mockClient.functionLoad).toHaveBeenCalledWith(LIBRARY_SOURCE, { replace: true });
   });
 
   it('should load library when fcall throws (function not found)', async () => {
@@ -251,10 +243,7 @@ describe('ensureFunctionLibrary', () => {
 
     await ensureFunctionLibrary(mockClient as any);
 
-    expect(mockClient.functionLoad).toHaveBeenCalledWith(
-      LIBRARY_SOURCE,
-      { replace: true },
-    );
+    expect(mockClient.functionLoad).toHaveBeenCalledWith(LIBRARY_SOURCE, { replace: true });
   });
 
   it('should use allPrimaries route when clusterMode is true', async () => {
@@ -265,10 +254,7 @@ describe('ensureFunctionLibrary', () => {
 
     await ensureFunctionLibrary(mockClient as any, LIBRARY_SOURCE, true);
 
-    expect(mockClient.functionLoad).toHaveBeenCalledWith(
-      LIBRARY_SOURCE,
-      { replace: true, route: 'allPrimaries' },
-    );
+    expect(mockClient.functionLoad).toHaveBeenCalledWith(LIBRARY_SOURCE, { replace: true, route: 'allPrimaries' });
   });
 
   it('should not use route when clusterMode is false', async () => {
@@ -279,10 +265,7 @@ describe('ensureFunctionLibrary', () => {
 
     await ensureFunctionLibrary(mockClient as any, LIBRARY_SOURCE, false);
 
-    expect(mockClient.functionLoad).toHaveBeenCalledWith(
-      LIBRARY_SOURCE,
-      { replace: true },
-    );
+    expect(mockClient.functionLoad).toHaveBeenCalledWith(LIBRARY_SOURCE, { replace: true });
   });
 
   it('should accept custom library source', async () => {
@@ -294,10 +277,7 @@ describe('ensureFunctionLibrary', () => {
 
     await ensureFunctionLibrary(mockClient as any, customSource);
 
-    expect(mockClient.functionLoad).toHaveBeenCalledWith(
-      customSource,
-      { replace: true },
-    );
+    expect(mockClient.functionLoad).toHaveBeenCalledWith(customSource, { replace: true });
   });
 
   it('should coerce non-string fcall result for version comparison', async () => {
@@ -326,12 +306,7 @@ describe('createConsumerGroup', () => {
 
     await createConsumerGroup(mockClient as any, 'mystream', 'mygroup');
 
-    expect(mockClient.xgroupCreate).toHaveBeenCalledWith(
-      'mystream',
-      'mygroup',
-      '0',
-      { mkStream: true },
-    );
+    expect(mockClient.xgroupCreate).toHaveBeenCalledWith('mystream', 'mygroup', '0', { mkStream: true });
   });
 
   it('should use custom startId when provided', async () => {
@@ -341,36 +316,25 @@ describe('createConsumerGroup', () => {
 
     await createConsumerGroup(mockClient as any, 'mystream', 'mygroup', '$');
 
-    expect(mockClient.xgroupCreate).toHaveBeenCalledWith(
-      'mystream',
-      'mygroup',
-      '$',
-      { mkStream: true },
-    );
+    expect(mockClient.xgroupCreate).toHaveBeenCalledWith('mystream', 'mygroup', '$', { mkStream: true });
   });
 
   it('should ignore BUSYGROUP error (group already exists)', async () => {
     const mockClient = makeMockClient({
-      xgroupCreate: vi.fn().mockRejectedValue(
-        new Error('BUSYGROUP Consumer Group name already exists'),
-      ),
+      xgroupCreate: vi.fn().mockRejectedValue(new Error('BUSYGROUP Consumer Group name already exists')),
     });
 
     // Should not throw
-    await expect(
-      createConsumerGroup(mockClient as any, 'mystream', 'mygroup'),
-    ).resolves.toBeUndefined();
+    await expect(createConsumerGroup(mockClient as any, 'mystream', 'mygroup')).resolves.toBeUndefined();
   });
 
   it('should rethrow non-BUSYGROUP errors', async () => {
     const mockClient = makeMockClient({
-      xgroupCreate: vi.fn().mockRejectedValue(
-        new Error('WRONGTYPE Operation against a key holding the wrong kind of value'),
-      ),
+      xgroupCreate: vi
+        .fn()
+        .mockRejectedValue(new Error('WRONGTYPE Operation against a key holding the wrong kind of value')),
     });
 
-    await expect(
-      createConsumerGroup(mockClient as any, 'mystream', 'mygroup'),
-    ).rejects.toThrow('WRONGTYPE');
+    await expect(createConsumerGroup(mockClient as any, 'mystream', 'mygroup')).rejects.toThrow('WRONGTYPE');
   });
 });

@@ -49,15 +49,23 @@ describeEachMode('Token bucket', (CONNECTION) => {
     // 3 jobs each costing 2 tokens = 6 tokens total. Bucket starts with 5.
     // First 2 jobs (cost 4) fit. Third (cost 2) must wait for refill.
     for (let i = 0; i < 3; i++) {
-      await q.add('tb-job', { i }, {
-        ordering: { key: 'tbGrp', concurrency: 10, tokenBucket: { capacity: 5, refillRate: 5 } },
-        cost: 2,
-      });
+      await q.add(
+        'tb-job',
+        { i },
+        {
+          ordering: { key: 'tbGrp', concurrency: 10, tokenBucket: { capacity: 5, refillRate: 5 } },
+          cost: 2,
+        },
+      );
     }
 
-    const worker = new Worker(QN, async () => {
-      completed.push(Date.now() - start);
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      QN,
+      async () => {
+        completed.push(Date.now() - start);
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 15000;
     while (completed.length < 3 && Date.now() < deadline) await sleep(50);
@@ -81,12 +89,34 @@ describeEachMode('Token bucket', (CONNECTION) => {
 
     // Bucket: capacity=10 tokens, refill=10/sec
     // Jobs: cost 1, cost 3, cost 5, cost 1 = total 10, exactly fits in bucket
-    await q.add('cheap', { cost: 1 }, { ordering: { key: 'dcGrp', concurrency: 10, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 1 });
-    await q.add('medium', { cost: 3 }, { ordering: { key: 'dcGrp', concurrency: 10, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 3 });
-    await q.add('expensive', { cost: 5 }, { ordering: { key: 'dcGrp', concurrency: 10, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 5 });
-    await q.add('cheap2', { cost: 1 }, { ordering: { key: 'dcGrp', concurrency: 10, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 1 });
+    await q.add(
+      'cheap',
+      { cost: 1 },
+      { ordering: { key: 'dcGrp', concurrency: 10, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 1 },
+    );
+    await q.add(
+      'medium',
+      { cost: 3 },
+      { ordering: { key: 'dcGrp', concurrency: 10, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 3 },
+    );
+    await q.add(
+      'expensive',
+      { cost: 5 },
+      { ordering: { key: 'dcGrp', concurrency: 10, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 5 },
+    );
+    await q.add(
+      'cheap2',
+      { cost: 1 },
+      { ordering: { key: 'dcGrp', concurrency: 10, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 1 },
+    );
 
-    const worker = new Worker(QN, async () => { completed++; }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      QN,
+      async () => {
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 10000;
     while (completed < 4 && Date.now() < deadline) await sleep(50);
@@ -105,10 +135,14 @@ describeEachMode('Token bucket', (CONNECTION) => {
     const q = new Queue(QN, { connection: CONNECTION });
 
     await expect(
-      q.add('too-expensive', {}, {
-        ordering: { key: 'ceGrp', concurrency: 5, tokenBucket: { capacity: 3, refillRate: 1 } },
-        cost: 5, // 5 > capacity 3
-      })
+      q.add(
+        'too-expensive',
+        {},
+        {
+          ordering: { key: 'ceGrp', concurrency: 5, tokenBucket: { capacity: 3, refillRate: 1 } },
+          cost: 5, // 5 > capacity 3
+        },
+      ),
     ).rejects.toThrow('cost exceeds token bucket capacity');
 
     await q.close();
@@ -125,13 +159,23 @@ describeEachMode('Token bucket', (CONNECTION) => {
     // Bucket: capacity=3, refill=3/sec. 3 jobs with default cost=1 each.
     // All 3 fit in initial bucket.
     for (let i = 0; i < 3; i++) {
-      await q.add('dc-job', { i }, {
-        ordering: { key: 'defGrp', concurrency: 10, tokenBucket: { capacity: 3, refillRate: 3 } },
-        // no cost specified -> default 1
-      });
+      await q.add(
+        'dc-job',
+        { i },
+        {
+          ordering: { key: 'defGrp', concurrency: 10, tokenBucket: { capacity: 3, refillRate: 3 } },
+          // no cost specified -> default 1
+        },
+      );
     }
 
-    const worker = new Worker(QN, async () => { completed++; }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      QN,
+      async () => {
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 10000;
     while (completed < 3 && Date.now() < deadline) await sleep(50);
@@ -155,19 +199,27 @@ describeEachMode('Token bucket', (CONNECTION) => {
     // concurrency=2, bucket capacity=10, refill=10/sec, cost=1
     // Concurrency should limit to 2 parallel even though bucket allows more
     for (let i = 0; i < 6; i++) {
-      await q.add('conc-job', { i }, {
-        ordering: { key: 'tbcGrp', concurrency: 2, tokenBucket: { capacity: 10, refillRate: 10 } },
-        cost: 1,
-      });
+      await q.add(
+        'conc-job',
+        { i },
+        {
+          ordering: { key: 'tbcGrp', concurrency: 2, tokenBucket: { capacity: 10, refillRate: 10 } },
+          cost: 1,
+        },
+      );
     }
 
-    const worker = new Worker(QN, async () => {
-      currentConcurrent++;
-      peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
-      await sleep(50);
-      currentConcurrent--;
-      completed++;
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      QN,
+      async () => {
+        currentConcurrent++;
+        peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
+        await sleep(50);
+        currentConcurrent--;
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 10000;
     while (completed < 6 && Date.now() < deadline) await sleep(50);
@@ -191,18 +243,28 @@ describeEachMode('Token bucket', (CONNECTION) => {
     // Sliding window: max=2 per 800ms (restrictive)
     // Sliding window should be the bottleneck
     for (let i = 0; i < 4; i++) {
-      await q.add('tbrl-job', { i }, {
-        ordering: {
-          key: 'tbrlGrp',
-          concurrency: 10,
-          tokenBucket: { capacity: 10, refillRate: 10 },
-          rateLimit: { max: 2, duration: 800 },
+      await q.add(
+        'tbrl-job',
+        { i },
+        {
+          ordering: {
+            key: 'tbrlGrp',
+            concurrency: 10,
+            tokenBucket: { capacity: 10, refillRate: 10 },
+            rateLimit: { max: 2, duration: 800 },
+          },
+          cost: 1,
         },
-        cost: 1,
-      });
+      );
     }
 
-    const worker = new Worker(QN, async () => { completed++; }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      QN,
+      async () => {
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 15000;
     while (completed < 4 && Date.now() < deadline) await sleep(50);
@@ -225,15 +287,23 @@ describeEachMode('Token bucket', (CONNECTION) => {
     // Bucket: capacity=2, refill=2/sec, cost=1 per job
     // First 2 fit. Third waits for refill (~500ms for 1 token at 2/sec)
     for (let i = 0; i < 3; i++) {
-      await q.add('refill-job', { i }, {
-        ordering: { key: 'refGrp', concurrency: 10, tokenBucket: { capacity: 2, refillRate: 2 } },
-        cost: 1,
-      });
+      await q.add(
+        'refill-job',
+        { i },
+        {
+          ordering: { key: 'refGrp', concurrency: 10, tokenBucket: { capacity: 2, refillRate: 2 } },
+          cost: 1,
+        },
+      );
     }
 
-    const worker = new Worker(QN, async () => {
-      completionTimes.push(Date.now() - start);
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      QN,
+      async () => {
+        completionTimes.push(Date.now() - start);
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 15000;
     while (completionTimes.length < 3 && Date.now() < deadline) await sleep(50);
@@ -258,20 +328,28 @@ describeEachMode('Token bucket', (CONNECTION) => {
 
     // Token bucket group
     for (let i = 0; i < 3; i++) {
-      await q.add('tb-job', { tb: true }, {
-        ordering: { key: 'mixTbGrp', concurrency: 10, tokenBucket: { capacity: 10, refillRate: 10 } },
-        cost: 1,
-      });
+      await q.add(
+        'tb-job',
+        { tb: true },
+        {
+          ordering: { key: 'mixTbGrp', concurrency: 10, tokenBucket: { capacity: 10, refillRate: 10 } },
+          cost: 1,
+        },
+      );
     }
     // Normal jobs (no ordering)
     for (let i = 0; i < 3; i++) {
       await q.add('normal-job', { tb: false });
     }
 
-    const worker = new Worker(QN, async (job: any) => {
-      if (job.data.tb) tbCompleted++;
-      else normalCompleted++;
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      QN,
+      async (job: any) => {
+        if (job.data.tb) tbCompleted++;
+        else normalCompleted++;
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 10000;
     while ((tbCompleted < 3 || normalCompleted < 3) && Date.now() < deadline) await sleep(50);
@@ -294,19 +372,27 @@ describeEachMode('Token bucket', (CONNECTION) => {
     let completed = 0;
 
     for (let i = 0; i < 4; i++) {
-      await q.add('seq-job', { i }, {
-        ordering: { key: 'tbSeqGrp', tokenBucket: { capacity: 10, refillRate: 10 } },
-        cost: 1,
-      });
+      await q.add(
+        'seq-job',
+        { i },
+        {
+          ordering: { key: 'tbSeqGrp', tokenBucket: { capacity: 10, refillRate: 10 } },
+          cost: 1,
+        },
+      );
     }
 
-    const worker = new Worker(QN, async () => {
-      currentConcurrent++;
-      peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
-      await sleep(20);
-      currentConcurrent--;
-      completed++;
-    }, { connection: CONNECTION, concurrency: 10 });
+    const worker = new Worker(
+      QN,
+      async () => {
+        currentConcurrent++;
+        peakConcurrent = Math.max(peakConcurrent, currentConcurrent);
+        await sleep(20);
+        currentConcurrent--;
+        completed++;
+      },
+      { connection: CONNECTION, concurrency: 10 },
+    );
 
     const deadline = Date.now() + 10000;
     while (completed < 4 && Date.now() < deadline) await sleep(50);
@@ -325,10 +411,14 @@ describeEachMode('Token bucket', (CONNECTION) => {
     const QN = uq('-fields');
     const q = new Queue(QN, { connection: CONNECTION });
 
-    await q.add('field-job', {}, {
-      ordering: { key: 'fieldGrp', concurrency: 3, tokenBucket: { capacity: 50, refillRate: 10 } },
-      cost: 5,
-    });
+    await q.add(
+      'field-job',
+      {},
+      {
+        ordering: { key: 'fieldGrp', concurrency: 3, tokenBucket: { capacity: 50, refillRate: 10 } },
+        cost: 5,
+      },
+    );
 
     // Check group hash
     const keys = buildKeys(QN);
@@ -362,10 +452,14 @@ describeEachMode('Token bucket', (CONNECTION) => {
     const QN = uq('-obl');
     const q = new Queue(QN, { connection: CONNECTION });
 
-    await q.add('obl-job', {}, {
-      ordering: { key: 'oblGrp', concurrency: 5, tokenBucket: { capacity: 20, refillRate: 5 } },
-      cost: 2,
-    });
+    await q.add(
+      'obl-job',
+      {},
+      {
+        ordering: { key: 'oblGrp', concurrency: 5, tokenBucket: { capacity: 20, refillRate: 5 } },
+        cost: 2,
+      },
+    );
 
     const worker = new Worker(QN, async () => {}, { connection: CONNECTION });
     await sleep(500);

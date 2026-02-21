@@ -70,7 +70,7 @@ describeEachMode('Global concurrency enforcement', (CONNECTION) => {
         async () => {
           current++;
           if (current > maxConcurrent) maxConcurrent = current;
-          await new Promise(r => setTimeout(r, 200));
+          await new Promise((r) => setTimeout(r, 200));
           current--;
           return 'ok';
         },
@@ -90,7 +90,7 @@ describeEachMode('Global concurrency enforcement', (CONNECTION) => {
       worker.on('error', () => {});
     });
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     for (let i = 0; i < TOTAL; i++) {
       await queue.add(`gc-${i}`, { i });
     }
@@ -132,7 +132,7 @@ describeEachMode('Global concurrency: no limit when not set', (CONNECTION) => {
         async () => {
           current++;
           if (current > maxConcurrent) maxConcurrent = current;
-          await new Promise(r => setTimeout(r, 100));
+          await new Promise((r) => setTimeout(r, 100));
           current--;
           return 'ok';
         },
@@ -152,7 +152,7 @@ describeEachMode('Global concurrency: no limit when not set', (CONNECTION) => {
       worker.on('error', () => {});
     });
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
     for (let i = 0; i < TOTAL; i++) {
       await queue.add(`nc-${i}`, { i });
     }
