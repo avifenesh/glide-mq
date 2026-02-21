@@ -46,6 +46,11 @@ export interface ConnectionOptions {
    * read commands to nodes in the same AZ, reducing cross-AZ latency and cost.
    */
   clientAz?: string;
+  /**
+   * Maximum concurrent in-flight requests per client connection.
+   * Passed through to GLIDE. Default: 1000.
+   */
+  inflightRequestsLimit?: number;
 }
 
 export interface DeadLetterQueueOptions {
@@ -56,7 +61,14 @@ export interface DeadLetterQueueOptions {
 }
 
 export interface QueueOptions {
-  connection: ConnectionOptions;
+  /** Connection options for creating a new client. Required unless `client` is provided. */
+  connection?: ConnectionOptions;
+  /**
+   * Pre-existing GLIDE client for non-blocking commands.
+   * When provided, the component does NOT own this client - close() will not destroy it.
+   * Must not be used for blocking reads (XREADGROUP BLOCK / XREAD BLOCK).
+   */
+  client?: Client;
   prefix?: string;
   /** Dead letter queue configuration. Jobs that exhaust retries are moved here. */
   deadLetterQueue?: DeadLetterQueueOptions;
@@ -65,6 +77,13 @@ export interface QueueOptions {
 }
 
 export interface WorkerOptions extends QueueOptions {
+  /**
+   * Pre-existing GLIDE client for non-blocking commands (alias for `client`).
+   * The blocking client for XREADGROUP is always auto-created from `connection`.
+   * `connection` is required even when this is set.
+   * Provide either `commandClient` or `client`, not both.
+   */
+  commandClient?: Client;
   concurrency?: number;
   globalConcurrency?: number;
   prefetch?: number;
@@ -139,12 +158,20 @@ export interface FlowJob {
 }
 
 export interface FlowProducerOptions {
-  connection: ConnectionOptions;
+  /** Connection options for creating a new client. Required unless `client` is provided. */
+  connection?: ConnectionOptions;
+  /**
+   * Pre-existing GLIDE client for non-blocking commands.
+   * When provided, the component does NOT own this client - close() will not destroy it.
+   */
+  client?: Client;
   prefix?: string;
 }
 
 export interface QueueEventsOptions {
   connection: ConnectionOptions;
+  /** @internal Not supported - QueueEvents uses blocking XREAD and requires a dedicated connection. */
+  client?: never;
   prefix?: string;
   /** Starting stream ID. Defaults to '$' (new events only). Use '0' for historical replay. */
   lastEventId?: string;

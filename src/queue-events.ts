@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import type { QueueEventsOptions, Client } from './types';
 import { buildKeys, nextReconnectDelay, reconnectWithBackoff } from './utils';
 import { createBlockingClient, ensureFunctionLibrary } from './connection';
+import { GlideMQError } from './errors';
 
 export class QueueEvents extends EventEmitter {
   readonly name: string;
@@ -17,6 +18,13 @@ export class QueueEvents extends EventEmitter {
 
   constructor(name: string, opts: QueueEventsOptions) {
     super();
+    if ((opts as any).client) {
+      throw new GlideMQError(
+        'QueueEvents does not accept an injected `client`. '
+        + 'It uses blocking XREAD which requires a dedicated connection. '
+        + 'Provide `connection` instead.',
+      );
+    }
     this.name = name;
     this.opts = opts;
     this.queueKeys = buildKeys(name, opts.prefix);
