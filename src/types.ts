@@ -84,11 +84,16 @@ export interface JobOptions {
   delay?: number;
   priority?: number;
   /**
-   * Optional per-key ordering. Jobs sharing the same key are processed sequentially
-   * in enqueue order, even when worker concurrency > 1.
+   * Per-key ordering and group concurrency control.
+   * Jobs sharing the same key are constrained to run at most `concurrency`
+   * instances simultaneously across all workers.
+   * When concurrency is 1 (default), jobs run sequentially in enqueue order.
+   * When concurrency > 1, up to N jobs per key run in parallel.
    */
   ordering?: {
     key: string;
+    /** Max concurrent jobs for this ordering key. Default: 1 (sequential). */
+    concurrency?: number;
   };
   attempts?: number;
   backoff?: { type: 'fixed' | 'exponential' | string; delay: number; jitter?: number };

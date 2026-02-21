@@ -97,6 +97,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const parentId = opts?.parent ? opts.parent.id : '';
         const maxAttempts = opts?.attempts ?? 0;
         const orderingKey = opts?.ordering?.key ?? '';
+        const groupConcurrency = opts?.ordering?.concurrency ?? 0;
         validateOrderingKey(orderingKey);
 
         // Payload size validation - prevent DoS via oversized jobs
@@ -128,6 +129,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             parentId,
             maxAttempts,
             orderingKey,
+            groupConcurrency,
           );
           if (result === 'skipped') {
             return null;
@@ -146,6 +148,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             parentId,
             maxAttempts,
             orderingKey,
+            groupConcurrency,
           );
         }
 
@@ -196,7 +199,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
         serializedData = compress(serializedData);
       }
 
-      return { entry, opts, delay, priority, parentId, maxAttempts, orderingKey, deduplication, serializedData };
+      const groupConcurrency = opts.ordering?.concurrency ?? 0;
+      return { entry, opts, delay, priority, parentId, maxAttempts, orderingKey, groupConcurrency, deduplication, serializedData };
     });
 
     // Build a batch with all fcall commands
@@ -219,6 +223,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.parentId,
           p.maxAttempts.toString(),
           p.orderingKey,
+          p.groupConcurrency.toString(),
         ]);
       } else {
         batch.fcall('glidemq_addJob', keys, [
@@ -231,6 +236,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.parentId,
           p.maxAttempts.toString(),
           p.orderingKey,
+          p.groupConcurrency.toString(),
         ]);
       }
     }
@@ -442,6 +448,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       this.keys.id, this.keys.stream, this.keys.scheduled,
       this.keys.completed, this.keys.failed, this.keys.events,
       this.keys.meta, this.keys.dedup, this.keys.rate, this.keys.schedulers,
+      this.keys.ordering,
     ];
     await client.del(staticKeys);
 
@@ -451,8 +458,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const jobPattern = `${pfx}:job:*`;
     const logPattern = `${pfx}:log:*`;
     const depsPattern = `${pfx}:deps:*`;
+    const groupPattern = `${pfx}:group:*`;
+    const groupqPattern = `${pfx}:groupq:*`;
+    const orderPendingPattern = `${pfx}:orderdone:pending:*`;
 
-    for (const pattern of [jobPattern, logPattern, depsPattern]) {
+    for (const pattern of [jobPattern, logPattern, depsPattern, groupPattern, groupqPattern, orderPendingPattern]) {
       await this.scanAndDelete(client, pattern);
     }
   }

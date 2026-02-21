@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '15';
+export const LIBRARY_VERSION = '16';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -60,6 +60,25 @@ local function markOrderingDone(jobKey, jobId)
   end
 end
 
+local function releaseGroupSlotAndPromote(jobKey, jobId)
+  local gk = redis.call('HGET', jobKey, 'groupKey')
+  if not gk or gk == '' then return end
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  local groupHashKey = prefix .. 'group:' .. gk
+  local cur = tonumber(redis.call('HGET', groupHashKey, 'active')) or 0
+  if cur > 0 then
+    redis.call('HSET', groupHashKey, 'active', tostring(cur - 1))
+  end
+  local waitListKey = prefix .. 'groupq:' .. gk
+  local nextJobId = redis.call('LPOP', waitListKey)
+  if nextJobId then
+    local streamKey = prefix .. 'stream'
+    redis.call('XADD', streamKey, '*', 'jobId', nextJobId)
+    local nextJobKey = prefix .. 'job:' .. nextJobId
+    redis.call('HSET', nextJobKey, 'state', 'waiting')
+  end
+end
+
 local function extractOrderingKeyFromOpts(optsJson)
   if not optsJson or optsJson == '' then
     return ''
@@ -77,6 +96,25 @@ local function extractOrderingKeyFromOpts(optsJson)
     return ''
   end
   return tostring(key)
+end
+
+local function extractGroupConcurrencyFromOpts(optsJson)
+  if not optsJson or optsJson == '' then
+    return 0
+  end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then
+    return 0
+  end
+  local ordering = decoded['ordering']
+  if type(ordering) ~= 'table' then
+    return 0
+  end
+  local conc = ordering['concurrency']
+  if conc == nil then
+    return 0
+  end
+  return tonumber(conc) or 0
 end
 
 redis.register_function('glidemq_version', function(keys, args)
@@ -97,14 +135,23 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local parentId = args[7] or ''
   local maxAttempts = tonumber(args[8]) or 0
   local orderingKey = args[9] or ''
+  local groupConcurrency = tonumber(args[10]) or 0
   local jobId = redis.call('INCR', idKey)
   local jobIdStr = tostring(jobId)
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local jobKey = prefix .. 'job:' .. jobIdStr
+  local useGroupConcurrency = (orderingKey ~= '' and groupConcurrency > 1)
   local orderingSeq = 0
-  if orderingKey ~= '' then
+  if orderingKey ~= '' and not useGroupConcurrency then
     local orderingMetaKey = prefix .. 'ordering'
     orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
+  end
+  if useGroupConcurrency then
+    local groupHashKey = prefix .. 'group:' .. orderingKey
+    local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
+    if curMax ~= groupConcurrency then
+      redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
+    end
   end
   local hashFields = {
     'id', jobIdStr,
@@ -117,7 +164,10 @@ redis.register_function('glidemq_addJob', function(keys, args)
     'priority', tostring(priority),
     'maxAttempts', tostring(maxAttempts)
   }
-  if orderingKey ~= '' then
+  if useGroupConcurrency then
+    hashFields[#hashFields + 1] = 'groupKey'
+    hashFields[#hashFields + 1] = orderingKey
+  elseif orderingKey ~= '' then
     hashFields[#hashFields + 1] = 'orderingKey'
     hashFields[#hashFields + 1] = orderingKey
     hashFields[#hashFields + 1] = 'orderingSeq'
@@ -214,6 +264,7 @@ redis.register_function('glidemq_complete', function(keys, args)
     'finishedOn', tostring(timestamp)
   )
   markOrderingDone(jobKey, jobId)
+  releaseGroupSlotAndPromote(jobKey, jobId)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   if removeMode == 'true' then
@@ -295,6 +346,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     'finishedOn', tostring(timestamp)
   )
   markOrderingDone(jobKey, jobId)
+  releaseGroupSlotAndPromote(jobKey, jobId)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
 
@@ -362,6 +414,21 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   if revoked == '1' then
     return cjson.encode({completed = jobId, next = 'REVOKED', nextJobId = nextJobId, nextEntryId = nextEntryId})
   end
+  local nextGroupKey = redis.call('HGET', nextJobKey, 'groupKey')
+  if nextGroupKey and nextGroupKey ~= '' then
+    local nextGroupHashKey = prefix .. 'group:' .. nextGroupKey
+    local nextMaxConc = tonumber(redis.call('HGET', nextGroupHashKey, 'maxConcurrency')) or 0
+    local nextActive = tonumber(redis.call('HGET', nextGroupHashKey, 'active')) or 0
+    if nextMaxConc > 0 and nextActive >= nextMaxConc then
+      redis.call('XACK', streamKey, group, nextEntryId)
+      redis.call('XDEL', streamKey, nextEntryId)
+      local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
+      redis.call('RPUSH', nextWaitListKey, nextJobId)
+      redis.call('HSET', nextJobKey, 'state', 'group-waiting')
+      return cjson.encode({completed = jobId, next = false})
+    end
+    redis.call('HINCRBY', nextGroupHashKey, 'active', 1)
+  end
   redis.call('HSET', nextJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
   local nextHash = redis.call('HGETALL', nextJobKey)
   return cjson.encode({completed = jobId, next = nextHash, nextJobId = nextJobId, nextEntryId = nextEntryId})
@@ -396,6 +463,7 @@ redis.register_function('glidemq_fail', function(keys, args)
       'failedReason', failedReason,
       'processedOn', tostring(timestamp)
     )
+    releaseGroupSlotAndPromote(jobKey, jobId)
     emitEvent(eventsKey, 'retrying', jobId, {
       'failedReason', failedReason,
       'attemptsMade', tostring(attemptsMade),
@@ -411,6 +479,7 @@ redis.register_function('glidemq_fail', function(keys, args)
       'processedOn', tostring(timestamp)
     )
     markOrderingDone(jobKey, jobId)
+    releaseGroupSlotAndPromote(jobKey, jobId)
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     if removeMode == 'true' then
@@ -498,6 +567,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
           'finishedOn', tostring(timestamp)
         )
         markOrderingDone(jobKey, jobId)
+        releaseGroupSlotAndPromote(jobKey, jobId)
         emitEvent(eventsKey, 'failed', jobId, {
           'failedReason', 'job stalled more than maxStalledCount'
         })
@@ -546,6 +616,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local parentId = args[10] or ''
   local maxAttempts = tonumber(args[11]) or 0
   local orderingKey = args[12] or ''
+  local groupConcurrency = tonumber(args[13]) or 0
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local existing = redis.call('HGET', dedupKey, dedupId)
   if mode == 'simple' then
@@ -591,10 +662,18 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local jobId = redis.call('INCR', idKey)
   local jobIdStr = tostring(jobId)
   local jobKey = prefix .. 'job:' .. jobIdStr
+  local useGroupConcurrency = (orderingKey ~= '' and groupConcurrency > 1)
   local orderingSeq = 0
-  if orderingKey ~= '' then
+  if orderingKey ~= '' and not useGroupConcurrency then
     local orderingMetaKey = prefix .. 'ordering'
     orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
+  end
+  if useGroupConcurrency then
+    local groupHashKey = prefix .. 'group:' .. orderingKey
+    local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
+    if curMax ~= groupConcurrency then
+      redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
+    end
   end
   local hashFields = {
     'id', jobIdStr,
@@ -607,7 +686,10 @@ redis.register_function('glidemq_dedup', function(keys, args)
     'priority', tostring(priority),
     'maxAttempts', tostring(maxAttempts)
   }
-  if orderingKey ~= '' then
+  if useGroupConcurrency then
+    hashFields[#hashFields + 1] = 'groupKey'
+    hashFields[#hashFields + 1] = orderingKey
+  elseif orderingKey ~= '' then
     hashFields[#hashFields + 1] = 'orderingKey'
     hashFields[#hashFields + 1] = orderingKey
     hashFields[#hashFields + 1] = 'orderingSeq'
@@ -678,7 +760,11 @@ end)
 
 redis.register_function('glidemq_moveToActive', function(keys, args)
   local jobKey = keys[1]
+  local streamKey = keys[2] or ''
   local timestamp = args[1]
+  local entryId = args[2] or ''
+  local group = args[3] or ''
+  local jobId = args[4] or ''
   local exists = redis.call('EXISTS', jobKey)
   if exists == 0 then
     return ''
@@ -686,6 +772,24 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
   local revoked = redis.call('HGET', jobKey, 'revoked')
   if revoked == '1' then
     return 'REVOKED'
+  end
+  local groupKey = redis.call('HGET', jobKey, 'groupKey')
+  if groupKey and groupKey ~= '' then
+    local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+    local groupHashKey = prefix .. 'group:' .. groupKey
+    local maxConc = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
+    local active = tonumber(redis.call('HGET', groupHashKey, 'active')) or 0
+    if maxConc > 0 and active >= maxConc then
+      if streamKey ~= '' and entryId ~= '' and group ~= '' then
+        redis.call('XACK', streamKey, group, entryId)
+        redis.call('XDEL', streamKey, entryId)
+      end
+      local waitListKey = prefix .. 'groupq:' .. groupKey
+      redis.call('RPUSH', waitListKey, jobId)
+      redis.call('HSET', jobKey, 'state', 'group-waiting')
+      return 'GROUP_FULL'
+    end
+    redis.call('HINCRBY', groupHashKey, 'active', 1)
   end
   redis.call('HSET', jobKey, 'state', 'active', 'processedOn', timestamp, 'lastActive', timestamp)
   local fields = redis.call('HGETALL', jobKey)
@@ -866,6 +970,17 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   if exists == 0 then
     return 0
   end
+  local state = redis.call('HGET', jobKey, 'state')
+  local groupKey = redis.call('HGET', jobKey, 'groupKey')
+  if groupKey and groupKey ~= '' then
+    if state == 'active' then
+      releaseGroupSlotAndPromote(jobKey, jobId)
+    elseif state == 'group-waiting' then
+      local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+      local waitListKey = prefix .. 'groupq:' .. groupKey
+      redis.call('LREM', waitListKey, 1, jobId)
+    end
+  end
   redis.call('ZREM', scheduledKey, jobId)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
@@ -984,6 +1099,7 @@ export async function addJob(
   parentId: string,
   maxAttempts: number,
   orderingKey: string = '',
+  groupConcurrency: number = 0,
 ): Promise<string> {
   const result = await client.fcall(
     'glidemq_addJob',
@@ -998,6 +1114,7 @@ export async function addJob(
       parentId,
       maxAttempts.toString(),
       orderingKey,
+      groupConcurrency.toString(),
     ],
   );
   return result as string;
@@ -1022,6 +1139,7 @@ export async function dedup(
   parentId: string,
   maxAttempts: number,
   orderingKey: string = '',
+  groupConcurrency: number = 0,
 ): Promise<string> {
   const result = await client.fcall(
     'glidemq_dedup',
@@ -1039,6 +1157,7 @@ export async function dedup(
       parentId,
       maxAttempts.toString(),
       orderingKey,
+      groupConcurrency.toString(),
     ],
   );
   return result as string;
@@ -1327,27 +1446,38 @@ export async function checkConcurrency(
 /**
  * Move a job to active state in a single round trip.
  * Reads the full job hash, checks revoked flag, sets state=active + processedOn + lastActive.
+ * For group-concurrency jobs, checks if the group has capacity. If not, parks the job
+ * in the group wait list and returns 'GROUP_FULL'.
  * Returns:
  * - null if job hash doesn't exist
  * - 'REVOKED' if the job's revoked flag is set
+ * - 'GROUP_FULL' if the job's group is at max concurrency (job was parked)
  * - Record<string, string> with all job fields otherwise
- *
- * Replaces: HGETALL + revoked check + HSET lastActive (3 round trips -> 1)
  */
 export async function moveToActive(
   client: Client,
   k: QueueKeys,
   jobId: string,
   timestamp: number,
-): Promise<Record<string, string> | 'REVOKED' | null> {
+  streamKey: string = '',
+  entryId: string = '',
+  group: string = '',
+): Promise<Record<string, string> | 'REVOKED' | 'GROUP_FULL' | null> {
+  const keys: string[] = [k.job(jobId)];
+  const args: string[] = [timestamp.toString()];
+  if (streamKey) {
+    keys.push(streamKey);
+    args.push(entryId, group, jobId);
+  }
   const result = await client.fcall(
     'glidemq_moveToActive',
-    [k.job(jobId)],
-    [timestamp.toString()],
+    keys,
+    args,
   );
   const str = String(result);
   if (str === '' || str === 'null') return null;
   if (str === 'REVOKED') return 'REVOKED';
+  if (str === 'GROUP_FULL') return 'GROUP_FULL';
   // Parse the cjson.encode output: [field1, value1, field2, value2, ...]
   const arr = JSON.parse(str) as string[];
   const hash: Record<string, string> = {};

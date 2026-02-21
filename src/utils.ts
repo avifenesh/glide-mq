@@ -58,9 +58,12 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     dedup: `${p}:dedup`,
     rate: `${p}:rate`,
     schedulers: `${p}:schedulers`,
+    ordering: `${p}:ordering`,
     job: (id: string) => `${p}:job:${id}`,
     log: (id: string) => `${p}:log:${id}`,
     deps: (id: string) => `${p}:deps:${id}`,
+    group: (key: string) => `${p}:group:${key}`,
+    groupq: (key: string) => `${p}:groupq:${key}`,
   };
 }
 
