@@ -7,7 +7,6 @@ import { isMainThread, parentPort, workerData } from 'worker_threads';
 import type { MainToChild, ChildToMain, SerializedJob } from './types';
 import { SandboxJob } from './sandbox-job';
 
-// Detect mode: worker thread or child process
 const isThread = !isMainThread && parentPort != null;
 const isChild = typeof process.send === 'function';
 
@@ -38,7 +37,6 @@ async function loadProcessor(filePath: string): Promise<(job: any) => Promise<an
     const { pathToFileURL } = require('url');
     mod = await (Function('p', 'return import(p)') as (p: string) => Promise<any>)(pathToFileURL(filePath).href);
   } else {
-    // CJS modules - use require() directly
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     mod = require(filePath);
   }

@@ -46,11 +46,9 @@ export class SandboxPool {
     const pw: PoolWorker = { thread, busy: false };
 
     const onExit = (code: number | null) => {
-      // Remove from pool
       const idx = this.workers.indexOf(pw);
       if (idx >= 0) this.workers.splice(idx, 1);
 
-      // Reject in-flight promise if the thread crashed
       if (pw.currentReject) {
         pw.currentReject(new Error(`Sandbox worker exited with code ${code}`));
         pw.currentReject = undefined;
@@ -72,21 +70,18 @@ export class SandboxPool {
   }
 
   private acquire(): Promise<PoolWorker> {
-    // Find an idle worker
     const idle = this.workers.find((w) => !w.busy);
     if (idle) {
       idle.busy = true;
       return Promise.resolve(idle);
     }
 
-    // Spawn a new one if under capacity
     if (this.workers.length < this.maxWorkers) {
       const pw = this.spawn();
       pw.busy = true;
       return Promise.resolve(pw);
     }
 
-    // All busy and at capacity - wait for one to free up
     return new Promise<PoolWorker>((resolve) => {
       this.waiters.push(resolve);
     });
@@ -96,7 +91,6 @@ export class SandboxPool {
     pw.busy = false;
     pw.currentReject = undefined;
 
-    // If someone is waiting, hand them this worker
     const waiter = this.waiters.shift();
     if (waiter) {
       pw.busy = true;
@@ -204,7 +198,6 @@ export class SandboxPool {
 
     this.waiters.length = 0;
 
-    // Terminate all workers
     const terminations: Promise<void>[] = [];
     for (const pw of this.workers) {
       terminations.push(

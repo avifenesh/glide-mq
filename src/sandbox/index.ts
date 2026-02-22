@@ -38,7 +38,6 @@ export function createSandboxedProcessor<D = any, R = any>(
 ): { processor: Processor<D, R>; close: () => Promise<void> } {
   const absolutePath = path.resolve(processorPath);
 
-  // Validate file exists
   try {
     fs.accessSync(absolutePath, fs.constants.R_OK);
   } catch {

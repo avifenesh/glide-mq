@@ -89,7 +89,6 @@ export class SandboxJob<D = any, R = any> {
     }
   }
 
-  // Methods not available in sandbox
   async getState(): Promise<string> {
     throw new GlideMQError('Method not available in sandboxed processor');
   }
