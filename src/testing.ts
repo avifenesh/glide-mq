@@ -251,6 +251,11 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     this.queue = queue;
     if (typeof processor === 'string') {
       const filePath = path.resolve(processor);
+      if (filePath.endsWith('.mjs')) {
+        throw new GlideMQError(
+          'TestWorker does not support ESM (.mjs) processors. Use a .js (CJS) file or an inline function.',
+        );
+      }
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const mod = require(filePath);
       const fn = mod.default || mod;

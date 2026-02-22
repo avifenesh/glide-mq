@@ -44,6 +44,9 @@ export function createSandboxedProcessor<D = any, R = any>(
 
   const useWorkerThreads = sandboxOpts?.useWorkerThreads !== false;
   const maxWorkers = sandboxOpts?.maxWorkers ?? concurrency;
+  if (!Number.isFinite(maxWorkers) || maxWorkers < 1) {
+    throw new GlideMQError(`sandbox.maxWorkers must be >= 1, got ${maxWorkers}`);
+  }
   const runnerPath = resolveRunnerPath();
 
   const pool = new SandboxPool(absolutePath, useWorkerThreads, maxWorkers, runnerPath);

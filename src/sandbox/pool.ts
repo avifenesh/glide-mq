@@ -71,7 +71,7 @@ export class SandboxPool {
           offMsg: (handler) => (thread as ChildProcess).off('message', handler as any),
         };
 
-    const onExit = (code: number | null) => {
+    const removeAndCleanup = (error: Error) => {
       const idx = this.workers.indexOf(pw);
       if (idx >= 0) this.workers.splice(idx, 1);
 
@@ -80,23 +80,25 @@ export class SandboxPool {
       }
 
       if (pw.currentReject) {
-        pw.currentReject(new GlideMQError(`Sandbox worker exited with code ${code}`));
+        pw.currentReject(error);
         pw.currentReject = undefined;
+      }
+
+      // Wake next waiter with a fresh worker (if not closing)
+      if (!this._closed && this.waiters.length > 0) {
+        const replacement = this.spawn();
+        replacement.busy = true;
+        const waiter = this.waiters.shift()!;
+        waiter.resolve(replacement);
       }
     };
 
+    const onExit = (code: number | null) => {
+      removeAndCleanup(new GlideMQError(`Sandbox worker exited with code ${code}`));
+    };
+
     const onError = (err: Error) => {
-      const idx = this.workers.indexOf(pw);
-      if (idx >= 0) this.workers.splice(idx, 1);
-
-      if (pw.currentCleanup) {
-        pw.currentCleanup();
-      }
-
-      if (pw.currentReject) {
-        pw.currentReject(err);
-        pw.currentReject = undefined;
-      }
+      removeAndCleanup(err);
     };
 
     thread.on('exit', onExit);
@@ -193,6 +195,25 @@ export class SandboxPool {
 
       pw.currentCleanup = removeListener;
       pw.onMsg(onMessage);
+
+      // Forward abort signal to sandbox worker
+      const abortHandler = job.abortSignal
+        ? () => {
+            pw.send({ type: 'abort', id: invocationId });
+          }
+        : undefined;
+      if (job.abortSignal && abortHandler) {
+        job.abortSignal.addEventListener('abort', abortHandler, { once: true });
+      }
+
+      const originalRemoveListener = removeListener;
+      const cleanupAll = () => {
+        originalRemoveListener();
+        if (job.abortSignal && abortHandler) {
+          job.abortSignal.removeEventListener('abort', abortHandler);
+        }
+      };
+      pw.currentCleanup = cleanupAll;
 
       pw.send({
         type: 'process',

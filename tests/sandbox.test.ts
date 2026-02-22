@@ -8,6 +8,19 @@ import { createSandboxedProcessor } from '../src/sandbox/index';
 import { Job } from '../src/job';
 import { LIBRARY_VERSION } from '../src/functions/index';
 
+vi.mock('@glidemq/speedkey', () => {
+  const MockGlideClient = {
+    createClient: vi.fn(),
+  };
+  const MockGlideClusterClient = {
+    createClient: vi.fn(),
+  };
+  return {
+    GlideClient: MockGlideClient,
+    GlideClusterClient: MockGlideClusterClient,
+  };
+});
+
 const PROCESSORS = path.resolve(__dirname, 'fixtures/processors');
 const ECHO_PROCESSOR = path.join(PROCESSORS, 'echo.js');
 const ECHO_ESM_PROCESSOR = path.join(PROCESSORS, 'echo.mjs');
