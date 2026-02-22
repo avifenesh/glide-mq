@@ -618,50 +618,67 @@ describe('Stress tests', () => {
   it('should close() during active and queued jobs', async () => {
     const pool = new SandboxPool(SLOW_PROCESSOR, true, 2, RUNNER_PATH);
 
-    // Start 4 jobs: 2 active (occupy both workers) + 2 queued
-    const promises = Array.from({ length: 4 }, (_, i) => pool.run(makeJob(`close-active-${i}`, { delay: 5000 })));
+    try {
+      // Start 4 jobs: 2 active (occupy both workers) + 2 queued
+      const promises = Array.from({ length: 4 }, (_, i) => pool.run(makeJob(`close-active-${i}`, { delay: 5000 })));
 
-    // Attach rejection handlers BEFORE close() to prevent unhandled rejection warnings
-    const settled = Promise.allSettled(promises);
+      // Attach rejection handlers BEFORE close() to prevent unhandled rejection warnings
+      const settled = Promise.allSettled(promises);
 
-    // Give workers time to start processing
-    await new Promise((r) => setTimeout(r, 200));
+      // Give workers time to start processing
+      await new Promise((r) => setTimeout(r, 200));
 
-    const start = Date.now();
-    await pool.close(false);
-    const elapsed = Date.now() - start;
+      const start = Date.now();
+      await pool.close(false);
+      const elapsed = Date.now() - start;
 
-    // close() should resolve within 10s (KILL_TIMEOUT=5s + buffer)
-    expect(elapsed).toBeLessThan(10_000);
+      // close() should resolve within 10s (KILL_TIMEOUT=5s + buffer)
+      expect(elapsed).toBeLessThan(10_000);
 
-    // All 4 promises should reject (active ones due to termination, queued ones due to pool close)
-    const results = await settled;
-    for (const r of results) {
-      expect(r.status).toBe('rejected');
+      // All 4 promises should reject
+      const results = await settled;
+      for (const r of results) {
+        expect(r.status).toBe('rejected');
+      }
+
+      // Verify error types: queued jobs get "closed", active jobs get "exited"
+      const reasons = results.map((r) => (r as PromiseRejectedResult).reason?.message ?? '');
+      const closedCount = reasons.filter((m) => m.includes('closed')).length;
+      const exitedCount = reasons.filter((m) => m.includes('exited')).length;
+      expect(closedCount + exitedCount).toBe(4);
+    } finally {
+      await pool.close();
     }
   }, 15_000);
 
   it('should force-close within 3s', async () => {
     const pool = new SandboxPool(SLOW_PROCESSOR, true, 2, RUNNER_PATH);
 
-    const promises = [pool.run(makeJob('force-1', { delay: 10_000 })), pool.run(makeJob('force-2', { delay: 10_000 }))];
+    try {
+      const promises = [
+        pool.run(makeJob('force-1', { delay: 10_000 })),
+        pool.run(makeJob('force-2', { delay: 10_000 })),
+      ];
 
-    // Attach rejection handlers BEFORE close() to prevent unhandled rejection warnings
-    const settled = Promise.allSettled(promises);
+      // Attach rejection handlers BEFORE close() to prevent unhandled rejection warnings
+      const settled = Promise.allSettled(promises);
 
-    // Give workers time to start
-    await new Promise((r) => setTimeout(r, 200));
+      // Give workers time to start
+      await new Promise((r) => setTimeout(r, 200));
 
-    const start = Date.now();
-    await pool.close(true);
-    const elapsed = Date.now() - start;
+      const start = Date.now();
+      await pool.close(true);
+      const elapsed = Date.now() - start;
 
-    // FORCE_TIMEOUT=2s + buffer, should resolve well within 3s
-    expect(elapsed).toBeLessThan(3_000);
+      // FORCE_TIMEOUT=2s + buffer, should resolve well within 3s
+      expect(elapsed).toBeLessThan(3_000);
 
-    const results = await settled;
-    for (const r of results) {
-      expect(r.status).toBe('rejected');
+      const results = await settled;
+      for (const r of results) {
+        expect(r.status).toBe('rejected');
+      }
+    } finally {
+      await pool.close();
     }
   }, 10_000);
 });
