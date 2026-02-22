@@ -21,6 +21,7 @@ describeEachMode('Queue.clean()', (CONNECTION) => {
   });
 
   afterAll(async () => {
+    if (!cleanupClient) return;
     const suffixes = ['-comp', '-fail', '-limit', '-grace', '-mixed', '-empty'];
     for (const s of suffixes) {
       await flushQueue(cleanupClient, Q + s);
