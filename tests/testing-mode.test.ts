@@ -372,3 +372,25 @@ describe('TestWorker', () => {
     expect(completed[0].result).toEqual({ greeting: 'hello' });
   });
 });
+
+describe('TestJob.changePriority', () => {
+  let queue: TestQueue;
+
+  afterEach(async () => {
+    if (queue) await queue.close();
+  });
+
+  it('updates opts.priority', async () => {
+    queue = new TestQueue('cp-test');
+    const job = await queue.add('task', { x: 1 }, { priority: 3 });
+    expect(job!.opts.priority).toBe(3);
+    await job!.changePriority(7);
+    expect(job!.opts.priority).toBe(7);
+  });
+
+  it('throws on negative priority', async () => {
+    queue = new TestQueue('cp-neg');
+    const job = await queue.add('task', { x: 1 });
+    await expect(job!.changePriority(-1)).rejects.toThrow('Priority must be >= 0');
+  });
+});

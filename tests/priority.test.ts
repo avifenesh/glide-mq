@@ -303,5 +303,45 @@ describeEachMode('Priority jobs', (CONNECTION) => {
       await localQueue.close();
       await flushQueue(cleanupClient, qName);
     });
+
+    it('failed job: returns error', async () => {
+      const qName = Q + '-cp-failed';
+      const localQueue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+
+      const job = await localQueue.add('task', { x: 1 });
+      await cleanupClient.hset(k.job(job.id), { state: 'failed' });
+
+      const result = await changePriority(cleanupClient, k, job.id, 5);
+      expect(result).toBe('error:invalid_state');
+
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('waiting job with priority 0 -> 0: returns no_op', async () => {
+      const qName = Q + '-cp-noop';
+      const localQueue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+
+      const job = await localQueue.add('task', { x: 1 });
+      expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('waiting');
+
+      const result = await changePriority(cleanupClient, k, job.id, 0);
+      expect(result).toBe('no_op');
+
+      // State unchanged
+      expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('waiting');
+
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('nonexistent job: returns not_found', async () => {
+      const k = buildKeys(Q);
+
+      const result = await changePriority(cleanupClient, k, 'nonexistent-999', 5);
+      expect(result).toBe('error:not_found');
+    });
   });
 });
