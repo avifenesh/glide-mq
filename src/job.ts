@@ -1,6 +1,6 @@
 import type { JobOptions, Client } from './types';
 import type { QueueKeys } from './functions/index';
-import { removeJob, failJob } from './functions/index';
+import { removeJob, failJob, changePriority } from './functions/index';
 import { calculateBackoff, decompress } from './utils';
 
 export class Job<D = any, R = any> {
@@ -163,6 +163,25 @@ export class Job<D = any, R = any> {
    */
   async remove(): Promise<void> {
     await removeJob(this.client, this.queueKeys, this.id);
+  }
+
+  /**
+   * Change the priority of this job. Supports waiting, prioritized, and delayed states.
+   * Setting priority to 0 moves a prioritized job back to the stream (waiting).
+   * Throws if the job is in an invalid state (active, completed, failed).
+   */
+  async changePriority(newPriority: number): Promise<void> {
+    if (newPriority < 0) {
+      throw new Error('Priority must be >= 0');
+    }
+    const result = await changePriority(this.client, this.queueKeys, this.id, newPriority);
+    if (result.startsWith('error:')) {
+      const reason = result.slice(6);
+      throw new Error(`Cannot change priority: ${reason}`);
+    }
+    if (result === 'ok' || result === 'no_op') {
+      this.opts.priority = newPriority;
+    }
   }
 
   /**

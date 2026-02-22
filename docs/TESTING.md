@@ -101,6 +101,12 @@ describe('email processor', () => {
 | `isPaused()` | Check pause state (synchronous, returns `boolean`) |
 | `close()` | Close the queue |
 
+### TestJob
+
+| Method | Description |
+|--------|-------------|
+| `changePriority(newPriority)` | Re-prioritize a job in the in-memory queue; mirrors `Job.changePriority()` |
+
 ### TestWorker
 
 | Method / Event | Description |
