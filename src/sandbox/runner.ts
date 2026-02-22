@@ -95,8 +95,12 @@ function handleMessage(msg: MainToChild): void {
       break;
     }
     case 'proxy-response': {
-      for (const job of activeJobs.values()) {
-        job.handleProxyResponse(msg);
+      const proxyId = msg.id;
+      const colonIdx = proxyId.indexOf(':');
+      if (colonIdx >= 0) {
+        const invId = proxyId.slice(0, colonIdx);
+        const job = activeJobs.get(invId);
+        if (job) job.handleProxyResponse(msg);
       }
       break;
     }

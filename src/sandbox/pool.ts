@@ -51,7 +51,7 @@ export class SandboxPool {
       });
     } else {
       thread = fork(this.runnerPath, [this.processorPath], {
-        stdio: 'pipe',
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
       });
     }
 
@@ -72,9 +72,20 @@ export class SandboxPool {
         };
 
     let cleaned = false;
+    const onExit = (code: number | null) => {
+      removeAndCleanup(new GlideMQError(`Sandbox worker exited with code ${code}`));
+    };
+    const onError = (err: Error) => {
+      removeAndCleanup(err);
+    };
+
     const removeAndCleanup = (error: Error) => {
       if (cleaned) return;
       cleaned = true;
+
+      thread.off('exit', onExit);
+      thread.off('error', onError);
+
       const idx = this.workers.indexOf(pw);
       if (idx >= 0) this.workers.splice(idx, 1);
 
@@ -94,14 +105,6 @@ export class SandboxPool {
         const waiter = this.waiters.shift()!;
         waiter.resolve(replacement);
       }
-    };
-
-    const onExit = (code: number | null) => {
-      removeAndCleanup(new GlideMQError(`Sandbox worker exited with code ${code}`));
-    };
-
-    const onError = (err: Error) => {
-      removeAndCleanup(err);
     };
 
     thread.on('exit', onExit);
@@ -201,7 +204,14 @@ export class SandboxPool {
       pw.currentCleanup = removeListener;
       pw.onMsg(onMessage);
 
-      // Forward abort signal to sandbox worker
+      // Send process message first so runner creates the SandboxJob entry
+      pw.send({
+        type: 'process',
+        id: invocationId,
+        job: serialized,
+      });
+
+      // Forward abort signal to sandbox worker (after process message)
       const abortHandler = job.abortSignal
         ? () => {
             pw.send({ type: 'abort', id: invocationId });
@@ -223,12 +233,6 @@ export class SandboxPool {
         }
       };
       pw.currentCleanup = cleanupAll;
-
-      pw.send({
-        type: 'process',
-        id: invocationId,
-        job: serialized,
-      });
     });
   }
 
