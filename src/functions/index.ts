@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '23';
+export const LIBRARY_VERSION = '24';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1685,6 +1685,101 @@ redis.register_function('glidemq_searchByName', function(keys, args)
   end
   return matched
 end)
+
+redis.register_function('glidemq_drain', function(keys, args)
+  local streamKey = keys[1]
+  local scheduledKey = keys[2]
+  local eventsKey = keys[3]
+  local idKey = keys[4]
+  local drainDelayed = args[1] == '1'
+  local group = args[2]
+  local prefix = string.sub(idKey, 1, #idKey - 2)
+  local removed = 0
+
+  -- Build set of active entry IDs from PEL via paginated XPENDING
+  local activeSet = {}
+  local ok, pending = pcall(redis.call, 'XPENDING', streamKey, group, '-', '+', '10000')
+  if ok and pending and #pending > 0 then
+    for i = 1, #pending do
+      activeSet[pending[i][1]] = true
+    end
+    -- Page through remaining PEL entries if there were exactly 10000
+    while #pending == 10000 do
+      local lastId = pending[#pending][1]
+      local dashPos = lastId:find('-')
+      local seq = tonumber(lastId:sub(dashPos + 1))
+      local nextStart = lastId:sub(1, dashPos) .. tostring(seq + 1)
+      ok, pending = pcall(redis.call, 'XPENDING', streamKey, group, nextStart, '+', '10000')
+      if ok and pending and #pending > 0 then
+        for i = 1, #pending do
+          activeSet[pending[i][1]] = true
+        end
+      else
+        break
+      end
+    end
+  end
+
+  -- Paginated XRANGE to avoid loading entire stream into memory
+  local cursor = '-'
+  while true do
+    local entries = redis.call('XRANGE', streamKey, cursor, '+', 'COUNT', 1000)
+    if #entries == 0 then break end
+
+    local toDelete = {}
+    for i = 1, #entries do
+      local entryId = entries[i][1]
+      if not activeSet[entryId] then
+        toDelete[#toDelete + 1] = entryId
+        local fields = entries[i][2]
+        for j = 1, #fields, 2 do
+          if fields[j] == 'jobId' and fields[j + 1] ~= '' then
+            local jobId = fields[j + 1]
+            redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+            removed = removed + 1
+            break
+          end
+        end
+      end
+    end
+    if #toDelete > 0 then
+      for i = 1, #toDelete, 1000 do
+        redis.call('XDEL', streamKey, unpack(toDelete, i, math.min(i + 999, #toDelete)))
+      end
+    end
+
+    -- Advance cursor past the last entry
+    local lastId = entries[#entries][1]
+    local dashPos = lastId:find('-')
+    local seq = tonumber(lastId:sub(dashPos + 1))
+    cursor = lastId:sub(1, dashPos) .. tostring(seq + 1)
+  end
+
+  -- Optionally drain delayed/scheduled jobs
+  if drainDelayed then
+    local offset = 0
+    while true do
+      local scheduled = redis.call('ZRANGE', scheduledKey, offset, offset + 999)
+      if #scheduled == 0 then break end
+      local batch = {}
+      for j = 1, #scheduled do
+        local jobId = scheduled[j]
+        batch[#batch + 1] = prefix .. 'job:' .. jobId
+        batch[#batch + 1] = prefix .. 'log:' .. jobId
+        batch[#batch + 1] = prefix .. 'deps:' .. jobId
+      end
+      redis.call('DEL', unpack(batch))
+      removed = removed + #scheduled
+      offset = offset + 1000
+    end
+    redis.call('DEL', scheduledKey)
+  end
+
+  if removed > 0 then
+    emitEvent(eventsKey, 'drained', tostring(removed), nil)
+  end
+  return removed
+end)
 `;
 
 // ---- Key set type ----
@@ -2199,6 +2294,26 @@ export async function cleanJobs(
   const setKey = type === 'completed' ? k.completed : k.failed;
   const result = await client.fcall('glidemq_clean', [setKey, k.events, k.id], [cutoff.toString(), limit.toString()]);
   return Array.isArray(result) ? result.map((r) => String(r)) : [];
+}
+
+/**
+ * Drain the queue: remove all waiting jobs from the stream (skipping active ones).
+ * Optionally also remove all delayed/scheduled jobs.
+ * Deletes associated job/log/deps hashes. Emits 'drained' event.
+ * Returns the number of removed jobs.
+ */
+export async function drainQueue(
+  client: Client,
+  k: QueueKeys,
+  delayed: boolean,
+  group: string = CONSUMER_GROUP,
+): Promise<number> {
+  const result = await client.fcall(
+    'glidemq_drain',
+    [k.stream, k.scheduled, k.events, k.id],
+    [delayed ? '1' : '0', group],
+  );
+  return Number(result) || 0;
 }
 
 /**

@@ -30,6 +30,7 @@ npm install glide-mq
 - **Stalled job recovery** — auto-reclaim jobs from crashed workers via XAUTOCLAIM
 - **Global concurrency** — cross-worker active job cap for the entire queue
 - **Pause & resume** — pause/resume at queue level or per-worker, with force option
+- **Drain** — `queue.drain(delayed?)` removes all waiting (and optionally delayed) jobs in a single server-side call
 - **Real-time events** — `QueueEvents` stream for added, completed, failed, stalled, revoked, and more
 - **Job search** — query by state, name, and data filters
 - **Progress tracking** — real-time numeric or object progress updates

@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `queue.drain(delayed?)` — remove all waiting jobs from the queue without touching active jobs. Pass `true` to also remove delayed/scheduled jobs. Implemented as a single Valkey Server Function call; emits a `'drained'` event (#15).
+- `TestQueue.drain(delayed?)` — in-memory equivalent; removes waiting (and optionally delayed) jobs from `TestQueue`.
 - `active` event on `Worker` and `TestWorker` — emitted with `(job, jobId)` when a job starts processing.
 - `drained` event on `Worker` and `TestWorker` — emitted when the queue transitions from non-empty to empty (i.e. no more waiting jobs after the last active job completes). A new `isDrained` flag prevents repeated emissions.
 - `queue.clean(grace, limit, type)` — bulk-remove old `completed` or `failed` jobs by minimum age. Returns an array of removed job IDs. Implemented as a single Valkey Server Function call (#16).

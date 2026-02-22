@@ -96,6 +96,7 @@ describe('email processor', () => {
 | `getJobs(state, start?, end?)` | List jobs by state |
 | `getJobCounts()` | Returns `{ waiting, active, delayed, completed, failed }` |
 | `searchJobs(opts)` | Filter jobs by state, name, and/or data fields |
+| `drain(delayed?)` | Remove waiting jobs; pass `true` to also remove delayed jobs |
 | `pause()` / `resume()` | Pause / resume the queue |
 | `isPaused()` | Check pause state (synchronous, returns `boolean`) |
 | `close()` | Close the queue |
