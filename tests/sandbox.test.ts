@@ -29,7 +29,6 @@ const CRASH_PROCESSOR = path.join(PROCESSORS, 'crash.js');
 const SLOW_PROCESSOR = path.join(PROCESSORS, 'slow.js');
 const PROGRESS_PROCESSOR = path.join(PROCESSORS, 'progress.js');
 const FLOOD_PROGRESS_PROCESSOR = path.join(PROCESSORS, 'flood-progress.js');
-const CRASH_AFTER_PROXY_PROCESSOR = path.join(PROCESSORS, 'crash-after-proxy.js');
 const CONDITIONAL_CRASH_PROCESSOR = path.join(PROCESSORS, 'conditional-crash.js');
 const CONDITIONAL_PROXY_CRASH_PROCESSOR = path.join(PROCESSORS, 'conditional-proxy-crash.js');
 
@@ -598,8 +597,12 @@ describe('Stress tests', () => {
     const pool = new SandboxPool(CONDITIONAL_PROXY_CRASH_PROCESSOR, true, 1, RUNNER_PATH);
 
     try {
-      // Crash with in-flight proxy call
-      await expect(pool.run(makeJob('crash-proxy-1', { crash: true }))).rejects.toThrow(/exited with code/);
+      // Use a slow log mock so the proxy call is genuinely pending when the worker exits
+      const crashJob = {
+        ...makeJob('crash-proxy-1', { crash: true }),
+        log: vi.fn(() => new Promise((r) => setTimeout(r, 5000))),
+      } as unknown as Job;
+      await expect(pool.run(crashJob)).rejects.toThrow(/exited with code/);
 
       // Same pool should recover and process a normal job
       const result = await pool.run(makeJob('post-crash-proxy', { recovered: true }));
