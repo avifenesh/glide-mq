@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '24';
+export const LIBRARY_VERSION = '25';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1644,6 +1644,66 @@ redis.register_function('glidemq_revoke', function(keys, args)
   return 'flagged'
 end)
 
+redis.register_function('glidemq_changePriority', function(keys, args)
+  local jobKey = keys[1]
+  local streamKey = keys[2]
+  local scheduledKey = keys[3]
+  local eventsKey = keys[4]
+  local jobId = args[1]
+  local newPriority = tonumber(args[2]) or 0
+  local group = args[3]
+  local exists = redis.call('EXISTS', jobKey)
+  if exists == 0 then
+    return 'error:not_found'
+  end
+  local state = redis.call('HGET', jobKey, 'state')
+  if state == 'waiting' then
+    if newPriority == 0 then
+      return 'no_op'
+    end
+    local entries = redis.call('XRANGE', streamKey, '-', '+')
+    for i = 1, #entries do
+      local entryId = entries[i][1]
+      local fields = entries[i][2]
+      for j = 1, #fields, 2 do
+        if fields[j] == 'jobId' and fields[j+1] == jobId then
+          redis.call('XACK', streamKey, group, entryId)
+          redis.call('XDEL', streamKey, entryId)
+          break
+        end
+      end
+    end
+    local score = newPriority * PRIORITY_SHIFT
+    redis.call('ZADD', scheduledKey, score, jobId)
+    redis.call('HSET', jobKey, 'state', 'prioritized', 'priority', tostring(newPriority))
+    emitEvent(eventsKey, 'priority-changed', jobId, {'priority', tostring(newPriority)})
+    return 'ok'
+  elseif state == 'prioritized' then
+    redis.call('ZREM', scheduledKey, jobId)
+    if newPriority == 0 then
+      redis.call('XADD', streamKey, '*', 'jobId', jobId)
+      redis.call('HSET', jobKey, 'state', 'waiting', 'priority', '0')
+    else
+      local score = newPriority * PRIORITY_SHIFT
+      redis.call('ZADD', scheduledKey, score, jobId)
+      redis.call('HSET', jobKey, 'priority', tostring(newPriority))
+    end
+    emitEvent(eventsKey, 'priority-changed', jobId, {'priority', tostring(newPriority)})
+    return 'ok'
+  elseif state == 'delayed' then
+    local oldScore = tonumber(redis.call('ZSCORE', scheduledKey, jobId)) or 0
+    local oldTimestamp = oldScore % PRIORITY_SHIFT
+    local newScore = newPriority * PRIORITY_SHIFT + oldTimestamp
+    redis.call('ZREM', scheduledKey, jobId)
+    redis.call('ZADD', scheduledKey, newScore, jobId)
+    redis.call('HSET', jobKey, 'priority', tostring(newPriority))
+    emitEvent(eventsKey, 'priority-changed', jobId, {'priority', tostring(newPriority)})
+    return 'ok'
+  else
+    return 'error:invalid_state'
+  end
+end)
+
 redis.register_function('glidemq_searchByName', function(keys, args)
   local stateKey = keys[1]
   local stateType = args[1]
@@ -2333,6 +2393,26 @@ export async function revokeJob(
     'glidemq_revoke',
     [k.job(jobId), k.stream, k.scheduled, k.failed, k.events],
     [jobId, timestamp.toString(), group],
+  );
+  return result as string;
+}
+
+/**
+ * Change the priority of a job after enqueue.
+ * Handles waiting, prioritized, and delayed states. Returns 'ok', 'no_op',
+ * or an error string for invalid states.
+ */
+export async function changePriority(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  newPriority: number,
+  group: string = CONSUMER_GROUP,
+): Promise<string> {
+  const result = await client.fcall(
+    'glidemq_changePriority',
+    [k.job(jobId), k.stream, k.scheduled, k.events],
+    [jobId, newPriority.toString(), group],
   );
   return result as string;
 }
