@@ -4,50 +4,49 @@ Current state of the glide-mq repository as of 2026-02-22.
 
 ## Branch
 
-`main` — no open PR yet for the current work item.
+`queue-clean-16` — open against `main`. PR not yet created.
 
 ## In-progress task
 
-**Task #20: Worker `active` and `drained` events**
+**Task #16: `queue.clean(grace, limit, type)`**
 
 ### What was done
 
-- Added `'active'` and `'drained'` to the `WorkerEvent` union type in `src/worker.ts`.
-- `Worker` emits `'active'(job, jobId)` at the moment a job begins processing (before the processor function is called).
-- `Worker` emits `'drained'()` when the queue transitions from non-empty to empty. An `isDrained` flag prevents duplicate emissions when the worker loops on an already-empty queue.
-- `TestWorker` in `src/testing.ts` mirrors both events with identical semantics.
-- New test file `tests/worker-events.test.ts` covers both events, including the dedup guard on `drained`.
+- Added `cleanJobs` Valkey Server Function in `src/functions/index.ts` — single FCALL that scans completed/failed job metadata and removes jobs older than `grace` ms, up to `limit` at a time.
+- Added `Queue.clean(grace, limit, type)` public method in `src/queue.ts`.
+- Added `TestQueue.clean(grace, limit, type)` in `src/testing.ts` — in-memory equivalent using `finishedOn` timestamps.
+- New test file `tests/clean.test.ts` — covers completed and failed cleanup, grace boundary, limit cap, and empty-result paths.
 
-### Files changed (uncommitted)
+### Files changed
 
 | File | Change |
 |------|--------|
-| `src/worker.ts` | `WorkerEvent` extended; `active`/`drained` emits added; `isDrained` flag |
-| `src/testing.ts` | `active`/`drained` emits added to `TestWorker`; `isDrained` flag |
-| `tests/worker-events.test.ts` | New — integration + unit tests for both events |
-| `package-lock.json` | Updated (dependency install) |
+| `src/functions/index.ts` | New `cleanJobs` FCALL function |
+| `src/queue.ts` | `Queue.clean()` public method |
+| `src/testing.ts` | `TestQueue.clean()` in-memory implementation |
+| `tests/clean.test.ts` | New — tests for all clean() scenarios |
 
 ### Docs updated (this session)
 
 | File | Change |
 |------|--------|
-| `docs/USAGE.md` | Worker events section now includes `active`/`drained` with full event table |
-| `docs/TESTING.md` | TestWorker API table now lists `active` and `drained` |
-| `CHANGELOG.md` | Created; `[Unreleased]` section documents both new events |
-| `HANDOVER.md` | This file (created) |
+| `docs/USAGE.md` | New "Cleaning old jobs" section with example |
+| `docs/MIGRATION.md` | `queue.clean()` status updated from Gap to Full; workaround row updated |
+| `CHANGELOG.md` | `[Unreleased]` section now includes `queue.clean()` entry |
+| `HANDOVER.md` | This file (updated) |
 
 ## What comes next
 
 1. Commit all changed files as separate logical commits.
 2. Run `/deslop` before pushing.
-3. Open PR — title: `feat: add active and drained events to Worker and TestWorker`.
+3. Open PR — title: `feat: add queue.clean(grace, limit, type)`.
 4. Verify CI passes (unit + integration tests).
 
 ## Known state
 
 - Valkey must be on `:6379` (standalone) and `:7000-7005` (cluster) for full integration tests.
 - `npm run build` compiles TypeScript to `dist/`.
-- `npx vitest run tests/worker-events.test.ts` runs just the new event tests.
+- `npx vitest run tests/clean.test.ts` runs just the new clean tests.
 
 ## Active configuration
 
