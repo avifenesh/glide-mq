@@ -2,6 +2,8 @@
 
 **High-performance message queue for Node.js** — powered by Valkey/Redis Streams and a Rust-native NAPI client.
 
+If you find this useful, [give it a ⭐ on GitHub](https://github.com/avifenesh/glide-mq) — it helps the project reach more developers.
+
 ```bash
 npm install glide-mq
 ```
@@ -16,7 +18,8 @@ npm install glide-mq
 
 ## Features
 
-- **Queues & Workers** — producer/consumer with configurable concurrency and priority
+- **Queues & Workers** — producer/consumer with configurable concurrency
+- **Delayed & priority jobs** — schedule jobs for later or run high-priority work first
 - **Workflows** — `FlowProducer` parent-child trees, `chain`, `group`, `chord` pipelines with result aggregation
 - **Schedulers** — cron and interval repeatable jobs, persisted across restarts
 - **Per-key ordering** — sequential processing per key while staying parallel across keys
@@ -26,13 +29,15 @@ npm install glide-mq
 - **Job revocation** — cooperative cancellation via AbortSignal for active jobs
 - **Stalled job recovery** — auto-reclaim jobs from crashed workers via XAUTOCLAIM
 - **Global concurrency** — cross-worker active job cap for the entire queue
+- **Pause & resume** — pause/resume at queue level or per-worker, with force option
+- **Real-time events** — `QueueEvents` stream for added, completed, failed, stalled, revoked, and more
 - **Job search** — query by state, name, and data filters
 - **Progress tracking** — real-time numeric or object progress updates
 - **Batch API** — `addBulk` for high-throughput ingestion (12.7× faster than serial)
 - **Compression** — transparent gzip (up to 98% size reduction)
 - **Graceful shutdown** — one-liner `gracefulShutdown()` for SIGTERM/SIGINT handling
 - **Connection sharing** — reuse a single client across components to reduce TCP connections
-- **Observability** — OpenTelemetry tracing, per-job logs, [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) middleware
+- **Observability** — OpenTelemetry tracing, per-job logs, [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) web UI
 - **In-memory testing** — `TestQueue` & `TestWorker` with zero dependencies via `glide-mq/testing`
 
 ## Quick Start
