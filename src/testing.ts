@@ -364,8 +364,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         record.attemptsMade++;
         const maxAttempts = record.opts.attempts ?? 0;
 
-        const skipRetry =
-          job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
+        const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
         if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
           // Retry: put back to waiting
           record.state = 'waiting';

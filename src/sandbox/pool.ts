@@ -193,9 +193,7 @@ export class SandboxPool {
                 cleanup();
                 this.release(pw);
                 const err =
-                  msg.errorName === 'UnrecoverableError'
-                    ? new UnrecoverableError(msg.error)
-                    : new Error(msg.error);
+                  msg.errorName === 'UnrecoverableError' ? new UnrecoverableError(msg.error) : new Error(msg.error);
                 if (msg.stack) err.stack = msg.stack;
                 if (msg.discarded) job.discarded = true;
                 reject(err);
