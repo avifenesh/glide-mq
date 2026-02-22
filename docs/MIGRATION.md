@@ -464,7 +464,7 @@ The processor function signature is identical. The only change is the connection
 | `worker.on('active', (job, prev))` | - | Gap [#20](https://github.com/avifenesh/glide-mq/issues/20) |
 | `worker.on('drained')` | - | Gap [#20](https://github.com/avifenesh/glide-mq/issues/20) |
 | `Worker.RateLimitError` | `Worker.RateLimitError` | Full |
-| Sandboxed processor (file path string) | - | Gap [#21](https://github.com/avifenesh/glide-mq/issues/21) |
+| Sandboxed processor (file path string) | `new Worker('q', './processor.js', { connection, sandbox: {} })` | Full |
 
 ### Job methods
 
@@ -632,18 +632,19 @@ const worker = new Worker('q', processor, {
 await queue.setGlobalConcurrency(50);
 ```
 
-**No sandboxed processors** - BullMQ supports passing a file path string as the processor to run it in a child process. glide-mq requires an inline function. If you need process isolation, run separate worker processes each with their own `Worker` instance.
+**Sandboxed processors** - Both BullMQ and glide-mq support passing a file path string as the processor. The processor runs in a worker thread (default) or child process, isolating crashes from the main process.
 
 ```ts
-// BullMQ - sandboxed
-const worker = new Worker('q', './processor.js', { connection });
+// BullMQ
+const worker = new Worker('q', './processor.js', { connection, useWorkerThreads: true });
 ```
 
 ```ts
-// glide-mq - no equivalent; import and use inline
-import { processJob } from './processor';
-const worker = new Worker('q', processJob, { connection });
+// glide-mq
+const worker = new Worker('q', './processor.js', { connection, sandbox: { useWorkerThreads: true } });
 ```
+
+The processor file must export a function, either via CommonJS (`module.exports = async (job) => { ... }`) or as an ESM default export (`export default async (job) => { ... }`). Inside the sandbox, `job.log()`, `job.updateProgress()`, and `job.updateData()` work normally via IPC proxy. Methods that require direct Valkey access (`job.getState()`, `job.remove()`, etc.) are not available.
 
 **`worker.on('active')` and `worker.on('drained')` not yet available** - tracked in [#20](https://github.com/avifenesh/glide-mq/issues/20). Workarounds:
 
@@ -1105,7 +1106,7 @@ These features exist in BullMQ but are not yet implemented in glide-mq. Each has
 | `queue.getJobScheduler(name)` | `(await queue.getRepeatableJobs()).find(s => s.name === name)` | [#19](https://github.com/avifenesh/glide-mq/issues/19) |
 | `worker.on('active')` | Wrap the processor function - see [Worker section](#worker) | [#20](https://github.com/avifenesh/glide-mq/issues/20) |
 | `worker.on('drained')` | Poll `queue.getJobCounts()` - see [Worker section](#worker) | [#20](https://github.com/avifenesh/glide-mq/issues/20) |
-| Sandboxed processor | Separate worker process per job type | [#21](https://github.com/avifenesh/glide-mq/issues/21) |
+| Sandboxed processor | `new Worker('q', './processor.js', { connection, sandbox: {} })` | Full - see [Worker section](#worker) |
 | Custom `jobId` | Use `deduplication.id` for idempotent creation | - |
 | `lifo` | Use `priority` values in reverse insertion order | - |
 | QueueEvents `'waiting'`, `'active'`, `'delayed'`, `'drained'`, `'deduplicated'` events | Use the worker-level events or poll `getJobCounts()` | - |

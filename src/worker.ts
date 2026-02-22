@@ -3,6 +3,7 @@ import { randomBytes } from 'crypto';
 import type { WorkerOptions, Processor, Client } from './types';
 import { Job } from './job';
 import { buildKeys, calculateBackoff, keyPrefix, nextReconnectDelay, reconnectWithBackoff } from './utils';
+import { createSandboxedProcessor } from './sandbox';
 import {
   createClient,
   createBlockingClient,
@@ -61,8 +62,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private globalRateLimitEnabled = false;
   private cachedRateLimitMax = 0;
   private cachedRateLimitDuration = 0;
+  private sandboxClose?: (force?: boolean) => Promise<void>;
 
-  constructor(name: string, processor: Processor<D, R>, opts: WorkerOptions) {
+  constructor(name: string, processor: Processor<D, R> | string, opts: WorkerOptions) {
     super();
 
     // Validate client injection options
@@ -81,7 +83,14 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
 
     this.name = name;
-    this.processor = processor;
+    if (typeof processor === 'string') {
+      const concurrency = opts.concurrency ?? 1;
+      const sandbox = createSandboxedProcessor<D, R>(processor, opts.sandbox, concurrency);
+      this.processor = sandbox.processor;
+      this.sandboxClose = (force?: boolean) => sandbox.close(force);
+    } else {
+      this.processor = processor;
+    }
     this.opts = opts;
     this.queueKeys = buildKeys(name, opts.prefix);
     this.consumerId = `worker-${Date.now()}-${randomBytes(4).toString('hex')}`;
@@ -868,6 +877,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     if (!force) {
       await this.waitForActiveJobs();
+    }
+
+    // Shut down sandbox worker pool
+    if (this.sandboxClose) {
+      await this.sandboxClose(force);
     }
 
     // Clear all active heartbeats
