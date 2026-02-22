@@ -306,7 +306,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     });
 
     if (!result) {
-      if (!this.isDrained) {
+      if (!this.isDrained && this.activeCount === 0) {
         this.isDrained = true;
         this.emit('drained');
       }
@@ -640,7 +640,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
       // No next job - return to poll loop
       if (fetchResult.next === false) {
-        if (!this.isDrained) {
+        if (!this.isDrained && this.activeCount <= 1) {
           this.isDrained = true;
           this.emit('drained');
         }

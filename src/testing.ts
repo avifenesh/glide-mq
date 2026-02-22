@@ -324,7 +324,6 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   }
 
   private processJob(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
-
     this.processor(job as any)
       .then((result) => {
         record.state = 'completed';

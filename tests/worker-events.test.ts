@@ -160,8 +160,12 @@ describe('TestWorker active and drained events', () => {
 
     const worker = new TestWorker(queue, async () => 'ok');
 
-    worker.on('active', (job: any) => { activeJob = job; });
-    worker.on('completed', (job: any) => { completedJob = job; });
+    worker.on('active', (job: any) => {
+      activeJob = job;
+    });
+    worker.on('completed', (job: any) => {
+      completedJob = job;
+    });
 
     const completed = new Promise<void>((resolve) => {
       worker.on('completed', () => resolve());
