@@ -4,12 +4,12 @@
  *
  * Run: npx vitest run tests/priority.test.ts
  */
-import { it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, describe, beforeAll, afterAll } from 'vitest';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
+const { promote, changePriority } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
 import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
@@ -183,4 +183,125 @@ describeEachMode('Priority jobs', (CONNECTION) => {
     await localQueue.close();
     await flushQueue(cleanupClient, qName);
   }, 10000);
+
+  describe('changePriority', () => {
+    it('waiting (priority 0) -> prioritized (priority 5)', async () => {
+      const qName = Q + '-cp-wait-to-prio';
+      const localQueue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+
+      const job = await localQueue.add('task', { x: 1 });
+      expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('waiting');
+
+      const result = await changePriority(cleanupClient, k, job.id, 5);
+      expect(result).toBe('ok');
+
+      expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('prioritized');
+      expect(String(await cleanupClient.hget(k.job(job.id), 'priority'))).toBe('5');
+
+      const score = await cleanupClient.zscore(k.scheduled, job.id);
+      expect(score).not.toBeNull();
+      const PRIORITY_SHIFT = 2 ** 42;
+      expect(Number(score)).toBe(5 * PRIORITY_SHIFT);
+
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('prioritized (5) -> prioritized (1): new score ordering', async () => {
+      const qName = Q + '-cp-prio-to-prio';
+      const localQueue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+
+      const job = await localQueue.add('task', { x: 1 }, { priority: 5 });
+      expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('prioritized');
+
+      const result = await changePriority(cleanupClient, k, job.id, 1);
+      expect(result).toBe('ok');
+
+      expect(String(await cleanupClient.hget(k.job(job.id), 'priority'))).toBe('1');
+      const PRIORITY_SHIFT = 2 ** 42;
+      const score = Number(await cleanupClient.zscore(k.scheduled, job.id));
+      expect(score).toBe(1 * PRIORITY_SHIFT);
+
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('prioritized -> waiting (priority 0): back in stream', async () => {
+      const qName = Q + '-cp-prio-to-wait';
+      const localQueue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+
+      const job = await localQueue.add('task', { x: 1 }, { priority: 3 });
+      expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('prioritized');
+
+      const result = await changePriority(cleanupClient, k, job.id, 0);
+      expect(result).toBe('ok');
+
+      expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('waiting');
+      expect(String(await cleanupClient.hget(k.job(job.id), 'priority'))).toBe('0');
+
+      const score = await cleanupClient.zscore(k.scheduled, job.id);
+      expect(score).toBeNull();
+
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('delayed job: delay preserved, priority updated', async () => {
+      const qName = Q + '-cp-delayed';
+      const localQueue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+
+      const job = await localQueue.add('task', { x: 1 }, { priority: 2, delay: 60000 });
+      expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('delayed');
+
+      const oldScore = Number(await cleanupClient.zscore(k.scheduled, job.id));
+      const PRIORITY_SHIFT = 2 ** 42;
+      const oldTimestamp = oldScore % PRIORITY_SHIFT;
+
+      const result = await changePriority(cleanupClient, k, job.id, 7);
+      expect(result).toBe('ok');
+
+      expect(String(await cleanupClient.hget(k.job(job.id), 'priority'))).toBe('7');
+      const newScore = Number(await cleanupClient.zscore(k.scheduled, job.id));
+      expect(newScore).toBe(7 * PRIORITY_SHIFT + oldTimestamp);
+
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('active job: returns error', async () => {
+      const qName = Q + '-cp-active';
+      const localQueue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+
+      const job = await localQueue.add('task', { x: 1 });
+
+      // Manually set state to active to simulate
+      await cleanupClient.hset(k.job(job.id), { state: 'active' });
+
+      const result = await changePriority(cleanupClient, k, job.id, 5);
+      expect(result).toBe('error:invalid_state');
+
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('completed job: returns error', async () => {
+      const qName = Q + '-cp-completed';
+      const localQueue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+
+      const job = await localQueue.add('task', { x: 1 });
+      await cleanupClient.hset(k.job(job.id), { state: 'completed' });
+
+      const result = await changePriority(cleanupClient, k, job.id, 5);
+      expect(result).toBe('error:invalid_state');
+
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+  });
 });
