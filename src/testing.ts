@@ -79,6 +79,13 @@ export class TestJob<D = any, R = any> {
     this.opts.priority = newPriority;
   }
 
+  async changeDelay(newDelay: number): Promise<void> {
+    if (newDelay < 0) {
+      throw new Error('Delay must be >= 0');
+    }
+    this.opts.delay = newDelay;
+  }
+
   discard(): void {
     this.discarded = true;
   }
