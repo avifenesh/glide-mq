@@ -34,6 +34,7 @@ import {
   resume,
   revokeJob,
   searchByName,
+  cleanJobs,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -558,6 +559,18 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const key = type === 'completed' ? this.keys.completed : this.keys.failed;
     const count = await client.zcard(key);
     return { count };
+  }
+
+  /**
+   * Bulk-remove old completed or failed jobs by age.
+   * @param grace - Minimum age in milliseconds. Jobs finished more recently than this are kept.
+   * @param limit - Maximum number of jobs to remove in one call.
+   * @param type - Which job state to clean: 'completed' or 'failed'.
+   * @returns Array of removed job IDs.
+   */
+  async clean(grace: number, limit: number, type: 'completed' | 'failed'): Promise<string[]> {
+    const client = await this.getClient();
+    return cleanJobs(client, this.keys, type, grace, limit, Date.now());
   }
 
   /**
