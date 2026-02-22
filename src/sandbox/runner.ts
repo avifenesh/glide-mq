@@ -75,6 +75,8 @@ async function handleProcess(id: string, serialized: SerializedJob): Promise<voi
 }
 
 function handleMessage(msg: MainToChild): void {
+  if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') return;
+
   switch (msg.type) {
     case 'process':
       handleProcess(msg.id, msg.job).catch((err) => {

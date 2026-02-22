@@ -10,6 +10,9 @@ interface PoolWorker {
   busy: boolean;
   currentReject?: (err: Error) => void;
   currentCleanup?: () => void;
+  send: (msg: MainToChild) => void;
+  onMsg: (handler: (msg: ChildToMain) => void) => void;
+  offMsg: (handler: (msg: ChildToMain) => void) => void;
 }
 
 interface Waiter {
@@ -52,7 +55,21 @@ export class SandboxPool {
       });
     }
 
-    const pw: PoolWorker = { thread, busy: false };
+    const pw: PoolWorker = this.useWorkerThreads
+      ? {
+          thread,
+          busy: false,
+          send: (msg) => (thread as WorkerThread).postMessage(msg),
+          onMsg: (handler) => (thread as WorkerThread).on('message', handler),
+          offMsg: (handler) => (thread as WorkerThread).off('message', handler),
+        }
+      : {
+          thread,
+          busy: false,
+          send: (msg) => (thread as ChildProcess).send(msg),
+          onMsg: (handler) => (thread as ChildProcess).on('message', handler as any),
+          offMsg: (handler) => (thread as ChildProcess).off('message', handler as any),
+        };
 
     const onExit = (code: number | null) => {
       const idx = this.workers.indexOf(pw);
@@ -118,14 +135,6 @@ export class SandboxPool {
     }
   }
 
-  private sendToWorker(pw: PoolWorker, msg: MainToChild): void {
-    if (this.useWorkerThreads) {
-      (pw.thread as WorkerThread).postMessage(msg);
-    } else {
-      (pw.thread as ChildProcess).send(msg);
-    }
-  }
-
   /**
    * Run a job in a sandbox worker. Returns the processor result.
    * The real Job object is used for proxying log/updateProgress/updateData calls.
@@ -147,48 +156,45 @@ export class SandboxPool {
         if (cleaned) return;
         cleaned = true;
         pw.currentCleanup = undefined;
-        if (this.useWorkerThreads) {
-          (pw.thread as WorkerThread).off('message', onMessage);
-        } else {
-          (pw.thread as ChildProcess).off('message', onMessage);
-        }
+        pw.offMsg(onMessage);
       };
 
       const onMessage = (msg: ChildToMain) => {
-        switch (msg.type) {
-          case 'completed':
-            if (msg.id === invocationId) {
-              removeListener();
-              this.release(pw);
-              resolve(msg.result as R);
-            }
-            break;
+        try {
+          switch (msg.type) {
+            case 'completed':
+              if (msg.id === invocationId) {
+                removeListener();
+                this.release(pw);
+                resolve(msg.result as R);
+              }
+              break;
 
-          case 'failed':
-            if (msg.id === invocationId) {
-              removeListener();
-              this.release(pw);
-              const err = new Error(msg.error);
-              if (msg.stack) err.stack = msg.stack;
-              reject(err);
-            }
-            break;
+            case 'failed':
+              if (msg.id === invocationId) {
+                removeListener();
+                this.release(pw);
+                const err = new Error(msg.error);
+                if (msg.stack) err.stack = msg.stack;
+                reject(err);
+              }
+              break;
 
-          case 'proxy-request':
-            this.handleProxyRequest(pw, job, msg);
-            break;
+            case 'proxy-request':
+              this.handleProxyRequest(pw, job, msg);
+              break;
+          }
+        } catch (err) {
+          removeListener();
+          this.release(pw);
+          reject(err);
         }
       };
 
       pw.currentCleanup = removeListener;
+      pw.onMsg(onMessage);
 
-      if (this.useWorkerThreads) {
-        (pw.thread as WorkerThread).on('message', onMessage);
-      } else {
-        (pw.thread as ChildProcess).on('message', onMessage);
-      }
-
-      this.sendToWorker(pw, {
+      pw.send({
         type: 'process',
         id: invocationId,
         job: serialized,
@@ -211,9 +217,9 @@ export class SandboxPool {
         default:
           throw new Error(`Unknown proxy method: ${msg.method}`);
       }
-      this.sendToWorker(pw, { type: 'proxy-response', id: msg.id });
+      pw.send({ type: 'proxy-response', id: msg.id });
     } catch (err: any) {
-      this.sendToWorker(pw, { type: 'proxy-response', id: msg.id, error: err?.message ?? String(err) });
+      pw.send({ type: 'proxy-response', id: msg.id, error: err?.message ?? String(err) });
     }
   }
 

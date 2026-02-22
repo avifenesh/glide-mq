@@ -1,4 +1,3 @@
-import { randomBytes } from 'crypto';
 import type { JobOptions } from '../types';
 import type { SerializedJob, ChildToMain, MainToChild } from './types';
 import { GlideMQError } from '../errors';
@@ -30,6 +29,7 @@ export class SandboxJob<D = any, R = any> {
 
   private abortController: AbortController;
   private pendingProxies = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private proxySeq = 0;
   private sendMessage: (msg: ChildToMain) => void;
 
   constructor(serialized: SerializedJob, sendMessage: (msg: ChildToMain) => void) {
@@ -136,7 +136,7 @@ export class SandboxJob<D = any, R = any> {
   }
 
   private proxyCall(method: 'log' | 'updateProgress' | 'updateData', args: unknown[]): Promise<unknown> {
-    const id = randomBytes(8).toString('hex');
+    const id = String(++this.proxySeq);
     return new Promise<unknown>((resolve, reject) => {
       this.pendingProxies.set(id, { resolve, reject });
       this.sendMessage({ type: 'proxy-request', id, method, args });

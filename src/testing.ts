@@ -9,6 +9,7 @@
 import { EventEmitter } from 'events';
 import path from 'path';
 import type { JobOptions, JobCounts, Processor } from './types';
+import { GlideMQError } from './errors';
 
 // ---- Lightweight in-memory Job representation ----
 
@@ -249,11 +250,14 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     super();
     this.queue = queue;
     if (typeof processor === 'string') {
-      // In test mode, load the module synchronously - no child process
       const filePath = path.resolve(processor);
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const mod = require(filePath);
-      this.processor = mod.default || mod;
+      const fn = mod.default || mod;
+      if (typeof fn !== 'function') {
+        throw new GlideMQError(`Processor file ${filePath} does not export a function`);
+      }
+      this.processor = fn;
     } else {
       this.processor = processor;
     }
