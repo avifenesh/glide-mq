@@ -91,15 +91,6 @@ export class SandboxJob<D = any, R = any> {
     }
   }
 
-  /** @internal Reject all in-flight proxy calls. Called when the worker exits unexpectedly. */
-  drainPendingProxies(reason: string): void {
-    const err = new GlideMQError(reason);
-    for (const pending of this.pendingProxies.values()) {
-      pending.reject(err);
-    }
-    this.pendingProxies.clear();
-  }
-
   async getState(): Promise<string> {
     throw new GlideMQError('Method not available in sandboxed processor');
   }

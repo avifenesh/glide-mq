@@ -62,7 +62,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private globalRateLimitEnabled = false;
   private cachedRateLimitMax = 0;
   private cachedRateLimitDuration = 0;
-  private sandboxClose?: () => Promise<void>;
+  private sandboxClose?: (force?: boolean) => Promise<void>;
 
   constructor(name: string, processor: Processor<D, R> | string, opts: WorkerOptions) {
     super();
@@ -87,7 +87,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const concurrency = opts.concurrency ?? 1;
       const sandbox = createSandboxedProcessor<D, R>(processor, opts.sandbox, concurrency);
       this.processor = sandbox.processor;
-      this.sandboxClose = sandbox.close;
+      this.sandboxClose = (force?: boolean) => sandbox.close(force);
     } else {
       this.processor = processor;
     }
@@ -881,7 +881,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     // Shut down sandbox worker pool
     if (this.sandboxClose) {
-      await this.sandboxClose();
+      await this.sandboxClose(force);
     }
 
     // Clear all active heartbeats

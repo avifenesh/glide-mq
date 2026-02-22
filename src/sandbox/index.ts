@@ -33,7 +33,7 @@ export function createSandboxedProcessor<D = any, R = any>(
   processorPath: string,
   sandboxOpts: SandboxOptions | undefined,
   concurrency: number,
-): { processor: Processor<D, R>; close: () => Promise<void> } {
+): { processor: Processor<D, R>; close: (force?: boolean) => Promise<void> } {
   const absolutePath = path.resolve(processorPath);
 
   try {
@@ -55,7 +55,7 @@ export function createSandboxedProcessor<D = any, R = any>(
     return pool.run<D, R>(job);
   };
 
-  const close = () => pool.close();
+  const close = (force?: boolean) => pool.close(force);
 
   return { processor, close };
 }

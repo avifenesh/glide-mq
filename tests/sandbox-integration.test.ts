@@ -15,6 +15,7 @@ import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './he
 const ECHO_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/echo.js');
 const PROGRESS_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/progress.js');
 const CRASH_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/crash.js');
+const ABORT_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/abort-aware.js');
 
 describeEachMode('Sandboxed Processor', (CONNECTION) => {
   let cleanupClient: any;
@@ -168,5 +169,27 @@ describeEachMode('Sandboxed Processor', (CONNECTION) => {
     // Graceful close should not throw
     await worker.close(false);
     expect(completed).toBe(true);
+  }, 60_000);
+
+  it('abort signal propagates to sandboxed processor', async () => {
+    const queue = makeQueue();
+    const worker = new Worker(queue.name, ABORT_PROCESSOR, {
+      connection: CONNECTION,
+      concurrency: 1,
+    });
+    workers.push(worker);
+
+    const failedPromise = new Promise<any>((resolve) => {
+      worker.on('failed', (_job: any, err: any) => resolve(err));
+    });
+
+    const job = await queue.add('abort-test', {});
+    const jobId = job.id!;
+
+    // Poll until worker has registered the abort controller for this job
+    await waitFor(() => worker.abortJob(jobId), 15_000);
+
+    const err = await failedPromise;
+    expect(err.message).toMatch(/revoked/);
   }, 60_000);
 });

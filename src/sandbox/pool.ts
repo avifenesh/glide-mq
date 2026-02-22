@@ -52,6 +52,7 @@ export class SandboxPool {
     } else {
       thread = fork(this.runnerPath, [this.processorPath], {
         stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        execArgv: [],
       });
     }
 
@@ -259,7 +260,7 @@ export class SandboxPool {
   }
 
   /** Terminate all workers and reject pending waiters. */
-  async close(): Promise<void> {
+  async close(force?: boolean): Promise<void> {
     if (this._closed) return;
     this._closed = true;
 
@@ -274,20 +275,27 @@ export class SandboxPool {
     for (const pw of [...this.workers]) {
       terminations.push(
         new Promise<void>((resolve) => {
-          const timer = setTimeout(() => {
-            if (!this.useWorkerThreads) {
-              (pw.thread as ChildProcess).kill('SIGKILL');
-            }
-            resolve();
-          }, KILL_TIMEOUT);
-          pw.thread.once('exit', () => {
-            clearTimeout(timer);
-            resolve();
-          });
+          if (!force) {
+            const timer = setTimeout(() => {
+              if (!this.useWorkerThreads) {
+                (pw.thread as ChildProcess).kill('SIGKILL');
+              } else {
+                (pw.thread as WorkerThread).terminate();
+              }
+              resolve();
+            }, KILL_TIMEOUT);
+            pw.thread.once('exit', () => {
+              clearTimeout(timer);
+              resolve();
+            });
+          } else {
+            pw.thread.once('exit', () => resolve());
+          }
+
           if (this.useWorkerThreads) {
             (pw.thread as WorkerThread).terminate();
           } else {
-            (pw.thread as ChildProcess).kill();
+            (pw.thread as ChildProcess).kill(force ? 'SIGKILL' : undefined);
           }
         }),
       );
