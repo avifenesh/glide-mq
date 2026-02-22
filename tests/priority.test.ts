@@ -343,5 +343,28 @@ describeEachMode('Priority jobs', (CONNECTION) => {
       const result = await changePriority(cleanupClient, k, 'nonexistent-999', 5);
       expect(result).toBe('error:not_found');
     });
+
+    it('Job instance method: updates opts.priority and throws on invalid state', async () => {
+      const qName = Q + '-cp-instance';
+      const localQueue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+
+      const job = await localQueue.add('task', { x: 1 }, { priority: 3 });
+      expect(job!.opts.priority).toBe(3);
+
+      await job!.changePriority(1);
+      expect(job!.opts.priority).toBe(1);
+      expect(String(await cleanupClient.hget(k.job(job!.id), 'priority'))).toBe('1');
+
+      // Negative priority throws locally
+      await expect(job!.changePriority(-1)).rejects.toThrow('Priority must be >= 0');
+
+      // Active state throws via server
+      await cleanupClient.hset(k.job(job!.id), { state: 'active' });
+      await expect(job!.changePriority(5)).rejects.toThrow('Cannot change priority');
+
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    });
   });
 });
