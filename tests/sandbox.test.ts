@@ -10,6 +10,7 @@ import { LIBRARY_VERSION } from '../src/functions/index';
 
 const PROCESSORS = path.resolve(__dirname, 'fixtures/processors');
 const ECHO_PROCESSOR = path.join(PROCESSORS, 'echo.js');
+const ECHO_ESM_PROCESSOR = path.join(PROCESSORS, 'echo.mjs');
 const THROW_PROCESSOR = path.join(PROCESSORS, 'throw.js');
 const CRASH_PROCESSOR = path.join(PROCESSORS, 'crash.js');
 const SLOW_PROCESSOR = path.join(PROCESSORS, 'slow.js');
@@ -314,6 +315,77 @@ describe('SandboxPool', () => {
     } as unknown as Job;
 
     await expect(pool.run(fakeJob)).rejects.toThrow('SandboxPool is closed');
+  });
+
+  it('should load ESM processor (.mjs)', async () => {
+    const pool = new SandboxPool(ECHO_ESM_PROCESSOR, true, 1, RUNNER_PATH);
+
+    try {
+      const fakeJob = {
+        id: 'job-esm',
+        name: 'test',
+        data: { esm: true },
+        opts: {},
+        attemptsMade: 0,
+        timestamp: Date.now(),
+        progress: 0,
+        log: vi.fn(),
+        updateProgress: vi.fn(),
+        updateData: vi.fn(),
+      } as unknown as Job;
+
+      const result = await pool.run(fakeJob);
+      expect(result).toEqual({ esm: true });
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it('should process job via child process (fork mode)', async () => {
+    const pool = new SandboxPool(ECHO_PROCESSOR, false, 1, RUNNER_PATH);
+
+    try {
+      const fakeJob = {
+        id: 'job-fork',
+        name: 'test',
+        data: { mode: 'fork' },
+        opts: {},
+        attemptsMade: 0,
+        timestamp: Date.now(),
+        progress: 0,
+        log: vi.fn(),
+        updateProgress: vi.fn(),
+        updateData: vi.fn(),
+      } as unknown as Job;
+
+      const result = await pool.run(fakeJob);
+      expect(result).toEqual({ mode: 'fork' });
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it('should handle processor crash in fork mode', async () => {
+    const pool = new SandboxPool(CRASH_PROCESSOR, false, 1, RUNNER_PATH);
+
+    try {
+      const fakeJob = {
+        id: 'job-fork-crash',
+        name: 'test',
+        data: {},
+        opts: {},
+        attemptsMade: 0,
+        timestamp: Date.now(),
+        progress: 0,
+        log: vi.fn(),
+        updateProgress: vi.fn(),
+        updateData: vi.fn(),
+      } as unknown as Job;
+
+      await expect(pool.run(fakeJob)).rejects.toThrow(/exited with code/);
+    } finally {
+      await pool.close();
+    }
   });
 
   it('should queue jobs when all workers are busy', async () => {

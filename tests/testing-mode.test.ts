@@ -5,7 +5,10 @@
  * Run: npx vitest run tests/testing-mode.test.ts
  */
 import { describe, it, expect, afterEach } from 'vitest';
+import path from 'path';
 import { TestQueue, TestWorker, TestJob } from '../src/testing';
+
+const ECHO_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/echo.js');
 
 describe('TestQueue', () => {
   let queue: TestQueue;
@@ -350,5 +353,22 @@ describe('TestWorker', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(processed).toHaveLength(0);
+  });
+
+  it('should accept a file path string as processor', async () => {
+    queue = new TestQueue('test-q');
+    const completed: { job: TestJob; result: any }[] = [];
+
+    worker = new TestWorker(queue, ECHO_PROCESSOR);
+
+    worker.on('completed', (job, result) => {
+      completed.push({ job, result });
+    });
+
+    await queue.add('echo-task', { greeting: 'hello' });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(completed).toHaveLength(1);
+    expect(completed[0].result).toEqual({ greeting: 'hello' });
   });
 });
