@@ -106,6 +106,7 @@ describe('email processor', () => {
 | Method | Description |
 |--------|-------------|
 | `changePriority(newPriority)` | Re-prioritize a job in the in-memory queue; mirrors `Job.changePriority()` |
+| `changeDelay(newDelay)` | Change the delay of a job in the in-memory queue; mirrors `Job.changeDelay()` |
 
 ### TestWorker
 

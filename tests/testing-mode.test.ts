@@ -394,3 +394,25 @@ describe('TestJob.changePriority', () => {
     await expect(job!.changePriority(-1)).rejects.toThrow('Priority must be >= 0');
   });
 });
+
+describe('TestJob.changeDelay', () => {
+  let queue: TestQueue;
+
+  afterEach(async () => {
+    if (queue) await queue.close();
+  });
+
+  it('updates opts.delay', async () => {
+    queue = new TestQueue('cd-test');
+    const job = await queue.add('task', { x: 1 }, { delay: 5000 });
+    expect(job!.opts.delay).toBe(5000);
+    await job!.changeDelay(10000);
+    expect(job!.opts.delay).toBe(10000);
+  });
+
+  it('throws on negative delay', async () => {
+    queue = new TestQueue('cd-neg');
+    const job = await queue.add('task', { x: 1 });
+    await expect(job!.changeDelay(-1)).rejects.toThrow('Delay must be >= 0');
+  });
+});
