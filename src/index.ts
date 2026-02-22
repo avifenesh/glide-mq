@@ -28,6 +28,7 @@ export type {
   RateLimitConfig,
   TokenBucketConfig,
   ReadFrom,
+  SandboxOptions,
   SearchJobsOptions,
 } from './types';
 
