@@ -2194,11 +2194,7 @@ export async function cleanJobs(
 ): Promise<string[]> {
   const cutoff = timestamp - grace;
   const setKey = type === 'completed' ? k.completed : k.failed;
-  const result = await client.fcall(
-    'glidemq_clean',
-    [setKey, k.events, k.id],
-    [cutoff.toString(), limit.toString()],
-  );
+  const result = await client.fcall('glidemq_clean', [setKey, k.events, k.id], [cutoff.toString(), limit.toString()]);
   return Array.isArray(result) ? result.map((r) => String(r)) : [];
 }
 
