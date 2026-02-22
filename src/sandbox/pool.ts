@@ -160,11 +160,20 @@ export class SandboxPool {
       pw.currentReject = reject;
       let cleaned = false;
 
-      const removeListener = () => {
+      const abortHandler = job.abortSignal
+        ? () => {
+            pw.send({ type: 'abort', id: invocationId });
+          }
+        : undefined;
+
+      const cleanup = () => {
         if (cleaned) return;
         cleaned = true;
         pw.currentCleanup = undefined;
         pw.offMsg(onMessage);
+        if (job.abortSignal && abortHandler) {
+          job.abortSignal.removeEventListener('abort', abortHandler);
+        }
       };
 
       const onMessage = (msg: ChildToMain) => {
@@ -172,7 +181,7 @@ export class SandboxPool {
           switch (msg.type) {
             case 'completed':
               if (msg.id === invocationId) {
-                removeListener();
+                cleanup();
                 this.release(pw);
                 resolve(msg.result as R);
               }
@@ -180,7 +189,7 @@ export class SandboxPool {
 
             case 'failed':
               if (msg.id === invocationId) {
-                removeListener();
+                cleanup();
                 this.release(pw);
                 const err = new Error(msg.error);
                 if (msg.stack) err.stack = msg.stack;
@@ -197,13 +206,13 @@ export class SandboxPool {
               break;
           }
         } catch (err) {
-          removeListener();
+          cleanup();
           this.release(pw);
           reject(err);
         }
       };
 
-      pw.currentCleanup = removeListener;
+      pw.currentCleanup = cleanup;
       pw.onMsg(onMessage);
 
       // Send process message first so runner creates the SandboxJob entry
@@ -214,11 +223,6 @@ export class SandboxPool {
       });
 
       // Forward abort signal to sandbox worker (after process message)
-      const abortHandler = job.abortSignal
-        ? () => {
-            pw.send({ type: 'abort', id: invocationId });
-          }
-        : undefined;
       if (job.abortSignal && abortHandler) {
         if (job.abortSignal.aborted) {
           abortHandler();
@@ -226,15 +230,6 @@ export class SandboxPool {
           job.abortSignal.addEventListener('abort', abortHandler, { once: true });
         }
       }
-
-      const originalRemoveListener = removeListener;
-      const cleanupAll = () => {
-        originalRemoveListener();
-        if (job.abortSignal && abortHandler) {
-          job.abortSignal.removeEventListener('abort', abortHandler);
-        }
-      };
-      pw.currentCleanup = cleanupAll;
     });
   }
 
