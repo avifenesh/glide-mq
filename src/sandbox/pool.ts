@@ -9,6 +9,7 @@ interface PoolWorker {
   thread: WorkerThread | ChildProcess;
   busy: boolean;
   currentReject?: (err: Error) => void;
+  currentCleanup?: () => void;
 }
 
 interface Waiter {
@@ -57,8 +58,12 @@ export class SandboxPool {
       const idx = this.workers.indexOf(pw);
       if (idx >= 0) this.workers.splice(idx, 1);
 
+      if (pw.currentCleanup) {
+        pw.currentCleanup();
+      }
+
       if (pw.currentReject) {
-        pw.currentReject(new Error(`Sandbox worker exited with code ${code}`));
+        pw.currentReject(new GlideMQError(`Sandbox worker exited with code ${code}`));
         pw.currentReject = undefined;
       }
     };
@@ -66,6 +71,10 @@ export class SandboxPool {
     const onError = (err: Error) => {
       const idx = this.workers.indexOf(pw);
       if (idx >= 0) this.workers.splice(idx, 1);
+
+      if (pw.currentCleanup) {
+        pw.currentCleanup();
+      }
 
       if (pw.currentReject) {
         pw.currentReject(err);
@@ -123,7 +132,7 @@ export class SandboxPool {
    */
   async run<D, R>(job: Job<D, R>): Promise<R> {
     if (this._closed) {
-      throw new Error('SandboxPool is closed');
+      throw new GlideMQError('SandboxPool is closed');
     }
 
     const pw = await this.acquire();
@@ -132,19 +141,33 @@ export class SandboxPool {
 
     return new Promise<R>((resolve, reject) => {
       pw.currentReject = reject;
+      let cleaned = false;
+
+      const removeListener = () => {
+        if (cleaned) return;
+        cleaned = true;
+        pw.currentCleanup = undefined;
+        if (this.useWorkerThreads) {
+          (pw.thread as WorkerThread).off('message', onMessage);
+        } else {
+          (pw.thread as ChildProcess).off('message', onMessage);
+        }
+      };
 
       const onMessage = (msg: ChildToMain) => {
         switch (msg.type) {
           case 'completed':
             if (msg.id === invocationId) {
-              cleanup();
+              removeListener();
+              this.release(pw);
               resolve(msg.result as R);
             }
             break;
 
           case 'failed':
             if (msg.id === invocationId) {
-              cleanup();
+              removeListener();
+              this.release(pw);
               const err = new Error(msg.error);
               if (msg.stack) err.stack = msg.stack;
               reject(err);
@@ -157,15 +180,7 @@ export class SandboxPool {
         }
       };
 
-      const cleanup = () => {
-        if (this.useWorkerThreads) {
-          (pw.thread as WorkerThread).off('message', onMessage);
-        } else {
-          (pw.thread as ChildProcess).off('message', onMessage);
-        }
-        pw.currentReject = undefined;
-        this.release(pw);
-      };
+      pw.currentCleanup = removeListener;
 
       if (this.useWorkerThreads) {
         (pw.thread as WorkerThread).on('message', onMessage);
