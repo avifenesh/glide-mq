@@ -202,7 +202,11 @@ export class SandboxPool {
     });
   }
 
-  private async handleProxyRequest(pw: PoolWorker, job: Job, msg: ChildToMain & { type: 'proxy-request' }): Promise<void> {
+  private async handleProxyRequest(
+    pw: PoolWorker,
+    job: Job,
+    msg: ChildToMain & { type: 'proxy-request' },
+  ): Promise<void> {
     try {
       switch (msg.method) {
         case 'log':

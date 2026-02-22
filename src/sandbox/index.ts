@@ -22,9 +22,7 @@ function resolveRunnerPath(): string {
     dir = parent;
   }
 
-  throw new GlideMQError(
-    'Cannot find sandbox runner.js. Run `npm run build` to compile the project.',
-  );
+  throw new GlideMQError('Cannot find sandbox runner.js. Run `npm run build` to compile the project.');
 }
 
 /**
