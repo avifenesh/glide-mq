@@ -8,7 +8,6 @@
 
 import { EventEmitter } from 'events';
 import path from 'path';
-import { pathToFileURL } from 'url';
 import type { JobOptions, JobCounts, Processor } from './types';
 
 // ---- Lightweight in-memory Job representation ----
@@ -240,8 +239,7 @@ export interface TestWorkerOptions {
 
 export class TestWorker<D = any, R = any> extends EventEmitter {
   private queue: TestQueue<D, R>;
-  private processor: Processor<D, R> | null = null;
-  private processorReady: Promise<Processor<D, R>>;
+  private processor: Processor<D, R>;
   private concurrency: number;
   private activeCount = 0;
   private running = true;
@@ -251,16 +249,13 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     super();
     this.queue = queue;
     if (typeof processor === 'string') {
-      // In test mode, load the module asynchronously - no child process
+      // In test mode, load the module synchronously - no child process
       const filePath = path.resolve(processor);
-      this.processorReady = import(pathToFileURL(filePath).href).then((mod) => {
-        const fn = mod.default || mod;
-        this.processor = fn;
-        return fn;
-      });
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const mod = require(filePath);
+      this.processor = mod.default || mod;
     } else {
       this.processor = processor;
-      this.processorReady = Promise.resolve(processor);
     }
     this.concurrency = opts?.concurrency ?? 1;
 
@@ -313,8 +308,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private processJob(record: TestJobRecord<D, R>): void {
     const job = new TestJob<D, R>(record);
 
-    this.processorReady
-      .then((proc) => proc(job as any))
+    this.processor(job as any)
       .then((result) => {
         record.state = 'completed';
         record.returnvalue = result;
