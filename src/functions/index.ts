@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '25';
+export const LIBRARY_VERSION = '26';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1718,6 +1718,106 @@ redis.register_function('glidemq_changePriority', function(keys, args)
     redis.call('ZADD', scheduledKey, string.format('%.0f', newScore), jobId)
     redis.call('HSET', jobKey, 'priority', tostring(newPriority))
     emitEvent(eventsKey, 'priority-changed', jobId, {'priority', tostring(newPriority)})
+    return 'ok'
+  else
+    return 'error:invalid_state'
+  end
+end)
+
+redis.register_function('glidemq_changeDelay', function(keys, args)
+  local jobKey = keys[1]
+  local streamKey = keys[2]
+  local scheduledKey = keys[3]
+  local eventsKey = keys[4]
+  local jobId = args[1]
+  local newDelay = tonumber(args[2])
+  if newDelay == nil or newDelay < 0 then
+    return 'error:invalid_delay'
+  end
+  local now = tonumber(args[3])
+  local group = args[4]
+  local exists = redis.call('EXISTS', jobKey)
+  if exists == 0 then
+    return 'error:not_found'
+  end
+  local state = redis.call('HGET', jobKey, 'state')
+  if state == 'delayed' then
+    if newDelay == 0 then
+      local rawScore = redis.call('ZSCORE', scheduledKey, jobId)
+      if rawScore == false then
+        return 'error:not_in_scheduled'
+      end
+      local oldScore = tonumber(rawScore) or 0
+      local priority = math.floor(oldScore / PRIORITY_SHIFT)
+      redis.call('ZREM', scheduledKey, jobId)
+      if priority > 0 then
+        redis.call('ZADD', scheduledKey, string.format('%.0f', priority * PRIORITY_SHIFT), jobId)
+        redis.call('HSET', jobKey, 'state', 'prioritized', 'delay', '0')
+      else
+        redis.call('XADD', streamKey, '*', 'jobId', jobId)
+        redis.call('HSET', jobKey, 'state', 'waiting', 'delay', '0')
+      end
+    else
+      local rawScore = redis.call('ZSCORE', scheduledKey, jobId)
+      if rawScore == false then
+        return 'error:not_in_scheduled'
+      end
+      local oldScore = tonumber(rawScore) or 0
+      local priority = math.floor(oldScore / PRIORITY_SHIFT)
+      local newScore = priority * PRIORITY_SHIFT + (now + newDelay)
+      redis.call('ZADD', scheduledKey, 'XX', string.format('%.0f', newScore), jobId)
+      redis.call('HSET', jobKey, 'delay', tostring(newDelay))
+    end
+    emitEvent(eventsKey, 'delay-changed', jobId, {'delay', tostring(newDelay)})
+    return 'ok'
+  elseif state == 'waiting' then
+    if newDelay == 0 then
+      return 'no_op'
+    end
+    local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
+    local cursor = '-'
+    local found = false
+    while not found do
+      local entries = redis.call('XRANGE', streamKey, cursor, '+', 'COUNT', 1000)
+      if #entries == 0 then break end
+      for i = 1, #entries do
+        local entryId = entries[i][1]
+        local fields = entries[i][2]
+        for j = 1, #fields, 2 do
+          if fields[j] == 'jobId' and fields[j+1] == jobId then
+            pcall(redis.call, 'XACK', streamKey, group, entryId)
+            redis.call('XDEL', streamKey, entryId)
+            found = true
+            break
+          end
+        end
+        if found then break end
+      end
+      if not found then
+        local lastId = entries[#entries][1]
+        local dashPos = lastId:find('-')
+        cursor = lastId:sub(1, dashPos) .. tostring(tonumber(lastId:sub(dashPos + 1)) + 1)
+      end
+    end
+    local newScore = priority * PRIORITY_SHIFT + (now + newDelay)
+    redis.call('ZADD', scheduledKey, string.format('%.0f', newScore), jobId)
+    redis.call('HSET', jobKey, 'state', 'delayed', 'delay', tostring(newDelay))
+    emitEvent(eventsKey, 'delay-changed', jobId, {'delay', tostring(newDelay)})
+    return 'ok'
+  elseif state == 'prioritized' then
+    if newDelay == 0 then
+      return 'no_op'
+    end
+    local rawScore = redis.call('ZSCORE', scheduledKey, jobId)
+    if rawScore == false then
+      return 'error:not_in_scheduled'
+    end
+    local oldScore = tonumber(rawScore) or 0
+    local priority = math.floor(oldScore / PRIORITY_SHIFT)
+    local newScore = priority * PRIORITY_SHIFT + (now + newDelay)
+    redis.call('ZADD', scheduledKey, 'XX', string.format('%.0f', newScore), jobId)
+    redis.call('HSET', jobKey, 'state', 'delayed', 'delay', tostring(newDelay))
+    emitEvent(eventsKey, 'delay-changed', jobId, {'delay', tostring(newDelay)})
     return 'ok'
   else
     return 'error:invalid_state'
