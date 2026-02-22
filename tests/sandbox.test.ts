@@ -28,6 +28,9 @@ const THROW_PROCESSOR = path.join(PROCESSORS, 'throw.js');
 const CRASH_PROCESSOR = path.join(PROCESSORS, 'crash.js');
 const SLOW_PROCESSOR = path.join(PROCESSORS, 'slow.js');
 const PROGRESS_PROCESSOR = path.join(PROCESSORS, 'progress.js');
+const FLOOD_PROGRESS_PROCESSOR = path.join(PROCESSORS, 'flood-progress.js');
+const CONDITIONAL_CRASH_PROCESSOR = path.join(PROCESSORS, 'conditional-crash.js');
+const CONDITIONAL_PROXY_CRASH_PROCESSOR = path.join(PROCESSORS, 'conditional-proxy-crash.js');
 
 // The compiled runner.js lives in dist/sandbox/
 const RUNNER_PATH = path.resolve(__dirname, '..', 'dist', 'sandbox', 'runner.js');
@@ -517,4 +520,164 @@ describe('Worker with string processor', () => {
 
     await worker.close(true);
   });
+});
+
+describe('Stress tests', () => {
+  const makeJob = (id: string, data: any = {}) =>
+    ({
+      id,
+      name: 'stress',
+      data,
+      opts: {},
+      attemptsMade: 0,
+      timestamp: Date.now(),
+      progress: 0,
+      log: vi.fn().mockResolvedValue(undefined),
+      updateProgress: vi.fn().mockResolvedValue(undefined),
+      updateData: vi.fn().mockResolvedValue(undefined),
+    }) as unknown as Job;
+
+  it('should handle pool exhaustion: 20 jobs through 2-worker pool', async () => {
+    const pool = new SandboxPool(SLOW_PROCESSOR, true, 2, RUNNER_PATH);
+
+    try {
+      const jobs = Array.from({ length: 20 }, (_, i) => pool.run(makeJob(`exhaust-${i}`, { delay: 50 })));
+
+      const results = await Promise.all(jobs);
+
+      expect(results).toHaveLength(20);
+      for (const r of results) {
+        expect(r).toEqual({ delay: 50 });
+      }
+    } finally {
+      await pool.close();
+    }
+  }, 30_000);
+
+  it('should recover from 5 consecutive crashes within the same pool', async () => {
+    const pool = new SandboxPool(CONDITIONAL_CRASH_PROCESSOR, true, 2, RUNNER_PATH);
+
+    try {
+      // Crash 5 workers sequentially - pool spawns replacements each time
+      for (let i = 0; i < 5; i++) {
+        await expect(pool.run(makeJob(`crash-${i}`, { crash: true }))).rejects.toThrow(/exited with code/);
+      }
+
+      // Same pool should still process jobs after repeated crashes
+      const result = await pool.run(makeJob('post-crash', { ok: true }));
+      expect(result).toEqual({ ok: true });
+    } finally {
+      await pool.close();
+    }
+  }, 30_000);
+
+  it('should handle 50 rapid proxy calls (flood)', async () => {
+    const pool = new SandboxPool(FLOOD_PROGRESS_PROCESSOR, true, 1, RUNNER_PATH);
+
+    try {
+      const progressFn = vi.fn().mockResolvedValue(undefined);
+      const job = {
+        ...makeJob('flood-1', { flooded: true }),
+        updateProgress: progressFn,
+      } as unknown as Job;
+
+      const result = await pool.run(job);
+
+      expect(result).toEqual({ flooded: true });
+      expect(progressFn).toHaveBeenCalledTimes(50);
+      // Verify ordering: IPC messages arrive in send order
+      expect(progressFn).toHaveBeenNthCalledWith(1, 2);
+      expect(progressFn).toHaveBeenNthCalledWith(50, 100);
+    } finally {
+      await pool.close();
+    }
+  }, 30_000);
+
+  it('should recover after crash during proxy call', async () => {
+    const pool = new SandboxPool(CONDITIONAL_PROXY_CRASH_PROCESSOR, true, 1, RUNNER_PATH);
+
+    try {
+      // Use a slow log mock so the proxy call is genuinely pending when the worker exits
+      const crashJob = {
+        ...makeJob('crash-proxy-1', { crash: true }),
+        log: vi.fn(() => new Promise((r) => setTimeout(r, 5000))),
+      } as unknown as Job;
+      await expect(pool.run(crashJob)).rejects.toThrow(/exited with code/);
+
+      // Same pool should recover and process a normal job
+      const result = await pool.run(makeJob('post-crash-proxy', { recovered: true }));
+      expect(result).toEqual({ recovered: true });
+    } finally {
+      await pool.close();
+    }
+  }, 30_000);
+
+  it('should close() during active and queued jobs', async () => {
+    const pool = new SandboxPool(SLOW_PROCESSOR, true, 2, RUNNER_PATH);
+
+    try {
+      // Start 4 jobs: 2 active (occupy both workers) + 2 queued
+      const promises = Array.from({ length: 4 }, (_, i) => pool.run(makeJob(`close-active-${i}`, { delay: 5000 })));
+
+      // Attach rejection handlers BEFORE close() to prevent unhandled rejection warnings
+      const settled = Promise.allSettled(promises);
+
+      // Give workers time to start processing
+      await new Promise((r) => setTimeout(r, 200));
+
+      const start = Date.now();
+      await pool.close(false);
+      const elapsed = Date.now() - start;
+
+      // close() should resolve within 10s (KILL_TIMEOUT=5s + buffer)
+      expect(elapsed).toBeLessThan(10_000);
+
+      // All 4 promises should reject
+      const results = await settled;
+      for (const r of results) {
+        expect(r.status).toBe('rejected');
+      }
+
+      // Verify error types: queued jobs get "closed", active jobs get "exited"
+      const reasons = results.map((r) => (r as PromiseRejectedResult).reason?.message ?? '');
+      const closedCount = reasons.filter((m) => m.includes('closed')).length;
+      const exitedCount = reasons.filter((m) => m.includes('exited')).length;
+      expect(closedCount + exitedCount).toBe(4);
+      expect(closedCount).toBeGreaterThan(0);
+      expect(exitedCount).toBeGreaterThan(0);
+    } finally {
+      await pool.close();
+    }
+  }, 15_000);
+
+  it('should force-close within 3s', async () => {
+    const pool = new SandboxPool(SLOW_PROCESSOR, true, 2, RUNNER_PATH);
+
+    try {
+      const promises = [
+        pool.run(makeJob('force-1', { delay: 10_000 })),
+        pool.run(makeJob('force-2', { delay: 10_000 })),
+      ];
+
+      // Attach rejection handlers BEFORE close() to prevent unhandled rejection warnings
+      const settled = Promise.allSettled(promises);
+
+      // Give workers time to start
+      await new Promise((r) => setTimeout(r, 200));
+
+      const start = Date.now();
+      await pool.close(true);
+      const elapsed = Date.now() - start;
+
+      // FORCE_TIMEOUT=2s + generous CI buffer
+      expect(elapsed).toBeLessThan(5_000);
+
+      const results = await settled;
+      for (const r of results) {
+        expect(r.status).toBe('rejected');
+      }
+    } finally {
+      await pool.close();
+    }
+  }, 10_000);
 });
