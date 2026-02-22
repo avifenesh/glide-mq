@@ -31,6 +31,7 @@ const PROGRESS_PROCESSOR = path.join(PROCESSORS, 'progress.js');
 const FLOOD_PROGRESS_PROCESSOR = path.join(PROCESSORS, 'flood-progress.js');
 const CRASH_AFTER_PROXY_PROCESSOR = path.join(PROCESSORS, 'crash-after-proxy.js');
 const CONDITIONAL_CRASH_PROCESSOR = path.join(PROCESSORS, 'conditional-crash.js');
+const CONDITIONAL_PROXY_CRASH_PROCESSOR = path.join(PROCESSORS, 'conditional-proxy-crash.js');
 
 // The compiled runner.js lives in dist/sandbox/
 const RUNNER_PATH = path.resolve(__dirname, '..', 'dist', 'sandbox', 'runner.js');
@@ -594,21 +595,17 @@ describe('Stress tests', () => {
   }, 30_000);
 
   it('should recover after crash during proxy call', async () => {
-    const pool = new SandboxPool(CRASH_AFTER_PROXY_PROCESSOR, true, 1, RUNNER_PATH);
+    const pool = new SandboxPool(CONDITIONAL_PROXY_CRASH_PROCESSOR, true, 1, RUNNER_PATH);
 
     try {
-      await expect(pool.run(makeJob('crash-proxy-1'))).rejects.toThrow(/exited with code/);
-    } finally {
-      await pool.close();
-    }
+      // Crash with in-flight proxy call
+      await expect(pool.run(makeJob('crash-proxy-1', { crash: true }))).rejects.toThrow(/exited with code/);
 
-    // Verify a fresh pool still works after crash-during-proxy
-    const pool2 = new SandboxPool(ECHO_PROCESSOR, true, 1, RUNNER_PATH);
-    try {
-      const result = await pool2.run(makeJob('post-crash-proxy', { recovered: true }));
+      // Same pool should recover and process a normal job
+      const result = await pool.run(makeJob('post-crash-proxy', { recovered: true }));
       expect(result).toEqual({ recovered: true });
     } finally {
-      await pool2.close();
+      await pool.close();
     }
   }, 30_000);
 
