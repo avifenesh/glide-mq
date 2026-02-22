@@ -540,9 +540,7 @@ describe('Stress tests', () => {
     const pool = new SandboxPool(SLOW_PROCESSOR, true, 2, RUNNER_PATH);
 
     try {
-      const jobs = Array.from({ length: 20 }, (_, i) =>
-        pool.run(makeJob(`exhaust-${i}`, { delay: 50 })),
-      );
+      const jobs = Array.from({ length: 20 }, (_, i) => pool.run(makeJob(`exhaust-${i}`, { delay: 50 })));
 
       const results = await Promise.all(jobs);
 
@@ -621,9 +619,7 @@ describe('Stress tests', () => {
     const pool = new SandboxPool(SLOW_PROCESSOR, true, 2, RUNNER_PATH);
 
     // Start 4 jobs: 2 active (occupy both workers) + 2 queued
-    const promises = Array.from({ length: 4 }, (_, i) =>
-      pool.run(makeJob(`close-active-${i}`, { delay: 5000 })),
-    );
+    const promises = Array.from({ length: 4 }, (_, i) => pool.run(makeJob(`close-active-${i}`, { delay: 5000 })));
 
     // Attach rejection handlers BEFORE close() to prevent unhandled rejection warnings
     const settled = Promise.allSettled(promises);
@@ -648,10 +644,7 @@ describe('Stress tests', () => {
   it('should force-close within 3s', async () => {
     const pool = new SandboxPool(SLOW_PROCESSOR, true, 2, RUNNER_PATH);
 
-    const promises = [
-      pool.run(makeJob('force-1', { delay: 10_000 })),
-      pool.run(makeJob('force-2', { delay: 10_000 })),
-    ];
+    const promises = [pool.run(makeJob('force-1', { delay: 10_000 })), pool.run(makeJob('force-2', { delay: 10_000 }))];
 
     // Attach rejection handlers BEFORE close() to prevent unhandled rejection warnings
     const settled = Promise.allSettled(promises);
