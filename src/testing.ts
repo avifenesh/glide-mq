@@ -133,7 +133,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       name,
       data,
       opts: opts ?? {},
-      state: (opts?.delay && opts.delay > 0) ? 'delayed' : 'waiting',
+      state: opts?.delay && opts.delay > 0 ? 'delayed' : 'waiting',
       attemptsMade: 0,
       returnvalue: undefined,
       failedReason: undefined,
