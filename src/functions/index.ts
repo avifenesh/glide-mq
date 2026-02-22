@@ -1651,7 +1651,7 @@ redis.register_function('glidemq_changePriority', function(keys, args)
   local eventsKey = keys[4]
   local jobId = args[1]
   local newPriority = tonumber(args[2])
-  if newPriority == nil then
+  if newPriority == nil or newPriority < 0 then
     return 'error:invalid_priority'
   end
   local group = args[3]
@@ -1674,7 +1674,7 @@ redis.register_function('glidemq_changePriority', function(keys, args)
         local fields = entries[i][2]
         for j = 1, #fields, 2 do
           if fields[j] == 'jobId' and fields[j+1] == jobId then
-            redis.call('XACK', streamKey, group, entryId)
+            pcall(redis.call, 'XACK', streamKey, group, entryId)
             redis.call('XDEL', streamKey, entryId)
             found = true
             break
@@ -1687,6 +1687,9 @@ redis.register_function('glidemq_changePriority', function(keys, args)
         local dashPos = lastId:find('-')
         cursor = lastId:sub(1, dashPos) .. tostring(tonumber(lastId:sub(dashPos + 1)) + 1)
       end
+    end
+    if not found then
+      return 'error:not_in_stream'
     end
     redis.call('ZADD', scheduledKey, string.format('%.0f', newPriority * PRIORITY_SHIFT), jobId)
     redis.call('HSET', jobKey, 'state', 'prioritized', 'priority', tostring(newPriority))
@@ -1704,7 +1707,11 @@ redis.register_function('glidemq_changePriority', function(keys, args)
     emitEvent(eventsKey, 'priority-changed', jobId, {'priority', tostring(newPriority)})
     return 'ok'
   elseif state == 'delayed' then
-    local oldScore = tonumber(redis.call('ZSCORE', scheduledKey, jobId)) or 0
+    local rawScore = redis.call('ZSCORE', scheduledKey, jobId)
+    if rawScore == false then
+      return 'error:not_in_scheduled'
+    end
+    local oldScore = tonumber(rawScore) or 0
     local oldTimestamp = oldScore % PRIORITY_SHIFT
     local newScore = newPriority * PRIORITY_SHIFT + oldTimestamp
     redis.call('ZREM', scheduledKey, jobId)

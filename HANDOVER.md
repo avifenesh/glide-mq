@@ -4,7 +4,7 @@ Current state of the glide-mq repository as of 2026-02-22.
 
 ## Branch
 
-`feature/change-priority-13` - open against `main`. PR not yet created.
+`feature/change-priority-13` - open against `main`. PR #43.
 
 ## In-progress task
 
