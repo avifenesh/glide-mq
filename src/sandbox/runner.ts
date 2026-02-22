@@ -24,7 +24,7 @@ function send(msg: ChildToMain): void {
 }
 
 let cachedProcessor: ((job: any) => Promise<any>) | null = null;
-let currentJob: SandboxJob | null = null;
+const activeJobs = new Map<string, SandboxJob>();
 
 async function loadProcessor(filePath: string): Promise<(job: any) => Promise<any>> {
   if (cachedProcessor) return cachedProcessor;
@@ -53,19 +53,18 @@ async function loadProcessor(filePath: string): Promise<(job: any) => Promise<an
 
 async function handleProcess(id: string, serialized: SerializedJob): Promise<void> {
   try {
-    // The processor path is passed via workerData (threads) or argv (child process)
     const processorPath = isThread ? workerData.processorPath : process.argv[2];
     const processor = await loadProcessor(processorPath);
 
     const job = new SandboxJob(serialized, send);
-    currentJob = job;
+    activeJobs.set(id, job);
 
     const result = await processor(job);
 
-    currentJob = null;
+    activeJobs.delete(id);
     send({ type: 'completed', id, result });
   } catch (err: any) {
-    currentJob = null;
+    activeJobs.delete(id);
     send({
       type: 'failed',
       id,
@@ -78,18 +77,27 @@ async function handleProcess(id: string, serialized: SerializedJob): Promise<voi
 function handleMessage(msg: MainToChild): void {
   switch (msg.type) {
     case 'process':
-      handleProcess(msg.id, msg.job);
+      handleProcess(msg.id, msg.job).catch((err) => {
+        send({
+          type: 'failed',
+          id: msg.id,
+          error: err?.message ?? String(err),
+        });
+      });
       break;
-    case 'abort':
-      if (currentJob) {
-        currentJob._abort();
+    case 'abort': {
+      const abortJob = activeJobs.get(msg.id);
+      if (abortJob) {
+        abortJob._abort();
       }
       break;
-    case 'proxy-response':
-      if (currentJob) {
-        currentJob.handleProxyResponse(msg);
+    }
+    case 'proxy-response': {
+      for (const job of activeJobs.values()) {
+        job.handleProxyResponse(msg);
       }
       break;
+    }
   }
 }
 

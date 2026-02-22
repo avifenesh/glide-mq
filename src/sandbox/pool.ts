@@ -16,6 +16,8 @@ interface Waiter {
   reject: (err: Error) => void;
 }
 
+let nextInvocationId = 0;
+
 /**
  * Pool of worker threads or child processes that execute sandboxed processors.
  * Manages lifecycle, IPC message routing, and concurrency.
@@ -126,7 +128,7 @@ export class SandboxPool {
 
     const pw = await this.acquire();
     const serialized = toSerializedJob(job);
-    const invocationId = job.id;
+    const invocationId = String(++nextInvocationId);
 
     return new Promise<R>((resolve, reject) => {
       pw.currentReject = reject;
