@@ -2193,8 +2193,8 @@ export async function cleanJobs(
 ): Promise<string[]> {
   const cutoff = timestamp - grace;
   const setKey = type === 'completed' ? k.completed : k.failed;
-  // Derive prefix from the key: "glide:{queueName}:completed" -> "glide:{queueName}:"
-  const prefix = setKey.replace(/completed$|failed$/, '');
+  // Derive prefix from k.id: "glide:{queueName}:id" -> "glide:{queueName}:"
+  const prefix = k.id.slice(0, -2);
   const result = await client.fcall(
     'glidemq_clean',
     [setKey, k.events],

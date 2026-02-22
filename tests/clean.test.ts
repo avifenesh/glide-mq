@@ -161,6 +161,51 @@ describeEachMode('Queue.clean()', (CONNECTION) => {
     await flushQueue(cleanupClient, Q + '-grace');
   }, 15000);
 
+  it('only removes old jobs in a mixed-age batch', async () => {
+    const queue = new Queue(Q + '-mixed', { connection: CONNECTION });
+
+    const worker = new Worker(Q + '-mixed', async () => 'ok', {
+      connection: CONNECTION,
+      concurrency: 5,
+      blockTimeout: 1000,
+    });
+    worker.on('error', () => {});
+
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Add first batch and let them complete
+    await queue.add('old-1', { v: 1 });
+    await queue.add('old-2', { v: 2 });
+
+    await waitFor(async () => {
+      const counts = await queue.getJobCounts();
+      return counts.completed >= 2;
+    }, 10000);
+
+    // Wait so first batch ages
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Add second batch
+    await queue.add('new-1', { v: 3 });
+    await queue.add('new-2', { v: 4 });
+
+    await waitFor(async () => {
+      const counts = await queue.getJobCounts();
+      return counts.completed >= 4;
+    }, 10000);
+
+    // Grace of 100ms - should only remove the old batch
+    const removed = await queue.clean(100, 100, 'completed');
+    expect(removed).toHaveLength(2);
+
+    const counts = await queue.getJobCounts();
+    expect(counts.completed).toBe(2);
+
+    await worker.close(true);
+    await queue.close();
+    await flushQueue(cleanupClient, Q + '-mixed');
+  }, 20000);
+
   it('returns empty array when no matching jobs', async () => {
     const queue = new Queue(Q + '-empty', { connection: CONNECTION });
     const removed = await queue.clean(0, 100, 'completed');
