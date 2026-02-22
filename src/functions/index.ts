@@ -2538,6 +2538,26 @@ export async function changePriority(
 }
 
 /**
+ * Change the delay of a job after enqueue.
+ * Handles delayed, waiting, and prioritized states. Returns 'ok', 'no_op',
+ * or an error string for invalid states.
+ */
+export async function changeDelay(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  newDelay: number,
+  group: string = CONSUMER_GROUP,
+): Promise<string> {
+  const result = await client.fcall(
+    'glidemq_changeDelay',
+    [k.job(jobId), k.stream, k.scheduled, k.events],
+    [jobId, newDelay.toString(), Date.now().toString(), group],
+  );
+  return result as string;
+}
+
+/**
  * Search for jobs by name within a specific state structure.
  * For ZSet states (completed, failed, delayed): iterates members and checks name.
  * For stream state (waiting): iterates stream entries and checks name.
