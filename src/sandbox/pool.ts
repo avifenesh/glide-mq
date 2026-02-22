@@ -1,6 +1,5 @@
 import { Worker as WorkerThread } from 'worker_threads';
 import { fork, ChildProcess } from 'child_process';
-import path from 'path';
 import type { MainToChild, ChildToMain } from './types';
 import { toSerializedJob } from './types';
 import type { Job } from '../job';
@@ -24,11 +23,11 @@ export class SandboxPool {
   private waiters: Array<(pw: PoolWorker) => void> = [];
   private _closed = false;
 
-  constructor(processorPath: string, useWorkerThreads: boolean, maxWorkers: number) {
+  constructor(processorPath: string, useWorkerThreads: boolean, maxWorkers: number, runnerPath: string) {
     this.processorPath = processorPath;
     this.useWorkerThreads = useWorkerThreads;
     this.maxWorkers = maxWorkers;
-    this.runnerPath = path.join(__dirname, 'runner.js');
+    this.runnerPath = runnerPath;
   }
 
   private spawn(): PoolWorker {
