@@ -16,14 +16,23 @@ npm install glide-mq
 
 ## Features
 
-- **Queues & Workers** — producer/consumer with configurable concurrency
-- **Workflows** — `FlowProducer` trees, `chain`, `group`, `chord` pipelines
-- **Schedulers** — cron and interval repeatable jobs
-- **Rate limiting** — token-bucket and global rate limiting
-- **Retries & DLQ** — exponential/fixed backoff with dead-letter queues
-- **Deduplication** — content- and id-based job dedup
+- **Queues & Workers** — producer/consumer with configurable concurrency and priority
+- **Workflows** — `FlowProducer` parent-child trees, `chain`, `group`, `chord` pipelines with result aggregation
+- **Schedulers** — cron and interval repeatable jobs, persisted across restarts
+- **Per-key ordering** — sequential processing per key while staying parallel across keys
+- **Rate limiting** — token-bucket (cost-based), per-group, and global rate limiting
+- **Retries & DLQ** — exponential/fixed/custom backoff with dead-letter queues
+- **Deduplication** — simple, throttle, and debounce modes with configurable TTL
+- **Job revocation** — cooperative cancellation via AbortSignal for active jobs
+- **Stalled job recovery** — auto-reclaim jobs from crashed workers via XAUTOCLAIM
+- **Global concurrency** — cross-worker active job cap for the entire queue
+- **Job search** — query by state, name, and data filters
+- **Progress tracking** — real-time numeric or object progress updates
+- **Batch API** — `addBulk` for high-throughput ingestion (12.7× faster than serial)
 - **Compression** — transparent gzip (up to 98% size reduction)
-- **Observability** — OpenTelemetry tracing, job-level logs, [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) middleware
+- **Graceful shutdown** — one-liner `gracefulShutdown()` for SIGTERM/SIGINT handling
+- **Connection sharing** — reuse a single client across components to reduce TCP connections
+- **Observability** — OpenTelemetry tracing, per-job logs, [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) middleware
 - **In-memory testing** — `TestQueue` & `TestWorker` with zero dependencies via `glide-mq/testing`
 
 ## Quick Start
