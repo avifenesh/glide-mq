@@ -72,6 +72,13 @@ export class TestJob<D = any, R = any> {
 
   discarded = false;
 
+  async changePriority(newPriority: number): Promise<void> {
+    if (newPriority < 0) {
+      throw new Error('Priority must be >= 0');
+    }
+    this.opts.priority = newPriority;
+  }
+
   discard(): void {
     this.discarded = true;
   }
