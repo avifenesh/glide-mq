@@ -84,6 +84,26 @@ await queue.obliterate();             // fails if there are active jobs
 await queue.obliterate({ force: true }); // unconditional wipe
 ```
 
+### Cleaning old jobs
+
+Remove completed or failed jobs that are older than a given grace period:
+
+```typescript
+// Remove completed jobs older than 1 hour, up to 1000 at a time
+const removedIds = await queue.clean(60_000 * 60, 1000, 'completed');
+
+// Remove failed jobs older than 24 hours, up to 500 at a time
+const removedFailedIds = await queue.clean(60_000 * 60 * 24, 500, 'failed');
+
+console.log(`Cleaned ${removedIds.length} completed jobs`);
+```
+
+- `grace` — minimum age in milliseconds; jobs finished more recently are kept.
+- `limit` — maximum number of jobs to remove per call.
+- `type` — `'completed'` or `'failed'`.
+
+Returns an array of the removed job IDs.
+
 ### Closing
 
 ```typescript

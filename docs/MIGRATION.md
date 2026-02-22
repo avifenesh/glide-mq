@@ -435,7 +435,7 @@ The processor function signature is identical. The only change is the connection
 | `queue.removeJobScheduler(id)` | `queue.removeJobScheduler(name)` | Full |
 | `queue.getWorkers()` | - | Gap [#18](https://github.com/avifenesh/glide-mq/issues/18) |
 | `queue.drain(delayed?)` | - | Gap [#15](https://github.com/avifenesh/glide-mq/issues/15) |
-| `queue.clean(grace, limit, type)` | - | Gap [#16](https://github.com/avifenesh/glide-mq/issues/16) |
+| `queue.clean(grace, limit, type)` | `queue.clean(grace, limit, type)` | Full |
 | `queue.retryJobs(opts)` | - | Gap [#17](https://github.com/avifenesh/glide-mq/issues/17) |
 | `queue.close()` | `queue.close()` | Full |
 | - | `queue.revoke(jobId)` | glide-mq only |
@@ -1100,7 +1100,7 @@ These features exist in BullMQ but are not yet implemented in glide-mq. Each has
 | `job.changePriority(opts)` | Remove and re-add with new priority | [#13](https://github.com/avifenesh/glide-mq/issues/13) |
 | `job.discard()` | Set `attempts: 1` upfront, or use a backoff strategy returning a large value that exceeds max attempts | [#14](https://github.com/avifenesh/glide-mq/issues/14) |
 | `queue.drain(delayed?)` | `queue.obliterate({ force: false })` removes everything; no surgical drain yet | [#15](https://github.com/avifenesh/glide-mq/issues/15) |
-| `queue.clean(grace, limit, type)` | Iterate `getJobs('completed')`, filter by `finishedOn`, call `job.remove()` | [#16](https://github.com/avifenesh/glide-mq/issues/16) |
+| `queue.clean(grace, limit, type)` | Now implemented natively — see [Queue API table](#queue-methods-and-options) above | Resolved [#16](https://github.com/avifenesh/glide-mq/issues/16) |
 | `queue.retryJobs(opts)` | `const failed = await queue.getJobs('failed'); await Promise.all(failed.map(j => j.retry()))` | [#17](https://github.com/avifenesh/glide-mq/issues/17) |
 | `queue.getWorkers()` | Not available | [#18](https://github.com/avifenesh/glide-mq/issues/18) |
 | `queue.getJobScheduler(name)` | `(await queue.getRepeatableJobs()).find(s => s.name === name)` | [#19](https://github.com/avifenesh/glide-mq/issues/19) |
