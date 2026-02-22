@@ -185,28 +185,28 @@ describe('discard in sandbox mode', () => {
 
   it('job.discard() propagates discarded flag through IPC', async () => {
     const pool = new SandboxPool(DISCARD_PROCESSOR, true, 1, RUNNER_PATH);
-    const job = makeJob('sandbox-discard-1');
-
-    await expect(pool.run(job)).rejects.toThrow('discarded-in-sandbox');
-    expect(job.discarded).toBe(true);
-
-    await pool.close();
+    try {
+      const job = makeJob('sandbox-discard-1');
+      await expect(pool.run(job)).rejects.toThrow('discarded-in-sandbox');
+      expect(job.discarded).toBe(true);
+    } finally {
+      await pool.close();
+    }
   });
 
   it('UnrecoverableError name survives IPC serialization', async () => {
     const pool = new SandboxPool(UNRECOVERABLE_PROCESSOR, true, 1, RUNNER_PATH);
-    const job = makeJob('sandbox-unrecoverable-1');
-
     try {
-      await pool.run(job);
-      expect.unreachable('should have thrown');
-    } catch (err: any) {
-      expect(err).toBeInstanceOf(UE);
-      expect(err.name).toBe('UnrecoverableError');
-      expect(err.message).toBe('fatal-in-sandbox');
+      const job = makeJob('sandbox-unrecoverable-1');
+      await expect(pool.run(job)).rejects.toSatisfy((err: any) => {
+        expect(err).toBeInstanceOf(UE);
+        expect(err.name).toBe('UnrecoverableError');
+        expect(err.message).toBe('fatal-in-sandbox');
+        return true;
+      });
+    } finally {
+      await pool.close();
     }
-
-    await pool.close();
   });
 });
 
@@ -230,10 +230,11 @@ describe('discard in testing mode', () => {
         throw new Error('nope');
       });
 
-      worker.on('failed', async () => {
+      worker.on('failed', async (_j: any, err: Error) => {
         clearTimeout(timeout);
         try {
           expect(attemptCount).toBe(1);
+          expect(err.message).toBe('nope');
           await worker.close();
           resolve();
         } catch (e) {
@@ -260,10 +261,11 @@ describe('discard in testing mode', () => {
         throw new UE('fatal');
       });
 
-      worker.on('failed', async () => {
+      worker.on('failed', async (_j: any, err: Error) => {
         clearTimeout(timeout);
         try {
           expect(attemptCount).toBe(1);
+          expect(err.message).toBe('fatal');
           await worker.close();
           resolve();
         } catch (e) {
