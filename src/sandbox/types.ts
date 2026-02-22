@@ -31,11 +31,11 @@ export type MainToChild =
 /** Messages sent from the child back to the main thread. */
 export type ChildToMain =
   | { type: 'completed'; id: string; result: unknown }
-  | { type: 'failed'; id: string; error: string; stack?: string }
+  | { type: 'failed'; id: string; error: string; stack?: string; errorName?: string; discarded?: boolean }
   | {
       type: 'proxy-request';
       id: string;
-      method: 'log' | 'updateProgress' | 'updateData';
+      method: 'log' | 'updateProgress' | 'updateData' | 'discard';
       args: unknown[];
     };
 

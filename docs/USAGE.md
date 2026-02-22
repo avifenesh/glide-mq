@@ -127,6 +127,16 @@ const worker = new Worker('tasks', async (job) => {
   await job.updateProgress(50);          // broadcast progress (0–100 or object)
   await job.updateData({ ...job.data, enriched: true });
 
+  // Permanently fail a job without consuming retries (two equivalent approaches):
+  // 1. Imperative: call job.discard() then throw
+  if (job.data.poison) {
+    job.discard();
+    throw new Error('poisoned job - discarded');
+  }
+  // 2. Declarative: throw UnrecoverableError - same effect, no discard() needed
+  // import { UnrecoverableError } from 'glide-mq';
+  // throw new UnrecoverableError('bad input - will not retry');
+
   return { ok: true };                   // becomes job.returnvalue
 }, {
   connection,

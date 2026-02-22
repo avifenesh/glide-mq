@@ -81,6 +81,8 @@ async function handleProcess(id: string, serialized: SerializedJob): Promise<voi
       id,
       error: err?.message ?? String(err),
       stack: err?.stack,
+      errorName: err?.name,
+      discarded: job.discarded,
     });
   }
 }

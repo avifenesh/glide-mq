@@ -30,6 +30,12 @@ export class Job<D = any, R = any> {
   abortSignal?: AbortSignal;
 
   /**
+   * When true, the job will not be retried on failure regardless of attempts config.
+   * Set by calling `discard()` inside the processor.
+   */
+  discarded = false;
+
+  /**
    * Stream entry ID assigned when the job was added to the stream.
    * Used by Worker to XACK after processing.
    * @internal
@@ -85,6 +91,14 @@ export class Job<D = any, R = any> {
       data: JSON.stringify(data),
     });
     this.data = data;
+  }
+
+  /**
+   * Mark this job so it will not be retried on failure.
+   * Call inside the processor before throwing to skip all remaining attempts.
+   */
+  discard(): void {
+    this.discarded = true;
   }
 
   /**

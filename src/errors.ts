@@ -18,3 +18,10 @@ export class ScriptError extends GlideMQError {
     this.name = 'ScriptError';
   }
 }
+
+export class UnrecoverableError extends GlideMQError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnrecoverableError';
+  }
+}
