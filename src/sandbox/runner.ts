@@ -12,7 +12,7 @@ const isChild = typeof process.send === 'function';
 
 if (!isThread && !isChild) {
   // This file was loaded directly (not as a worker thread or child process)
-  throw new Error('runner.ts must be loaded as a worker thread or child process');
+  throw new Error('Sandbox runner must be loaded as a worker thread or child process');
 }
 
 function send(msg: ChildToMain): void {

@@ -271,26 +271,35 @@ export class SandboxPool {
     this.waiters.length = 0;
 
     const KILL_TIMEOUT = 5000;
+    const FORCE_TIMEOUT = 2000;
     const terminations: Promise<void>[] = [];
     for (const pw of [...this.workers]) {
       terminations.push(
         new Promise<void>((resolve) => {
-          if (!force) {
-            const timer = setTimeout(() => {
+          // Check if child process already exited to avoid missing 'exit' event
+          if (!this.useWorkerThreads) {
+            const child = pw.thread as ChildProcess;
+            if (child.exitCode !== null || child.signalCode !== null) {
+              resolve();
+              return;
+            }
+          }
+
+          const timer = setTimeout(
+            () => {
               if (!this.useWorkerThreads) {
                 (pw.thread as ChildProcess).kill('SIGKILL');
               } else {
                 (pw.thread as WorkerThread).terminate();
               }
               resolve();
-            }, KILL_TIMEOUT);
-            pw.thread.once('exit', () => {
-              clearTimeout(timer);
-              resolve();
-            });
-          } else {
-            pw.thread.once('exit', () => resolve());
-          }
+            },
+            force ? FORCE_TIMEOUT : KILL_TIMEOUT,
+          );
+          pw.thread.once('exit', () => {
+            clearTimeout(timer);
+            resolve();
+          });
 
           if (this.useWorkerThreads) {
             (pw.thread as WorkerThread).terminate();
