@@ -9,7 +9,7 @@
 import { EventEmitter } from 'events';
 import path from 'path';
 import type { JobOptions, JobCounts, Processor } from './types';
-import { GlideMQError } from './errors';
+import { GlideMQError, UnrecoverableError } from './errors';
 
 // ---- Lightweight in-memory Job representation ----
 
@@ -68,6 +68,12 @@ export class TestJob<D = any, R = any> {
 
   async updateData(data: D): Promise<void> {
     this.data = data;
+  }
+
+  discarded = false;
+
+  discard(): void {
+    this.discarded = true;
   }
 }
 
@@ -358,7 +364,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         record.attemptsMade++;
         const maxAttempts = record.opts.attempts ?? 0;
 
-        if (maxAttempts > 0 && record.attemptsMade < maxAttempts) {
+        if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !job.discarded && !(err instanceof UnrecoverableError)) {
           // Retry: put back to waiting
           record.state = 'waiting';
           // Schedule a re-drain so the retry gets picked up

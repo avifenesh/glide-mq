@@ -27,6 +27,12 @@ export class Job<D = any, R = any> {
    * The processor should check signal.aborted cooperatively.
    * Only set when the job is being processed by a Worker.
    */
+  /**
+   * When true, the job will not be retried on failure regardless of attempts config.
+   * Set by calling `discard()` inside the processor.
+   */
+  discarded = false;
+
   abortSignal?: AbortSignal;
 
   /**
@@ -85,6 +91,14 @@ export class Job<D = any, R = any> {
       data: JSON.stringify(data),
     });
     this.data = data;
+  }
+
+  /**
+   * Mark this job so it will not be retried on failure.
+   * Call inside the processor before throwing to skip all remaining attempts.
+   */
+  discard(): void {
+    this.discarded = true;
   }
 
   /**

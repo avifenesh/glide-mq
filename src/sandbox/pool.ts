@@ -3,7 +3,7 @@ import { fork, ChildProcess } from 'child_process';
 import type { MainToChild, ChildToMain } from './types';
 import { toSerializedJob } from './types';
 import type { Job } from '../job';
-import { GlideMQError } from '../errors';
+import { GlideMQError, UnrecoverableError } from '../errors';
 
 interface PoolWorker {
   thread: WorkerThread | ChildProcess;
@@ -192,8 +192,12 @@ export class SandboxPool {
               if (msg.id === invocationId) {
                 cleanup();
                 this.release(pw);
-                const err = new Error(msg.error);
+                const err =
+                  msg.errorName === 'UnrecoverableError'
+                    ? new UnrecoverableError(msg.error)
+                    : new Error(msg.error);
                 if (msg.stack) err.stack = msg.stack;
+                if (msg.discarded) job.discarded = true;
                 reject(err);
               }
               break;
@@ -249,6 +253,9 @@ export class SandboxPool {
           break;
         case 'updateData':
           await job.updateData(msg.args[0]);
+          break;
+        case 'discard':
+          job.discarded = true;
           break;
         default:
           throw new Error(`Unknown proxy method: ${msg.method}`);
