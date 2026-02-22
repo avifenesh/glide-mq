@@ -1696,48 +1696,79 @@ redis.register_function('glidemq_drain', function(keys, args)
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local removed = 0
 
-  -- Get active entry IDs from PEL (pending entries list)
+  -- Build set of active entry IDs from PEL via paginated XPENDING
   local activeSet = {}
-  local ok, pending = pcall(redis.call, redis, 'XPENDING', streamKey, group, '-', '+', '10000')
-  if ok and pending then
+  local ok, pending = pcall(redis.call, 'XPENDING', streamKey, group, '-', '+', '10000')
+  if ok and pending and #pending > 0 then
     for i = 1, #pending do
       activeSet[pending[i][1]] = true
     end
-  end
-
-  -- XRANGE all stream entries, delete non-active ones
-  local entries = redis.call('XRANGE', streamKey, '-', '+')
-  local toDelete = {}
-  for i = 1, #entries do
-    local entryId = entries[i][1]
-    if not activeSet[entryId] then
-      toDelete[#toDelete + 1] = entryId
-      -- Extract jobId from the entry fields
-      local fields = entries[i][2]
-      for j = 1, #fields, 2 do
-        if fields[j] == 'jobId' then
-          local jobId = fields[j + 1]
-          redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
-          removed = removed + 1
-          break
+    -- Page through remaining PEL entries if there were exactly 10000
+    while #pending == 10000 do
+      local lastId = pending[#pending][1]
+      local nextStart = lastId:sub(1, lastId:find('-') - 1)
+      nextStart = tostring(tonumber(nextStart) + 1) .. '-0'
+      ok, pending = pcall(redis.call, 'XPENDING', streamKey, group, nextStart, '+', '10000')
+      if ok and pending then
+        for i = 1, #pending do
+          activeSet[pending[i][1]] = true
         end
+      else
+        break
       end
     end
   end
-  -- XDEL in batches
-  for i = 1, #toDelete, 1000 do
-    redis.call('XDEL', streamKey, unpack(toDelete, i, math.min(i + 999, #toDelete)))
+
+  -- Paginated XRANGE to avoid loading entire stream into memory
+  local cursor = '-'
+  while true do
+    local entries = redis.call('XRANGE', streamKey, cursor, '+', 'COUNT', 1000)
+    if #entries == 0 then break end
+
+    local toDelete = {}
+    for i = 1, #entries do
+      local entryId = entries[i][1]
+      if not activeSet[entryId] then
+        toDelete[#toDelete + 1] = entryId
+        local fields = entries[i][2]
+        for j = 1, #fields, 2 do
+          if fields[j] == 'jobId' and fields[j + 1] ~= '' then
+            local jobId = fields[j + 1]
+            redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+            removed = removed + 1
+            break
+          end
+        end
+      end
+    end
+    if #toDelete > 0 then
+      for i = 1, #toDelete, 1000 do
+        redis.call('XDEL', streamKey, unpack(toDelete, i, math.min(i + 999, #toDelete)))
+      end
+    end
+
+    -- Advance cursor past the last entry
+    local lastId = entries[#entries][1]
+    local dashPos = lastId:find('-')
+    local seq = tonumber(lastId:sub(dashPos + 1))
+    cursor = lastId:sub(1, dashPos) .. tostring(seq + 1)
   end
 
   -- Optionally drain delayed/scheduled jobs
   if drainDelayed then
     local scheduled = redis.call('ZRANGE', scheduledKey, 0, -1)
-    for i = 1, #scheduled do
-      local jobId = scheduled[i]
-      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
-      removed = removed + 1
-    end
     if #scheduled > 0 then
+      for i = 1, #scheduled, 1000 do
+        local batch = {}
+        for j = i, math.min(i + 999, #scheduled) do
+          local jobId = scheduled[j]
+          batch[#batch + 1] = prefix .. 'job:' .. jobId
+          batch[#batch + 1] = prefix .. 'log:' .. jobId
+          batch[#batch + 1] = prefix .. 'deps:' .. jobId
+        end
+        redis.call('DEL', unpack(batch))
+      end
+      removed = removed + #scheduled
       redis.call('DEL', scheduledKey)
     end
   end
