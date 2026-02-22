@@ -26,9 +26,16 @@ describeEachMode('job.promote()', (CONNECTION) => {
   afterAll(async () => {
     await queue.close();
     const suffixes = [
-      '', '-prio', '-worker', '-instance',
-      '-evt', '-not-found', '-waiting', '-active',
-      '-completed', '-failed',
+      '',
+      '-prio',
+      '-worker',
+      '-instance',
+      '-evt',
+      '-not-found',
+      '-waiting',
+      '-active',
+      '-completed',
+      '-failed',
     ];
     for (const s of suffixes) {
       await flushQueue(cleanupClient, Q + s);

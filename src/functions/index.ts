@@ -2584,16 +2584,8 @@ export async function changeDelay(
  * Removes from the scheduled ZSet, adds to the stream, sets state to 'waiting'.
  * Returns 'ok', 'error:not_found', or 'error:not_delayed'.
  */
-export async function promoteJob(
-  client: Client,
-  k: QueueKeys,
-  jobId: string,
-): Promise<string> {
-  const result = await client.fcall(
-    'glidemq_promoteJob',
-    [k.job(jobId), k.stream, k.scheduled, k.events],
-    [jobId],
-  );
+export async function promoteJob(client: Client, k: QueueKeys, jobId: string): Promise<string> {
+  const result = await client.fcall('glidemq_promoteJob', [k.job(jobId), k.stream, k.scheduled, k.events], [jobId]);
   return result as string;
 }
 
