@@ -1750,7 +1750,7 @@ redis.register_function('glidemq_changeDelay', function(keys, args)
       local oldScore = tonumber(rawScore) or 0
       local priority = math.floor(oldScore / PRIORITY_SHIFT)
       if priority > 0 then
-        redis.call('ZADD', scheduledKey, string.format('%.0f', priority * PRIORITY_SHIFT), jobId)
+        redis.call('ZADD', scheduledKey, 'XX', string.format('%.0f', priority * PRIORITY_SHIFT), jobId)
         redis.call('HSET', jobKey, 'state', 'prioritized', 'delay', '0')
       else
         redis.call('ZREM', scheduledKey, jobId)
