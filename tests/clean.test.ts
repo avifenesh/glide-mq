@@ -21,7 +21,10 @@ describeEachMode('Queue.clean()', (CONNECTION) => {
   });
 
   afterAll(async () => {
-    await flushQueue(cleanupClient, Q);
+    const suffixes = ['-comp', '-fail', '-limit', '-grace', '-mixed', '-empty'];
+    for (const s of suffixes) {
+      await flushQueue(cleanupClient, Q + s);
+    }
     cleanupClient.close();
   });
 
@@ -182,8 +185,8 @@ describeEachMode('Queue.clean()', (CONNECTION) => {
       return counts.completed >= 2;
     }, 10000);
 
-    // Wait so first batch ages
-    await new Promise((r) => setTimeout(r, 200));
+    // Wait so first batch ages beyond grace threshold
+    await new Promise((r) => setTimeout(r, 500));
 
     // Add second batch
     await queue.add('new-1', { v: 3 });
@@ -194,8 +197,8 @@ describeEachMode('Queue.clean()', (CONNECTION) => {
       return counts.completed >= 4;
     }, 10000);
 
-    // Grace of 100ms - should only remove the old batch
-    const removed = await queue.clean(100, 100, 'completed');
+    // Grace of 250ms - should only remove the old batch (aged 500ms+)
+    const removed = await queue.clean(250, 100, 'completed');
     expect(removed).toHaveLength(2);
 
     const counts = await queue.getJobCounts();

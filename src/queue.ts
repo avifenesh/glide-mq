@@ -569,6 +569,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * @returns Array of removed job IDs.
    */
   async clean(grace: number, limit: number, type: 'completed' | 'failed'): Promise<string[]> {
+    if (grace < 0) throw new RangeError('grace must be >= 0');
+    if (limit <= 0) return [];
     const client = await this.getClient();
     return cleanJobs(client, this.keys, type, grace, limit, Date.now());
   }

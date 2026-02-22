@@ -1566,21 +1566,22 @@ end)
 redis.register_function('glidemq_clean', function(keys, args)
   local setKey = keys[1]
   local eventsKey = keys[2]
+  local idKey = keys[3]
   local cutoff = tonumber(args[1])
   local limit = tonumber(args[2])
-  local prefix = args[3]
-  local ids = redis.call('ZRANGEBYSCORE', setKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, limit)
+  if not limit or limit <= 0 then return {} end
+  local prefix = string.sub(idKey, 1, #idKey - 2)
+  local ids = redis.call('ZRANGEBYSCORE', setKey, '-inf', string.format('%.0f', cutoff), 'LIMIT', 0, limit)
   if #ids == 0 then
     return {}
   end
   for i = 1, #ids do
-    redis.call('DEL', prefix .. 'job:' .. ids[i])
-    redis.call('DEL', prefix .. 'log:' .. ids[i])
-    emitEvent(eventsKey, 'removed', ids[i], nil)
+    redis.call('DEL', prefix .. 'job:' .. ids[i], prefix .. 'log:' .. ids[i])
   end
   for i = 1, #ids, 1000 do
     redis.call('ZREM', setKey, unpack(ids, i, math.min(i + 999, #ids)))
   end
+  emitEvent(eventsKey, 'cleaned', tostring(#ids), nil)
   return ids
 end)
 
@@ -2193,12 +2194,10 @@ export async function cleanJobs(
 ): Promise<string[]> {
   const cutoff = timestamp - grace;
   const setKey = type === 'completed' ? k.completed : k.failed;
-  // Derive prefix from k.id: "glide:{queueName}:id" -> "glide:{queueName}:"
-  const prefix = k.id.slice(0, -2);
   const result = await client.fcall(
     'glidemq_clean',
-    [setKey, k.events],
-    [cutoff.toString(), limit.toString(), prefix],
+    [setKey, k.events, k.id],
+    [cutoff.toString(), limit.toString()],
   );
   return Array.isArray(result) ? result.map((r) => String(r)) : [];
 }
