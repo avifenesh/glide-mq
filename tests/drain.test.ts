@@ -226,6 +226,21 @@ describe('TestQueue.drain()', () => {
     await queue.close();
   });
 
+  it('does not remove delayed jobs by default', async () => {
+    const queue = new TestQueue('test-drain-mem-nodelay');
+
+    await queue.add('waiting', { v: 1 });
+    await queue.add('delayed', { v: 2 }, { delay: 60000 });
+
+    await queue.drain();
+
+    const counts = await queue.getJobCounts();
+    expect(counts.waiting).toBe(0);
+    expect(counts.delayed).toBe(1);
+
+    await queue.close();
+  });
+
   it('is a no-op on empty queue', async () => {
     const queue = new TestQueue('test-drain-mem-empty');
     await queue.drain();
