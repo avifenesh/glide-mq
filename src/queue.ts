@@ -887,6 +887,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     const collectKeys = async (keys: unknown[]): Promise<void> => {
       const keyStrs = keys.map((k) => String(k));
+      if (keyStrs.length === 0) return;
       if (!nameFilter) {
         for (const k of keyStrs) {
           if (jobIds.length >= limit) break;

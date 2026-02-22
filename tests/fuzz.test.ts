@@ -4,7 +4,7 @@
  * Runs against real Valkey standalone + cluster.
  */
 import { it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -383,18 +383,7 @@ describeEachMode('Fuzz: dedup stress test', (CONNECTION) => {
     const q = new Queue(Q, { connection: CONNECTION });
     const processed = new Set<string>();
 
-    const w = new Worker(
-      Q,
-      async (job: any) => {
-        processed.add(job.id);
-        await sleep(50);
-        return 'ok';
-      },
-      { connection: CONNECTION, concurrency: 5, blockTimeout: 500 },
-    );
-    w.on('error', () => {});
-
-    // Rapid fire 100 jobs with same dedup ID
+    // Add all jobs before starting worker to prevent dedup key clearing mid-add
     let addedCount = 0;
     for (let i = 0; i < 100; i++) {
       const result = await q.add(
@@ -407,7 +396,18 @@ describeEachMode('Fuzz: dedup stress test', (CONNECTION) => {
       if (result !== null) addedCount++;
     }
 
-    await sleep(3000);
+    const w = new Worker(
+      Q,
+      async (job: any) => {
+        processed.add(job.id);
+        await sleep(50);
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 5, blockTimeout: 500 },
+    );
+    w.on('error', () => {});
+
+    await waitFor(() => processed.size >= 1, 10000);
     await w.close(true);
     await q.close();
 

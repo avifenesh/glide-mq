@@ -3,7 +3,7 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor, ConnectionConfig } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -74,10 +74,12 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
     it('graceful close waits for active job to complete', async () => {
       const queue = new Queue(Q, { connection: CONNECTION });
       const completed: string[] = [];
+      let jobStarted = false;
 
       const worker = new Worker(
         Q,
         async (job: any) => {
+          jobStarted = true;
           await new Promise((r) => setTimeout(r, 500));
           completed.push(job.id);
           return 'ok';
@@ -89,7 +91,7 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
 
       const job = await queue.add('task', { x: 1 });
 
-      await new Promise((r) => setTimeout(r, 300));
+      await waitFor(() => jobStarted);
 
       await worker.close(false);
 
@@ -109,10 +111,12 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
     it('pause allows current job to finish but blocks new jobs', async () => {
       const queue = new Queue(Q, { connection: CONNECTION });
       const processed: string[] = [];
+      let jobStarted = false;
 
       const worker = new Worker(
         Q,
         async (job: any) => {
+          jobStarted = true;
           await new Promise((r) => setTimeout(r, 200));
           processed.push(job.id);
           return 'ok';
@@ -124,9 +128,10 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
 
       const job1 = await queue.add('task1', { i: 1 });
 
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(() => jobStarted);
       await worker.pause();
 
+      await waitFor(() => processed.includes(job1.id));
       expect(processed).toContain(job1.id);
 
       const countBefore = processed.length;
@@ -138,7 +143,7 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
 
       await worker.resume();
 
-      await new Promise((r) => setTimeout(r, 2000));
+      await waitFor(() => processed.includes(job2.id), 5000);
       expect(processed).toContain(job2.id);
 
       await worker.close(true);

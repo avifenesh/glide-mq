@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '19';
+export const LIBRARY_VERSION = '22';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -270,6 +270,17 @@ local function extractCostFromOpts(optsJson)
   return math.floor(cost * 1000)
 end
 
+-- Remove excess jobs from a sorted set in capped, stack-safe batches.
+-- Deletes job hashes and removes from the set in chunks of 1000.
+local function removeExcessJobs(setKey, prefix, ids)
+  for i = 1, #ids do
+    redis.call('DEL', prefix .. 'job:' .. ids[i])
+  end
+  for i = 1, #ids, 1000 do
+    redis.call('ZREM', setKey, unpack(ids, i, math.min(i + 999, #ids)))
+  end
+end
+
 redis.register_function('glidemq_version', function(keys, args)
   return '${LIBRARY_VERSION}'
 end)
@@ -486,32 +497,20 @@ redis.register_function('glidemq_complete', function(keys, args)
   elseif removeMode == 'count' and removeCount > 0 then
     local total = redis.call('ZCARD', completedKey)
     if total > removeCount then
-      local excess = redis.call('ZRANGE', completedKey, 0, total - removeCount - 1)
-      for i = 1, #excess do
-        local oldId = excess[i]
-        redis.call('DEL', prefix .. 'job:' .. oldId)
-        redis.call('ZREM', completedKey, oldId)
-      end
+      local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
+      if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
     end
   elseif removeMode == 'age_count' then
     if removeAge > 0 then
       local cutoff = timestamp - (removeAge * 1000)
-      local old = redis.call('ZRANGEBYSCORE', completedKey, '0', tostring(cutoff))
-      for i = 1, #old do
-        local oldId = old[i]
-        redis.call('DEL', prefix .. 'job:' .. oldId)
-        redis.call('ZREM', completedKey, oldId)
-      end
+      local old = redis.call('ZRANGEBYSCORE', completedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
+      if #old > 0 then removeExcessJobs(completedKey, prefix, old) end
     end
     if removeCount > 0 then
       local total = redis.call('ZCARD', completedKey)
       if total > removeCount then
-        local excess = redis.call('ZRANGE', completedKey, 0, total - removeCount - 1)
-        for i = 1, #excess do
-          local oldId = excess[i]
-          redis.call('DEL', prefix .. 'job:' .. oldId)
-          redis.call('ZREM', completedKey, oldId)
-        end
+        local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
+        if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
       end
     end
   end
@@ -570,10 +569,20 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   elseif removeMode == 'count' and removeCount > 0 then
     local total = redis.call('ZCARD', completedKey)
     if total > removeCount then
-      local excess = redis.call('ZRANGE', completedKey, 0, total - removeCount - 1)
-      for i = 1, #excess do
-        redis.call('DEL', prefix .. 'job:' .. excess[i])
-        redis.call('ZREM', completedKey, excess[i])
+      local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
+      if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
+    end
+  elseif removeMode == 'age_count' then
+    if removeAge > 0 then
+      local cutoff = timestamp - (removeAge * 1000)
+      local old = redis.call('ZRANGEBYSCORE', completedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
+      if #old > 0 then removeExcessJobs(completedKey, prefix, old) end
+    end
+    if removeCount > 0 then
+      local total = redis.call('ZCARD', completedKey)
+      if total > removeCount then
+        local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
+        if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
       end
     end
   end
@@ -773,32 +782,20 @@ redis.register_function('glidemq_fail', function(keys, args)
     elseif removeMode == 'count' and removeCount > 0 then
       local total = redis.call('ZCARD', failedKey)
       if total > removeCount then
-        local excess = redis.call('ZRANGE', failedKey, 0, total - removeCount - 1)
-        for i = 1, #excess do
-          local oldId = excess[i]
-          redis.call('DEL', prefix .. 'job:' .. oldId)
-          redis.call('ZREM', failedKey, oldId)
-        end
+        local excess = redis.call('ZRANGE', failedKey, 0, math.min(total - removeCount, 1000) - 1)
+        if #excess > 0 then removeExcessJobs(failedKey, prefix, excess) end
       end
     elseif removeMode == 'age_count' then
       if removeAge > 0 then
         local cutoff = timestamp - (removeAge * 1000)
-        local old = redis.call('ZRANGEBYSCORE', failedKey, '0', tostring(cutoff))
-        for i = 1, #old do
-          local oldId = old[i]
-          redis.call('DEL', prefix .. 'job:' .. oldId)
-          redis.call('ZREM', failedKey, oldId)
-        end
+        local old = redis.call('ZRANGEBYSCORE', failedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
+        if #old > 0 then removeExcessJobs(failedKey, prefix, old) end
       end
       if removeCount > 0 then
         local total = redis.call('ZCARD', failedKey)
         if total > removeCount then
-          local excess = redis.call('ZRANGE', failedKey, 0, total - removeCount - 1)
-          for i = 1, #excess do
-            local oldId = excess[i]
-            redis.call('DEL', prefix .. 'job:' .. oldId)
-            redis.call('ZREM', failedKey, oldId)
-          end
+          local excess = redis.call('ZRANGE', failedKey, 0, math.min(total - removeCount, 1000) - 1)
+          if #excess > 0 then removeExcessJobs(failedKey, prefix, excess) end
         end
       end
     end

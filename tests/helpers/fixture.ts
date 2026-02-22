@@ -15,7 +15,8 @@
 
 import { describe } from 'vitest';
 
-const { GlideClient, GlideClusterClient } = require('@glidemq/speedkey') as typeof import('@glidemq/speedkey');
+const { GlideClient, GlideClusterClient, ClusterScanCursor } =
+  require('@glidemq/speedkey') as typeof import('@glidemq/speedkey');
 const { buildKeys, keyPrefix } = require('../../dist/utils') as typeof import('../../src/utils');
 const { ensureFunctionLibrary } = require('../../dist/connection') as typeof import('../../src/connection');
 const { LIBRARY_SOURCE } = require('../../dist/functions/index') as typeof import('../../src/functions/index');
@@ -73,6 +74,23 @@ export async function createCleanupClient(connection: ConnectionConfig) {
 }
 
 /**
+ * Poll until a predicate returns true, or timeout.
+ * Replaces fixed setTimeout waits in tests that race against async Valkey writes.
+ */
+export async function waitFor(
+  predicate: () => Promise<boolean> | boolean,
+  timeoutMs = 5000,
+  intervalMs = 100,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`waitFor timed out after ${timeoutMs}ms`);
+}
+
+/**
  * Flush all keys for a queue. Works for both standalone and cluster.
  */
 export async function flushQueue(client: any, queueName: string, prefix = 'glide'): Promise<void> {
@@ -88,6 +106,8 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
     k.dedup,
     k.rate,
     k.schedulers,
+    k.ordering,
+    k.ratelimited,
   ];
   for (const key of staticKeys) {
     try {
@@ -97,17 +117,15 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
 
   // Scan and delete job hashes + log keys + deps keys
   const pfx = keyPrefix(prefix, queueName);
-  for (const pattern of [`${pfx}:job:*`, `${pfx}:log:*`, `${pfx}:deps:*`]) {
+  for (const pattern of [`${pfx}:job:*`, `${pfx}:log:*`, `${pfx}:deps:*`, `${pfx}:group:*`, `${pfx}:groupq:*`]) {
     try {
       if (client.constructor.name === 'GlideClusterClient') {
-        // Cluster scan - use string cursor
-        let cursor = '0';
-        do {
-          const result = await client.scan(cursor, { match: pattern, count: 100 });
-          cursor = result[0] as string;
-          const keys = result[1] as string[];
-          if (keys.length > 0) await client.del(keys);
-        } while (cursor !== '0');
+        let cursor = new ClusterScanCursor();
+        while (!cursor.isFinished()) {
+          const [nextCursor, keys] = await client.scan(cursor, { match: pattern, count: 100 });
+          cursor = nextCursor;
+          if (keys.length > 0) await client.del(keys.map((k: any) => String(k)));
+        }
       } else {
         let cursor = '0';
         do {

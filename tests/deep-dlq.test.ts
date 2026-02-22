@@ -11,7 +11,7 @@ const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { Job } = require('../dist/job') as typeof import('../src/job');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 function uid() {
   return `dlq-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -79,7 +79,7 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
       worker.on('failed', () => {
         failCount++;
         if (failCount >= 2) {
-          setTimeout(resolve, 200);
+          resolve();
         }
       });
     });
@@ -87,6 +87,10 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
     await failedPromise;
 
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
+    await waitFor(async () => {
+      const jobs = await dlqQueue.getJobs('waiting');
+      return jobs.length > 0;
+    });
     const dlqJobs = await dlqQueue.getJobs('waiting');
     expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
     const dlqJob = dlqJobs[0];
@@ -119,12 +123,16 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
           stalledInterval: 60000,
         },
       );
-      worker.on('failed', () => setTimeout(resolve, 200));
+      worker.on('failed', () => resolve());
     });
 
     await failedPromise;
 
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
+    await waitFor(async () => {
+      const jobs = await dlqQueue.getJobs('waiting');
+      return jobs.length > 0;
+    });
     const dlqJobs = await dlqQueue.getJobs('waiting');
     expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
     const dlqData = dlqJobs[0].data as any;
@@ -156,13 +164,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
       );
       worker.on('failed', () => {
         failCount++;
-        if (failCount >= 3) setTimeout(resolve, 200);
+        if (failCount >= 3) resolve();
       });
     });
 
     await failedPromise;
 
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
+    await waitFor(async () => {
+      const jobs = await dlqQueue.getJobs('waiting');
+      return jobs.length > 0;
+    });
     const dlqJobs = await dlqQueue.getJobs('waiting');
     expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
     const dlqData = dlqJobs[0].data as any;
@@ -225,7 +237,7 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
           stalledInterval: 60000,
         },
       );
-      worker.on('failed', () => setTimeout(resolve, 200));
+      worker.on('failed', () => resolve());
     });
 
     await failedPromise;
@@ -270,12 +282,16 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
       );
       worker.on('failed', () => {
         failCount++;
-        if (failCount >= 2) setTimeout(resolve, 200);
+        if (failCount >= 2) resolve();
       });
     });
 
     await allFailed;
 
+    await waitFor(async () => {
+      const jobs = await queue.getDeadLetterJobs();
+      return jobs.length >= 2;
+    });
     const dlqJobs = await queue.getDeadLetterJobs();
     expect(dlqJobs.length).toBe(2);
   });
@@ -307,12 +323,16 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
       );
       worker.on('failed', () => {
         failCount++;
-        if (failCount >= 3) setTimeout(resolve, 200);
+        if (failCount >= 3) resolve();
       });
     });
 
     await allFailed;
 
+    await waitFor(async () => {
+      const jobs = await queue.getDeadLetterJobs();
+      return jobs.length >= 3;
+    });
     const page = await queue.getDeadLetterJobs(0, 1);
     expect(page.length).toBe(2);
   });
@@ -344,13 +364,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
       );
       worker.on('failed', () => {
         failCount++;
-        if (failCount >= 5) setTimeout(resolve, 200);
+        if (failCount >= 5) resolve();
       });
     });
 
     await allFailed;
 
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
+    await waitFor(async () => {
+      const jobs = await dlqQueue.getJobs('waiting');
+      return jobs.length >= 5;
+    });
     const dlqJobs = await dlqQueue.getJobs('waiting');
     expect(dlqJobs.length).toBe(5);
   });
@@ -377,12 +401,16 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
           stalledInterval: 60000,
         },
       );
-      worker.on('failed', () => setTimeout(resolve, 200));
+      worker.on('failed', () => resolve());
     });
 
     await failedPromise;
 
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
+    await waitFor(async () => {
+      const jobs = await dlqQueue.getJobs('waiting');
+      return jobs.length > 0;
+    });
     const dlqJobs = await dlqQueue.getJobs('waiting');
     expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
     expect(dlqJobs[0].name).toBe('special-name');
@@ -410,7 +438,7 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
           stalledInterval: 60000,
         },
       );
-      worker.on('failed', () => setTimeout(resolve, 200));
+      worker.on('failed', () => resolve());
     });
 
     await failedPromise;
@@ -443,12 +471,16 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
           stalledInterval: 60000,
         },
       );
-      worker.on('failed', () => setTimeout(resolve, 200));
+      worker.on('failed', () => resolve());
     });
 
     await failedPromise;
 
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
+    await waitFor(async () => {
+      const jobs = await dlqQueue.getJobs('waiting');
+      return jobs.length > 0;
+    });
     const dlqJobs = await dlqQueue.getJobs('waiting');
     const dlqData = dlqJobs[0].data as any;
     expect(dlqData.failedReason).toBe('specific failure reason XYZ');
@@ -477,12 +509,16 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
           stalledInterval: 60000,
         },
       );
-      worker.on('failed', () => setTimeout(resolve, 300));
+      worker.on('failed', () => resolve());
     });
 
     await failedPromise;
 
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
+    await waitFor(async () => {
+      const jobs = await dlqQueue.getJobs('waiting');
+      return jobs.length > 0;
+    });
     const dlqJobs = await dlqQueue.getJobs('waiting');
     expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
     const dlqData = dlqJobs[0].data as any;
@@ -522,13 +558,17 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
       );
       worker.on('failed', () => {
         failCount++;
-        if (failCount >= 3) setTimeout(resolve, 200);
+        if (failCount >= 3) resolve();
       });
     });
 
     await allFailed;
 
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
+    await waitFor(async () => {
+      const jobs = await dlqQueue.getJobs('waiting');
+      return jobs.length > 0;
+    });
     const dlqJobs = await dlqQueue.getJobs('waiting');
     expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
   });
@@ -558,7 +598,7 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
       );
       worker.on('failed', (job: any, err: Error) => {
         failedJobs.push({ job, err });
-        setTimeout(resolve, 200);
+        resolve();
       });
     });
 
@@ -590,7 +630,7 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
           stalledInterval: 60000,
         },
       );
-      worker.on('failed', () => setTimeout(resolve, 200));
+      worker.on('failed', () => resolve());
     });
 
     await failedPromise;
@@ -621,12 +661,16 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
           stalledInterval: 60000,
         },
       );
-      worker.on('failed', () => setTimeout(resolve, 200));
+      worker.on('failed', () => resolve());
     });
 
     await failedPromise;
 
     dlqQueue = new Queue(dlqName, { connection: CONNECTION });
+    await waitFor(async () => {
+      const jobs = await dlqQueue.getJobs('waiting');
+      return jobs.length > 0;
+    });
     const dlqJobs = await dlqQueue.getJobs('waiting');
     expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
     const dlqData = dlqJobs[0].data as any;

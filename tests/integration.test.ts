@@ -27,7 +27,8 @@ describeEachMode('Function Library', (CONNECTION) => {
   });
 
   it('glidemq_version returns correct version', async () => {
-    const result = await cleanupClient.fcall('glidemq_version', [], []);
+    // Pass a hash-tagged key so cluster mode routes to a primary (not a replica)
+    const result = await cleanupClient.fcall('glidemq_version', ['{glidemq}:_'], []);
     expect(String(result)).toBe(LIBRARY_VERSION);
   });
 });

@@ -319,8 +319,17 @@ export class Worker<D = any, R = any> extends EventEmitter {
         if (!jobId) continue;
 
         if (this.concurrency === 1) {
-          // c=1 fast path: process inline (blocks poll loop, no activeCount tracking needed)
-          await this.processJob(jobId, String(entryId));
+          // c=1 fast path: process inline (blocks poll loop).
+          // Track in activePromises so close(false) can wait for it.
+          this.activeCount++;
+          const promise = this.processJob(jobId, String(entryId));
+          this.activePromises.add(promise);
+          try {
+            await promise;
+          } finally {
+            this.activeCount--;
+            this.activePromises.delete(promise);
+          }
         } else {
           this.dispatchJob(jobId, String(entryId));
         }
