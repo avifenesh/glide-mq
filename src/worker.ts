@@ -25,7 +25,7 @@ import {
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
-export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed';
+export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained';
 
 export class Worker<D = any, R = any> extends EventEmitter {
   readonly name: string;
@@ -46,6 +46,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private scheduler: Scheduler | null = null;
   private initPromise: Promise<void>;
   private rateLimitUntil = 0;
+  private isDrained = true;
   private reconnectBackoff = 0;
   private internalEvents = new EventEmitter();
 
@@ -305,7 +306,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
     });
 
     if (!result) {
-      // null means no messages (timeout expired) - just loop again
+      if (!this.isDrained) {
+        this.isDrained = true;
+        this.emit('drained');
+      }
       return;
     }
 
@@ -602,6 +606,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
         return;
       }
 
+      this.isDrained = false;
+      this.emit('active', job, currentJobId);
+
       const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
 
       if (processError || aborted) {
@@ -632,7 +639,13 @@ export class Worker<D = any, R = any> extends EventEmitter {
       this.emit('completed', job, processResult);
 
       // No next job - return to poll loop
-      if (fetchResult.next === false) return;
+      if (fetchResult.next === false) {
+        if (!this.isDrained) {
+          this.isDrained = true;
+          this.emit('drained');
+        }
+        return;
+      }
 
       if (fetchResult.next === 'REVOKED') {
         if (fetchResult.nextJobId && fetchResult.nextEntryId) {
