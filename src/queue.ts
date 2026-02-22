@@ -40,6 +40,8 @@ import {
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
 
+const EMPTY_OPTS_STR = '{}';
+
 const MAX_ORDERING_KEY_LENGTH = 256;
 
 function validateOrderingKey(orderingKey: string): void {
@@ -250,7 +252,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             this.keys,
             name,
             serialized,
-            JSON.stringify(opts ?? {}),
+            opts ? JSON.stringify(opts) : EMPTY_OPTS_STR,
             timestamp,
             delay,
             priority,
@@ -295,6 +297,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     // Prepare job metadata for each entry
     const prepared = jobs.map((entry) => {
       const opts = entry.opts ?? {};
+      const serializedOpts = entry.opts ? JSON.stringify(entry.opts) : EMPTY_OPTS_STR;
       const delay = opts.delay ?? 0;
       const priority = opts.priority ?? 0;
       const parentId = opts.parent ? opts.parent.id : '';
@@ -346,6 +349,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         jobCost,
         deduplication,
         serializedData,
+        serializedOpts,
       };
     });
 
@@ -362,7 +366,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.deduplication.mode ?? 'simple',
           p.entry.name,
           p.serializedData,
-          JSON.stringify(p.opts),
+          p.serializedOpts,
           timestamp.toString(),
           p.delay.toString(),
           p.priority.toString(),
@@ -380,7 +384,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         batch.fcall('glidemq_addJob', keys, [
           p.entry.name,
           p.serializedData,
-          JSON.stringify(p.opts),
+          p.serializedOpts,
           timestamp.toString(),
           p.delay.toString(),
           p.priority.toString(),
