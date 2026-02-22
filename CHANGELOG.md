@@ -17,6 +17,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `queue.clean(grace, limit, type)` — bulk-remove old `completed` or `failed` jobs by minimum age. Returns an array of removed job IDs. Implemented as a single Valkey Server Function call (#16).
 - `job.discard()` — immediately move an active job to failed state, bypassing retries (#14).
 - `UnrecoverableError` — throw this error class inside a processor to skip all remaining retry attempts and fail the job permanently (#14).
+- `job.changePriority(newPriority)` — re-prioritize a waiting, prioritized, or delayed job after enqueue. Setting priority to `0` moves it back to the normal stream. Throws if the job is active, completed, or failed (#13).
 
 ---
 

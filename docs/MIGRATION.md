@@ -484,7 +484,7 @@ The processor function signature is identical. The only change is the connection
 | `job.getChildrenValues()` | `job.getChildrenValues()` | Full |
 | `job.promote()` | - | Gap [#11](https://github.com/avifenesh/glide-mq/issues/11) |
 | `job.changeDelay(delay)` | - | Gap [#12](https://github.com/avifenesh/glide-mq/issues/12) |
-| `job.changePriority(opts)` | - | Gap [#13](https://github.com/avifenesh/glide-mq/issues/13) |
+| `job.changePriority(opts)` | `job.changePriority(newPriority)` | Full [#13](https://github.com/avifenesh/glide-mq/issues/13) |
 | `job.discard()` | `job.discard()` | Full [#14](https://github.com/avifenesh/glide-mq/issues/14) |
 | `job.toJSON()` | - | Use `job.data`, `job.opts`, etc. directly |
 | - | `job.abortSignal` | glide-mq only |
@@ -968,7 +968,15 @@ await queue.add('normal', data, { priority: 10 });
 await queue.add('background', data, { priority: 100 });
 ```
 
-`job.changePriority()` is not yet implemented in glide-mq - tracked in [#13](https://github.com/avifenesh/glide-mq/issues/13).
+`job.changePriority(newPriority)` is now implemented natively in glide-mq ([#13](https://github.com/avifenesh/glide-mq/issues/13)):
+
+```ts
+// Re-prioritize a waiting job after enqueue
+await job.changePriority(5);   // move to priority queue with priority 5
+await job.changePriority(0);   // move back to normal stream (no priority)
+```
+
+Throws if the job is active, completed, or failed.
 
 ---
 
@@ -1097,7 +1105,7 @@ These features exist in BullMQ but are not yet implemented in glide-mq. Each has
 |---|---|---|
 | `job.promote()` | Remove and re-add the job with `delay: 0` | [#11](https://github.com/avifenesh/glide-mq/issues/11) |
 | `job.changeDelay(delay)` | Remove and re-add with new delay | [#12](https://github.com/avifenesh/glide-mq/issues/12) |
-| `job.changePriority(opts)` | Remove and re-add with new priority | [#13](https://github.com/avifenesh/glide-mq/issues/13) |
+| `job.changePriority(opts)` | Now implemented natively — call `job.changePriority(newPriority)` | Resolved [#13](https://github.com/avifenesh/glide-mq/issues/13) |
 | `job.discard()` | Now implemented natively — call `job.discard()` or throw `UnrecoverableError` inside the processor | Resolved [#14](https://github.com/avifenesh/glide-mq/issues/14) |
 | `queue.drain(delayed?)` | Now implemented natively — call `queue.drain()` or `queue.drain(true)` to also remove delayed jobs | Resolved [#15](https://github.com/avifenesh/glide-mq/issues/15) |
 | `queue.clean(grace, limit, type)` | Now implemented natively — see [Queue API table](#queue-methods-and-options) above | Resolved [#16](https://github.com/avifenesh/glide-mq/issues/16) |
