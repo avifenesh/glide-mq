@@ -644,7 +644,7 @@ const worker = new Worker('q', './processor.js', { connection, useWorkerThreads:
 const worker = new Worker('q', './processor.js', { connection, sandbox: { useWorkerThreads: true } });
 ```
 
-The processor file must export a default function: `module.exports = async (job) => { ... }` (CJS) or `export default async (job) => { ... }` (ESM). Inside the sandbox, `job.log()`, `job.updateProgress()`, and `job.updateData()` work normally via IPC proxy. Methods that require direct Valkey access (`job.getState()`, `job.remove()`, etc.) are not available.
+The processor file must export a function, either via CommonJS (`module.exports = async (job) => { ... }`) or as an ESM default export (`export default async (job) => { ... }`). Inside the sandbox, `job.log()`, `job.updateProgress()`, and `job.updateData()` work normally via IPC proxy. Methods that require direct Valkey access (`job.getState()`, `job.remove()`, etc.) are not available.
 
 **`worker.on('active')` and `worker.on('drained')` not yet available** - tracked in [#20](https://github.com/avifenesh/glide-mq/issues/20). Workarounds:
 

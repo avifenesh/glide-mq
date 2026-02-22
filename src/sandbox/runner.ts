@@ -52,12 +52,12 @@ async function loadProcessor(filePath: string): Promise<(job: any) => Promise<an
 }
 
 async function handleProcess(id: string, serialized: SerializedJob): Promise<void> {
+  const job = new SandboxJob(serialized, send, id);
+  activeJobs.set(id, job);
+
   try {
     const processorPath = isThread ? workerData.processorPath : process.argv[2];
     const processor = await loadProcessor(processorPath);
-
-    const job = new SandboxJob(serialized, send, id);
-    activeJobs.set(id, job);
 
     const result = await processor(job);
 

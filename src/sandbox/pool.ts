@@ -271,7 +271,7 @@ export class SandboxPool {
 
     const KILL_TIMEOUT = 5000;
     const terminations: Promise<void>[] = [];
-    for (const pw of this.workers) {
+    for (const pw of [...this.workers]) {
       terminations.push(
         new Promise<void>((resolve) => {
           const timer = setTimeout(() => {
