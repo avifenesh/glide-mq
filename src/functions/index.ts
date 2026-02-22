@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '23';
+export const LIBRARY_VERSION = '24';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1685,6 +1685,68 @@ redis.register_function('glidemq_searchByName', function(keys, args)
   end
   return matched
 end)
+
+redis.register_function('glidemq_drain', function(keys, args)
+  local streamKey = keys[1]
+  local scheduledKey = keys[2]
+  local eventsKey = keys[3]
+  local idKey = keys[4]
+  local drainDelayed = args[1] == '1'
+  local group = args[2]
+  local prefix = string.sub(idKey, 1, #idKey - 2)
+  local removed = 0
+
+  -- Get active entry IDs from PEL (pending entries list)
+  local activeSet = {}
+  local ok, pending = pcall(redis.call, redis, 'XPENDING', streamKey, group, '-', '+', '10000')
+  if ok and pending then
+    for i = 1, #pending do
+      activeSet[pending[i][1]] = true
+    end
+  end
+
+  -- XRANGE all stream entries, delete non-active ones
+  local entries = redis.call('XRANGE', streamKey, '-', '+')
+  local toDelete = {}
+  for i = 1, #entries do
+    local entryId = entries[i][1]
+    if not activeSet[entryId] then
+      toDelete[#toDelete + 1] = entryId
+      -- Extract jobId from the entry fields
+      local fields = entries[i][2]
+      for j = 1, #fields, 2 do
+        if fields[j] == 'jobId' then
+          local jobId = fields[j + 1]
+          redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+          removed = removed + 1
+          break
+        end
+      end
+    end
+  end
+  -- XDEL in batches
+  for i = 1, #toDelete, 1000 do
+    redis.call('XDEL', streamKey, unpack(toDelete, i, math.min(i + 999, #toDelete)))
+  end
+
+  -- Optionally drain delayed/scheduled jobs
+  if drainDelayed then
+    local scheduled = redis.call('ZRANGE', scheduledKey, 0, -1)
+    for i = 1, #scheduled do
+      local jobId = scheduled[i]
+      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+      removed = removed + 1
+    end
+    if #scheduled > 0 then
+      redis.call('DEL', scheduledKey)
+    end
+  end
+
+  if removed > 0 then
+    emitEvent(eventsKey, 'drained', tostring(removed), nil)
+  end
+  return removed
+end)
 `;
 
 // ---- Key set type ----
@@ -2199,6 +2261,26 @@ export async function cleanJobs(
   const setKey = type === 'completed' ? k.completed : k.failed;
   const result = await client.fcall('glidemq_clean', [setKey, k.events, k.id], [cutoff.toString(), limit.toString()]);
   return Array.isArray(result) ? result.map((r) => String(r)) : [];
+}
+
+/**
+ * Drain the queue: remove all waiting jobs from the stream (skipping active ones).
+ * Optionally also remove all delayed/scheduled jobs.
+ * Deletes associated job/log/deps hashes. Emits 'drained' event.
+ * Returns the number of removed jobs.
+ */
+export async function drainQueue(
+  client: Client,
+  k: QueueKeys,
+  delayed: boolean,
+  group: string = CONSUMER_GROUP,
+): Promise<number> {
+  const result = await client.fcall(
+    'glidemq_drain',
+    [k.stream, k.scheduled, k.events, k.id],
+    [delayed ? '1' : '0', group],
+  );
+  return Number(result) || 0;
 }
 
 /**

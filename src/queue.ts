@@ -35,6 +35,7 @@ import {
   revokeJob,
   searchByName,
   cleanJobs,
+  drainQueue,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -573,6 +574,16 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (limit <= 0) return [];
     const client = await this.getClient();
     return cleanJobs(client, this.keys, type, grace, limit, Date.now());
+  }
+
+  /**
+   * Drain the queue: remove all waiting jobs without touching active jobs.
+   * When delayed=true, also removes all delayed/scheduled jobs.
+   * Deletes associated job hashes and emits a 'drained' event.
+   */
+  async drain(delayed?: boolean): Promise<void> {
+    const client = await this.getClient();
+    await drainQueue(client, this.keys, delayed ?? false);
   }
 
   /**

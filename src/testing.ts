@@ -251,6 +251,19 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     return removed;
   }
 
+  /** Drain the queue: remove all waiting jobs, optionally delayed ones too. */
+  async drain(delayed?: boolean): Promise<void> {
+    const toRemove: string[] = [];
+    for (const [id, record] of this.jobs) {
+      if (record.state === 'waiting' || (delayed && record.state === 'delayed')) {
+        toRemove.push(id);
+      }
+    }
+    for (const id of toRemove) {
+      this.jobs.delete(id);
+    }
+  }
+
   /** Close the queue. */
   async close(): Promise<void> {
     this.removeAllListeners();
