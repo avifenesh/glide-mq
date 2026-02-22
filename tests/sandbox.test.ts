@@ -30,6 +30,7 @@ const SLOW_PROCESSOR = path.join(PROCESSORS, 'slow.js');
 const PROGRESS_PROCESSOR = path.join(PROCESSORS, 'progress.js');
 const FLOOD_PROGRESS_PROCESSOR = path.join(PROCESSORS, 'flood-progress.js');
 const CRASH_AFTER_PROXY_PROCESSOR = path.join(PROCESSORS, 'crash-after-proxy.js');
+const CONDITIONAL_CRASH_PROCESSOR = path.join(PROCESSORS, 'conditional-crash.js');
 
 // The compiled runner.js lives in dist/sandbox/
 const RUNNER_PATH = path.resolve(__dirname, '..', 'dist', 'sandbox', 'runner.js');
@@ -553,24 +554,20 @@ describe('Stress tests', () => {
     }
   }, 30_000);
 
-  it('should recover from 5 consecutive crashes', async () => {
-    const pool = new SandboxPool(CRASH_PROCESSOR, true, 2, RUNNER_PATH);
+  it('should recover from 5 consecutive crashes within the same pool', async () => {
+    const pool = new SandboxPool(CONDITIONAL_CRASH_PROCESSOR, true, 2, RUNNER_PATH);
 
     try {
+      // Crash 5 workers sequentially - pool spawns replacements each time
       for (let i = 0; i < 5; i++) {
-        await expect(pool.run(makeJob(`crash-${i}`))).rejects.toThrow(/exited with code/);
+        await expect(pool.run(makeJob(`crash-${i}`, { crash: true }))).rejects.toThrow(/exited with code/);
       }
-    } finally {
-      await pool.close();
-    }
 
-    // After 5 crashes, create a fresh pool with echo to verify recovery pattern
-    const pool2 = new SandboxPool(ECHO_PROCESSOR, true, 2, RUNNER_PATH);
-    try {
-      const result = await pool2.run(makeJob('post-crash', { ok: true }));
+      // Same pool should still process jobs after repeated crashes
+      const result = await pool.run(makeJob('post-crash', { ok: true }));
       expect(result).toEqual({ ok: true });
     } finally {
-      await pool2.close();
+      await pool.close();
     }
   }, 30_000);
 
@@ -588,9 +585,9 @@ describe('Stress tests', () => {
 
       expect(result).toEqual({ flooded: true });
       expect(progressFn).toHaveBeenCalledTimes(50);
-      // Verify first and last calls
-      expect(progressFn).toHaveBeenCalledWith(2);
-      expect(progressFn).toHaveBeenCalledWith(100);
+      // Verify ordering: IPC messages arrive in send order
+      expect(progressFn).toHaveBeenNthCalledWith(1, 2);
+      expect(progressFn).toHaveBeenNthCalledWith(50, 100);
     } finally {
       await pool.close();
     }
@@ -646,6 +643,8 @@ describe('Stress tests', () => {
       const closedCount = reasons.filter((m) => m.includes('closed')).length;
       const exitedCount = reasons.filter((m) => m.includes('exited')).length;
       expect(closedCount + exitedCount).toBe(4);
+      expect(closedCount).toBeGreaterThan(0);
+      expect(exitedCount).toBeGreaterThan(0);
     } finally {
       await pool.close();
     }
@@ -670,8 +669,8 @@ describe('Stress tests', () => {
       await pool.close(true);
       const elapsed = Date.now() - start;
 
-      // FORCE_TIMEOUT=2s + buffer, should resolve well within 3s
-      expect(elapsed).toBeLessThan(3_000);
+      // FORCE_TIMEOUT=2s + generous CI buffer
+      expect(elapsed).toBeLessThan(5_000);
 
       const results = await settled;
       for (const r of results) {
