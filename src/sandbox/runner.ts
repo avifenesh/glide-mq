@@ -37,8 +37,19 @@ async function loadProcessor(filePath: string): Promise<(job: any) => Promise<an
     const { pathToFileURL } = require('url');
     mod = await (Function('p', 'return import(p)') as (p: string) => Promise<any>)(pathToFileURL(filePath).href);
   } else {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    mod = require(filePath);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      mod = require(filePath);
+    } catch (err: any) {
+      if (err?.code === 'ERR_REQUIRE_ESM') {
+        // Fallback: .js file in a "type": "module" project
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { pathToFileURL } = require('url');
+        mod = await (Function('p', 'return import(p)') as (p: string) => Promise<any>)(pathToFileURL(filePath).href);
+      } else {
+        throw err;
+      }
+    }
   }
 
   const fn = mod.default || mod;
