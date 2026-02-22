@@ -416,3 +416,27 @@ describe('TestJob.changeDelay', () => {
     await expect(job!.changeDelay(-1)).rejects.toThrow('Delay must be >= 0');
   });
 });
+
+describe('TestJob.promote', () => {
+  let queue: TestQueue;
+
+  afterEach(async () => {
+    if (queue) await queue.close();
+  });
+
+  it('updates opts.delay to 0', async () => {
+    queue = new TestQueue('promote-test');
+    const job = await queue.add('task', { x: 1 }, { delay: 5000 });
+    expect(job!.opts.delay).toBe(5000);
+    await job!.promote();
+    expect(job!.opts.delay).toBe(0);
+  });
+
+  it('is a no-op when delay is already 0', async () => {
+    queue = new TestQueue('promote-noop');
+    const job = await queue.add('task', { x: 1 });
+    expect(job!.opts.delay).toBeUndefined();
+    await job!.promote();
+    expect(job!.opts.delay).toBe(0);
+  });
+});
