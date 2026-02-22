@@ -133,7 +133,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       name,
       data,
       opts: opts ?? {},
-      state: opts?.delay && opts.delay > 0 ? 'delayed' : 'waiting',
+      state: 'waiting',
       attemptsMade: 0,
       returnvalue: undefined,
       failedReason: undefined,
@@ -261,6 +261,9 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
     for (const id of toRemove) {
       this.jobs.delete(id);
+    }
+    if (toRemove.length > 0) {
+      this.emit('drained', toRemove.length);
     }
   }
 

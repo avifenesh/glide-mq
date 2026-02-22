@@ -1706,10 +1706,11 @@ redis.register_function('glidemq_drain', function(keys, args)
     -- Page through remaining PEL entries if there were exactly 10000
     while #pending == 10000 do
       local lastId = pending[#pending][1]
-      local nextStart = lastId:sub(1, lastId:find('-') - 1)
-      nextStart = tostring(tonumber(nextStart) + 1) .. '-0'
+      local dashPos = lastId:find('-')
+      local seq = tonumber(lastId:sub(dashPos + 1))
+      local nextStart = lastId:sub(1, dashPos) .. tostring(seq + 1)
       ok, pending = pcall(redis.call, 'XPENDING', streamKey, group, nextStart, '+', '10000')
-      if ok and pending then
+      if ok and pending and #pending > 0 then
         for i = 1, #pending do
           activeSet[pending[i][1]] = true
         end
@@ -1756,21 +1757,22 @@ redis.register_function('glidemq_drain', function(keys, args)
 
   -- Optionally drain delayed/scheduled jobs
   if drainDelayed then
-    local scheduled = redis.call('ZRANGE', scheduledKey, 0, -1)
-    if #scheduled > 0 then
-      for i = 1, #scheduled, 1000 do
-        local batch = {}
-        for j = i, math.min(i + 999, #scheduled) do
-          local jobId = scheduled[j]
-          batch[#batch + 1] = prefix .. 'job:' .. jobId
-          batch[#batch + 1] = prefix .. 'log:' .. jobId
-          batch[#batch + 1] = prefix .. 'deps:' .. jobId
-        end
-        redis.call('DEL', unpack(batch))
+    local offset = 0
+    while true do
+      local scheduled = redis.call('ZRANGE', scheduledKey, offset, offset + 999)
+      if #scheduled == 0 then break end
+      local batch = {}
+      for j = 1, #scheduled do
+        local jobId = scheduled[j]
+        batch[#batch + 1] = prefix .. 'job:' .. jobId
+        batch[#batch + 1] = prefix .. 'log:' .. jobId
+        batch[#batch + 1] = prefix .. 'deps:' .. jobId
       end
+      redis.call('DEL', unpack(batch))
       removed = removed + #scheduled
-      redis.call('DEL', scheduledKey)
+      offset = offset + 1000
     end
+    redis.call('DEL', scheduledKey)
   end
 
   if removed > 0 then
