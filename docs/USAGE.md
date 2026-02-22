@@ -130,7 +130,7 @@ const worker = new Worker('tasks', async (job) => {
   // Permanently fail a job without consuming retries (two equivalent approaches):
   // 1. Imperative: call job.discard() then throw
   if (job.data.poison) {
-    await job.discard();
+    job.discard();
     throw new Error('poisoned job - discarded');
   }
   // 2. Declarative: throw UnrecoverableError - same effect, no discard() needed

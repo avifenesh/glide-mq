@@ -27,13 +27,13 @@ export class Job<D = any, R = any> {
    * The processor should check signal.aborted cooperatively.
    * Only set when the job is being processed by a Worker.
    */
+  abortSignal?: AbortSignal;
+
   /**
    * When true, the job will not be retried on failure regardless of attempts config.
    * Set by calling `discard()` inside the processor.
    */
   discarded = false;
-
-  abortSignal?: AbortSignal;
 
   /**
    * Stream entry ID assigned when the job was added to the stream.
