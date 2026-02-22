@@ -1,6 +1,6 @@
 import type { JobOptions, Client } from './types';
 import type { QueueKeys } from './functions/index';
-import { removeJob, failJob, changePriority, changeDelay } from './functions/index';
+import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
 import { calculateBackoff, decompress } from './utils';
 
 export class Job<D = any, R = any> {
@@ -201,6 +201,22 @@ export class Job<D = any, R = any> {
     }
     if (result === 'ok' || result === 'no_op') {
       this.opts.delay = newDelay;
+    }
+  }
+
+  /**
+   * Promote a delayed job to waiting immediately.
+   * Removes from the scheduled ZSet, adds to the stream, sets state to 'waiting'.
+   * Throws if the job is not in the delayed state or does not exist.
+   */
+  async promote(): Promise<void> {
+    const result = await promoteJob(this.client, this.queueKeys, this.id);
+    if (result.startsWith('error:')) {
+      const reason = result.slice(6);
+      throw new Error(`Cannot promote: ${reason}`);
+    }
+    if (result === 'ok') {
+      this.opts.delay = 0;
     }
   }
 

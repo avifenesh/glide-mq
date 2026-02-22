@@ -86,6 +86,10 @@ export class TestJob<D = any, R = any> {
     this.opts.delay = newDelay;
   }
 
+  async promote(): Promise<void> {
+    this.opts.delay = 0;
+  }
+
   discard(): void {
     this.discarded = true;
   }

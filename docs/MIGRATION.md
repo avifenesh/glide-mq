@@ -482,7 +482,7 @@ The processor function signature is identical. The only change is the connection
 | `job.retry(state?)` | `job.retry()` | Changed |
 | `job.remove(opts?)` | `job.remove()` | Full |
 | `job.getChildrenValues()` | `job.getChildrenValues()` | Full |
-| `job.promote()` | - | Gap [#11](https://github.com/avifenesh/glide-mq/issues/11) |
+| `job.promote()` | `job.promote()` | Full [#11](https://github.com/avifenesh/glide-mq/issues/11) |
 | `job.changeDelay(delay)` | `job.changeDelay(newDelay)` | Full [#12](https://github.com/avifenesh/glide-mq/issues/12) |
 | `job.changePriority(opts)` | `job.changePriority(newPriority)` | Full [#13](https://github.com/avifenesh/glide-mq/issues/13) |
 | `job.discard()` | `job.discard()` | Full [#14](https://github.com/avifenesh/glide-mq/issues/14) |
@@ -1103,7 +1103,7 @@ These features exist in BullMQ but are not yet implemented in glide-mq. Each has
 
 | Missing feature | Workaround | Issue |
 |---|---|---|
-| `job.promote()` | Remove and re-add the job with `delay: 0` | [#11](https://github.com/avifenesh/glide-mq/issues/11) |
+| `job.promote()` | Now implemented natively — call `job.promote()` to move a delayed job to waiting immediately | Resolved [#11](https://github.com/avifenesh/glide-mq/issues/11) |
 | `job.changeDelay(delay)` | Now implemented natively - call `job.changeDelay(newDelay)` | Resolved [#12](https://github.com/avifenesh/glide-mq/issues/12) |
 | `job.changePriority(opts)` | Now implemented natively — call `job.changePriority(newPriority)` | Resolved [#13](https://github.com/avifenesh/glide-mq/issues/13) |
 | `job.discard()` | Now implemented natively — call `job.discard()` or throw `UnrecoverableError` inside the processor | Resolved [#14](https://github.com/avifenesh/glide-mq/issues/14) |

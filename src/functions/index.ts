@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '26';
+export const LIBRARY_VERSION = '27';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1825,6 +1825,27 @@ redis.register_function('glidemq_changeDelay', function(keys, args)
   end
 end)
 
+redis.register_function('glidemq_promoteJob', function(keys, args)
+  local jobKey = keys[1]
+  local streamKey = keys[2]
+  local scheduledKey = keys[3]
+  local eventsKey = keys[4]
+  local jobId = args[1]
+  local exists = redis.call('EXISTS', jobKey)
+  if exists == 0 then
+    return 'error:not_found'
+  end
+  local state = redis.call('HGET', jobKey, 'state')
+  if state ~= 'delayed' then
+    return 'error:not_delayed'
+  end
+  redis.call('ZREM', scheduledKey, jobId)
+  redis.call('XADD', streamKey, '*', 'jobId', jobId)
+  redis.call('HSET', jobKey, 'state', 'waiting', 'delay', '0')
+  emitEvent(eventsKey, 'promoted', jobId, nil)
+  return 'ok'
+end)
+
 redis.register_function('glidemq_searchByName', function(keys, args)
   local stateKey = keys[1]
   local stateType = args[1]
@@ -2555,6 +2576,16 @@ export async function changeDelay(
     [k.job(jobId), k.stream, k.scheduled, k.events],
     [jobId, newDelay.toString(), Date.now().toString(), group],
   );
+  return result as string;
+}
+
+/**
+ * Promote a delayed job to waiting immediately.
+ * Removes from the scheduled ZSet, adds to the stream, sets state to 'waiting'.
+ * Returns 'ok', 'error:not_found', or 'error:not_delayed'.
+ */
+export async function promoteJob(client: Client, k: QueueKeys, jobId: string): Promise<string> {
+  const result = await client.fcall('glidemq_promoteJob', [k.job(jobId), k.stream, k.scheduled, k.events], [jobId]);
   return result as string;
 }
 
