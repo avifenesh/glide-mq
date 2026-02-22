@@ -1,6 +1,6 @@
 import type { JobOptions, Client } from './types';
 import type { QueueKeys } from './functions/index';
-import { removeJob, failJob, changePriority } from './functions/index';
+import { removeJob, failJob, changePriority, changeDelay } from './functions/index';
 import { calculateBackoff, decompress } from './utils';
 
 export class Job<D = any, R = any> {
@@ -181,6 +181,26 @@ export class Job<D = any, R = any> {
     }
     if (result === 'ok' || result === 'no_op') {
       this.opts.priority = newPriority;
+    }
+  }
+
+  /**
+   * Change the delay of this job. Supports delayed, waiting, and prioritized states.
+   * Setting delay to 0 promotes a delayed job immediately.
+   * Setting delay > 0 on a waiting/prioritized job moves it to the scheduled ZSet.
+   * Throws if the job is in an invalid state (active, completed, failed).
+   */
+  async changeDelay(newDelay: number): Promise<void> {
+    if (newDelay < 0) {
+      throw new Error('Delay must be >= 0');
+    }
+    const result = await changeDelay(this.client, this.queueKeys, this.id, newDelay);
+    if (result.startsWith('error:')) {
+      const reason = result.slice(6);
+      throw new Error(`Cannot change delay: ${reason}`);
+    }
+    if (result === 'ok' || result === 'no_op') {
+      this.opts.delay = newDelay;
     }
   }
 
