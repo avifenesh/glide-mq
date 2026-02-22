@@ -434,7 +434,7 @@ The processor function signature is identical. The only change is the connection
 | `queue.getJobSchedulers()` | `queue.getRepeatableJobs()` | Changed |
 | `queue.removeJobScheduler(id)` | `queue.removeJobScheduler(name)` | Full |
 | `queue.getWorkers()` | - | Gap [#18](https://github.com/avifenesh/glide-mq/issues/18) |
-| `queue.drain(delayed?)` | - | Gap [#15](https://github.com/avifenesh/glide-mq/issues/15) |
+| `queue.drain(delayed?)` | `queue.drain(delayed?)` | Full |
 | `queue.clean(grace, limit, type)` | `queue.clean(grace, limit, type)` | Full |
 | `queue.retryJobs(opts)` | - | Gap [#17](https://github.com/avifenesh/glide-mq/issues/17) |
 | `queue.close()` | `queue.close()` | Full |
@@ -1099,7 +1099,7 @@ These features exist in BullMQ but are not yet implemented in glide-mq. Each has
 | `job.changeDelay(delay)` | Remove and re-add with new delay | [#12](https://github.com/avifenesh/glide-mq/issues/12) |
 | `job.changePriority(opts)` | Remove and re-add with new priority | [#13](https://github.com/avifenesh/glide-mq/issues/13) |
 | `job.discard()` | Now implemented natively — call `job.discard()` or throw `UnrecoverableError` inside the processor | Resolved [#14](https://github.com/avifenesh/glide-mq/issues/14) |
-| `queue.drain(delayed?)` | `queue.obliterate({ force: false })` removes everything; no surgical drain yet | [#15](https://github.com/avifenesh/glide-mq/issues/15) |
+| `queue.drain(delayed?)` | Now implemented natively — call `queue.drain()` or `queue.drain(true)` to also remove delayed jobs | Resolved [#15](https://github.com/avifenesh/glide-mq/issues/15) |
 | `queue.clean(grace, limit, type)` | Now implemented natively — see [Queue API table](#queue-methods-and-options) above | Resolved [#16](https://github.com/avifenesh/glide-mq/issues/16) |
 | `queue.retryJobs(opts)` | `const failed = await queue.getJobs('failed'); await Promise.all(failed.map(j => j.retry()))` | [#17](https://github.com/avifenesh/glide-mq/issues/17) |
 | `queue.getWorkers()` | Not available | [#18](https://github.com/avifenesh/glide-mq/issues/18) |

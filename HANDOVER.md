@@ -4,60 +4,50 @@ Current state of the glide-mq repository as of 2026-02-22.
 
 ## Branch
 
-`job-discard-14` — open against `main`. PR not yet created.
+`drain-15` — open against `main`. PR not yet created.
 
 ## In-progress task
 
-**Task #14: `job.discard()` and `UnrecoverableError`**
+**Task #15: `queue.drain(delayed?)`**
 
 ### What was done
 
-- Added `UnrecoverableError` class in `src/errors.ts` — extends `Error`, exported from `src/index.ts`.
-- Added `job.discard()` method in `src/job.ts` — sets a discard flag, causing the worker to move the job directly to failed state without consuming retry attempts.
-- Updated `src/worker.ts` to check for `discard` flag and `UnrecoverableError` on job failure — both paths skip retry scheduling.
-- Updated `src/sandbox/` types, runner, and pool to propagate discard/unrecoverable signals from child process/thread back to the main process.
-- Updated `src/testing.ts` — `TestWorker` honours discard flag and `UnrecoverableError`.
-- New test file `tests/discard.test.ts` — covers both `job.discard()` and `UnrecoverableError` in standalone and sandbox modes.
-- New fixtures: `tests/fixtures/processors/discard.js`, `tests/fixtures/processors/unrecoverable.js`.
+- Added `glidemq_drain` Lua function in `src/functions/index.ts` — removes all waiting jobs from the stream and associated job hashes. When `delayed=1`, also removes delayed/scheduled jobs from the sorted set. Emits a `'drained'` event. LIBRARY_VERSION bumped to `24`.
+- Added `drainQueue()` helper in `src/functions/index.ts` and `queue.drain(delayed?: boolean)` method in `src/queue.ts`.
+- Added `TestQueue.drain(delayed?: boolean)` in `src/testing.ts` — in-memory equivalent; `TestQueue` now tracks delayed job state so drain can selectively remove them.
+- New test file `tests/drain.test.ts` — covers waiting-only drain, drain with delayed=true, drain on empty queue, and drain emits event.
 
 ### Files changed
 
 | File | Change |
 |------|--------|
-| `src/errors.ts` | New `UnrecoverableError` class |
-| `src/index.ts` | Export `UnrecoverableError` |
-| `src/job.ts` | `job.discard()` method |
-| `src/worker.ts` | Handle discard flag and `UnrecoverableError` |
-| `src/sandbox/types.ts` | Propagate discard/unrecoverable in IPC types |
-| `src/sandbox/runner.ts` | Catch and signal discard/unrecoverable |
-| `src/sandbox/pool.ts` | Handle discard/unrecoverable from runner |
-| `src/sandbox/sandbox-job.ts` | Expose `discard()` in sandbox job proxy |
-| `src/testing.ts` | `TestWorker` honours discard/unrecoverable |
-| `tests/discard.test.ts` | New — full test coverage |
-| `tests/fixtures/processors/discard.js` | Fixture for sandbox discard test |
-| `tests/fixtures/processors/unrecoverable.js` | Fixture for sandbox UnrecoverableError test |
+| `src/functions/index.ts` | `glidemq_drain` Lua function; `drainQueue()` export; LIBRARY_VERSION → 24 |
+| `src/queue.ts` | `queue.drain(delayed?)` method |
+| `src/testing.ts` | `TestQueue.drain(delayed?)`; delayed job tracking |
+| `tests/drain.test.ts` | New — full test coverage |
 
 ### Docs updated (this session)
 
 | File | Change |
 |------|--------|
-| `docs/USAGE.md` | Added `job.discard()` / `UnrecoverableError` example in Worker section |
-| `docs/MIGRATION.md` | `job.discard()` updated from Gap to Full; workaround text and workarounds table updated |
-| `CHANGELOG.md` | `[Unreleased]` section includes `job.discard()` and `UnrecoverableError` entries |
+| `docs/USAGE.md` | Replaced "no standalone drain()" comment with actual usage example |
+| `docs/MIGRATION.md` | `queue.drain(delayed?)` updated from Gap to Full; workarounds table entry updated to Resolved |
+| `docs/TESTING.md` | Added `drain(delayed?)` row to TestQueue API surface table |
+| `CHANGELOG.md` | `[Unreleased]` section includes `queue.drain()` and `TestQueue.drain()` entries |
 | `HANDOVER.md` | This file (updated) |
 
 ## What comes next
 
 1. Commit all changed files as separate logical commits.
 2. Run `/deslop` before pushing.
-3. Open PR — title: `feat: add job.discard() and UnrecoverableError`.
+3. Open PR — title: `feat: queue.drain(delayed?) — remove waiting/delayed jobs`.
 4. Verify CI passes (unit + integration tests).
 
 ## Known state
 
 - Valkey must be on `:6379` (standalone) and `:7000-7005` (cluster) for full integration tests.
 - `npm run build` compiles TypeScript to `dist/`.
-- `npx vitest run tests/discard.test.ts` runs just the new discard tests.
+- `npx vitest run tests/drain.test.ts` runs just the new drain tests.
 
 ## Active configuration
 

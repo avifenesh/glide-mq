@@ -77,7 +77,8 @@ const paused = await queue.isPaused();
 
 ```typescript
 // Remove all waiting jobs (keeps active jobs running)
-// Note: no standalone drain() method — use obliterate with caution.
+await queue.drain();           // remove waiting jobs only
+await queue.drain(true);       // also remove delayed/scheduled jobs
 
 // Remove ALL queue data from Valkey
 await queue.obliterate();             // fails if there are active jobs
