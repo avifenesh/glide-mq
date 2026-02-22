@@ -126,6 +126,10 @@ const worker = new Worker('tasks', async (job) => {
 ### Worker events
 
 ```typescript
+worker.on('active', (job, jobId) => {
+  console.log(`Job ${jobId} started processing`);
+});
+
 worker.on('completed', (job, result) => {
   console.log(`Job ${job.id} finished`, result);
 });
@@ -141,7 +145,22 @@ worker.on('error', (err) => {
 worker.on('stalled', (jobId) => {
   console.warn(`Job ${jobId} stalled and was re-queued`);
 });
+
+worker.on('drained', () => {
+  console.log('Queue is empty — no more jobs waiting');
+});
 ```
+
+| Event | Arguments | Description |
+|-------|-----------|-------------|
+| `active` | `(job, jobId)` | Fired when a job starts processing |
+| `completed` | `(job, result)` | Fired when a job finishes successfully |
+| `failed` | `(job, err)` | Fired when a job throws or times out |
+| `error` | `(err)` | Internal worker error (connection issues, etc.) |
+| `stalled` | `(jobId)` | Job exceeded lock duration and was re-queued |
+| `drained` | `()` | Queue transitioned from non-empty to empty |
+| `closing` | `()` | Worker is beginning to close |
+| `closed` | `()` | Worker has fully closed |
 
 ### Pausing / closing a worker
 

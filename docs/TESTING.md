@@ -104,8 +104,10 @@ describe('email processor', () => {
 
 | Method / Event | Description |
 |----------------|-------------|
+| `on('active', fn)` | Fired when a job starts processing — args: `(job, jobId)` |
 | `on('completed', fn)` | Fired when a job finishes successfully |
 | `on('failed', fn)` | Fired when a job throws |
+| `on('drained', fn)` | Fired when the queue transitions from non-empty to empty |
 | `close()` | Stop the worker |
 
 ---
