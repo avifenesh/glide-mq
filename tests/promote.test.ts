@@ -40,17 +40,14 @@ describeEachMode('job.promote()', (CONNECTION) => {
     const job = await queue.add('task', { x: 1 }, { delay: 60000 });
     const k = buildKeys(Q);
 
-    // Verify delayed state
     expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('delayed');
     expect(await cleanupClient.zscore(k.scheduled, job.id)).not.toBeNull();
 
     const result = await promoteJob(cleanupClient, k, job.id);
     expect(result).toBe('ok');
 
-    // ZSCORE should be null (removed from scheduled)
     expect(await cleanupClient.zscore(k.scheduled, job.id)).toBeNull();
 
-    // State should be 'waiting', delay should be '0'
     expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('waiting');
     expect(String(await cleanupClient.hget(k.job(job.id), 'delay'))).toBe('0');
   });
@@ -187,7 +184,6 @@ describeEachMode('job.promote()', (CONNECTION) => {
 
     expect(String(await cleanupClient.hget(k.job(job!.id), 'state'))).toBe('waiting');
 
-    // Promoting again (now waiting) should throw
     await expect(job!.promote()).rejects.toThrow('Cannot promote');
 
     await localQueue.close();
