@@ -225,6 +225,20 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     return results;
   }
 
+  /** Bulk-remove old completed or failed jobs by age. */
+  async clean(grace: number, limit: number, type: 'completed' | 'failed'): Promise<string[]> {
+    const cutoff = Date.now() - grace;
+    const removed: string[] = [];
+    for (const [id, record] of this.jobs) {
+      if (removed.length >= limit) break;
+      if (record.state === type && record.finishedOn !== undefined && record.finishedOn < cutoff) {
+        removed.push(id);
+        this.jobs.delete(id);
+      }
+    }
+    return removed;
+  }
+
   /** Close the queue. */
   async close(): Promise<void> {
     this.removeAllListeners();
