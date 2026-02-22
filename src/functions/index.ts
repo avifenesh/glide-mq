@@ -1794,9 +1794,7 @@ redis.register_function('glidemq_changeDelay', function(keys, args)
         if found then break end
       end
       if not found then
-        local lastId = entries[#entries][1]
-        local dashPos = lastId:find('-')
-        cursor = lastId:sub(1, dashPos) .. tostring(tonumber(lastId:sub(dashPos + 1)) + 1)
+        cursor = '(' .. entries[#entries][1]
       end
     end
     if not found then
