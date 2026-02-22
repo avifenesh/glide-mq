@@ -3,11 +3,17 @@ import { fork, ChildProcess } from 'child_process';
 import type { MainToChild, ChildToMain } from './types';
 import { toSerializedJob } from './types';
 import type { Job } from '../job';
+import { GlideMQError } from '../errors';
 
 interface PoolWorker {
   thread: WorkerThread | ChildProcess;
   busy: boolean;
   currentReject?: (err: Error) => void;
+}
+
+interface Waiter {
+  resolve: (pw: PoolWorker) => void;
+  reject: (err: Error) => void;
 }
 
 /**
@@ -20,7 +26,7 @@ export class SandboxPool {
   private maxWorkers: number;
   private runnerPath: string;
   private workers: PoolWorker[] = [];
-  private waiters: Array<(pw: PoolWorker) => void> = [];
+  private waiters: Waiter[] = [];
   private _closed = false;
 
   constructor(processorPath: string, useWorkerThreads: boolean, maxWorkers: number, runnerPath: string) {
@@ -56,6 +62,9 @@ export class SandboxPool {
     };
 
     const onError = (err: Error) => {
+      const idx = this.workers.indexOf(pw);
+      if (idx >= 0) this.workers.splice(idx, 1);
+
       if (pw.currentReject) {
         pw.currentReject(err);
         pw.currentReject = undefined;
@@ -82,8 +91,8 @@ export class SandboxPool {
       return Promise.resolve(pw);
     }
 
-    return new Promise<PoolWorker>((resolve) => {
-      this.waiters.push(resolve);
+    return new Promise<PoolWorker>((resolve, reject) => {
+      this.waiters.push({ resolve, reject });
     });
   }
 
@@ -94,7 +103,7 @@ export class SandboxPool {
     const waiter = this.waiters.shift();
     if (waiter) {
       pw.busy = true;
-      waiter(pw);
+      waiter.resolve(pw);
     }
   }
 
@@ -196,6 +205,10 @@ export class SandboxPool {
     if (this._closed) return;
     this._closed = true;
 
+    const closedError = new GlideMQError('SandboxPool is closed');
+    for (const waiter of this.waiters) {
+      waiter.reject(closedError);
+    }
     this.waiters.length = 0;
 
     const terminations: Promise<void>[] = [];
