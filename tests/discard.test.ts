@@ -4,7 +4,8 @@
  *
  * Run: npx vitest run tests/discard.test.ts
  */
-import { it, expect, describe, beforeAll, afterAll } from 'vitest';
+import { it, expect, describe, beforeAll, afterAll, vi } from 'vitest';
+import path from 'path';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -155,6 +156,57 @@ describeEachMode('job.discard() and UnrecoverableError', (CONNECTION) => {
     await done;
     await flushQueue(cleanupClient, Q);
     await queue.close();
+  });
+});
+
+// ---- Sandbox tests (IPC boundary) ----
+
+describe('discard in sandbox mode', () => {
+  const { SandboxPool } = require('../dist/sandbox/pool') as typeof import('../src/sandbox/pool');
+  const { UnrecoverableError: UE } = require('../dist/errors') as typeof import('../src/errors');
+  const RUNNER_PATH = path.resolve(__dirname, '..', 'dist', 'sandbox', 'runner.js');
+  const DISCARD_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/discard.js');
+  const UNRECOVERABLE_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/unrecoverable.js');
+
+  const makeJob = (id: string) =>
+    ({
+      id,
+      name: 'test',
+      data: {},
+      opts: { attempts: 5 },
+      attemptsMade: 0,
+      timestamp: Date.now(),
+      progress: 0,
+      discarded: false,
+      log: vi.fn(),
+      updateProgress: vi.fn(),
+      updateData: vi.fn(),
+    }) as any;
+
+  it('job.discard() propagates discarded flag through IPC', async () => {
+    const pool = new SandboxPool(DISCARD_PROCESSOR, true, 1, RUNNER_PATH);
+    const job = makeJob('sandbox-discard-1');
+
+    await expect(pool.run(job)).rejects.toThrow('discarded-in-sandbox');
+    expect(job.discarded).toBe(true);
+
+    await pool.close();
+  });
+
+  it('UnrecoverableError name survives IPC serialization', async () => {
+    const pool = new SandboxPool(UNRECOVERABLE_PROCESSOR, true, 1, RUNNER_PATH);
+    const job = makeJob('sandbox-unrecoverable-1');
+
+    try {
+      await pool.run(job);
+      expect.unreachable('should have thrown');
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(UE);
+      expect(err.name).toBe('UnrecoverableError');
+      expect(err.message).toBe('fatal-in-sandbox');
+    }
+
+    await pool.close();
   });
 });
 
