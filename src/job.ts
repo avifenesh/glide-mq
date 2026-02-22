@@ -179,7 +179,7 @@ export class Job<D = any, R = any> {
       const reason = result.slice(6);
       throw new Error(`Cannot change priority: ${reason}`);
     }
-    if (result === 'ok') {
+    if (result === 'ok' || result === 'no_op') {
       this.opts.priority = newPriority;
     }
   }

@@ -1664,23 +1664,31 @@ redis.register_function('glidemq_changePriority', function(keys, args)
     if newPriority == 0 then
       return 'no_op'
     end
-    local entries = redis.call('XRANGE', streamKey, '-', '+')
+    local cursor = '-'
     local found = false
-    for i = 1, #entries do
-      if found then break end
-      local entryId = entries[i][1]
-      local fields = entries[i][2]
-      for j = 1, #fields, 2 do
-        if fields[j] == 'jobId' and fields[j+1] == jobId then
-          redis.call('XACK', streamKey, group, entryId)
-          redis.call('XDEL', streamKey, entryId)
-          found = true
-          break
+    while not found do
+      local entries = redis.call('XRANGE', streamKey, cursor, '+', 'COUNT', 1000)
+      if #entries == 0 then break end
+      for i = 1, #entries do
+        local entryId = entries[i][1]
+        local fields = entries[i][2]
+        for j = 1, #fields, 2 do
+          if fields[j] == 'jobId' and fields[j+1] == jobId then
+            redis.call('XACK', streamKey, group, entryId)
+            redis.call('XDEL', streamKey, entryId)
+            found = true
+            break
+          end
         end
+        if found then break end
+      end
+      if not found then
+        local lastId = entries[#entries][1]
+        local dashPos = lastId:find('-')
+        cursor = lastId:sub(1, dashPos) .. tostring(tonumber(lastId:sub(dashPos + 1)) + 1)
       end
     end
-    local score = newPriority * PRIORITY_SHIFT
-    redis.call('ZADD', scheduledKey, score, jobId)
+    redis.call('ZADD', scheduledKey, string.format('%.0f', newPriority * PRIORITY_SHIFT), jobId)
     redis.call('HSET', jobKey, 'state', 'prioritized', 'priority', tostring(newPriority))
     emitEvent(eventsKey, 'priority-changed', jobId, {'priority', tostring(newPriority)})
     return 'ok'
@@ -1690,7 +1698,7 @@ redis.register_function('glidemq_changePriority', function(keys, args)
       redis.call('XADD', streamKey, '*', 'jobId', jobId)
       redis.call('HSET', jobKey, 'state', 'waiting', 'priority', '0')
     else
-      redis.call('ZADD', scheduledKey, newPriority * PRIORITY_SHIFT, jobId)
+      redis.call('ZADD', scheduledKey, string.format('%.0f', newPriority * PRIORITY_SHIFT), jobId)
       redis.call('HSET', jobKey, 'priority', tostring(newPriority))
     end
     emitEvent(eventsKey, 'priority-changed', jobId, {'priority', tostring(newPriority)})
@@ -1700,7 +1708,7 @@ redis.register_function('glidemq_changePriority', function(keys, args)
     local oldTimestamp = oldScore % PRIORITY_SHIFT
     local newScore = newPriority * PRIORITY_SHIFT + oldTimestamp
     redis.call('ZREM', scheduledKey, jobId)
-    redis.call('ZADD', scheduledKey, newScore, jobId)
+    redis.call('ZADD', scheduledKey, string.format('%.0f', newScore), jobId)
     redis.call('HSET', jobKey, 'priority', tostring(newPriority))
     emitEvent(eventsKey, 'priority-changed', jobId, {'priority', tostring(newPriority)})
     return 'ok'
