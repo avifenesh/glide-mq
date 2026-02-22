@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '22';
+export const LIBRARY_VERSION = '23';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1563,6 +1563,27 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   return 1
 end)
 
+redis.register_function('glidemq_clean', function(keys, args)
+  local setKey = keys[1]
+  local eventsKey = keys[2]
+  local cutoff = tonumber(args[1])
+  local limit = tonumber(args[2])
+  local prefix = args[3]
+  local ids = redis.call('ZRANGEBYSCORE', setKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, limit)
+  if #ids == 0 then
+    return {}
+  end
+  for i = 1, #ids do
+    redis.call('DEL', prefix .. 'job:' .. ids[i])
+    redis.call('DEL', prefix .. 'log:' .. ids[i])
+    emitEvent(eventsKey, 'removed', ids[i], nil)
+  end
+  for i = 1, #ids, 1000 do
+    redis.call('ZREM', setKey, unpack(ids, i, math.min(i + 999, #ids)))
+  end
+  return ids
+end)
+
 redis.register_function('glidemq_revoke', function(keys, args)
   local jobKey = keys[1]
   local streamKey = keys[2]
@@ -2155,6 +2176,31 @@ export async function removeJob(client: Client, k: QueueKeys, jobId: string): Pr
     [jobId],
   );
   return result as number;
+}
+
+/**
+ * Bulk-remove old completed or failed jobs by age.
+ * Removes job hashes, log keys, and ZSet entries for jobs older than cutoff.
+ * Returns an array of removed job IDs.
+ */
+export async function cleanJobs(
+  client: Client,
+  k: QueueKeys,
+  type: 'completed' | 'failed',
+  grace: number,
+  limit: number,
+  timestamp: number,
+): Promise<string[]> {
+  const cutoff = timestamp - grace;
+  const setKey = type === 'completed' ? k.completed : k.failed;
+  // Derive prefix from the key: "glide:{queueName}:completed" -> "glide:{queueName}:"
+  const prefix = setKey.replace(/completed$|failed$/, '');
+  const result = await client.fcall(
+    'glidemq_clean',
+    [setKey, k.events],
+    [cutoff.toString(), limit.toString(), prefix],
+  );
+  return Array.isArray(result) ? result.map((r) => String(r)) : [];
 }
 
 /**
