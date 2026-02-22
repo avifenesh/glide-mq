@@ -245,6 +245,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private activeCount = 0;
   private running = true;
   private processing = false;
+  private isDrained = true;
 
   constructor(queue: TestQueue<D, R>, processor: Processor<D, R> | string, opts?: TestWorkerOptions) {
     super();
@@ -303,7 +304,15 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       record.state = 'active';
       record.processedOn = Date.now();
       this.activeCount++;
-      this.processJob(record);
+      this.isDrained = false;
+      const job = new TestJob<D, R>(record);
+      this.emit('active', job, record.id);
+      this.processJob(record, job);
+    }
+
+    if (this.activeCount === 0 && !this.isDrained) {
+      this.isDrained = true;
+      this.emit('drained');
     }
   }
 
@@ -314,9 +323,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     return undefined;
   }
 
-  private processJob(record: TestJobRecord<D, R>): void {
-    const job = new TestJob<D, R>(record);
-
+  private processJob(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
     this.processor(job as any)
       .then((result) => {
         record.state = 'completed';
