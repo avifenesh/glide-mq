@@ -203,7 +203,11 @@ export class SandboxPool {
           }
         : undefined;
       if (job.abortSignal && abortHandler) {
-        job.abortSignal.addEventListener('abort', abortHandler, { once: true });
+        if (job.abortSignal.aborted) {
+          abortHandler();
+        } else {
+          job.abortSignal.addEventListener('abort', abortHandler, { once: true });
+        }
       }
 
       const originalRemoveListener = removeListener;

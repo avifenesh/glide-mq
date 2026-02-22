@@ -30,9 +30,10 @@ export class SandboxJob<D = any, R = any> {
   private abortController: AbortController;
   private pendingProxies = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private proxySeq = 0;
+  private invocationId: string;
   private sendMessage: (msg: ChildToMain) => void;
 
-  constructor(serialized: SerializedJob, sendMessage: (msg: ChildToMain) => void) {
+  constructor(serialized: SerializedJob, sendMessage: (msg: ChildToMain) => void, invocationId?: string) {
     this.id = serialized.id;
     this.name = serialized.name;
     this.data = serialized.data as D;
@@ -52,6 +53,7 @@ export class SandboxJob<D = any, R = any> {
 
     this.abortController = new AbortController();
     this.abortSignal = this.abortController.signal;
+    this.invocationId = invocationId ?? '';
     this.sendMessage = sendMessage;
   }
 
@@ -136,7 +138,7 @@ export class SandboxJob<D = any, R = any> {
   }
 
   private proxyCall(method: 'log' | 'updateProgress' | 'updateData', args: unknown[]): Promise<unknown> {
-    const id = String(++this.proxySeq);
+    const id = `${this.invocationId}:${++this.proxySeq}`;
     return new Promise<unknown>((resolve, reject) => {
       this.pendingProxies.set(id, { resolve, reject });
       this.sendMessage({ type: 'proxy-request', id, method, args });
