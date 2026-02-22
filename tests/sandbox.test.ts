@@ -32,11 +32,11 @@ const PROGRESS_PROCESSOR = path.join(PROCESSORS, 'progress.js');
 // The compiled runner.js lives in dist/sandbox/
 const RUNNER_PATH = path.resolve(__dirname, '..', 'dist', 'sandbox', 'runner.js');
 
-// Build before running tests - the runner.js must exist in dist/
+// Verify build artifacts and fixtures exist before running tests
 beforeAll(async () => {
-  // Verify fixture files exist
   const fs = await import('fs');
   expect(fs.existsSync(ECHO_PROCESSOR)).toBe(true);
+  expect(fs.existsSync(RUNNER_PATH)).toBe(true);
 });
 
 describe('SandboxJob', () => {
@@ -446,20 +446,6 @@ describe('createSandboxedProcessor', () => {
 });
 
 describe('Worker with string processor', () => {
-  // Mock speedkey module
-  vi.mock('@glidemq/speedkey', () => {
-    const MockGlideClient = {
-      createClient: vi.fn(),
-    };
-    const MockGlideClusterClient = {
-      createClient: vi.fn(),
-    };
-    return {
-      GlideClient: MockGlideClient,
-      GlideClusterClient: MockGlideClusterClient,
-    };
-  });
-
   function makeMockClient(overrides: Record<string, unknown> = {}) {
     return {
       fcall: vi.fn().mockImplementation((func: string) => {

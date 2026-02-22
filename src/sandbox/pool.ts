@@ -71,7 +71,10 @@ export class SandboxPool {
           offMsg: (handler) => (thread as ChildProcess).off('message', handler as any),
         };
 
+    let cleaned = false;
     const removeAndCleanup = (error: Error) => {
+      if (cleaned) return;
+      cleaned = true;
       const idx = this.workers.indexOf(pw);
       if (idx >= 0) this.workers.splice(idx, 1);
 
@@ -183,7 +186,9 @@ export class SandboxPool {
               break;
 
             case 'proxy-request':
-              this.handleProxyRequest(pw, job, msg);
+              if (msg.id.startsWith(invocationId + ':')) {
+                this.handleProxyRequest(pw, job, msg);
+              }
               break;
           }
         } catch (err) {
@@ -263,11 +268,21 @@ export class SandboxPool {
     }
     this.waiters.length = 0;
 
+    const KILL_TIMEOUT = 5000;
     const terminations: Promise<void>[] = [];
     for (const pw of this.workers) {
       terminations.push(
         new Promise<void>((resolve) => {
-          pw.thread.once('exit', () => resolve());
+          const timer = setTimeout(() => {
+            if (!this.useWorkerThreads) {
+              (pw.thread as ChildProcess).kill('SIGKILL');
+            }
+            resolve();
+          }, KILL_TIMEOUT);
+          pw.thread.once('exit', () => {
+            clearTimeout(timer);
+            resolve();
+          });
           if (this.useWorkerThreads) {
             (pw.thread as WorkerThread).terminate();
           } else {
