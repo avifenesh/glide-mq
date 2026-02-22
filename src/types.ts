@@ -76,6 +76,13 @@ export interface QueueOptions {
   compression?: 'none' | 'gzip';
 }
 
+export interface SandboxOptions {
+  /** Use worker_threads (default: true). When false, uses child_process.fork. */
+  useWorkerThreads?: boolean;
+  /** Maximum number of concurrent sandbox workers. Defaults to the Worker concurrency. */
+  maxWorkers?: number;
+}
+
 export interface WorkerOptions extends QueueOptions {
   /**
    * Pre-existing GLIDE client for non-blocking commands (alias for `client`).
@@ -97,6 +104,8 @@ export interface WorkerOptions extends QueueOptions {
    *  Jobs with a recent heartbeat are not reclaimed as stalled.
    *  Default: 30000 (30s). */
   lockDuration?: number;
+  /** Sandbox options for file-path processors. Only used when processor is a string. */
+  sandbox?: SandboxOptions;
 }
 
 export interface JobOptions {
