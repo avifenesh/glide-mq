@@ -232,7 +232,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     const cutoff = Date.now() - grace;
     const candidates: [string, number][] = [];
     for (const [id, record] of this.jobs) {
-      if (record.state === type && record.finishedOn !== undefined && record.finishedOn < cutoff) {
+      if (record.state === type && record.finishedOn !== undefined && record.finishedOn <= cutoff) {
         candidates.push([id, record.finishedOn]);
       }
     }
