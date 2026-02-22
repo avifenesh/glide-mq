@@ -190,7 +190,9 @@ export class SandboxPool {
 
             case 'proxy-request':
               if (msg.id.startsWith(invocationId + ':')) {
-                this.handleProxyRequest(pw, job, msg);
+                this.handleProxyRequest(pw, job, msg).catch(() => {
+                  // Proxy send can fail if worker crashed mid-flight; safe to ignore
+                });
               }
               break;
           }
