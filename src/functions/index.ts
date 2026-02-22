@@ -1749,11 +1749,11 @@ redis.register_function('glidemq_changeDelay', function(keys, args)
       end
       local oldScore = tonumber(rawScore) or 0
       local priority = math.floor(oldScore / PRIORITY_SHIFT)
-      redis.call('ZREM', scheduledKey, jobId)
       if priority > 0 then
         redis.call('ZADD', scheduledKey, string.format('%.0f', priority * PRIORITY_SHIFT), jobId)
         redis.call('HSET', jobKey, 'state', 'prioritized', 'delay', '0')
       else
+        redis.call('ZREM', scheduledKey, jobId)
         redis.call('XADD', streamKey, '*', 'jobId', jobId)
         redis.call('HSET', jobKey, 'state', 'waiting', 'delay', '0')
       end
@@ -1798,6 +1798,9 @@ redis.register_function('glidemq_changeDelay', function(keys, args)
         local dashPos = lastId:find('-')
         cursor = lastId:sub(1, dashPos) .. tostring(tonumber(lastId:sub(dashPos + 1)) + 1)
       end
+    end
+    if not found then
+      return 'error:not_in_stream'
     end
     local newScore = priority * PRIORITY_SHIFT + (now + newDelay)
     redis.call('ZADD', scheduledKey, string.format('%.0f', newScore), jobId)

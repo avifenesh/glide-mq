@@ -331,6 +331,53 @@ describeEachMode('Delayed jobs', (CONNECTION) => {
       await flushQueue(cleanupClient, qName);
     });
 
+    it('completed job: returns error', async () => {
+      const qName = Q + '-cd-completed';
+      const localQueue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+
+      const job = await localQueue.add('task', { x: 1 });
+      await cleanupClient.hset(k.job(job.id), { state: 'completed' });
+
+      const result = await changeDelay(cleanupClient, k, job.id, 5000);
+      expect(result).toBe('error:invalid_state');
+
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('failed job: returns error', async () => {
+      const qName = Q + '-cd-failed';
+      const localQueue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+
+      const job = await localQueue.add('task', { x: 1 });
+      await cleanupClient.hset(k.job(job.id), { state: 'failed' });
+
+      const result = await changeDelay(cleanupClient, k, job.id, 5000);
+      expect(result).toBe('error:invalid_state');
+
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('prioritized with delay 0 -> delay 0: returns no_op', async () => {
+      const qName = Q + '-cd-prio-noop';
+      const localQueue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+
+      const job = await localQueue.add('task', { x: 1 }, { priority: 3 });
+      expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('prioritized');
+
+      const result = await changeDelay(cleanupClient, k, job.id, 0);
+      expect(result).toBe('no_op');
+
+      expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('prioritized');
+
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
     it('nonexistent job: returns error', async () => {
       const k = buildKeys(Q);
 
