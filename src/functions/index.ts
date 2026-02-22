@@ -1576,7 +1576,7 @@ redis.register_function('glidemq_clean', function(keys, args)
     return {}
   end
   for i = 1, #ids do
-    redis.call('DEL', prefix .. 'job:' .. ids[i], prefix .. 'log:' .. ids[i])
+    redis.call('DEL', prefix .. 'job:' .. ids[i], prefix .. 'log:' .. ids[i], prefix .. 'deps:' .. ids[i])
   end
   for i = 1, #ids, 1000 do
     redis.call('ZREM', setKey, unpack(ids, i, math.min(i + 999, #ids)))
@@ -2192,6 +2192,9 @@ export async function cleanJobs(
   limit: number,
   timestamp: number,
 ): Promise<string[]> {
+  if (type !== 'completed' && type !== 'failed') {
+    throw new TypeError(`clean type must be 'completed' or 'failed', got '${type}'`);
+  }
   const cutoff = timestamp - grace;
   const setKey = type === 'completed' ? k.completed : k.failed;
   const result = await client.fcall('glidemq_clean', [setKey, k.events, k.id], [cutoff.toString(), limit.toString()]);
