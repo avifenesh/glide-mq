@@ -32,7 +32,7 @@ export type {
   SearchJobsOptions,
 } from './types';
 
-export { GlideMQError, ConnectionError } from './errors';
+export { GlideMQError, ConnectionError, UnrecoverableError } from './errors';
 export { isClusterClient } from './connection';
 export { gracefulShutdown } from './graceful-shutdown';
 export type { GracefulShutdownHandle } from './graceful-shutdown';

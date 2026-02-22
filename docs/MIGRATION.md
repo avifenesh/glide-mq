@@ -485,7 +485,7 @@ The processor function signature is identical. The only change is the connection
 | `job.promote()` | - | Gap [#11](https://github.com/avifenesh/glide-mq/issues/11) |
 | `job.changeDelay(delay)` | - | Gap [#12](https://github.com/avifenesh/glide-mq/issues/12) |
 | `job.changePriority(opts)` | - | Gap [#13](https://github.com/avifenesh/glide-mq/issues/13) |
-| `job.discard()` | - | Gap [#14](https://github.com/avifenesh/glide-mq/issues/14) |
+| `job.discard()` | `job.discard()` | Full [#14](https://github.com/avifenesh/glide-mq/issues/14) |
 | `job.toJSON()` | - | Use `job.data`, `job.opts`, etc. directly |
 | - | `job.abortSignal` | glide-mq only |
 | - | `job.isRevoked()` | glide-mq only |
@@ -701,7 +701,7 @@ await queue.add('job', data, {
 
 **No `job.promote()`** - tracked in [#11](https://github.com/avifenesh/glide-mq/issues/11). No workaround without re-adding the job.
 
-**No `job.discard()`** - tracked in [#14](https://github.com/avifenesh/glide-mq/issues/14). Workaround: set `attempts: 1` on the job, or throw a specific error type and use a backoff strategy that returns 0 to prevent scheduling.
+**`job.discard()` is now implemented** - call `job.discard()` inside a processor to immediately fail the job without consuming any remaining retry attempts. Alternatively, throw `UnrecoverableError` to trigger the same behavior declaratively. Both are exported from `glide-mq` (#14).
 
 ---
 
@@ -1098,7 +1098,7 @@ These features exist in BullMQ but are not yet implemented in glide-mq. Each has
 | `job.promote()` | Remove and re-add the job with `delay: 0` | [#11](https://github.com/avifenesh/glide-mq/issues/11) |
 | `job.changeDelay(delay)` | Remove and re-add with new delay | [#12](https://github.com/avifenesh/glide-mq/issues/12) |
 | `job.changePriority(opts)` | Remove and re-add with new priority | [#13](https://github.com/avifenesh/glide-mq/issues/13) |
-| `job.discard()` | Set `attempts: 1` upfront, or use a backoff strategy returning a large value that exceeds max attempts | [#14](https://github.com/avifenesh/glide-mq/issues/14) |
+| `job.discard()` | Now implemented natively — call `job.discard()` or throw `UnrecoverableError` inside the processor | Resolved [#14](https://github.com/avifenesh/glide-mq/issues/14) |
 | `queue.drain(delayed?)` | `queue.obliterate({ force: false })` removes everything; no surgical drain yet | [#15](https://github.com/avifenesh/glide-mq/issues/15) |
 | `queue.clean(grace, limit, type)` | Now implemented natively — see [Queue API table](#queue-methods-and-options) above | Resolved [#16](https://github.com/avifenesh/glide-mq/issues/16) |
 | `queue.retryJobs(opts)` | `const failed = await queue.getJobs('failed'); await Promise.all(failed.map(j => j.retry()))` | [#17](https://github.com/avifenesh/glide-mq/issues/17) |

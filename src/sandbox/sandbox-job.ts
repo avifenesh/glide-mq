@@ -25,6 +25,8 @@ export class SandboxJob<D = any, R = any> {
   groupKey?: string;
   cost?: number;
 
+  discarded = false;
+
   abortSignal: AbortSignal;
 
   private abortController: AbortController;
@@ -72,6 +74,12 @@ export class SandboxJob<D = any, R = any> {
   async updateData(data: D): Promise<void> {
     await this.proxyCall('updateData', [data]);
     this.data = data;
+  }
+
+  /** Mark this job so it will not be retried on failure. */
+  discard(): void {
+    this.discarded = true;
+    this.proxyCall('discard', []).catch(() => {});
   }
 
   /** @internal Trigger the abort signal. Called when main thread sends 'abort'. */
@@ -128,7 +136,7 @@ export class SandboxJob<D = any, R = any> {
     throw new GlideMQError('Method not available in sandboxed processor');
   }
 
-  private proxyCall(method: 'log' | 'updateProgress' | 'updateData', args: unknown[]): Promise<unknown> {
+  private proxyCall(method: 'log' | 'updateProgress' | 'updateData' | 'discard', args: unknown[]): Promise<unknown> {
     const id = `${this.invocationId}:${++this.proxySeq}`;
     return new Promise<unknown>((resolve, reject) => {
       this.pendingProxies.set(id, { resolve, reject });

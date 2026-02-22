@@ -11,7 +11,7 @@ import {
   ensureFunctionLibraryOnce,
   createConsumerGroup,
 } from './connection';
-import { GlideMQError, ConnectionError } from './errors';
+import { GlideMQError, ConnectionError, UnrecoverableError } from './errors';
 import {
   CONSUMER_GROUP,
   completeJob,
@@ -487,7 +487,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
       return false;
     }
 
-    const maxAttempts = job.opts.attempts ?? 0;
+    const configuredAttempts = job.opts.attempts ?? 0;
+    // .name fallback handles cross-realm errors or sandbox IPC where instanceof may fail
+    const skipRetry = job.discarded || error instanceof UnrecoverableError || error.name === 'UnrecoverableError';
+    const maxAttempts = skipRetry ? 0 : configuredAttempts;
     let backoffDelay = 0;
     if (maxAttempts > 0 && job.opts.backoff) {
       const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];

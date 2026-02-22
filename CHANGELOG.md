@@ -13,6 +13,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `active` event on `Worker` and `TestWorker` — emitted with `(job, jobId)` when a job starts processing.
 - `drained` event on `Worker` and `TestWorker` — emitted when the queue transitions from non-empty to empty (i.e. no more waiting jobs after the last active job completes). A new `isDrained` flag prevents repeated emissions.
 - `queue.clean(grace, limit, type)` — bulk-remove old `completed` or `failed` jobs by minimum age. Returns an array of removed job IDs. Implemented as a single Valkey Server Function call (#16).
+- `job.discard()` — immediately move an active job to failed state, bypassing retries (#14).
+- `UnrecoverableError` — throw this error class inside a processor to skip all remaining retry attempts and fail the job permanently (#14).
 
 ---
 
