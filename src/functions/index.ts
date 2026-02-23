@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '27';
+export const LIBRARY_VERSION = '28';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1982,6 +1982,56 @@ redis.register_function('glidemq_drain', function(keys, args)
   end
   return removed
 end)
+
+redis.register_function('glidemq_retryJobs', function(keys, args)
+  local failedKey = keys[1]
+  local streamKey = keys[2]
+  local scheduledKey = keys[3]
+  local eventsKey = keys[4]
+  local idKey = keys[5]
+  local count = tonumber(args[1]) or 0
+  local timestamp = tonumber(args[2])
+  local prefix = string.sub(idKey, 1, #idKey - 2)
+  local retried = 0
+
+  while true do
+    if count > 0 and retried >= count then break end
+    local batchSize = 1000
+    if count > 0 then
+      batchSize = math.min(1000, count - retried)
+    end
+    local ids = redis.call('ZRANGE', failedKey, 0, batchSize - 1)
+    if #ids == 0 then break end
+    for i = 1, #ids do
+      if count > 0 and retried >= count then break end
+      local jobId = ids[i]
+      local jobKey = prefix .. 'job:' .. jobId
+      redis.call('ZREM', failedKey, jobId)
+      local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
+      if priority == 0 then
+        redis.call('XADD', streamKey, '*', 'jobId', jobId)
+        redis.call('HSET', jobKey,
+          'state', 'waiting',
+          'attemptsMade', '0',
+          'failedReason', '',
+          'finishedOn', ''
+        )
+      else
+        local score = priority * PRIORITY_SHIFT + timestamp
+        redis.call('ZADD', scheduledKey, score, jobId)
+        redis.call('HSET', jobKey,
+          'state', 'delayed',
+          'attemptsMade', '0',
+          'failedReason', '',
+          'finishedOn', ''
+        )
+      end
+      emitEvent(eventsKey, 'retried', jobId, nil)
+      retried = retried + 1
+    end
+  end
+  return retried
+end)
 `;
 
 // ---- Key set type ----
@@ -2514,6 +2564,28 @@ export async function drainQueue(
     'glidemq_drain',
     [k.stream, k.scheduled, k.events, k.id],
     [delayed ? '1' : '0', group],
+  );
+  return Number(result) || 0;
+}
+
+/**
+ * Bulk retry failed jobs.
+ * Moves jobs from the failed ZSet back to the stream (priority=0) or scheduled ZSet (priority>0).
+ * Resets attemptsMade, failedReason, and finishedOn on each job hash.
+ * Emits a 'retried' event per job.
+ * @param count - Maximum number of jobs to retry. 0 means all.
+ * @returns The number of jobs retried.
+ */
+export async function retryJobs(
+  client: Client,
+  k: QueueKeys,
+  count: number,
+  timestamp: number,
+): Promise<number> {
+  const result = await client.fcall(
+    'glidemq_retryJobs',
+    [k.failed, k.stream, k.scheduled, k.events, k.id],
+    [count.toString(), timestamp.toString()],
   );
   return Number(result) || 0;
 }
