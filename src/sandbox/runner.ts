@@ -80,11 +80,21 @@ async function handleProcess(id: string, serialized: SerializedJob): Promise<voi
       type: 'failed',
       id,
       error: err?.message ?? String(err),
-      stack: err?.stack,
+      stack: sanitizeStack(err?.stack),
       errorName: err?.name,
       discarded: job.discarded,
     });
   }
+}
+
+const cwd = process.cwd();
+// Escape potential regex special characters in cwd
+const escapedCwd = cwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const cwdRegex = new RegExp(escapedCwd, 'g');
+
+function sanitizeStack(stack: string | undefined): string | undefined {
+  if (!stack) return undefined;
+  return stack.replace(cwdRegex, '[PROJECT_ROOT]');
 }
 
 function handleMessage(msg: MainToChild): void {

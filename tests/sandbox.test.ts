@@ -681,3 +681,35 @@ describe('Stress tests', () => {
     }
   }, 10_000);
 });
+
+describe('Sandbox Security', () => {
+  it('should not leak absolute paths in stack traces', async () => {
+    const pool = new SandboxPool(THROW_PROCESSOR, true, 1, RUNNER_PATH);
+
+    const fakeJob = {
+      id: 'job-err',
+      name: 'test',
+      data: {},
+      opts: {},
+      attemptsMade: 0,
+      timestamp: Date.now(),
+      progress: 0,
+      log: vi.fn(),
+      updateProgress: vi.fn(),
+      updateData: vi.fn(),
+      abortSignal: new AbortController().signal,
+    } as unknown as Job;
+
+    try {
+      await pool.run(fakeJob);
+      expect(true).toBe(false); // Should have thrown
+    } catch (err: any) {
+      const cwd = process.cwd();
+      expect(err.stack).toBeDefined();
+      expect(err.stack).not.toContain(cwd);
+      expect(err.stack).toContain('[PROJECT_ROOT]');
+    } finally {
+      await pool.close();
+    }
+  });
+});
