@@ -1,4 +1,5 @@
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { JobOptions, Client } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
@@ -110,7 +111,10 @@ export class Job<D = any, R = any> {
     const depsKey = this.queueKeys.deps(this.id);
     const members = await this.client.smembers(depsKey);
     const result: Record<string, R> = {};
-    const batch = isClusterClient(this.client) ? new ClusterBatch(false) : new Batch(false);
+    if (!members || members.size === 0) return result;
+
+    const isCluster = isClusterClient(this.client);
+    const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
     const memberKeys: string[] = [];
 
     for (const member of members) {
@@ -129,7 +133,10 @@ export class Job<D = any, R = any> {
 
     if (memberKeys.length === 0) return result;
 
-    const results = await this.client.exec(batch as any, false);
+    const results = isCluster
+      ? await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false)
+      : await (this.client as GlideClient).exec(batch as Batch, false);
+
     if (results) {
       for (let i = 0; i < results.length; i++) {
         const val = results[i];
