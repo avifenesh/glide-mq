@@ -95,7 +95,7 @@ describe('Job', () => {
       expect(mockClient.smembers).toHaveBeenCalledWith('glide:{test-queue}:deps:1');
     });
 
-    it('should fetch return values from child jobs', async () => {
+    it('should fetch return values from child jobs via batch', async () => {
       mockClient.smembers.mockResolvedValue(new Set(['glide:{test-queue}:10', 'glide:{test-queue}:11']));
       mockClient.exec.mockResolvedValue(['"result-a"', '"result-b"']);
       const job = new Job(mockClient as any, keys, '1', 'parent', {}, {});
@@ -104,7 +104,8 @@ describe('Job', () => {
 
       expect(values['glide:{test-queue}:10']).toBe('result-a');
       expect(values['glide:{test-queue}:11']).toBe('result-b');
-      expect(mockClient.exec).toHaveBeenCalled();
+      expect(mockClient.exec).toHaveBeenCalledTimes(1);
+      expect(mockClient.hget).not.toHaveBeenCalled();
     });
 
     it('should skip children with null returnvalue', async () => {
@@ -116,7 +117,18 @@ describe('Job', () => {
 
       expect(values['glide:{test-queue}:10']).toBe('done');
       expect(values['glide:{test-queue}:11']).toBeUndefined();
-      expect(mockClient.exec).toHaveBeenCalled();
+      expect(mockClient.exec).toHaveBeenCalledTimes(1);
+      expect(mockClient.hget).not.toHaveBeenCalled();
+    });
+
+    it('should return empty object when all children have invalid format', async () => {
+      mockClient.smembers.mockResolvedValue(new Set(['invalid-no-colons']));
+      const job = new Job(mockClient as any, keys, '1', 'parent', {}, {});
+
+      const values = await job.getChildrenValues();
+
+      expect(values).toEqual({});
+      expect(mockClient.exec).not.toHaveBeenCalled();
     });
   });
 
