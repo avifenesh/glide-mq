@@ -1021,12 +1021,11 @@ describeEachMode('Memory and resource management', (CONNECTION) => {
     await Promise.all(addPromises);
 
     // Wait for all to be processed
-    const start = Date.now();
-    while (completedCount.value < jobCount && Date.now() - start < 30000) {
-      await new Promise((r) => setTimeout(r, 200));
-    }
+    await waitFor(() => completedCount.value >= jobCount, 30000, 200);
 
-    // Access activePromises via the private property to check it's bounded
+    // Wait for activePromises cleanup (finally() blocks are async)
+    await waitFor(() => ((worker as any).activePromises?.size ?? 0) === 0, 5000, 50);
+
     const activePromisesSize = (worker as any).activePromises?.size ?? 0;
     expect(activePromisesSize).toBe(0);
 
