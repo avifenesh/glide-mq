@@ -1,5 +1,7 @@
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
+import os from 'os';
+import { TimeUnit } from '@glidemq/speedkey';
 import type { WorkerOptions, Processor, Client } from './types';
 import { Job } from './job';
 import { buildKeys, calculateBackoff, keyPrefix, nextReconnectDelay, reconnectWithBackoff } from './utils';
@@ -64,6 +66,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private cachedRateLimitMax = 0;
   private cachedRateLimitDuration = 0;
   private sandboxClose?: (force?: boolean) => Promise<void>;
+  private workerHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly startedAt = Date.now();
 
   constructor(name: string, processor: Processor<D, R> | string, opts: WorkerOptions) {
     super();
@@ -147,6 +151,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
       onPromotionTick: () => this.refreshMetaFlags(),
     });
     this.scheduler.start();
+
+    // Register this worker and start periodic heartbeat
+    await this.registerWorker();
+    this.workerHeartbeatTimer = setInterval(() => {
+      this.registerWorker();
+    }, Math.floor(this.stalledInterval / 2));
 
     this.running = true;
     this.pollLoop();
@@ -247,6 +257,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
           onPromotionTick: () => this.refreshMetaFlags(),
         });
         this.scheduler.start();
+
+        // Re-register worker after reconnect
+        await this.registerWorker();
       },
       () => this.pollLoop(),
     );
@@ -797,6 +810,29 @@ export class Worker<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Register this worker in Valkey with a TTL-based heartbeat key.
+   * The key expires after stalledInterval ms; a periodic timer refreshes it at half that interval.
+   * Registration failure is non-fatal - the worker can still process jobs.
+   */
+  private async registerWorker(): Promise<void> {
+    if (!this.commandClient) return;
+    try {
+      const payload = JSON.stringify({
+        addr: os.hostname(),
+        pid: process.pid,
+        startedAt: this.startedAt,
+        activeJobs: this.activeCount,
+      });
+      const workerKey = this.queueKeys.worker(this.consumerId);
+      await this.commandClient.set(workerKey, payload, {
+        expiry: { type: TimeUnit.Milliseconds, count: this.stalledInterval },
+      });
+    } catch {
+      // Registration failure is non-fatal - worker can still process jobs
+    }
+  }
+
+  /**
    * Check if the worker is currently running and not paused.
    */
   isRunning(): boolean {
@@ -898,6 +934,20 @@ export class Worker<D = any, R = any> extends EventEmitter {
     // Shut down sandbox worker pool
     if (this.sandboxClose) {
       await this.sandboxClose(force);
+    }
+
+    // Clear worker registration heartbeat
+    if (this.workerHeartbeatTimer) {
+      clearInterval(this.workerHeartbeatTimer);
+      this.workerHeartbeatTimer = null;
+    }
+    // Best-effort deregistration
+    if (this.commandClient) {
+      try {
+        await this.commandClient.del([this.queueKeys.worker(this.consumerId)]);
+      } catch {
+        // Ignore - TTL will clean up
+      }
     }
 
     // Clear all active heartbeats
