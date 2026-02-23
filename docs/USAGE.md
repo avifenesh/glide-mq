@@ -292,6 +292,6 @@ await events.close();
 ### Waiting for a specific job to finish
 
 ```typescript
-// wait until job completes or fails (polls QueueEvents internally)
+// wait until job completes or fails (polls the job hash at the given interval)
 const result = await job.waitUntilFinished(500, 30000);
 ```
