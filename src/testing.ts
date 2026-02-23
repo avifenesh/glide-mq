@@ -344,12 +344,14 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
     const now = Date.now();
     const nextRun = schedule.pattern ? nextCronOccurrence(schedule.pattern, now) : now + schedule.every!;
-    this.schedulers.set(name, {
+    const entry: SchedulerEntry = {
       pattern: schedule.pattern,
       every: schedule.every,
       template,
       nextRun,
-    });
+    };
+    // Store via JSON roundtrip to detach from caller references (matches production serialization)
+    this.schedulers.set(name, JSON.parse(JSON.stringify(entry)));
   }
 
   async removeJobScheduler(name: string): Promise<void> {
@@ -359,13 +361,13 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   async getJobScheduler(name: string): Promise<SchedulerEntry | null> {
     const entry = this.schedulers.get(name);
     if (!entry) return null;
-    return { ...entry, template: entry.template ? { ...entry.template } : undefined };
+    return JSON.parse(JSON.stringify(entry));
   }
 
   async getRepeatableJobs(): Promise<{ name: string; entry: SchedulerEntry }[]> {
     return [...this.schedulers.entries()].map(([name, entry]) => ({
       name,
-      entry: { ...entry, template: entry.template ? { ...entry.template } : undefined },
+      entry: JSON.parse(JSON.stringify(entry)),
     }));
   }
 

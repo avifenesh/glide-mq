@@ -1082,10 +1082,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (!hashData || hashData.length === 0) return [];
     const result: { name: string; entry: SchedulerEntry }[] = [];
     for (const item of hashData) {
-      result.push({
-        name: String(item.field),
-        entry: JSON.parse(String(item.value)),
-      });
+      try {
+        result.push({
+          name: String(item.field),
+          entry: JSON.parse(String(item.value)),
+        });
+      } catch {
+        // Malformed JSON - skip entry
+      }
     }
     return result;
   }

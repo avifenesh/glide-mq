@@ -147,4 +147,14 @@ describeEachMode('Job schedulers', (CONNECTION) => {
 
     await queue.removeJobScheduler('cron-lookup');
   });
+
+  it('getJobScheduler returns null for malformed JSON data', async () => {
+    const k = buildKeys(Q);
+    await cleanupClient.hset(k.schedulers, { corrupt: 'not-valid-json{' });
+
+    const result = await queue.getJobScheduler('corrupt');
+    expect(result).toBeNull();
+
+    await cleanupClient.hdel(k.schedulers, ['corrupt']);
+  });
 });
