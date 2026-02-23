@@ -343,9 +343,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
     }
     const now = Date.now();
-    const nextRun = schedule.pattern
-      ? nextCronOccurrence(schedule.pattern, now)
-      : now + schedule.every!;
+    const nextRun = schedule.pattern ? nextCronOccurrence(schedule.pattern, now) : now + schedule.every!;
     this.schedulers.set(name, {
       pattern: schedule.pattern,
       every: schedule.every,
