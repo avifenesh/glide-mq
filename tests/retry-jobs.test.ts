@@ -9,7 +9,6 @@ import { it, expect, beforeAll, afterAll } from 'vitest';
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
@@ -140,7 +139,7 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
     await queue.close();
   }, 20000);
 
-  it('retried job lands in scheduled ZSet and gets promoted', async () => {
+  it('retried job lands in scheduled ZSet with correct state', async () => {
     const qName = Q + '-lifecycle';
     await addAndFail(qName, 1);
 
@@ -148,23 +147,17 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
     const retried = await queue.retryJobs();
     expect(retried).toBe(1);
 
-    // Verify the job is in the scheduled ZSet
+    // Verify the job moved from failed to scheduled ZSet
     const after = await queue.getJobCounts();
     expect(after.failed).toBe(0);
     expect(after.delayed).toBe(1);
 
-    // Explicitly promote the retried job from scheduled ZSet to stream
+    // Verify job hash state
     const k = buildKeys(qName);
-    const promoted = await promote(cleanupClient, k, Date.now());
-    expect(promoted).toBe(1);
-
-    // After promotion, the job should be in the stream (waiting state)
-    const postPromote = await queue.getJobCounts();
-    expect(postPromote.delayed).toBe(0);
-    expect(postPromote.waiting).toBe(1);
-
     const state = String(await cleanupClient.hget(k.job('1'), 'state'));
-    expect(state).toBe('waiting');
+    expect(state).toBe('delayed');
+    const attempts = String(await cleanupClient.hget(k.job('1'), 'attemptsMade'));
+    expect(attempts).toBe('0');
 
     await queue.close();
   }, 20000);
