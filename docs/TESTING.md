@@ -98,7 +98,7 @@ describe('email processor', () => {
 | `searchJobs(opts)` | Filter jobs by state, name, and/or data fields |
 | `drain(delayed?)` | Remove waiting jobs; pass `true` to also remove delayed jobs |
 | `pause()` / `resume()` | Pause / resume the queue |
-| `isPaused()` | Check pause state (synchronous, returns `boolean`) |
+| `isPaused()` | Check pause state (synchronous, returns `boolean` - note: real `Queue.isPaused()` is async) |
 | `close()` | Close the queue |
 
 ### TestJob

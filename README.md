@@ -87,6 +87,7 @@ Gzip compression: **98% payload reduction** on 15 KB payloads.
 | [Workflows](docs/WORKFLOWS.md) | FlowProducer, `chain`, `group`, `chord` pipelines |
 | [Observability](docs/OBSERVABILITY.md) | OpenTelemetry, job logs, `@glidemq/dashboard` |
 | [Testing](docs/TESTING.md) | In-memory `TestQueue` & `TestWorker` — no Valkey needed |
+| [Architecture](docs/ARCHITECTURE.md) | Key design, Valkey functions, data layout |
 | [Migration](docs/MIGRATION.md) | Coming from BullMQ? API mapping & workarounds |
 
 ## Get Involved

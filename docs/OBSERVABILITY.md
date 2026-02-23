@@ -14,7 +14,7 @@
 Append log lines from inside a processor using `job.log()`, then fetch them from any Queue instance.
 
 ```typescript
-import { Worker } from 'glide-mq';
+import { Queue, Worker } from 'glide-mq';
 
 // Inside the processor
 const worker = new Worker('tasks', async (job) => {
