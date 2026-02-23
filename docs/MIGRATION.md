@@ -682,7 +682,7 @@ await queue.add('job', data, {
 
 **No `lifo`** - Last-in-first-out ordering is not supported. Use `priority` (lower number = higher priority) to approximate LIFO behavior if needed.
 
-**No `job.promote()`** - tracked in [#11](https://github.com/avifenesh/glide-mq/issues/11). No workaround without re-adding the job.
+**`job.promote()` is now implemented** - call `job.promote()` to move a delayed job to waiting immediately. Throws if the job is not in the delayed state (#11).
 
 **`job.discard()` is now implemented** - call `job.discard()` inside a processor to immediately fail the job without consuming any remaining retry attempts. Alternatively, throw `UnrecoverableError` to trigger the same behavior declaratively. Both are exported from `glide-mq` (#14).
 
@@ -1152,14 +1152,15 @@ import { TestQueue, TestWorker } from 'glide-mq/testing';
 
 // In your tests:
 const queue = new TestQueue<{ email: string }, { sent: boolean }>('tasks');
-const worker = new TestWorker('tasks', async (job) => {
+const worker = new TestWorker(queue, async (job) => {
   return { sent: true };
 });
 
 await queue.add('send-email', { email: 'user@example.com' });
-await worker.process(); // runs all pending jobs synchronously
+// TestWorker processes jobs automatically when added to the queue
+await new Promise(r => setTimeout(r, 10)); // let microtask run
 
-const jobs = queue.getJobs('completed');
+const jobs = await queue.getJobs('completed');
 // [{ data: { email: 'user@example.com' }, returnvalue: { sent: true } }]
 ```
 
@@ -1177,27 +1178,23 @@ import { chain, group, chord } from 'glide-mq';
 const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 
 // chain: sequential pipeline - each job is a child of the next
-await chain([
-  { name: 'step-1', queueName: 'tasks', data: {} },
-  { name: 'step-2', queueName: 'tasks', data: {} },
-  { name: 'step-3', queueName: 'tasks', data: {} },
-], { connection });
+await chain('tasks', [
+  { name: 'step-1', data: {} },
+  { name: 'step-2', data: {} },
+  { name: 'step-3', data: {} },
+], connection);
 
-// group: parallel fan-out - all jobs run concurrently, parent waits
-await group([
-  { name: 'shard-1', queueName: 'tasks', data: {} },
-  { name: 'shard-2', queueName: 'tasks', data: {} },
-], { name: 'aggregate', queueName: 'tasks', data: {} }, { connection });
+// group: parallel fan-out - all jobs run concurrently, synthetic parent waits
+await group('tasks', [
+  { name: 'shard-1', data: {} },
+  { name: 'shard-2', data: {} },
+], connection);
 
-// chord: group then callback
-await chord(
-  { name: 'callback', queueName: 'tasks', data: {} },
-  [
-    { name: 'task-1', queueName: 'tasks', data: {} },
-    { name: 'task-2', queueName: 'tasks', data: {} },
-  ],
-  { connection },
-);
+// chord: group then callback - callback fires after all group jobs complete
+await chord('tasks', [
+  { name: 'task-1', data: {} },
+  { name: 'task-2', data: {} },
+], { name: 'aggregate', data: {} }, connection);
 ```
 
 ---
