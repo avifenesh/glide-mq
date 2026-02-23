@@ -171,7 +171,6 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
     const completedId = await completed;
     expect(completedId).toBe('1');
 
-    const k = buildKeys(qName);
     const finalState = String(await cleanupClient.hget(k.job('1'), 'state'));
     expect(finalState).toBe('completed');
 
