@@ -98,7 +98,7 @@ Use Valkey Functions (FUNCTION LOAD / FCALL) instead of EVAL/EVALSHA scripts.
 ### Loading Strategy
 1. On Queue/Worker creation, check if library exists: `FUNCTION LIST LIBRARYNAME glidemq`
 2. If missing, load via `FUNCTION LOAD` with the full library source
-3. If version mismatch (we track a version field in the library - currently `LIBRARY_VERSION = 19`), reload with `FUNCTION LOAD REPLACE`
+3. If version mismatch (we track a version field in the library - currently `LIBRARY_VERSION = 28`), reload with `FUNCTION LOAD REPLACE`
 4. Library source is embedded in the npm package as a string constant (built from .lua source files at compile time)
 5. In cluster mode, `FUNCTION LOAD` must be sent to all nodes (use route: "allNodes")
 

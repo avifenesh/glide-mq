@@ -5,6 +5,8 @@ docs/
 agent-knowledge/
 .github/
 .claude/
+.jules/
+demo/
 *.tgz
 tsconfig.json
 vitest.config.ts

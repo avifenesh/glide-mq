@@ -461,8 +461,8 @@ The processor function signature is identical. The only change is the connection
 | `worker.on('stalled', (jobId))` | `worker.on('stalled', (jobId))` | Full |
 | `worker.on('closing')` | `worker.on('closing')` | Full |
 | `worker.on('closed')` | `worker.on('closed')` | Full |
-| `worker.on('active', (job, prev))` | - | Gap [#20](https://github.com/avifenesh/glide-mq/issues/20) |
-| `worker.on('drained')` | - | Gap [#20](https://github.com/avifenesh/glide-mq/issues/20) |
+| `worker.on('active', (job, prev))` | `worker.on('active', (job, jobId))` | Changed |
+| `worker.on('drained')` | `worker.on('drained')` | Full |
 | `Worker.RateLimitError` | `Worker.RateLimitError` | Full |
 | Sandboxed processor (file path string) | `new Worker('q', './processor.js', { connection, sandbox: {} })` | Full |
 
@@ -646,24 +646,7 @@ const worker = new Worker('q', './processor.js', { connection, sandbox: { useWor
 
 The processor file must export a function, either via CommonJS (`module.exports = async (job) => { ... }`) or as an ESM default export (`export default async (job) => { ... }`). Inside the sandbox, `job.log()`, `job.updateProgress()`, and `job.updateData()` work normally via IPC proxy. Methods that require direct Valkey access (`job.getState()`, `job.remove()`, etc.) are not available.
 
-**`worker.on('active')` and `worker.on('drained')` not yet available** - tracked in [#20](https://github.com/avifenesh/glide-mq/issues/20). Workarounds:
-
-```ts
-// Workaround for 'active': wrap the processor
-const worker = new Worker('q', async (job) => {
-  myMetrics.jobStarted(job.name);  // ← replaces worker.on('active')
-  return processor(job);
-}, { connection });
-
-// Workaround for 'drained': poll getJobCounts()
-async function waitUntilEmpty(queue: Queue, intervalMs = 500): Promise<void> {
-  while (true) {
-    const { waiting, active, delayed } = await queue.getJobCounts();
-    if (waiting === 0 && active === 0 && delayed === 0) return;
-    await new Promise(r => setTimeout(r, intervalMs));
-  }
-}
-```
+`worker.on('active')` and `worker.on('drained')` are fully supported. The `active` event fires with `(job, jobId)` when a job starts processing - note that BullMQ passes `(job, prev)` where `prev` is the previous job state, while glide-mq passes the job ID as the second argument (`jobId` is equivalent to `job.id`). If your BullMQ code depends on `prev`, you will need to derive state via `job.getState()`. The `drained` event fires when the queue transitions from non-empty to empty.
 
 ---
 
@@ -1112,8 +1095,8 @@ These features exist in BullMQ but are not yet implemented in glide-mq. Each has
 | `queue.retryJobs(opts)` | Now implemented natively — call `queue.retryJobs({ count: 100 })` to bulk-retry failed jobs | Resolved [#17](https://github.com/avifenesh/glide-mq/issues/17) |
 | `queue.getWorkers()` | Now implemented natively - call `queue.getWorkers()` to list all active workers with metadata (id, addr, pid, startedAt, age, activeJobs) | Resolved [#18](https://github.com/avifenesh/glide-mq/issues/18) |
 | `queue.getJobScheduler(name)` | Now implemented natively - call `queue.getJobScheduler(name)` to retrieve a single scheduler entry by name | Resolved [#19](https://github.com/avifenesh/glide-mq/issues/19) |
-| `worker.on('active')` | Wrap the processor function - see [Worker section](#worker) | [#20](https://github.com/avifenesh/glide-mq/issues/20) |
-| `worker.on('drained')` | Poll `queue.getJobCounts()` - see [Worker section](#worker) | [#20](https://github.com/avifenesh/glide-mq/issues/20) |
+| `worker.on('active')` | Now implemented natively - emitted with `(job, jobId)` when a job starts processing. Note: BullMQ passes `(job, prev)` instead | Resolved [#20](https://github.com/avifenesh/glide-mq/issues/20) |
+| `worker.on('drained')` | Now implemented natively - emitted when queue transitions from non-empty to empty | Resolved [#20](https://github.com/avifenesh/glide-mq/issues/20) |
 | Sandboxed processor | `new Worker('q', './processor.js', { connection, sandbox: {} })` | Full - see [Worker section](#worker) |
 | Custom `jobId` | Use `deduplication.id` for idempotent creation | - |
 | `lifo` | Use `priority` values in reverse insertion order | - |
