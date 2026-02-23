@@ -7,7 +7,7 @@
  * Run: npx vitest run tests/bulletproof.test.ts
  */
 import { it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -1683,14 +1683,25 @@ describeEachMode('Bee-Queue #120: bulk stalled job recovery reclaims all jobs', 
     });
     recoveryWorker.on('error', () => {});
 
-    // Wait for enough cycles: each cycle reclaims all 20 entries.
-    // After MAX_STALLED + 1 cycles, all should move to failed.
-    await new Promise((r) => setTimeout(r, STALL_INTERVAL * (MAX_STALLED + 2) + 2000));
+    // Poll until all jobs have transitioned to failed state.
+    // The scheduler needs MAX_STALLED + 1 reclaim cycles per job, but CI timing varies.
+    const k = buildKeys(Q);
+    await waitFor(
+      async () => {
+        let failed = 0;
+        for (const id of jobIds) {
+          const state = await cleanupClient.hget(k.job(id), 'state');
+          if (String(state) === 'failed') failed++;
+        }
+        return failed >= TOTAL;
+      },
+      15000,
+      500,
+    );
 
     await recoveryWorker.close(true);
 
     // All 20 jobs must be in failed state - NOT stuck in active (Bee-Queue #120 bug)
-    const k = buildKeys(Q);
     let failedCount = 0;
     for (const id of jobIds) {
       const state = await cleanupClient.hget(k.job(id), 'state');
