@@ -51,7 +51,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- Sandboxed processor: run worker processor in a child process or worker thread (`sandboxed: true` option). Protects the main process from processor crashes and memory leaks (#36).
+- Sandboxed processor: run worker processor in a child process or worker thread (`sandbox: {}` option). Protects the main process from processor crashes and memory leaks (#36).
 - Sandbox pool stress tests (#37).
 
 ### Fixed
