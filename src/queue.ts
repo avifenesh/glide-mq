@@ -1092,13 +1092,17 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   /**
    * Get a single job scheduler entry by name.
-   * Returns null if no scheduler with that name exists.
+   * Returns null if no scheduler with that name exists or if stored data is malformed.
    */
   async getJobScheduler(name: string): Promise<SchedulerEntry | null> {
     const client = await this.getClient();
     const raw = await client.hget(this.keys.schedulers, name);
     if (raw == null) return null;
-    return JSON.parse(String(raw)) as SchedulerEntry;
+    try {
+      return JSON.parse(String(raw)) as SchedulerEntry;
+    } catch {
+      return null;
+    }
   }
 
   /**
