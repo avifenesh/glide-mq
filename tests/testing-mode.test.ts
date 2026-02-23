@@ -635,6 +635,32 @@ describe('TestQueue.getWorkers', () => {
     expect(await queue.getWorkers()).toHaveLength(0);
   });
 
+  it('activeJobs tracks processing count', async () => {
+    queue = new TestQueue('gw-active');
+    let finishJob!: () => void;
+    const jobPromise = new Promise<void>((r) => { finishJob = r; });
+
+    worker = new TestWorker(queue, async () => {
+      await jobPromise;
+      return 'ok';
+    });
+
+    await queue.add('slow', {});
+    // Let the microtask schedule processing
+    await new Promise((r) => setTimeout(r, 50));
+
+    const during = await queue.getWorkers();
+    expect(during).toHaveLength(1);
+    expect(during[0].activeJobs).toBe(1);
+
+    finishJob();
+    await new Promise((r) => setTimeout(r, 50));
+
+    const after = await queue.getWorkers();
+    expect(after).toHaveLength(1);
+    expect(after[0].activeJobs).toBe(0);
+  });
+
   it('multiple workers with distinct IDs', async () => {
     queue = new TestQueue('gw-multi');
     const w1 = new TestWorker(queue, async () => 'ok');

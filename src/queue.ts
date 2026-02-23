@@ -532,7 +532,6 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const now = Date.now();
     const workers: WorkerInfo[] = [];
 
-    // Pipeline GET for all worker keys
     const batch = this.newBatch();
     for (const key of keys) {
       (batch as any).get(key);
@@ -553,9 +552,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             age: now - data.startedAt,
             activeJobs: data.activeJobs,
           });
-        } catch {
-          // Skip malformed entries
-        }
+        } catch {}
       }
     }
 

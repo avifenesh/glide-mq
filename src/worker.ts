@@ -827,9 +827,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       await this.commandClient.set(workerKey, payload, {
         expiry: { type: TimeUnit.Milliseconds, count: this.stalledInterval },
       });
-    } catch {
-      // Registration failure is non-fatal - worker can still process jobs
-    }
+    } catch {}
   }
 
   /**
