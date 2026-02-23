@@ -32,11 +32,7 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
   /**
    * Helper: add N jobs, process them all with a failing worker, wait until all fail.
    */
-  async function addAndFail(
-    queueName: string,
-    count: number,
-    opts?: { priority?: number },
-  ): Promise<void> {
+  async function addAndFail(queueName: string, count: number, opts?: { priority?: number }): Promise<void> {
     const q = new Queue(queueName, { connection: CONNECTION });
     for (let i = 0; i < count; i++) {
       await q.add('task', { i }, opts);
@@ -150,11 +146,11 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
     // Now process with a succeeding worker
     const completed = new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
-      const worker = new Worker(
-        qName,
-        async () => 'success',
-        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
-      );
+      const worker = new Worker(qName, async () => 'success', {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 1000,
+      });
       worker.on('error', () => {});
       worker.on('completed', (job: any) => {
         clearTimeout(timeout);

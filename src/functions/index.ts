@@ -2007,27 +2007,29 @@ redis.register_function('glidemq_retryJobs', function(keys, args)
     for i = 1, #ids do
       local jobId = ids[i]
       local jobKey = prefix .. 'job:' .. jobId
-      local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
-      if priority == 0 then
-        redis.call('XADD', streamKey, '*', 'jobId', jobId)
-        redis.call('HSET', jobKey,
-          'state', 'waiting',
-          'attemptsMade', '0',
-          'failedReason', '',
-          'finishedOn', ''
-        )
-      else
-        local score = priority * PRIORITY_SHIFT + timestamp
-        redis.call('ZADD', scheduledKey, score, jobId)
-        redis.call('HSET', jobKey,
-          'state', 'delayed',
-          'attemptsMade', '0',
-          'failedReason', '',
-          'finishedOn', ''
-        )
+      if redis.call('EXISTS', jobKey) == 1 then
+        local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
+        if priority == 0 then
+          redis.call('XADD', streamKey, '*', 'jobId', jobId)
+          redis.call('HSET', jobKey,
+            'state', 'waiting',
+            'attemptsMade', '0',
+            'failedReason', '',
+            'finishedOn', ''
+          )
+        else
+          local score = priority * PRIORITY_SHIFT + timestamp
+          redis.call('ZADD', scheduledKey, score, jobId)
+          redis.call('HSET', jobKey,
+            'state', 'delayed',
+            'attemptsMade', '0',
+            'failedReason', '',
+            'finishedOn', ''
+          )
+        end
+        retried = retried + 1
       end
     end
-    retried = retried + #ids
   end
   if retried > 0 then
     emitEvent(eventsKey, 'retried', tostring(retried), nil)
@@ -2578,12 +2580,7 @@ export async function drainQueue(
  * @param count - Maximum number of jobs to retry. 0 means all.
  * @returns The number of jobs retried.
  */
-export async function retryJobs(
-  client: Client,
-  k: QueueKeys,
-  count: number,
-  timestamp: number,
-): Promise<number> {
+export async function retryJobs(client: Client, k: QueueKeys, count: number, timestamp: number): Promise<number> {
   const result = await client.fcall(
     'glidemq_retryJobs',
     [k.failed, k.stream, k.scheduled, k.events, k.id],
