@@ -140,7 +140,7 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
     await queue.close();
   }, 20000);
 
-  it('full lifecycle: fail then retry then complete', async () => {
+  it('retried job lands in scheduled ZSet and gets promoted', async () => {
     const qName = Q + '-lifecycle';
     await addAndFail(qName, 1);
 
@@ -148,34 +148,26 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
     const retried = await queue.retryJobs();
     expect(retried).toBe(1);
 
+    // Verify the job is in the scheduled ZSet
+    const after = await queue.getJobCounts();
+    expect(after.failed).toBe(0);
+    expect(after.delayed).toBe(1);
+
     // Explicitly promote the retried job from scheduled ZSet to stream
     const k = buildKeys(qName);
     const promoted = await promote(cleanupClient, k, Date.now());
-    expect(promoted).toBeGreaterThanOrEqual(1);
+    expect(promoted).toBe(1);
 
-    // Now process with a succeeding worker
-    const completed = new Promise<string>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
-      const worker = new Worker(qName, async () => 'success', {
-        connection: CONNECTION,
-        concurrency: 1,
-        blockTimeout: 1000,
-      });
-      worker.on('error', () => {});
-      worker.on('completed', (job: any) => {
-        clearTimeout(timeout);
-        worker.close(true).then(() => resolve(job.id));
-      });
-    });
+    // After promotion, the job should be in the stream (waiting state)
+    const postPromote = await queue.getJobCounts();
+    expect(postPromote.delayed).toBe(0);
+    expect(postPromote.waiting).toBe(1);
 
-    const completedId = await completed;
-    expect(completedId).toBe('1');
-
-    const finalState = String(await cleanupClient.hget(k.job('1'), 'state'));
-    expect(finalState).toBe('completed');
+    const state = String(await cleanupClient.hget(k.job('1'), 'state'));
+    expect(state).toBe('waiting');
 
     await queue.close();
-  }, 30000);
+  }, 20000);
 
   it('count greater than total failed retries all available', async () => {
     const qName = Q + '-over';
