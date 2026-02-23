@@ -12,6 +12,7 @@ import type {
   JobCounts,
   SearchJobsOptions,
   RateLimitConfig,
+  WorkerInfo,
 } from './types';
 import { Job } from './job';
 import {
@@ -517,6 +518,52 @@ export class Queue<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * List all active workers for this queue.
+   * Workers register themselves with TTL-based keys; only live workers appear.
+   * Returns an array of WorkerInfo sorted by startedAt (oldest first).
+   */
+  async getWorkers(): Promise<WorkerInfo[]> {
+    const client = await this.getClient();
+    const pfx = keyPrefixPattern(this.opts.prefix ?? 'glide', this.name);
+    const pattern = `${pfx}:w:*`;
+    const keys = await this.scanKeys(client, pattern);
+    if (keys.length === 0) return [];
+
+    const now = Date.now();
+    const workers: WorkerInfo[] = [];
+
+    // Pipeline GET for all worker keys
+    const batch = this.newBatch();
+    for (const key of keys) {
+      (batch as any).get(key);
+    }
+    const results = await client.exec(batch as any, false);
+
+    if (results) {
+      for (let i = 0; i < keys.length; i++) {
+        const val = results[i];
+        if (!val) continue;
+        try {
+          const data = JSON.parse(String(val));
+          workers.push({
+            id: keys[i].split(':w:').pop()!,
+            addr: data.addr,
+            pid: data.pid,
+            startedAt: data.startedAt,
+            age: now - data.startedAt,
+            activeJobs: data.activeJobs,
+          });
+        } catch {
+          // Skip malformed entries
+        }
+      }
+    }
+
+    workers.sort((a, b) => a.startedAt - b.startedAt);
+    return workers;
+  }
+
+  /**
    * Upsert a job scheduler (repeatable/cron job).
    * Stores the scheduler config in the schedulers hash.
    * Computes the initial nextRun based on the schedule.
@@ -695,37 +742,47 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const groupqPattern = `${pfx}:groupq:*`;
     const orderPendingPattern = `${pfx}:orderdone:pending:*`;
 
-    for (const pattern of [jobPattern, logPattern, depsPattern, groupPattern, groupqPattern, orderPendingPattern]) {
+    const workerPattern = `${pfx}:w:*`;
+
+    for (const pattern of [jobPattern, logPattern, depsPattern, groupPattern, groupqPattern, orderPendingPattern, workerPattern]) {
       await this.scanAndDelete(client, pattern);
     }
   }
 
   /**
-   * Scan for keys matching a pattern and delete them in batches.
+   * Scan for keys matching a pattern and return them.
    * Handles both standalone (GlideClient) and cluster (GlideClusterClient) scan APIs.
    * @internal
    */
-  private async scanAndDelete(client: Client, pattern: string): Promise<void> {
+  private async scanKeys(client: Client, pattern: string): Promise<string[]> {
+    const collected: string[] = [];
     if (this.clusterMode) {
       const clusterClient = client as GlideClusterClient;
       let cursor = new ClusterScanCursor();
       while (!cursor.isFinished()) {
         const [nextCursor, keys] = await clusterClient.scan(cursor, { match: pattern, count: 100 });
         cursor = nextCursor;
-        if (keys.length > 0) {
-          await client.del(keys);
-        }
+        for (const k of keys) collected.push(String(k));
       }
     } else {
       let cursor = '0';
       do {
         const result = await (client as GlideClient).scan(cursor, { match: pattern, count: 100 });
         cursor = result[0] as string;
-        const keys = result[1];
-        if (keys.length > 0) {
-          await client.del(keys);
-        }
+        for (const k of result[1]) collected.push(String(k));
       } while (cursor !== '0');
+    }
+    return collected;
+  }
+
+  /**
+   * Scan for keys matching a pattern and delete them in batches.
+   * @internal
+   */
+  private async scanAndDelete(client: Client, pattern: string): Promise<void> {
+    const keys = await this.scanKeys(client, pattern);
+    if (keys.length > 0) {
+      await client.del(keys);
     }
   }
 
