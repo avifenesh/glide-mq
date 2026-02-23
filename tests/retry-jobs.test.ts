@@ -22,7 +22,7 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
 
   afterAll(async () => {
     if (!cleanupClient) return;
-    const suffixes = ['', '-count', '-prio', '-lifecycle', '-empty'];
+    const suffixes = ['', '-count', '-prio', '-lifecycle', '-empty', '-over'];
     for (const s of suffixes) {
       await flushQueue(cleanupClient, Q + s);
     }
@@ -168,6 +168,21 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
     const k = buildKeys(qName);
     const finalState = String(await cleanupClient.hget(k.job('1'), 'state'));
     expect(finalState).toBe('completed');
+
+    await queue.close();
+  }, 20000);
+
+  it('count greater than total failed retries all available', async () => {
+    const qName = Q + '-over';
+    await addAndFail(qName, 3);
+
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const retried = await queue.retryJobs({ count: 100 });
+    expect(retried).toBe(3);
+
+    const after = await queue.getJobCounts();
+    expect(after.failed).toBe(0);
+    expect(after.waiting).toBe(3);
 
     await queue.close();
   }, 20000);

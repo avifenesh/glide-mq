@@ -292,12 +292,16 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
    * @returns Number of jobs retried.
    */
   async retryJobs(opts?: { count?: number }): Promise<number> {
+    if (opts?.count != null && (!Number.isInteger(opts.count) || opts.count < 0)) {
+      throw new Error('count must be a non-negative integer');
+    }
     const limit = opts?.count ?? 0;
     let retried = 0;
     for (const record of this.jobs.values()) {
       if (limit > 0 && retried >= limit) break;
       if (record.state !== 'failed') continue;
-      record.state = 'waiting';
+      const priority = record.opts.priority ?? 0;
+      record.state = priority > 0 ? 'delayed' : 'waiting';
       record.attemptsMade = 0;
       record.failedReason = undefined;
       record.finishedOn = undefined;

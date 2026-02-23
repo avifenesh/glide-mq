@@ -595,6 +595,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * @returns Number of jobs retried.
    */
   async retryJobs(opts?: { count?: number }): Promise<number> {
+    if (opts?.count != null && (!Number.isInteger(opts.count) || opts.count < 0)) {
+      throw new Error('count must be a non-negative integer');
+    }
     const client = await this.getClient();
     return retryJobs(client, this.keys, opts?.count ?? 0, Date.now());
   }

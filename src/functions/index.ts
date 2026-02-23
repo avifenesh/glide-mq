@@ -2002,11 +2002,10 @@ redis.register_function('glidemq_retryJobs', function(keys, args)
     end
     local ids = redis.call('ZRANGE', failedKey, 0, batchSize - 1)
     if #ids == 0 then break end
+    redis.call('ZREM', failedKey, unpack(ids))
     for i = 1, #ids do
-      if count > 0 and retried >= count then break end
       local jobId = ids[i]
       local jobKey = prefix .. 'job:' .. jobId
-      redis.call('ZREM', failedKey, jobId)
       local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
       if priority == 0 then
         redis.call('XADD', streamKey, '*', 'jobId', jobId)
@@ -2026,9 +2025,11 @@ redis.register_function('glidemq_retryJobs', function(keys, args)
           'finishedOn', ''
         )
       end
-      emitEvent(eventsKey, 'retried', jobId, nil)
-      retried = retried + 1
     end
+    retried = retried + #ids
+  end
+  if retried > 0 then
+    emitEvent(eventsKey, 'retried', tostring(retried), nil)
   end
   return retried
 end)

@@ -520,6 +520,51 @@ describe('TestQueue.retryJobs', () => {
     expect(retried).toBe(0);
   });
 
+  it('routes prioritized jobs to delayed state', async () => {
+    queue = new TestQueue('retry-prio');
+
+    worker = new TestWorker(queue, async () => {
+      throw new Error('fail');
+    });
+
+    await queue.add('t1', {}, { priority: 0 });
+    await queue.add('t2', {}, { priority: 5 });
+
+    await new Promise((r) => setTimeout(r, 100));
+    await worker.close();
+    worker = undefined;
+
+    const retried = await queue.retryJobs();
+    expect(retried).toBe(2);
+
+    const records = [...queue.jobs.values()];
+    const noPrio = records.find((r) => r.name === 't1');
+    const withPrio = records.find((r) => r.name === 't2');
+    expect(noPrio!.state).toBe('waiting');
+    expect(withPrio!.state).toBe('delayed');
+  });
+
+  it('count > total failed still retries all available', async () => {
+    queue = new TestQueue('retry-over');
+
+    worker = new TestWorker(queue, async () => {
+      throw new Error('fail');
+    });
+
+    await queue.add('t1', {});
+    await queue.add('t2', {});
+
+    await new Promise((r) => setTimeout(r, 100));
+    await worker.close();
+    worker = undefined;
+
+    const retried = await queue.retryJobs({ count: 100 });
+    expect(retried).toBe(2);
+
+    const counts = await queue.getJobCounts();
+    expect(counts.failed).toBe(0);
+  });
+
   it('retried jobs get processed by workers', async () => {
     queue = new TestQueue('retry-process');
     let callCount = 0;
