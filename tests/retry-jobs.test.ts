@@ -10,7 +10,7 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
-import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
 describeEachMode('Queue.retryJobs()', (CONNECTION) => {
   const Q = 'test-retryjobs-' + Date.now();

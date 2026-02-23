@@ -520,7 +520,7 @@ describe('TestQueue.retryJobs', () => {
     expect(retried).toBe(0);
   });
 
-  it('all retried jobs go to delayed state', async () => {
+  it('retried jobs with mixed priorities all go to waiting in TestQueue', async () => {
     queue = new TestQueue('retry-prio');
 
     worker = new TestWorker(queue, async () => {
