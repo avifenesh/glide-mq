@@ -66,6 +66,7 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     ratelimited: `${p}:ratelimited`,
     group: (key: string) => `${p}:group:${key}`,
     groupq: (key: string) => `${p}:groupq:${key}`,
+    worker: (id: string) => `${p}:w:${id}`,
   };
 }
 
