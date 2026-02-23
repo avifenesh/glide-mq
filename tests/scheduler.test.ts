@@ -128,12 +128,22 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     expect(result!.template?.data).toEqual({ key: 'val' });
     expect(result!.nextRun).toBeGreaterThan(0);
 
-    // Clean up
     await queue.removeJobScheduler('single-lookup');
   });
 
   it('getJobScheduler returns null for non-existent name', async () => {
     const result = await queue.getJobScheduler('does-not-exist');
     expect(result).toBeNull();
+  });
+
+  it('getJobScheduler returns scheduler with cron pattern', async () => {
+    await queue.upsertJobScheduler('cron-lookup', { pattern: '*/10 * * * *' });
+
+    const result = await queue.getJobScheduler('cron-lookup');
+    expect(result).not.toBeNull();
+    expect(result!.pattern).toBe('*/10 * * * *');
+    expect(result!.every).toBeUndefined();
+
+    await queue.removeJobScheduler('cron-lookup');
   });
 });

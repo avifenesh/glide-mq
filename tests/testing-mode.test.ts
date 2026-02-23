@@ -698,7 +698,6 @@ describe('TestQueue.getJobScheduler', () => {
     expect(entry!.template?.data).toEqual({ a: 1 });
     expect(entry!.nextRun).toBeGreaterThan(0);
 
-    // cleanup
     await queue.removeJobScheduler('test-sched');
   });
 
@@ -706,5 +705,32 @@ describe('TestQueue.getJobScheduler', () => {
     queue = new TestQueue('sched-miss');
     const entry = await queue.getJobScheduler('nonexistent');
     expect(entry).toBeNull();
+  });
+
+  it('getJobScheduler returns scheduler with cron pattern', async () => {
+    queue = new TestQueue('sched-cron');
+    await queue.upsertJobScheduler('cron-entry', { pattern: '*/5 * * * *' });
+
+    const entry = await queue.getJobScheduler('cron-entry');
+    expect(entry).not.toBeNull();
+    expect(entry!.pattern).toBe('*/5 * * * *');
+    expect(entry!.every).toBeUndefined();
+    expect(entry!.template).toBeUndefined();
+
+    await queue.removeJobScheduler('cron-entry');
+  });
+
+  it('getRepeatableJobs returns all scheduler entries', async () => {
+    queue = new TestQueue('sched-all');
+    await queue.upsertJobScheduler('a', { every: 100 });
+    await queue.upsertJobScheduler('b', { every: 200 });
+
+    const all = await queue.getRepeatableJobs();
+    expect(all).toHaveLength(2);
+    const names = all.map((s) => s.name).sort();
+    expect(names).toEqual(['a', 'b']);
+
+    await queue.removeJobScheduler('a');
+    await queue.removeJobScheduler('b');
   });
 });
