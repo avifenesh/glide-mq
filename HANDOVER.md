@@ -4,27 +4,28 @@ Current state of the glide-mq repository as of 2026-02-23.
 
 ## Branch
 
-`feature/retry-jobs-17` - implements `queue.retryJobs(opts)` (#17). Pending review and merge.
+`feature/get-workers-18` - implements `queue.getWorkers()` (#18). Pending review and merge.
 
 ## Last completed task
 
-**Task #17: `queue.retryJobs(opts)`** - bulk retry failed jobs.
-- Branch: `feature/retry-jobs-17`
-- Lua function: `glidemq_retryJobs` added to `src/functions/index.ts`
-- TypeScript wrapper: `retryJobs()` in `src/functions/index.ts`
-- Queue method: `Queue.retryJobs(opts?)` in `src/queue.ts`
-- Testing mode: `TestQueue.retryJobs(opts?)` in `src/testing.ts`
-- Bug fix: `Job.retry()` in `src/job.ts` - added missing ZREM from failed ZSet, reset attemptsMade/finishedOn
-- Integration tests: `tests/retry-jobs.test.ts` (5 tests x 2 modes)
-- Testing-mode tests: 4 new tests in `tests/testing-mode.test.ts`
-- LIBRARY_VERSION bumped from `27` to `28`
+**Task #18: `queue.getWorkers()`** - list active workers with metadata.
+- Branch: `feature/get-workers-18`
+- New type: `WorkerInfo` in `src/types.ts` (id, addr, pid, startedAt, age, activeJobs)
+- Key builder: `worker(id)` added to `buildKeys()` in `src/utils.ts`
+- Worker registration: TTL-based heartbeat keys in `src/worker.ts` using SET PX
+- Queue method: `Queue.getWorkers()` in `src/queue.ts` - SCAN + pipeline GET
+- Refactored `scanAndDelete` into `scanKeys` + `scanAndDelete` for reuse
+- Testing mode: `TestQueue.getWorkers()` in `src/testing.ts`
+- Integration tests: `tests/get-workers.test.ts` (7 tests x 2 modes)
+- Testing-mode tests: 5 new tests in `tests/testing-mode.test.ts`
+- Test fixture cleanup updated for worker keys
+- No LIBRARY_VERSION change (no Lua function changes)
 
-Previous: **Task #11: `job.promote()`** - branch `feature/promote-job-11`, pending review.
+Previous: **Task #17: `queue.retryJobs(opts)`** - branch `feature/retry-jobs-17`, merged.
 
 ## What comes next
 
 Open issues (by number):
-- #18 `queue.getWorkers()` - list active workers with metadata
 - #19 `queue.getJobScheduler(name)` - fetch a single scheduler entry
 - #42 Optimize JSON serialization in Queue.add
 - #44 Sanitize stack traces in sandbox runner
@@ -40,4 +41,5 @@ Open issues (by number):
 
 - `src/functions/index.ts` - single Valkey Server Function library loaded once per connection.
 - All keys hash-tagged as `glide:{queueName}:*`.
+- Worker keys: `glide:{queueName}:w:{consumerId}` - SET with PX TTL for heartbeat.
 - FCALL routing uses dummy key `{glidemq}:_` where deterministic cluster routing is needed.

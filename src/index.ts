@@ -30,6 +30,7 @@ export type {
   ReadFrom,
   SandboxOptions,
   SearchJobsOptions,
+  WorkerInfo,
 } from './types';
 
 export { GlideMQError, ConnectionError, UnrecoverableError } from './errors';

@@ -228,3 +228,12 @@ export interface SearchJobsOptions {
   data?: Record<string, unknown>;
   limit?: number;
 }
+
+export interface WorkerInfo {
+  id: string;
+  addr: string;
+  pid: number;
+  startedAt: number;
+  age: number;
+  activeJobs: number;
+}

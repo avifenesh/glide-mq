@@ -8,7 +8,8 @@
 
 import { EventEmitter } from 'events';
 import path from 'path';
-import type { JobOptions, JobCounts, Processor } from './types';
+import os from 'os';
+import type { JobOptions, JobCounts, Processor, WorkerInfo } from './types';
 import { GlideMQError, UnrecoverableError } from './errors';
 
 // ---- Lightweight in-memory Job representation ----
@@ -317,6 +318,24 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     return retried;
   }
 
+  /** List active workers attached to this queue. */
+  async getWorkers(): Promise<WorkerInfo[]> {
+    const now = Date.now();
+    const result: WorkerInfo[] = [];
+    for (const w of this.workers) {
+      result.push({
+        id: w.id,
+        addr: os.hostname(),
+        pid: process.pid,
+        startedAt: w.startedAt,
+        age: now - w.startedAt,
+        activeJobs: w.getActiveCount(),
+      });
+    }
+    result.sort((a, b) => a.startedAt - b.startedAt);
+    return result;
+  }
+
   /** Close the queue. */
   async close(): Promise<void> {
     this.removeAllListeners();
@@ -331,6 +350,9 @@ export interface TestWorkerOptions {
 }
 
 export class TestWorker<D = any, R = any> extends EventEmitter {
+  private static idCounter = 0;
+  readonly id: string;
+  readonly startedAt: number;
   private queue: TestQueue<D, R>;
   private processor: Processor<D, R>;
   private concurrency: number;
@@ -360,6 +382,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       this.processor = processor;
     }
     this.concurrency = opts?.concurrency ?? 1;
+    this.id = `test-worker-${++TestWorker.idCounter}`;
+    this.startedAt = Date.now();
 
     // Register with the queue
     queue.workers.add(this);
@@ -453,6 +477,11 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           this.processAvailable();
         }
       });
+  }
+
+  /** Return the number of jobs currently being processed. */
+  getActiveCount(): number {
+    return this.activeCount;
   }
 
   /** Stop processing and detach from the queue. */
