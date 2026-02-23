@@ -591,3 +591,63 @@ describe('TestQueue.retryJobs', () => {
     expect(completed[0]).toBe('1');
   });
 });
+
+describe('TestQueue.getWorkers', () => {
+  let queue: TestQueue;
+  let worker: InstanceType<typeof TestWorker> | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    if (queue) await queue.close();
+    worker = undefined;
+  });
+
+  it('returns empty when no workers', async () => {
+    queue = new TestQueue('gw-empty');
+    const workers = await queue.getWorkers();
+    expect(workers).toEqual([]);
+  });
+
+  it('lists active TestWorker', async () => {
+    queue = new TestQueue('gw-single');
+    worker = new TestWorker(queue, async () => 'ok');
+
+    const workers = await queue.getWorkers();
+    expect(workers).toHaveLength(1);
+    expect(workers[0].id).toBeTruthy();
+    expect(typeof workers[0].addr).toBe('string');
+    expect(typeof workers[0].pid).toBe('number');
+    expect(workers[0].pid).toBeGreaterThan(0);
+    expect(typeof workers[0].startedAt).toBe('number');
+    expect(workers[0].age).toBeGreaterThanOrEqual(0);
+    expect(typeof workers[0].activeJobs).toBe('number');
+  });
+
+  it('worker removed after close', async () => {
+    queue = new TestQueue('gw-close');
+    worker = new TestWorker(queue, async () => 'ok');
+
+    expect(await queue.getWorkers()).toHaveLength(1);
+
+    await worker.close();
+    worker = undefined;
+
+    expect(await queue.getWorkers()).toHaveLength(0);
+  });
+
+  it('multiple workers with distinct IDs', async () => {
+    queue = new TestQueue('gw-multi');
+    const w1 = new TestWorker(queue, async () => 'ok');
+    const w2 = new TestWorker(queue, async () => 'ok');
+
+    const workers = await queue.getWorkers();
+    expect(workers).toHaveLength(2);
+
+    const ids = workers.map((w) => w.id);
+    expect(new Set(ids).size).toBe(2);
+
+    await w1.close();
+    await w2.close();
+    worker = undefined;
+  });
+});
