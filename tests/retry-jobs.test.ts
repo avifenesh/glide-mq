@@ -49,16 +49,20 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
         { connection: CONNECTION, concurrency: 5, blockTimeout: 1000 },
       );
       worker.on('error', () => {});
-      worker.on('failed', (job: any) => {
+      worker.on('failed', async (job: any) => {
         failedIds.add(job.id);
         if (failedIds.size >= count) {
           clearTimeout(timeout);
-          worker.close(true).then(resolve);
+          // Use non-force close to ensure all operations complete
+          await worker.close(false);
+          resolve();
         }
       });
     });
     await done;
     await q.close();
+    // Ensure all async Valkey operations complete before returning
+    await new Promise((r) => setTimeout(r, 50));
   }
 
   it('retries all failed jobs', async () => {
