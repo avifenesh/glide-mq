@@ -223,17 +223,24 @@ export class Job<D = any, R = any> {
   /**
    * Retry this job by moving it back to the scheduled ZSet with a score of now
    * (so it gets promoted immediately on the next promote cycle).
+   * Removes the job from the failed ZSet first to prevent dual membership.
    */
   async retry(): Promise<void> {
     const now = Date.now();
     const priority = this.opts.priority ?? 0;
     const PRIORITY_SHIFT = 2 ** 42;
     const score = priority * PRIORITY_SHIFT + now;
+    await this.client.zrem(this.queueKeys.failed, [this.id]);
     await this.client.zadd(this.queueKeys.scheduled, [{ element: this.id, score }]);
     await this.client.hset(this.queueKeys.job(this.id), {
       state: 'delayed',
+      attemptsMade: '0',
       failedReason: '',
+      finishedOn: '',
     });
+    this.attemptsMade = 0;
+    this.failedReason = undefined;
+    this.finishedOn = undefined;
   }
 
   /**
