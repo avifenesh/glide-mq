@@ -9,6 +9,7 @@ import { it, expect, beforeAll, afterAll } from 'vitest';
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
@@ -147,14 +148,18 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
     const retried = await queue.retryJobs();
     expect(retried).toBe(1);
 
-    // Now process with a succeeding worker.
-    // The retried job is in the scheduled ZSet - the promote cycle moves it to the stream.
+    // Explicitly promote the retried job from scheduled ZSet to stream
+    const k = buildKeys(qName);
+    const promoted = await promote(cleanupClient, k, Date.now());
+    expect(promoted).toBeGreaterThanOrEqual(1);
+
+    // Now process with a succeeding worker
     const completed = new Promise<string>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('timeout')), 30000);
+      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
       const worker = new Worker(qName, async () => 'success', {
         connection: CONNECTION,
         concurrency: 1,
-        blockTimeout: 500,
+        blockTimeout: 1000,
       });
       worker.on('error', () => {});
       worker.on('completed', (job: any) => {
@@ -171,7 +176,7 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
     expect(finalState).toBe('completed');
 
     await queue.close();
-  }, 45000);
+  }, 30000);
 
   it('count greater than total failed retries all available', async () => {
     const qName = Q + '-over';
