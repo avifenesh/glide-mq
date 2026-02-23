@@ -11,6 +11,7 @@ import path from 'path';
 import os from 'os';
 import type { JobOptions, JobCounts, Processor, WorkerInfo, SchedulerEntry, ScheduleOpts, JobTemplate } from './types';
 import { GlideMQError, UnrecoverableError } from './errors';
+import { nextCronOccurrence } from './utils';
 
 // ---- Lightweight in-memory Job representation ----
 
@@ -341,7 +342,10 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     if (!schedule.pattern && !schedule.every) {
       throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
     }
-    const nextRun = schedule.every ? Date.now() + schedule.every : Date.now();
+    const now = Date.now();
+    const nextRun = schedule.pattern
+      ? nextCronOccurrence(schedule.pattern, now)
+      : now + schedule.every!;
     this.schedulers.set(name, {
       pattern: schedule.pattern,
       every: schedule.every,
@@ -355,11 +359,16 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   }
 
   async getJobScheduler(name: string): Promise<SchedulerEntry | null> {
-    return this.schedulers.get(name) ?? null;
+    const entry = this.schedulers.get(name);
+    if (!entry) return null;
+    return { ...entry, template: entry.template ? { ...entry.template } : undefined };
   }
 
   async getRepeatableJobs(): Promise<{ name: string; entry: SchedulerEntry }[]> {
-    return [...this.schedulers.entries()].map(([name, entry]) => ({ name, entry }));
+    return [...this.schedulers.entries()].map(([name, entry]) => ({
+      name,
+      entry: { ...entry, template: entry.template ? { ...entry.template } : undefined },
+    }));
   }
 
   /** Close the queue. */
