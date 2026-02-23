@@ -14,6 +14,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     zrem: vi.fn().mockResolvedValue(1),
     smembers: vi.fn().mockResolvedValue(new Set()),
     close: vi.fn(),
+    exec: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -96,24 +97,26 @@ describe('Job', () => {
 
     it('should fetch return values from child jobs', async () => {
       mockClient.smembers.mockResolvedValue(new Set(['glide:{test-queue}:10', 'glide:{test-queue}:11']));
-      mockClient.hget.mockResolvedValueOnce('"result-a"').mockResolvedValueOnce('"result-b"');
+      mockClient.exec.mockResolvedValue(['"result-a"', '"result-b"']);
       const job = new Job(mockClient as any, keys, '1', 'parent', {}, {});
 
       const values = await job.getChildrenValues();
 
       expect(values['glide:{test-queue}:10']).toBe('result-a');
       expect(values['glide:{test-queue}:11']).toBe('result-b');
+      expect(mockClient.exec).toHaveBeenCalled();
     });
 
     it('should skip children with null returnvalue', async () => {
       mockClient.smembers.mockResolvedValue(new Set(['glide:{test-queue}:10', 'glide:{test-queue}:11']));
-      mockClient.hget.mockResolvedValueOnce('"done"').mockResolvedValueOnce(null);
+      mockClient.exec.mockResolvedValue(['"done"', null]);
       const job = new Job(mockClient as any, keys, '1', 'parent', {}, {});
 
       const values = await job.getChildrenValues();
 
       expect(values['glide:{test-queue}:10']).toBe('done');
       expect(values['glide:{test-queue}:11']).toBeUndefined();
+      expect(mockClient.exec).toHaveBeenCalled();
     });
   });
 

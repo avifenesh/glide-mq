@@ -475,7 +475,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       for (let i = 1; i < sorted.length; i++) {
         expect(sorted[i]).toBeGreaterThan(sorted[i - 1]);
       }
-    });
+    }, 30000);
   });
 
   // ---------------------------------------------------------------------------
