@@ -463,7 +463,6 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       const jobs = await Promise.all(Array.from({ length: 100 }, (_, i) => queue.add(`rapid-${i}`, { i })));
 
       expect(jobs).toHaveLength(100);
-    }, 30000);
       const ids = jobs.map((j) => j!.id);
 
       const uniqueIds = new Set(ids);
