@@ -11,6 +11,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     hgetall: vi.fn().mockResolvedValue([]),
     xadd: vi.fn().mockResolvedValue('1-0'),
     zadd: vi.fn().mockResolvedValue(1),
+    zrem: vi.fn().mockResolvedValue(1),
     smembers: vi.fn().mockResolvedValue(new Set()),
     close: vi.fn(),
     ...overrides,
@@ -238,6 +239,9 @@ describe('Job', () => {
 
       await job.retry();
 
+      expect(mockClient.zrem).toHaveBeenCalledTimes(1);
+      expect(mockClient.zrem).toHaveBeenCalledWith('glide:{test-queue}:failed', ['3']);
+
       expect(mockClient.zadd).toHaveBeenCalledTimes(1);
       const zaddCall = mockClient.zadd.mock.calls[0];
       expect(zaddCall[0]).toBe('glide:{test-queue}:scheduled');
@@ -246,13 +250,23 @@ describe('Job', () => {
       expect(score).toBeGreaterThan(0);
       expect(score).toBeLessThan(Date.now() + 1000); // should be roughly now
 
-      expect(mockClient.hset).toHaveBeenCalledWith('glide:{test-queue}:job:3', { state: 'delayed', failedReason: '' });
+      expect(mockClient.hset).toHaveBeenCalledWith('glide:{test-queue}:job:3', {
+        state: 'delayed',
+        attemptsMade: '0',
+        failedReason: '',
+        finishedOn: '',
+      });
+      expect(job.attemptsMade).toBe(0);
+      expect(job.failedReason).toBeUndefined();
+      expect(job.finishedOn).toBeUndefined();
     });
 
     it('should encode priority into the score', async () => {
       const job = new Job(mockClient as any, keys, '3', 'job', {}, { priority: 2 });
 
       await job.retry();
+
+      expect(mockClient.zrem).toHaveBeenCalledWith('glide:{test-queue}:failed', ['3']);
 
       const score = mockClient.zadd.mock.calls[0][1][0].score;
       const PRIORITY_SHIFT = 2 ** 42;

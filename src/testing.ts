@@ -285,6 +285,38 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
   }
 
+  /**
+   * Bulk retry failed jobs.
+   * Moves failed jobs back to waiting, resets attemptsMade/failedReason/finishedOn.
+   * @param opts.count - Maximum number of jobs to retry. Omit or 0 to retry all.
+   * @returns Number of jobs retried.
+   */
+  async retryJobs(opts?: { count?: number }): Promise<number> {
+    if (opts?.count != null && (!Number.isInteger(opts.count) || opts.count < 0)) {
+      throw new Error('count must be a non-negative integer');
+    }
+    const limit = opts?.count ?? 0;
+    let retried = 0;
+    for (const record of this.jobs.values()) {
+      if (limit > 0 && retried >= limit) break;
+      if (record.state !== 'failed') continue;
+      record.state = 'waiting';
+      record.attemptsMade = 0;
+      record.failedReason = undefined;
+      record.finishedOn = undefined;
+      retried++;
+    }
+    // Notify workers so retried jobs get picked up
+    if (retried > 0 && !this.paused) {
+      queueMicrotask(() => {
+        for (const w of this.workers) {
+          w.onJobAdded();
+        }
+      });
+    }
+    return retried;
+  }
+
   /** Close the queue. */
   async close(): Promise<void> {
     this.removeAllListeners();

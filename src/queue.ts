@@ -36,6 +36,7 @@ import {
   searchByName,
   cleanJobs,
   drainQueue,
+  retryJobs,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -584,6 +585,21 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async drain(delayed?: boolean): Promise<void> {
     const client = await this.getClient();
     await drainQueue(client, this.keys, delayed ?? false);
+  }
+
+  /**
+   * Bulk retry failed jobs.
+   * Moves jobs from the failed set to the scheduled ZSet (delayed state).
+   * Resets attemptsMade, failedReason, and finishedOn on each retried job.
+   * @param opts.count - Maximum number of jobs to retry. Omit or 0 to retry all.
+   * @returns Number of jobs retried.
+   */
+  async retryJobs(opts?: { count?: number }): Promise<number> {
+    if (opts?.count != null && (!Number.isInteger(opts.count) || opts.count < 0)) {
+      throw new Error('count must be a non-negative integer');
+    }
+    const client = await this.getClient();
+    return retryJobs(client, this.keys, opts?.count ?? 0, Date.now());
   }
 
   /**

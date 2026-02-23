@@ -440,3 +440,154 @@ describe('TestJob.promote', () => {
     expect(job!.opts.delay).toBe(0);
   });
 });
+
+describe('TestQueue.retryJobs', () => {
+  let queue: TestQueue;
+  let worker: InstanceType<typeof TestWorker> | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    if (queue) await queue.close();
+    worker = undefined;
+  });
+
+  it('retries all failed jobs', async () => {
+    queue = new TestQueue('retry-all');
+    const failures: string[] = [];
+
+    worker = new TestWorker(queue, async () => {
+      throw new Error('fail');
+    });
+    worker.on('failed', (job) => failures.push(job.id));
+
+    await queue.add('t1', {});
+    await queue.add('t2', {});
+    await queue.add('t3', {});
+
+    await new Promise((r) => setTimeout(r, 100));
+    expect(failures).toHaveLength(3);
+
+    const counts = await queue.getJobCounts();
+    expect(counts.failed).toBe(3);
+
+    await worker.close();
+    worker = undefined;
+
+    const retried = await queue.retryJobs();
+    expect(retried).toBe(3);
+
+    const after = await queue.getJobCounts();
+    expect(after.failed).toBe(0);
+    expect(after.waiting).toBe(3);
+
+    // Verify reset fields
+    for (const record of queue.jobs.values()) {
+      expect(record.state).toBe('waiting');
+      expect(record.attemptsMade).toBe(0);
+      expect(record.failedReason).toBeUndefined();
+      expect(record.finishedOn).toBeUndefined();
+    }
+  });
+
+  it('respects count limit', async () => {
+    queue = new TestQueue('retry-count');
+
+    worker = new TestWorker(queue, async () => {
+      throw new Error('fail');
+    });
+
+    await queue.add('t1', {});
+    await queue.add('t2', {});
+    await queue.add('t3', {});
+
+    await new Promise((r) => setTimeout(r, 100));
+    await worker.close();
+    worker = undefined;
+
+    const retried = await queue.retryJobs({ count: 2 });
+    expect(retried).toBe(2);
+
+    const counts = await queue.getJobCounts();
+    expect(counts.failed).toBe(1);
+    expect(counts.waiting).toBe(2);
+  });
+
+  it('returns 0 when no failed jobs', async () => {
+    queue = new TestQueue('retry-empty');
+    await queue.add('t1', {});
+
+    const retried = await queue.retryJobs();
+    expect(retried).toBe(0);
+  });
+
+  it('retried jobs with mixed priorities all go to waiting in TestQueue', async () => {
+    queue = new TestQueue('retry-prio');
+
+    worker = new TestWorker(queue, async () => {
+      throw new Error('fail');
+    });
+
+    await queue.add('t1', {}, { priority: 0 });
+    await queue.add('t2', {}, { priority: 5 });
+
+    await new Promise((r) => setTimeout(r, 100));
+    await worker.close();
+    worker = undefined;
+
+    const retried = await queue.retryJobs();
+    expect(retried).toBe(2);
+
+    const records = [...queue.jobs.values()];
+    const noPrio = records.find((r) => r.name === 't1');
+    const withPrio = records.find((r) => r.name === 't2');
+    expect(noPrio!.state).toBe('waiting');
+    expect(withPrio!.state).toBe('waiting');
+  });
+
+  it('count > total failed still retries all available', async () => {
+    queue = new TestQueue('retry-over');
+
+    worker = new TestWorker(queue, async () => {
+      throw new Error('fail');
+    });
+
+    await queue.add('t1', {});
+    await queue.add('t2', {});
+
+    await new Promise((r) => setTimeout(r, 100));
+    await worker.close();
+    worker = undefined;
+
+    const retried = await queue.retryJobs({ count: 100 });
+    expect(retried).toBe(2);
+
+    const counts = await queue.getJobCounts();
+    expect(counts.failed).toBe(0);
+  });
+
+  it('retried jobs get processed by workers', async () => {
+    queue = new TestQueue('retry-process');
+    let callCount = 0;
+    const completed: string[] = [];
+
+    worker = new TestWorker(queue, async () => {
+      callCount++;
+      if (callCount <= 1) throw new Error('first attempt fails');
+      return 'ok';
+    });
+    worker.on('completed', (job) => completed.push(job.id));
+
+    await queue.add('t1', {});
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Job should have failed (no retries configured)
+    expect((await queue.getJobCounts()).failed).toBe(1);
+
+    const retried = await queue.retryJobs();
+    expect(retried).toBe(1);
+
+    await new Promise((r) => setTimeout(r, 100));
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toBe('1');
+  });
+});
