@@ -117,4 +117,23 @@ describeEachMode('Job schedulers', (CONNECTION) => {
       'Schedule must have either pattern (cron) or every (ms interval)',
     );
   });
+
+  it('getJobScheduler returns a single scheduler entry by name', async () => {
+    await queue.upsertJobScheduler('single-lookup', { every: 750 }, { name: 'lookup-job', data: { key: 'val' } });
+
+    const result = await queue.getJobScheduler('single-lookup');
+    expect(result).not.toBeNull();
+    expect(result!.every).toBe(750);
+    expect(result!.template?.name).toBe('lookup-job');
+    expect(result!.template?.data).toEqual({ key: 'val' });
+    expect(result!.nextRun).toBeGreaterThan(0);
+
+    // Clean up
+    await queue.removeJobScheduler('single-lookup');
+  });
+
+  it('getJobScheduler returns null for non-existent name', async () => {
+    const result = await queue.getJobScheduler('does-not-exist');
+    expect(result).toBeNull();
+  });
 });

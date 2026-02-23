@@ -679,3 +679,32 @@ describe('TestQueue.getWorkers', () => {
     worker = undefined;
   });
 });
+
+describe('TestQueue.getJobScheduler', () => {
+  let queue: TestQueue;
+
+  afterEach(async () => {
+    if (queue) await queue.close();
+  });
+
+  it('getJobScheduler returns entry after upsert', async () => {
+    queue = new TestQueue('sched-test');
+    await queue.upsertJobScheduler('test-sched', { every: 1000 }, { name: 'sched-job', data: { a: 1 } });
+
+    const entry = await queue.getJobScheduler('test-sched');
+    expect(entry).not.toBeNull();
+    expect(entry!.every).toBe(1000);
+    expect(entry!.template?.name).toBe('sched-job');
+    expect(entry!.template?.data).toEqual({ a: 1 });
+    expect(entry!.nextRun).toBeGreaterThan(0);
+
+    // cleanup
+    await queue.removeJobScheduler('test-sched');
+  });
+
+  it('getJobScheduler returns null for missing name', async () => {
+    queue = new TestQueue('sched-miss');
+    const entry = await queue.getJobScheduler('nonexistent');
+    expect(entry).toBeNull();
+  });
+});
