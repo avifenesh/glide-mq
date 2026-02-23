@@ -230,7 +230,7 @@ Pass any mix of `Queue`, `Worker`, and `QueueEvents` instances. Each receives a 
 Set `clusterMode: true` in the connection config. Everything else is the same — keys are hash-tagged automatically.
 
 ```typescript
-import { Queue, Worker, ReadFrom } from 'glide-mq';
+import { Queue, Worker } from 'glide-mq';
 
 const connection = {
   addresses: [
@@ -239,7 +239,7 @@ const connection = {
   ],
   clusterMode: true,
   // Optional: route reads to same-AZ replicas (AWS ElastiCache / MemoryDB)
-  readFrom: ReadFrom.AZAffinity,
+  readFrom: 'AZAffinity',
   clientAz: 'us-east-1a',
 };
 
@@ -277,7 +277,6 @@ import { QueueEvents } from 'glide-mq';
 const events = new QueueEvents('tasks', { connection });
 
 events.on('added',     ({ jobId })                   => console.log('added',     jobId));
-events.on('active',    ({ jobId })                   => console.log('active',    jobId));
 events.on('progress',  ({ jobId, data })             => console.log('progress',  jobId, data));
 events.on('completed', ({ jobId, returnvalue })      => console.log('completed', jobId, returnvalue));
 events.on('failed',    ({ jobId, failedReason })     => console.log('failed',    jobId, failedReason));
@@ -293,5 +292,5 @@ await events.close();
 
 ```typescript
 // wait until job completes or fails (polls the job hash at the given interval)
-const result = await job.waitUntilFinished(500, 30000);
+const state = await job.waitUntilFinished(500, 30000); // 'completed' | 'failed'
 ```
