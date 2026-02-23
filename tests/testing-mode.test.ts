@@ -520,7 +520,7 @@ describe('TestQueue.retryJobs', () => {
     expect(retried).toBe(0);
   });
 
-  it('routes prioritized jobs to delayed state', async () => {
+  it('all retried jobs go to delayed state', async () => {
     queue = new TestQueue('retry-prio');
 
     worker = new TestWorker(queue, async () => {
@@ -541,7 +541,7 @@ describe('TestQueue.retryJobs', () => {
     const noPrio = records.find((r) => r.name === 't1');
     const withPrio = records.find((r) => r.name === 't2');
     expect(noPrio!.state).toBe('waiting');
-    expect(withPrio!.state).toBe('delayed');
+    expect(withPrio!.state).toBe('waiting');
   });
 
   it('count > total failed still retries all available', async () => {

@@ -300,8 +300,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     for (const record of this.jobs.values()) {
       if (limit > 0 && retried >= limit) break;
       if (record.state !== 'failed') continue;
-      const priority = record.opts.priority ?? 0;
-      record.state = priority > 0 ? 'delayed' : 'waiting';
+      record.state = 'waiting';
       record.attemptsMade = 0;
       record.failedReason = undefined;
       record.finishedOn = undefined;

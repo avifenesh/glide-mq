@@ -79,13 +79,13 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
 
     const after = await queue.getJobCounts();
     expect(after.failed).toBe(0);
-    expect(after.waiting).toBe(3);
+    expect(after.delayed).toBe(3);
 
     // Verify job hashes were reset
     const k = buildKeys(qName);
     for (let id = 1; id <= 3; id++) {
       const state = String(await cleanupClient.hget(k.job(String(id)), 'state'));
-      expect(state).toBe('waiting');
+      expect(state).toBe('delayed');
       const attempts = String(await cleanupClient.hget(k.job(String(id)), 'attemptsMade'));
       expect(attempts).toBe('0');
       const failedReason = String(await cleanupClient.hget(k.job(String(id)), 'failedReason'));
@@ -108,7 +108,7 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
 
     const after = await queue.getJobCounts();
     expect(after.failed).toBe(3);
-    expect(after.waiting).toBe(2);
+    expect(after.delayed).toBe(2);
 
     await queue.close();
   }, 20000);
@@ -182,7 +182,7 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
 
     const after = await queue.getJobCounts();
     expect(after.failed).toBe(0);
-    expect(after.waiting).toBe(3);
+    expect(after.delayed).toBe(3);
 
     await queue.close();
   }, 20000);

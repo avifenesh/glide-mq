@@ -589,7 +589,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   /**
    * Bulk retry failed jobs.
-   * Moves jobs from the failed set back to waiting (priority=0) or delayed (priority>0).
+   * Moves jobs from the failed set to the scheduled ZSet (delayed state).
    * Resets attemptsMade, failedReason, and finishedOn on each retried job.
    * @param opts.count - Maximum number of jobs to retry. Omit or 0 to retry all.
    * @returns Number of jobs retried.

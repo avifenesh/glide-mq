@@ -1985,10 +1985,9 @@ end)
 
 redis.register_function('glidemq_retryJobs', function(keys, args)
   local failedKey = keys[1]
-  local streamKey = keys[2]
-  local scheduledKey = keys[3]
-  local eventsKey = keys[4]
-  local idKey = keys[5]
+  local scheduledKey = keys[2]
+  local eventsKey = keys[3]
+  local idKey = keys[4]
   local count = tonumber(args[1]) or 0
   local timestamp = tonumber(args[2])
   if not timestamp then return redis.error_reply('ERR invalid timestamp') end
@@ -2009,24 +2008,14 @@ redis.register_function('glidemq_retryJobs', function(keys, args)
       local jobKey = prefix .. 'job:' .. jobId
       if redis.call('EXISTS', jobKey) == 1 then
         local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
-        if priority == 0 then
-          redis.call('XADD', streamKey, '*', 'jobId', jobId)
-          redis.call('HSET', jobKey,
-            'state', 'waiting',
-            'attemptsMade', '0',
-            'failedReason', '',
-            'finishedOn', ''
-          )
-        else
-          local score = priority * PRIORITY_SHIFT + timestamp
-          redis.call('ZADD', scheduledKey, score, jobId)
-          redis.call('HSET', jobKey,
-            'state', 'delayed',
-            'attemptsMade', '0',
-            'failedReason', '',
-            'finishedOn', ''
-          )
-        end
+        local score = priority * PRIORITY_SHIFT + timestamp
+        redis.call('ZADD', scheduledKey, score, jobId)
+        redis.call('HSET', jobKey,
+          'state', 'delayed',
+          'attemptsMade', '0',
+          'failedReason', '',
+          'finishedOn', ''
+        )
         retried = retried + 1
       end
     end
@@ -2574,7 +2563,8 @@ export async function drainQueue(
 
 /**
  * Bulk retry failed jobs.
- * Moves jobs from the failed ZSet back to the stream (priority=0) or scheduled ZSet (priority>0).
+ * Moves jobs from the failed ZSet to the scheduled ZSet for re-processing.
+ * The promote cycle picks them up immediately (score = priority * PRIORITY_SHIFT + now).
  * Resets attemptsMade, failedReason, and finishedOn on each job hash.
  * Emits a single 'retried' event with the total count.
  * @param count - Maximum number of jobs to retry. 0 means all.
@@ -2583,7 +2573,7 @@ export async function drainQueue(
 export async function retryJobs(client: Client, k: QueueKeys, count: number, timestamp: number): Promise<number> {
   const result = await client.fcall(
     'glidemq_retryJobs',
-    [k.failed, k.stream, k.scheduled, k.events, k.id],
+    [k.failed, k.scheduled, k.events, k.id],
     [count.toString(), timestamp.toString()],
   );
   return Number(result) || 0;
