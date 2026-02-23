@@ -1991,6 +1991,7 @@ redis.register_function('glidemq_retryJobs', function(keys, args)
   local idKey = keys[5]
   local count = tonumber(args[1]) or 0
   local timestamp = tonumber(args[2])
+  if not timestamp then return redis.error_reply('ERR invalid timestamp') end
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local retried = 0
 
@@ -2573,7 +2574,7 @@ export async function drainQueue(
  * Bulk retry failed jobs.
  * Moves jobs from the failed ZSet back to the stream (priority=0) or scheduled ZSet (priority>0).
  * Resets attemptsMade, failedReason, and finishedOn on each job hash.
- * Emits a 'retried' event per job.
+ * Emits a single 'retried' event with the total count.
  * @param count - Maximum number of jobs to retry. 0 means all.
  * @returns The number of jobs retried.
  */

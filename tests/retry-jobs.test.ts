@@ -196,4 +196,14 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
 
     await queue.close();
   }, 10000);
+
+  it('throws on invalid count', async () => {
+    const qName = Q + '-empty';
+    const queue = new Queue(qName, { connection: CONNECTION });
+
+    await expect(queue.retryJobs({ count: -1 })).rejects.toThrow('count must be a non-negative integer');
+    await expect(queue.retryJobs({ count: 1.5 })).rejects.toThrow('count must be a non-negative integer');
+
+    await queue.close();
+  }, 10000);
 });
