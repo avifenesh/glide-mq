@@ -1,7 +1,10 @@
+import { Batch, ClusterBatch } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { JobOptions, Client } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
 import { calculateBackoff, decompress } from './utils';
+import { isClusterClient } from './connection';
 
 export class Job<D = any, R = any> {
   readonly id: string;
@@ -108,6 +111,12 @@ export class Job<D = any, R = any> {
     const depsKey = this.queueKeys.deps(this.id);
     const members = await this.client.smembers(depsKey);
     const result: Record<string, R> = {};
+    if (!members || members.length === 0) return result;
+
+    const isCluster = isClusterClient(this.client);
+    const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
+    const memberKeys: string[] = [];
+
     for (const member of members) {
       const memberStr = String(member);
       // Deps member format: "queuePrefix:childId" e.g. "glide:{q}:3"
@@ -117,9 +126,23 @@ export class Job<D = any, R = any> {
       const queuePrefix = memberStr.substring(0, lastColon);
       const childId = memberStr.substring(lastColon + 1);
       const jobKey = `${queuePrefix}:job:${childId}`;
-      const val = await this.client.hget(jobKey, 'returnvalue');
-      if (val != null) {
-        result[memberStr] = JSON.parse(String(val));
+
+      (batch as any).hget(jobKey, 'returnvalue');
+      memberKeys.push(memberStr);
+    }
+
+    if (memberKeys.length === 0) return result;
+
+    const results = isCluster
+      ? await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false)
+      : await (this.client as GlideClient).exec(batch as Batch, false);
+
+    if (results) {
+      for (let i = 0; i < results.length; i++) {
+        const val = results[i];
+        if (val != null) {
+          result[memberKeys[i]] = JSON.parse(String(val));
+        }
       }
     }
     return result;
