@@ -506,7 +506,7 @@ The processor function signature is identical. The only change is the connection
 | `jobId` (custom ID) | - | Gap - IDs are auto-generated |
 | `lifo` | - | Gap - not supported |
 | `repeat` | - | Gap - use `queue.upsertJobScheduler()` |
-| `sizeLimit` | - | 1 MB hard limit enforced internally |
+| `sizeLimit` | - | 1 MB hard limit enforced internally (JSON string character length) |
 | - | `ordering.key` | glide-mq only |
 | - | `ordering.concurrency` | glide-mq only |
 | - | `ordering.rateLimit` | glide-mq only |
@@ -1080,29 +1080,36 @@ Useful when job payloads are large (15 KB JSON → 331 bytes with gzip, 98% redu
 
 ---
 
-## Gaps and workarounds
+## Resolved gaps
 
-These features exist in BullMQ but are not yet implemented in glide-mq. Each has a tracking issue.
+These BullMQ features have been implemented in glide-mq.
 
-| Missing feature | Workaround | Issue |
+| Feature | glide-mq API | Issue |
 |---|---|---|
-| `job.promote()` | Now implemented natively — call `job.promote()` to move a delayed job to waiting immediately | Resolved [#11](https://github.com/avifenesh/glide-mq/issues/11) |
-| `job.changeDelay(delay)` | Now implemented natively - call `job.changeDelay(newDelay)` | Resolved [#12](https://github.com/avifenesh/glide-mq/issues/12) |
-| `job.changePriority(opts)` | Now implemented natively — call `job.changePriority(newPriority)` | Resolved [#13](https://github.com/avifenesh/glide-mq/issues/13) |
-| `job.discard()` | Now implemented natively — call `job.discard()` or throw `UnrecoverableError` inside the processor | Resolved [#14](https://github.com/avifenesh/glide-mq/issues/14) |
-| `queue.drain(delayed?)` | Now implemented natively — call `queue.drain()` or `queue.drain(true)` to also remove delayed jobs | Resolved [#15](https://github.com/avifenesh/glide-mq/issues/15) |
-| `queue.clean(grace, limit, type)` | Now implemented natively — see [Queue API table](#queue-methods-and-options) above | Resolved [#16](https://github.com/avifenesh/glide-mq/issues/16) |
-| `queue.retryJobs(opts)` | Now implemented natively — call `queue.retryJobs({ count: 100 })` to bulk-retry failed jobs | Resolved [#17](https://github.com/avifenesh/glide-mq/issues/17) |
-| `queue.getWorkers()` | Now implemented natively - call `queue.getWorkers()` to list all active workers with metadata (id, addr, pid, startedAt, age, activeJobs) | Resolved [#18](https://github.com/avifenesh/glide-mq/issues/18) |
-| `queue.getJobScheduler(name)` | Now implemented natively - call `queue.getJobScheduler(name)` to retrieve a single scheduler entry by name | Resolved [#19](https://github.com/avifenesh/glide-mq/issues/19) |
-| `worker.on('active')` | Now implemented natively - emitted with `(job, jobId)` when a job starts processing. Note: BullMQ passes `(job, prev)` instead | Resolved [#20](https://github.com/avifenesh/glide-mq/issues/20) |
-| `worker.on('drained')` | Now implemented natively - emitted when queue transitions from non-empty to empty | Resolved [#20](https://github.com/avifenesh/glide-mq/issues/20) |
-| Sandboxed processor | `new Worker('q', './processor.js', { connection, sandbox: {} })` | Full - see [Worker section](#worker) |
-| Custom `jobId` | Use `deduplication.id` for idempotent creation | - |
-| `lifo` | Use `priority` values in reverse insertion order | - |
-| QueueEvents `'waiting'`, `'active'`, `'delayed'`, `'drained'`, `'deduplicated'` events | Use the worker-level events or poll `getJobCounts()` | - |
-| `@nestjs/bullmq` integration | Not yet supported - use glide-mq directly | - |
-| `failParentOnFailure` in FlowJob | Implement manually in the worker's `failed` handler | - |
+| `job.promote()` | `job.promote()` - move delayed job to waiting | [#11](https://github.com/avifenesh/glide-mq/issues/11) |
+| `job.changeDelay(delay)` | `job.changeDelay(newDelay)` | [#12](https://github.com/avifenesh/glide-mq/issues/12) |
+| `job.changePriority(opts)` | `job.changePriority(newPriority)` | [#13](https://github.com/avifenesh/glide-mq/issues/13) |
+| `job.discard()` | `job.discard()` or throw `UnrecoverableError` | [#14](https://github.com/avifenesh/glide-mq/issues/14) |
+| `queue.drain(delayed?)` | `queue.drain()` or `queue.drain(true)` | [#15](https://github.com/avifenesh/glide-mq/issues/15) |
+| `queue.clean(grace, limit, type)` | Same signature | [#16](https://github.com/avifenesh/glide-mq/issues/16) |
+| `queue.retryJobs(opts)` | `queue.retryJobs({ count: 100 })` | [#17](https://github.com/avifenesh/glide-mq/issues/17) |
+| `queue.getWorkers()` | Same signature | [#18](https://github.com/avifenesh/glide-mq/issues/18) |
+| `queue.getJobScheduler(name)` | Same signature | [#19](https://github.com/avifenesh/glide-mq/issues/19) |
+| `worker.on('active')` | Emits `(job, jobId)` - note: BullMQ passes `(job, prev)` | [#20](https://github.com/avifenesh/glide-mq/issues/20) |
+| `worker.on('drained')` | Same signature | [#20](https://github.com/avifenesh/glide-mq/issues/20) |
+| Sandboxed processor | `new Worker('q', './processor.js', { connection, sandbox: {} })` | - |
+
+## Current gaps
+
+These BullMQ features are not yet implemented.
+
+| Missing feature | Workaround |
+|---|---|
+| Custom `jobId` | Use `deduplication.id` for idempotent creation |
+| `lifo` | Use `priority` values in reverse insertion order |
+| QueueEvents `'waiting'`, `'active'`, `'delayed'`, `'drained'`, `'deduplicated'` events | Use worker-level events or poll `getJobCounts()` |
+| `@nestjs/bullmq` integration | Not yet supported - use glide-mq directly |
+| `failParentOnFailure` in FlowJob | Implement manually in the worker's `failed` handler |
 
 ---
 
@@ -1244,7 +1251,7 @@ Work through this after completing your migration:
 - [ ] Remove `QueueScheduler` instantiation (not needed)
 - [ ] Remove `defaultJobOptions` from `QueueOptions`; apply options per job or via a wrapper
 - [ ] Replace `queue.getJobs([...types])` with per-type calls
-- [ ] Verify any `worker.on('active')` / `worker.on('drained')` handlers are replaced with workarounds
+- [ ] Update any `worker.on('active')` handlers: glide-mq emits `(job, jobId)` instead of BullMQ's `(job, prev)`
 - [ ] Replace `job.waitUntilFinished(queueEvents, ttl)` with `job.waitUntilFinished(pollMs, timeoutMs)`
 - [ ] Check `QueueEvents` listeners for removed events (`'waiting'`, `'active'`, `'delayed'`, `'drained'`)
 - [ ] Run your test suite: `npm test`
