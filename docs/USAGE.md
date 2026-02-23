@@ -293,5 +293,5 @@ await events.close();
 
 ```typescript
 // wait until job completes or fails (polls QueueEvents internally)
-const result = await job.waitUntilFinished(events);
+const result = await job.waitUntilFinished(500, 30000);
 ```
