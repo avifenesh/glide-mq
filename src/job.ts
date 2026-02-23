@@ -111,7 +111,7 @@ export class Job<D = any, R = any> {
     const depsKey = this.queueKeys.deps(this.id);
     const members = await this.client.smembers(depsKey);
     const result: Record<string, R> = {};
-    if (!members || members.length === 0) return result;
+    if (!members || members.size === 0) return result;
 
     const isCluster = isClusterClient(this.client);
     const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
