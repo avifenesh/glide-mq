@@ -729,6 +729,10 @@ describe('TestQueue.getJobScheduler', () => {
     expect(all).toHaveLength(2);
     const names = all.map((s) => s.name).sort();
     expect(names).toEqual(['a', 'b']);
+    for (const item of all) {
+      expect(item.entry.every).toBeGreaterThan(0);
+      expect(item.entry.nextRun).toBeGreaterThan(0);
+    }
 
     await queue.removeJobScheduler('a');
     await queue.removeJobScheduler('b');

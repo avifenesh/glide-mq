@@ -338,6 +338,9 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   }
 
   async upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void> {
+    if (!schedule.pattern && !schedule.every) {
+      throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
+    }
     const nextRun = schedule.every ? Date.now() + schedule.every : Date.now();
     this.schedulers.set(name, {
       pattern: schedule.pattern,

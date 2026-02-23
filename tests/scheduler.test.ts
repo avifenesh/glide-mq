@@ -143,6 +143,7 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     expect(result).not.toBeNull();
     expect(result!.pattern).toBe('*/10 * * * *');
     expect(result!.every).toBeUndefined();
+    expect(result!.template).toBeUndefined();
 
     await queue.removeJobScheduler('cron-lookup');
   });
