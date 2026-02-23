@@ -16,8 +16,8 @@ Current state of the glide-mq repository as of 2026-02-23.
 - Queue method: `Queue.getWorkers()` in `src/queue.ts` - SCAN + pipeline GET
 - Refactored `scanAndDelete` into `scanKeys` + `scanAndDelete` for reuse
 - Testing mode: `TestQueue.getWorkers()` in `src/testing.ts`
-- Integration tests: `tests/get-workers.test.ts` (5 tests x 2 modes)
-- Testing-mode tests: 4 new tests in `tests/testing-mode.test.ts`
+- Integration tests: `tests/get-workers.test.ts` (7 tests x 2 modes)
+- Testing-mode tests: 5 new tests in `tests/testing-mode.test.ts`
 - Test fixture cleanup updated for worker keys
 - No LIBRARY_VERSION change (no Lua function changes)
 

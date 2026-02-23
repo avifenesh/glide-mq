@@ -531,15 +531,16 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     const now = Date.now();
     const workers: WorkerInfo[] = [];
-
-    const batch = this.newBatch();
-    for (const key of keys) {
-      (batch as any).get(key);
-    }
-    const results = await client.exec(batch as any, false);
-
-    if (results) {
-      for (let i = 0; i < keys.length; i++) {
+    const CHUNK = 500;
+    for (let offset = 0; offset < keys.length; offset += CHUNK) {
+      const chunk = keys.slice(offset, offset + CHUNK);
+      const batch = this.newBatch();
+      for (const key of chunk) {
+        (batch as any).get(key);
+      }
+      const results = await client.exec(batch as any, false);
+      if (!results) continue;
+      for (let i = 0; i < chunk.length; i++) {
         const val = results[i];
         if (!val) continue;
         try {
@@ -547,17 +548,19 @@ export class Queue<D = any, R = any> extends EventEmitter {
           if (typeof data.addr !== 'string' || typeof data.pid !== 'number' || typeof data.startedAt !== 'number') {
             continue;
           }
-          const idx = keys[i].lastIndexOf(':w:');
+          const idx = chunk[i].lastIndexOf(':w:');
           if (idx < 0) continue;
           workers.push({
-            id: keys[i].substring(idx + 3),
+            id: chunk[i].substring(idx + 3),
             addr: data.addr,
             pid: data.pid,
             startedAt: data.startedAt,
             age: Math.max(0, now - data.startedAt),
             activeJobs: typeof data.activeJobs === 'number' ? data.activeJobs : 0,
           });
-        } catch {}
+        } catch {
+          // Malformed JSON - skip entry
+        }
       }
     }
 
@@ -746,7 +749,15 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     const workerPattern = `${pfx}:w:*`;
 
-    for (const pattern of [jobPattern, logPattern, depsPattern, groupPattern, groupqPattern, orderPendingPattern, workerPattern]) {
+    for (const pattern of [
+      jobPattern,
+      logPattern,
+      depsPattern,
+      groupPattern,
+      groupqPattern,
+      orderPendingPattern,
+      workerPattern,
+    ]) {
       await this.scanAndDelete(client, pattern);
     }
   }
@@ -757,29 +768,29 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * @internal
    */
   private async scanKeys(client: Client, pattern: string): Promise<string[]> {
-    const collected: string[] = [];
+    const seen = new Set<string>();
     if (this.clusterMode) {
       const clusterClient = client as GlideClusterClient;
       let cursor = new ClusterScanCursor();
       while (!cursor.isFinished()) {
         const [nextCursor, keys] = await clusterClient.scan(cursor, { match: pattern, count: 100 });
         cursor = nextCursor;
-        for (const k of keys) collected.push(String(k));
+        for (const k of keys) seen.add(String(k));
       }
     } else {
       let cursor = '0';
       do {
         const result = await (client as GlideClient).scan(cursor, { match: pattern, count: 100 });
         cursor = result[0] as string;
-        for (const k of result[1]) collected.push(String(k));
+        for (const k of result[1]) seen.add(String(k));
       } while (cursor !== '0');
     }
-    return collected;
+    return [...seen];
   }
 
   /**
    * Scan for keys matching a pattern and delete them in batches.
-   * Handles both standalone (GlideClient) and cluster (GlideClusterClient) scan APIs.
+   * Deletes during iteration to avoid accumulating all keys in memory.
    * @internal
    */
   private async scanAndDelete(client: Client, pattern: string): Promise<void> {

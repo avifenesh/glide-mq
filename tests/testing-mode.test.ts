@@ -638,7 +638,9 @@ describe('TestQueue.getWorkers', () => {
   it('activeJobs tracks processing count', async () => {
     queue = new TestQueue('gw-active');
     let finishJob!: () => void;
-    const jobPromise = new Promise<void>((r) => { finishJob = r; });
+    const jobPromise = new Promise<void>((r) => {
+      finishJob = r;
+    });
 
     worker = new TestWorker(queue, async () => {
       await jobPromise;

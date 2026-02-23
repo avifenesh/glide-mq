@@ -39,11 +39,7 @@ describeEachMode('Queue.getWorkers()', (CONNECTION) => {
   it('lists a single active worker', async () => {
     const qName = Q;
     const queue = new Queue(qName, { connection: CONNECTION });
-    const worker = new Worker(
-      qName,
-      async () => 'ok',
-      { connection: CONNECTION, blockTimeout: 1000 },
-    );
+    const worker = new Worker(qName, async () => 'ok', { connection: CONNECTION, blockTimeout: 1000 });
     await worker.waitUntilReady();
 
     // Worker registration happens on init - should appear quickly
@@ -68,16 +64,8 @@ describeEachMode('Queue.getWorkers()', (CONNECTION) => {
   it('lists multiple workers', async () => {
     const qName = Q + '-multi';
     const queue = new Queue(qName, { connection: CONNECTION });
-    const w1 = new Worker(
-      qName,
-      async () => 'ok',
-      { connection: CONNECTION, blockTimeout: 1000 },
-    );
-    const w2 = new Worker(
-      qName,
-      async () => 'ok',
-      { connection: CONNECTION, blockTimeout: 1000 },
-    );
+    const w1 = new Worker(qName, async () => 'ok', { connection: CONNECTION, blockTimeout: 1000 });
+    const w2 = new Worker(qName, async () => 'ok', { connection: CONNECTION, blockTimeout: 1000 });
     await w1.waitUntilReady();
     await w2.waitUntilReady();
 
@@ -104,11 +92,7 @@ describeEachMode('Queue.getWorkers()', (CONNECTION) => {
   it('worker disappears after close', async () => {
     const qName = Q + '-close';
     const queue = new Queue(qName, { connection: CONNECTION });
-    const worker = new Worker(
-      qName,
-      async () => 'ok',
-      { connection: CONNECTION, blockTimeout: 1000 },
-    );
+    const worker = new Worker(qName, async () => 'ok', { connection: CONNECTION, blockTimeout: 1000 });
     await worker.waitUntilReady();
 
     await waitFor(async () => {
@@ -134,11 +118,11 @@ describeEachMode('Queue.getWorkers()', (CONNECTION) => {
     const qName = Q + '-hb';
     const queue = new Queue(qName, { connection: CONNECTION });
     // Short stalledInterval so TTL is 2s, heartbeat refreshes at 1s
-    const worker = new Worker(
-      qName,
-      async () => 'ok',
-      { connection: CONNECTION, blockTimeout: 1000, stalledInterval: 2000 },
-    );
+    const worker = new Worker(qName, async () => 'ok', {
+      connection: CONNECTION,
+      blockTimeout: 1000,
+      stalledInterval: 2000,
+    });
     await worker.waitUntilReady();
 
     await waitFor(async () => {
@@ -161,7 +145,9 @@ describeEachMode('Queue.getWorkers()', (CONNECTION) => {
     const queue = new Queue(qName, { connection: CONNECTION });
     let jobStarted = false;
     let finishJob!: () => void;
-    const jobPromise = new Promise<void>((r) => { finishJob = r; });
+    const jobPromise = new Promise<void>((r) => {
+      finishJob = r;
+    });
 
     const worker = new Worker(
       qName,
@@ -189,11 +175,7 @@ describeEachMode('Queue.getWorkers()', (CONNECTION) => {
   it('metadata fields are correct types', async () => {
     const qName = Q + '-meta';
     const queue = new Queue(qName, { connection: CONNECTION });
-    const worker = new Worker(
-      qName,
-      async () => 'ok',
-      { connection: CONNECTION, blockTimeout: 1000 },
-    );
+    const worker = new Worker(qName, async () => 'ok', { connection: CONNECTION, blockTimeout: 1000 });
     await worker.waitUntilReady();
 
     await waitFor(async () => {

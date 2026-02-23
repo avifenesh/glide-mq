@@ -155,9 +155,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     // Register this worker and start periodic heartbeat
     await this.registerWorker();
+    const heartbeatMs = Math.max(1000, Math.floor(this.stalledInterval / 2));
     this.workerHeartbeatTimer = setInterval(() => {
       void this.registerWorker();
-    }, Math.floor(this.stalledInterval / 2));
+    }, heartbeatMs);
 
     this.running = true;
     this.pollLoop();
@@ -264,9 +265,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
           clearInterval(this.workerHeartbeatTimer);
         }
         await this.registerWorker();
+        const hbMs = Math.max(1000, Math.floor(this.stalledInterval / 2));
         this.workerHeartbeatTimer = setInterval(() => {
           void this.registerWorker();
-        }, Math.floor(this.stalledInterval / 2));
+        }, hbMs);
       },
       () => this.pollLoop(),
     );
@@ -834,7 +836,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
       await this.commandClient.set(workerKey, payload, {
         expiry: { type: TimeUnit.Milliseconds, count: this.stalledInterval },
       });
-    } catch {}
+    } catch {
+      // Non-fatal: next heartbeat tick will retry
+    }
   }
 
   /**
