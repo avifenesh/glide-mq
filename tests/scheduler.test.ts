@@ -117,4 +117,44 @@ describeEachMode('Job schedulers', (CONNECTION) => {
       'Schedule must have either pattern (cron) or every (ms interval)',
     );
   });
+
+  it('getJobScheduler returns a single scheduler entry by name', async () => {
+    await queue.upsertJobScheduler('single-lookup', { every: 750 }, { name: 'lookup-job', data: { key: 'val' } });
+
+    const result = await queue.getJobScheduler('single-lookup');
+    expect(result).not.toBeNull();
+    expect(result!.every).toBe(750);
+    expect(result!.template?.name).toBe('lookup-job');
+    expect(result!.template?.data).toEqual({ key: 'val' });
+    expect(result!.nextRun).toBeGreaterThan(0);
+
+    await queue.removeJobScheduler('single-lookup');
+  });
+
+  it('getJobScheduler returns null for non-existent name', async () => {
+    const result = await queue.getJobScheduler('does-not-exist');
+    expect(result).toBeNull();
+  });
+
+  it('getJobScheduler returns scheduler with cron pattern', async () => {
+    await queue.upsertJobScheduler('cron-lookup', { pattern: '*/10 * * * *' });
+
+    const result = await queue.getJobScheduler('cron-lookup');
+    expect(result).not.toBeNull();
+    expect(result!.pattern).toBe('*/10 * * * *');
+    expect(result!.every).toBeUndefined();
+    expect(result!.template).toBeUndefined();
+
+    await queue.removeJobScheduler('cron-lookup');
+  });
+
+  it('getJobScheduler returns null for malformed JSON data', async () => {
+    const k = buildKeys(Q);
+    await cleanupClient.hset(k.schedulers, { corrupt: 'not-valid-json{' });
+
+    const result = await queue.getJobScheduler('corrupt');
+    expect(result).toBeNull();
+
+    await cleanupClient.hdel(k.schedulers, ['corrupt']);
+  });
 });

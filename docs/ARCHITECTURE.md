@@ -194,6 +194,8 @@ class Queue<D = any, R = any> {
 
   // Job schedulers (repeatable/cron)
   upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void>
+  getJobScheduler(name: string): Promise<SchedulerEntry | null>
+  getRepeatableJobs(): Promise<{ name: string; entry: SchedulerEntry }[]>
   removeJobScheduler(name: string): Promise<void>
 }
 ```

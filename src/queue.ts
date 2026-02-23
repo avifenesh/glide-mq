@@ -1082,12 +1082,31 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (!hashData || hashData.length === 0) return [];
     const result: { name: string; entry: SchedulerEntry }[] = [];
     for (const item of hashData) {
-      result.push({
-        name: String(item.field),
-        entry: JSON.parse(String(item.value)),
-      });
+      try {
+        result.push({
+          name: String(item.field),
+          entry: JSON.parse(String(item.value)),
+        });
+      } catch {
+        // Malformed JSON - skip entry
+      }
     }
     return result;
+  }
+
+  /**
+   * Get a single job scheduler entry by name.
+   * Returns null if no scheduler with that name exists or if stored data is malformed.
+   */
+  async getJobScheduler(name: string): Promise<SchedulerEntry | null> {
+    const client = await this.getClient();
+    const raw = await client.hget(this.keys.schedulers, name);
+    if (raw == null) return null;
+    try {
+      return JSON.parse(String(raw)) as SchedulerEntry;
+    } catch {
+      return null;
+    }
   }
 
   /**

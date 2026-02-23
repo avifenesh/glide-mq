@@ -4,29 +4,27 @@ Current state of the glide-mq repository as of 2026-02-23.
 
 ## Branch
 
-`feature/get-workers-18` - implements `queue.getWorkers()` (#18). Pending review and merge.
+`feature/get-job-scheduler-19` - implements `queue.getJobScheduler(name)` (#19). Ready for review.
 
 ## Last completed task
 
-**Task #18: `queue.getWorkers()`** - list active workers with metadata.
-- Branch: `feature/get-workers-18`
-- New type: `WorkerInfo` in `src/types.ts` (id, addr, pid, startedAt, age, activeJobs)
-- Key builder: `worker(id)` added to `buildKeys()` in `src/utils.ts`
-- Worker registration: TTL-based heartbeat keys in `src/worker.ts` using SET PX
-- Queue method: `Queue.getWorkers()` in `src/queue.ts` - SCAN + pipeline GET
-- Refactored `scanAndDelete` into `scanKeys` + `scanAndDelete` for reuse
-- Testing mode: `TestQueue.getWorkers()` in `src/testing.ts`
-- Integration tests: `tests/get-workers.test.ts` (7 tests x 2 modes)
-- Testing-mode tests: 5 new tests in `tests/testing-mode.test.ts`
-- Test fixture cleanup updated for worker keys
+**Task #19: `queue.getJobScheduler(name)`** - fetch single scheduler entry by name.
+- Branch: `feature/get-job-scheduler-19`
+- Queue method: `Queue.getJobScheduler(name)` in `src/queue.ts` - HGET on schedulers hash
+- Returns `SchedulerEntry | null` with pattern/every, template, nextRun
+- Handles malformed JSON gracefully (try-catch, returns null)
+- Testing mode: `TestQueue.getJobScheduler(name)` in `src/testing.ts`
+- Also added `upsertJobScheduler`, `removeJobScheduler`, `getRepeatableJobs` to TestQueue
+- Integration tests: 3 new tests in `tests/scheduler.test.ts`
+- Testing-mode tests: 4 new tests in `tests/testing-mode.test.ts`
+- docs/MIGRATION.md: Updated gap table (getJobScheduler now resolved)
 - No LIBRARY_VERSION change (no Lua function changes)
 
-Previous: **Task #17: `queue.retryJobs(opts)`** - branch `feature/retry-jobs-17`, merged.
+Previous: **Task #18: `queue.getWorkers()`** - branch `feature/get-workers-18`, merged.
 
 ## What comes next
 
 Open issues (by number):
-- #19 `queue.getJobScheduler(name)` - fetch a single scheduler entry
 - #42 Optimize JSON serialization in Queue.add
 - #44 Sanitize stack traces in sandbox runner
 
