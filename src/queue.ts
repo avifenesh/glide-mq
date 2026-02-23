@@ -1091,6 +1091,17 @@ export class Queue<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Get a single job scheduler entry by name.
+   * Returns null if no scheduler with that name exists.
+   */
+  async getJobScheduler(name: string): Promise<SchedulerEntry | null> {
+    const client = await this.getClient();
+    const raw = await client.hget(this.keys.schedulers, name);
+    if (raw == null) return null;
+    return JSON.parse(String(raw)) as SchedulerEntry;
+  }
+
+  /**
    * Retrieve log entries for a job by ID.
    */
   async getJobLogs(id: string, start = 0, end = -1): Promise<{ logs: string[]; count: number }> {

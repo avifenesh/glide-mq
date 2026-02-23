@@ -9,7 +9,7 @@
 import { EventEmitter } from 'events';
 import path from 'path';
 import os from 'os';
-import type { JobOptions, JobCounts, Processor, WorkerInfo } from './types';
+import type { JobOptions, JobCounts, Processor, WorkerInfo, SchedulerEntry, ScheduleOpts, JobTemplate } from './types';
 import { GlideMQError, UnrecoverableError } from './errors';
 
 // ---- Lightweight in-memory Job representation ----
@@ -129,6 +129,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   /** Workers register themselves here so we can notify on add. */
   /** @internal */ readonly workers: Set<TestWorker<D, R>> = new Set();
+  private schedulers: Map<string, SchedulerEntry> = new Map();
 
   constructor(name: string, opts?: TestQueueOptions) {
     super();
@@ -334,6 +335,28 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
     result.sort((a, b) => a.startedAt - b.startedAt);
     return result;
+  }
+
+  async upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void> {
+    const nextRun = schedule.every ? Date.now() + schedule.every : Date.now();
+    this.schedulers.set(name, {
+      pattern: schedule.pattern,
+      every: schedule.every,
+      template,
+      nextRun,
+    });
+  }
+
+  async removeJobScheduler(name: string): Promise<void> {
+    this.schedulers.delete(name);
+  }
+
+  async getJobScheduler(name: string): Promise<SchedulerEntry | null> {
+    return this.schedulers.get(name) ?? null;
+  }
+
+  async getRepeatableJobs(): Promise<{ name: string; entry: SchedulerEntry }[]> {
+    return [...this.schedulers.entries()].map(([name, entry]) => ({ name, entry }));
   }
 
   /** Close the queue. */
