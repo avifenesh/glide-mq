@@ -117,7 +117,7 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
 
   // Scan and delete job hashes + log keys + deps keys
   const pfx = keyPrefix(prefix, queueName);
-  for (const pattern of [`${pfx}:job:*`, `${pfx}:log:*`, `${pfx}:deps:*`, `${pfx}:group:*`, `${pfx}:groupq:*`]) {
+  for (const pattern of [`${pfx}:job:*`, `${pfx}:log:*`, `${pfx}:deps:*`, `${pfx}:group:*`, `${pfx}:groupq:*`, `${pfx}:w:*`]) {
     try {
       if (client.constructor.name === 'GlideClusterClient') {
         let cursor = new ClusterScanCursor();
