@@ -74,18 +74,6 @@ describeEachMode('Queue.retryJobs()', (CONNECTION) => {
     expect(before.failed).toBe(3);
     expect(before.waiting).toBe(0);
 
-    // Debug: Check which job hashes actually exist before retrying
-    const k = buildKeys(qName);
-    const existingHashes = [];
-    for (let id = 1; id <= 3; id++) {
-      const exists = await cleanupClient.exists([k.job(String(id))]);
-      if (exists > 0) {
-        existingHashes.push(id);
-      }
-    }
-    console.log(`DEBUG: Existing job hashes before retryJobs: ${existingHashes.join(', ')}`);
-    expect(existingHashes.length).toBe(3); // All 3 hashes should exist
-
     const retried = await queue.retryJobs();
     expect(retried).toBe(3);
 
