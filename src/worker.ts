@@ -68,6 +68,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private sandboxClose?: (force?: boolean) => Promise<void>;
   private workerHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private readonly startedAt = Date.now();
+  private readonly hostname = os.hostname();
 
   constructor(name: string, processor: Processor<D, R> | string, opts: WorkerOptions) {
     super();
@@ -155,7 +156,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     // Register this worker and start periodic heartbeat
     await this.registerWorker();
     this.workerHeartbeatTimer = setInterval(() => {
-      this.registerWorker();
+      void this.registerWorker();
     }, Math.floor(this.stalledInterval / 2));
 
     this.running = true;
@@ -258,8 +259,14 @@ export class Worker<D = any, R = any> extends EventEmitter {
         });
         this.scheduler.start();
 
-        // Re-register worker after reconnect
+        // Re-register worker and restart heartbeat timer after reconnect
+        if (this.workerHeartbeatTimer) {
+          clearInterval(this.workerHeartbeatTimer);
+        }
         await this.registerWorker();
+        this.workerHeartbeatTimer = setInterval(() => {
+          void this.registerWorker();
+        }, Math.floor(this.stalledInterval / 2));
       },
       () => this.pollLoop(),
     );
@@ -818,7 +825,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     if (!this.commandClient) return;
     try {
       const payload = JSON.stringify({
-        addr: os.hostname(),
+        addr: this.hostname,
         pid: process.pid,
         startedAt: this.startedAt,
         activeJobs: this.activeCount,

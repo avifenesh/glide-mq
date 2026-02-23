@@ -544,13 +544,18 @@ export class Queue<D = any, R = any> extends EventEmitter {
         if (!val) continue;
         try {
           const data = JSON.parse(String(val));
+          if (typeof data.addr !== 'string' || typeof data.pid !== 'number' || typeof data.startedAt !== 'number') {
+            continue;
+          }
+          const idx = keys[i].lastIndexOf(':w:');
+          if (idx < 0) continue;
           workers.push({
-            id: keys[i].split(':w:').pop()!,
+            id: keys[i].substring(idx + 3),
             addr: data.addr,
             pid: data.pid,
             startedAt: data.startedAt,
-            age: now - data.startedAt,
-            activeJobs: data.activeJobs,
+            age: Math.max(0, now - data.startedAt),
+            activeJobs: typeof data.activeJobs === 'number' ? data.activeJobs : 0,
           });
         } catch {}
       }
@@ -774,12 +779,26 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   /**
    * Scan for keys matching a pattern and delete them in batches.
+   * Handles both standalone (GlideClient) and cluster (GlideClusterClient) scan APIs.
    * @internal
    */
   private async scanAndDelete(client: Client, pattern: string): Promise<void> {
-    const keys = await this.scanKeys(client, pattern);
-    if (keys.length > 0) {
-      await client.del(keys);
+    if (this.clusterMode) {
+      const clusterClient = client as GlideClusterClient;
+      let cursor = new ClusterScanCursor();
+      while (!cursor.isFinished()) {
+        const [nextCursor, keys] = await clusterClient.scan(cursor, { match: pattern, count: 100 });
+        cursor = nextCursor;
+        if (keys.length > 0) await client.del(keys);
+      }
+    } else {
+      let cursor = '0';
+      do {
+        const result = await (client as GlideClient).scan(cursor, { match: pattern, count: 100 });
+        cursor = result[0] as string;
+        const keys = result[1];
+        if (keys.length > 0) await client.del(keys);
+      } while (cursor !== '0');
     }
   }
 
