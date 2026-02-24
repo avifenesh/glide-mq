@@ -46,9 +46,7 @@ export async function addBulk(ctx: ScenarioContext): Promise<ScenarioResult> {
 
   // Verify returned array length matches input
   if (addedJobs.length !== jobCount) {
-    violations.push(
-      `addBulk returned ${addedJobs.length} jobs but expected ${jobCount}`,
-    );
+    violations.push(`addBulk returned ${addedJobs.length} jobs but expected ${jobCount}`);
   }
 
   const addedIds = new Set<string>();

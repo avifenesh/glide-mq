@@ -20,11 +20,7 @@ export async function scheduler(ctx: ScenarioContext): Promise<ScenarioResult> {
 
   // Step 1: Upsert a job scheduler
   try {
-    await queue.upsertJobScheduler(
-      schedName,
-      { every: 60000 },
-      { name: 'scheduled-job', data: {} },
-    );
+    await queue.upsertJobScheduler(schedName, { every: 60000 }, { name: 'scheduled-job', data: {} });
   } catch (err: any) {
     violations.push(`upsertJobScheduler threw: ${err.message}`);
     return { added: 0, processed: 0, failed: 0, violations };
@@ -60,7 +56,7 @@ export async function scheduler(ctx: ScenarioContext): Promise<ScenarioResult> {
     if (!found) {
       violations.push(
         `getRepeatableJobs() did not include '${schedName}'. ` +
-        `Found: [${repeatables.map((r: any) => r.name).join(', ')}]`,
+          `Found: [${repeatables.map((r: any) => r.name).join(', ')}]`,
       );
     } else {
       if (found.entry.every !== 60000) {
@@ -73,11 +69,7 @@ export async function scheduler(ctx: ScenarioContext): Promise<ScenarioResult> {
 
   // Step 4: Upsert again (update) - change interval
   try {
-    await queue.upsertJobScheduler(
-      schedName,
-      { every: 120000 },
-      { name: 'scheduled-job-v2', data: { version: 2 } },
-    );
+    await queue.upsertJobScheduler(schedName, { every: 120000 }, { name: 'scheduled-job-v2', data: { version: 2 } });
 
     const updated = await queue.getJobScheduler(schedName);
     if (!updated) {
@@ -92,17 +84,11 @@ export async function scheduler(ctx: ScenarioContext): Promise<ScenarioResult> {
   // Step 5: Add a second scheduler to test multiple entries
   const schedName2 = `test-sched-2-${rng.nextInt(1, 10000)}`;
   try {
-    await queue.upsertJobScheduler(
-      schedName2,
-      { every: 30000 },
-      { name: 'second-scheduled', data: {} },
-    );
+    await queue.upsertJobScheduler(schedName2, { every: 30000 }, { name: 'second-scheduled', data: {} });
 
     const repeatables = await queue.getRepeatableJobs();
     if (repeatables.length < 2) {
-      violations.push(
-        `Expected at least 2 repeatable jobs, got ${repeatables.length}`,
-      );
+      violations.push(`Expected at least 2 repeatable jobs, got ${repeatables.length}`);
     }
   } catch (err: any) {
     violations.push(`Second scheduler operations threw: ${err.message}`);
@@ -114,9 +100,7 @@ export async function scheduler(ctx: ScenarioContext): Promise<ScenarioResult> {
 
     const afterRemove = await queue.getJobScheduler(schedName);
     if (afterRemove !== null) {
-      violations.push(
-        `getJobScheduler('${schedName}') returned non-null after removeJobScheduler`,
-      );
+      violations.push(`getJobScheduler('${schedName}') returned non-null after removeJobScheduler`);
     }
   } catch (err: any) {
     violations.push(`removeJobScheduler threw: ${err.message}`);
@@ -137,9 +121,7 @@ export async function scheduler(ctx: ScenarioContext): Promise<ScenarioResult> {
     await queue.removeJobScheduler(schedName2);
     const finalRepeatables = await queue.getRepeatableJobs();
     if (finalRepeatables.length !== 0) {
-      violations.push(
-        `After removing all schedulers, getRepeatableJobs() returned ${finalRepeatables.length} entries`,
-      );
+      violations.push(`After removing all schedulers, getRepeatableJobs() returned ${finalRepeatables.length} entries`);
     }
   } catch (err: any) {
     violations.push(`Final cleanup threw: ${err.message}`);

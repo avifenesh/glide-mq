@@ -61,15 +61,10 @@ for (const entry of SCENARIO_REGISTRY) {
 }
 
 function timeoutPromise(ms: number, label: string): Promise<never> {
-  return new Promise((_, reject) =>
-    setTimeout(() => reject(new Error(`Timeout: ${label} after ${ms}ms`)), ms),
-  );
+  return new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout: ${label} after ${ms}ms`)), ms));
 }
 
-export async function runFuzzRound(
-  rng: SeededRNG,
-  mode: FuzzMode,
-): Promise<RoundResult> {
+export async function runFuzzRound(rng: SeededRNG, mode: FuzzMode): Promise<RoundResult> {
   const scenario = pickScenario(rng, mode);
   const ctx = createScenarioContext(rng, mode);
   const start = Date.now();

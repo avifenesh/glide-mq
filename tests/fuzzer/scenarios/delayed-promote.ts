@@ -109,9 +109,7 @@ export async function delayedPromote(ctx: ScenarioContext): Promise<ScenarioResu
   for (const jobId of promotedJobIds) {
     const elapsed = completionTimes.get(jobId);
     if (elapsed !== undefined && elapsed > 5000) {
-      violations.push(
-        `Promoted job ${jobId} took ${elapsed}ms to complete (expected < 5000ms)`,
-      );
+      violations.push(`Promoted job ${jobId} took ${elapsed}ms to complete (expected < 5000ms)`);
     }
   }
 
@@ -122,9 +120,7 @@ export async function delayedPromote(ctx: ScenarioContext): Promise<ScenarioResu
     for (const jobId of keepDelayedJobIds) {
       const elapsed = completionTimes.get(jobId);
       if (elapsed !== undefined && elapsed < 3000) {
-        violations.push(
-          `Delayed job ${jobId} completed in ${elapsed}ms but should have been delayed ~5000ms`,
-        );
+        violations.push(`Delayed job ${jobId} completed in ${elapsed}ms but should have been delayed ~5000ms`);
       }
     }
   }

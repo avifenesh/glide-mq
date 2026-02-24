@@ -101,9 +101,7 @@ export async function dlq(ctx: ScenarioContext): Promise<ScenarioResult> {
 
     // Allow some tolerance - DLQ routing is best-effort and timing-dependent
     if (dlqJobs.length === 0 && expectedDlqCount > 0) {
-      violations.push(
-        `Expected ~${expectedDlqCount} jobs in DLQ but found 0`,
-      );
+      violations.push(`Expected ~${expectedDlqCount} jobs in DLQ but found 0`);
     }
   } catch (err: any) {
     violations.push(`Failed to query DLQ: ${err.message}`);
