@@ -80,7 +80,7 @@ async function handleProcess(id: string, serialized: SerializedJob): Promise<voi
       type: 'failed',
       id,
       error: sanitizePath(err?.message ?? String(err)) || 'Unknown error',
-      stack: sanitizePath(err?.stack),
+      stack: getSanitizedStack(err),
       errorName: err?.name,
       discarded: job.discarded,
     });
@@ -96,6 +96,22 @@ function sanitizePath(text: string | undefined): string | undefined {
   if (!text) return text;
   return text.replace(cwdRegex, '[PROJECT_ROOT]');
 }
+
+function getSanitizedStack(err: any): string | undefined {
+  let stack = err?.stack;
+  // If no stack, synthesize one to prevent the parent from generating its own
+  // (which could include host process paths)
+  if (!stack && err != null) {
+    try {
+      stack = new Error(String(err)).stack;
+    } catch {
+      // If even that fails, return undefined
+      stack = undefined;
+    }
+  }
+  return sanitizePath(stack);
+}
+
 
 function handleMessage(msg: MainToChild): void {
   if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') return;
