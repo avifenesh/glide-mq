@@ -10,14 +10,14 @@ export class SeededRNG {
   constructor(seed: number) {
     // Splitmix64 to initialize state from a single seed
     let s = seed | 0;
-    s = ((s >>> 16) ^ s) * 0x45d9f3b | 0;
-    s = ((s >>> 16) ^ s) * 0x45d9f3b | 0;
+    s = (((s >>> 16) ^ s) * 0x45d9f3b) | 0;
+    s = (((s >>> 16) ^ s) * 0x45d9f3b) | 0;
     s = (s >>> 16) ^ s;
     this.s0 = s === 0 ? 1 : s;
 
     s = (seed + 0x9e3779b9) | 0;
-    s = ((s >>> 16) ^ s) * 0x45d9f3b | 0;
-    s = ((s >>> 16) ^ s) * 0x45d9f3b | 0;
+    s = (((s >>> 16) ^ s) * 0x45d9f3b) | 0;
+    s = (((s >>> 16) ^ s) * 0x45d9f3b) | 0;
     s = (s >>> 16) ^ s;
     this.s1 = s === 0 ? 1 : s;
   }

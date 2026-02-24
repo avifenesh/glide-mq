@@ -29,10 +29,7 @@ export async function sandbox(ctx: ScenarioContext): Promise<ScenarioResult> {
 
   // Write a temporary processor file
   const tmpFile = path.join(os.tmpdir(), `fuzz-processor-${Date.now()}.cjs`);
-  fs.writeFileSync(
-    tmpFile,
-    'module.exports = async (job) => ({ processed: job.name, ok: true });\n',
-  );
+  fs.writeFileSync(tmpFile, 'module.exports = async (job) => ({ processed: job.name, ok: true });\n');
 
   try {
     const queue = ctx.createQueue(queueName);
@@ -76,9 +73,7 @@ export async function sandbox(ctx: ScenarioContext): Promise<ScenarioResult> {
     await waitForCount(totalJobs, counter);
 
     if (completedIds.size < totalJobs) {
-      violations.push(
-        `Expected ${totalJobs} completed jobs, got ${completedIds.size}`,
-      );
+      violations.push(`Expected ${totalJobs} completed jobs, got ${completedIds.size}`);
     }
 
     // Close worker (force to avoid hanging on sandbox pool shutdown)

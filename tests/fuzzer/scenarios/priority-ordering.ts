@@ -73,7 +73,7 @@ export async function priorityOrdering(ctx: ScenarioContext): Promise<ScenarioRe
     if (first10Avg > overallAvg + 2) {
       violations.push(
         `Priority ordering violated: first 10 avg priority ${first10Avg.toFixed(2)} ` +
-        `> overall avg ${overallAvg.toFixed(2)} + 2 tolerance`,
+          `> overall avg ${overallAvg.toFixed(2)} + 2 tolerance`,
       );
     }
   }

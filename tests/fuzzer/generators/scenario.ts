@@ -42,9 +42,7 @@ export const SCENARIO_REGISTRY: ScenarioEntry[] = [
  * Filters out requiresValkey scenarios when running in test mode.
  */
 export function pickScenario(rng: SeededRNG, mode: FuzzMode): ScenarioEntry {
-  const available = mode === 'test'
-    ? SCENARIO_REGISTRY.filter((s) => !s.requiresValkey)
-    : SCENARIO_REGISTRY;
+  const available = mode === 'test' ? SCENARIO_REGISTRY.filter((s) => !s.requiresValkey) : SCENARIO_REGISTRY;
 
   const eligible = available.filter((s) => s.factory !== null);
   if (eligible.length === 0) {

@@ -89,9 +89,7 @@ export async function dedupModes(ctx: ScenarioContext): Promise<ScenarioResult> 
 
   // Verify exactly 5 unique dedup IDs were processed
   if (processedDedupIds.size !== numDedupIds) {
-    violations.push(
-      `Expected ${numDedupIds} unique dedup IDs processed, got ${processedDedupIds.size}`,
-    );
+    violations.push(`Expected ${numDedupIds} unique dedup IDs processed, got ${processedDedupIds.size}`);
   }
 
   // Verify total processed matches added (non-skipped)
@@ -104,9 +102,7 @@ export async function dedupModes(ctx: ScenarioContext): Promise<ScenarioResult> 
   // Verify skipped count is as expected
   const expectedSkipped = totalJobs - numDedupIds;
   if (skippedCount !== expectedSkipped) {
-    violations.push(
-      `Expected ${expectedSkipped} jobs skipped by dedup, got ${skippedCount}`,
-    );
+    violations.push(`Expected ${expectedSkipped} jobs skipped by dedup, got ${skippedCount}`);
   }
 
   return {

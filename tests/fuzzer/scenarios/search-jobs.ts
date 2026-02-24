@@ -76,9 +76,7 @@ export async function searchJobs(ctx: ScenarioContext): Promise<ScenarioResult> 
       // Verify all returned jobs have the correct name
       for (const job of results) {
         if (job.name !== name) {
-          violations.push(
-            `searchJobs({name: '${name}'}) returned job ${job.id} with name '${job.name}'`,
-          );
+          violations.push(`searchJobs({name: '${name}'}) returned job ${job.id} with name '${job.name}'`);
         }
       }
 
@@ -110,9 +108,7 @@ export async function searchJobs(ctx: ScenarioContext): Promise<ScenarioResult> 
     const combined = await queue.searchJobs({ name: targetName, state: 'completed' });
     for (const job of combined) {
       if (job.name !== targetName) {
-        violations.push(
-          `searchJobs({name: '${targetName}', state: 'completed'}) returned wrong name: '${job.name}'`,
-        );
+        violations.push(`searchJobs({name: '${targetName}', state: 'completed'}) returned wrong name: '${job.name}'`);
       }
     }
   } catch (err: any) {

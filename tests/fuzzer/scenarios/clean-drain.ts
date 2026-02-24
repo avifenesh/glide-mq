@@ -143,9 +143,7 @@ export async function cleanDrain(ctx: ScenarioContext): Promise<ScenarioResult> 
 
   // Verify retried jobs were reprocessed
   if (retriedIds.size < retried) {
-    violations.push(
-      `Only ${retriedIds.size} of ${retried} retried jobs were actually reprocessed`,
-    );
+    violations.push(`Only ${retriedIds.size} of ${retried} retried jobs were actually reprocessed`);
   }
 
   totalProcessed = counter1.value;
