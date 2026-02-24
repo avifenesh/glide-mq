@@ -88,9 +88,11 @@ async function handleProcess(id: string, serialized: SerializedJob): Promise<voi
 }
 
 const cwd = process.cwd();
-// Escape potential regex special characters in cwd
-const escapedCwd = cwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const cwdRegex = new RegExp(escapedCwd, 'g');
+// Also resolve symlinks so paths like /home/user/app-link are caught
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const realCwd: string = require('fs').realpathSync(cwd);
+const paths = realCwd !== cwd ? [cwd, realCwd] : [cwd];
+const cwdRegex = new RegExp(paths.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
 
 function sanitizePath(text: string | undefined): string | undefined {
   if (!text) return text;
@@ -112,7 +114,6 @@ function getSanitizedStack(err: any): string | undefined {
   return sanitizePath(stack);
 }
 
-
 function handleMessage(msg: MainToChild): void {
   if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') return;
 
@@ -123,6 +124,8 @@ function handleMessage(msg: MainToChild): void {
           type: 'failed',
           id: msg.id,
           error: sanitizePath(err?.message ?? String(err)) || 'Unknown error',
+          stack: getSanitizedStack(err),
+          errorName: err?.name,
         });
       });
       break;
