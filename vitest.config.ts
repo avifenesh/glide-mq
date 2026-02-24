@@ -5,5 +5,6 @@ export default defineConfig({
     globals: true,
     testTimeout: 30000,
     hookTimeout: 60000,
+    exclude: ['node_modules/**'],
   },
 });

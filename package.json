@@ -17,7 +17,7 @@
   "type": "commonjs",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "vitest run --exclude tests/fuzzer/**",
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
@@ -27,7 +27,8 @@
     "bench:throughput": "npx tsx benchmarks/run.ts throughput",
     "bench:latency": "npx tsx benchmarks/run.ts latency",
     "bench:memory": "npx tsx benchmarks/run.ts memory",
-    "bench:sharing": "npx tsx benchmarks/run.ts sharing"
+    "bench:sharing": "npx tsx benchmarks/run.ts sharing",
+    "fuzz": "vitest run tests/fuzzer/"
   },
   "engines": {
     "node": ">=20"

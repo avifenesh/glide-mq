@@ -1,0 +1,26 @@
+#!/bin/bash
+# Pre-push hook: run fuzzer before push
+# Blocks push on failure, reports seed for reproduction
+set -e
+
+SEED=$(date +%s)
+export FUZZ_SEED=$SEED
+
+echo "[pre-push] Running fuzzer (seed: $SEED)..."
+echo "[pre-push] Reproduce: FUZZ_SEED=$SEED npm run fuzz"
+echo ""
+
+npm run build 2>&1 || {
+  echo "[pre-push] Build failed. Push blocked."
+  exit 1
+}
+
+npx vitest run tests/fuzzer/ 2>&1 || {
+  echo ""
+  echo "[ERROR] Fuzzer failed with seed: $SEED"
+  echo "[ERROR] Reproduce: FUZZ_SEED=$SEED npm run fuzz"
+  echo "[ERROR] Push blocked."
+  exit 1
+}
+
+echo "[pre-push] Fuzzer passed."
