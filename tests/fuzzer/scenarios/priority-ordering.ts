@@ -67,13 +67,14 @@ export async function priorityOrdering(ctx: ScenarioContext): Promise<ScenarioRe
   const violations: string[] = [];
 
   // Soft assertion: first 10 processed should have avg priority <= avg of all
+  // Tolerance of +2 allows for some variance but maintains sensitivity to detect regressions
   if (processOrder.length >= 10) {
     const first10Avg = processOrder.slice(0, 10).reduce((a, b) => a + b, 0) / 10;
     const overallAvg = priorities.reduce((a, b) => a + b, 0) / priorities.length;
-    if (first10Avg > overallAvg + 3) {
+    if (first10Avg > overallAvg + 2) {
       violations.push(
         `Priority ordering violated: first 10 avg priority ${first10Avg.toFixed(2)} ` +
-          `> overall avg ${overallAvg.toFixed(2)} + 3 tolerance`,
+          `> overall avg ${overallAvg.toFixed(2)} + 2 tolerance`,
       );
     }
   }
