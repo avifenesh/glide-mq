@@ -50,9 +50,7 @@ export async function gracefulShutdown(ctx: ScenarioContext): Promise<ScenarioRe
   try {
     await Promise.race([
       worker.close(false),
-      new Promise<void>((_, reject) =>
-        setTimeout(() => reject(new Error('close() timed out after 10s')), 10000),
-      ),
+      new Promise<void>((_, reject) => setTimeout(() => reject(new Error('close() timed out after 10s')), 10000)),
     ]);
   } catch (err: any) {
     if (err.message.includes('timed out')) {

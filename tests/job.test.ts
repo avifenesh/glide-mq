@@ -265,7 +265,7 @@ describe('Job', () => {
       const zaddCall = mockBatch.zadd.mock.calls[0];
       expect(zaddCall[0]).toBe('glide:{test-queue}:scheduled');
       // Score should be timestamp (priority=0, so score = 0 + now)
-      const score = zaddCall[1][0].score;
+      const score = zaddCall[1]['3'];
       expect(score).toBeGreaterThan(0);
       expect(score).toBeLessThan(Date.now() + 1000); // should be roughly now
 
@@ -288,7 +288,7 @@ describe('Job', () => {
 
       expect(mockBatch.zrem).toHaveBeenCalledWith('glide:{test-queue}:failed', ['3']);
 
-      const score = mockBatch.zadd.mock.calls[0][1][0].score;
+      const score = mockBatch.zadd.mock.calls[0][1]['3'];
       const PRIORITY_SHIFT = 2 ** 42;
       // Score should include priority * PRIORITY_SHIFT
       expect(score).toBeGreaterThanOrEqual(2 * PRIORITY_SHIFT);

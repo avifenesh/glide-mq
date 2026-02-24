@@ -86,9 +86,7 @@ export async function queueEvents(ctx: ScenarioContext): Promise<ScenarioResult>
   // Verify event counts - use generous tolerance since event streaming
   // can miss events under load
   if (addedEvents.length < totalJobs * 0.8) {
-    violations.push(
-      `Expected ~${totalJobs} 'added' events, got ${addedEvents.length}`,
-    );
+    violations.push(`Expected ~${totalJobs} 'added' events, got ${addedEvents.length}`);
   }
 
   const terminalEvents = completedEvents.length + failedEvents.length;

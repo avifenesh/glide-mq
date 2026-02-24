@@ -69,9 +69,7 @@ export async function revokeAbort(ctx: ScenarioContext): Promise<ScenarioResult>
   }
 
   if (revokedCheckPassed === 0 && preRevokedJobs.length > 0) {
-    violations.push(
-      `None of ${preRevokedJobs.length} pre-revoked jobs showed isRevoked()=true`,
-    );
+    violations.push(`None of ${preRevokedJobs.length} pre-revoked jobs showed isRevoked()=true`);
   }
 
   // Track which jobs we will try to revoke while active
@@ -127,9 +125,7 @@ export async function revokeAbort(ctx: ScenarioContext): Promise<ScenarioResult>
   // Verify: total processed should be less than totalJobs
   // (some were revoked before or during processing)
   if (processedIds.size >= totalJobs) {
-    violations.push(
-      `Expected fewer than ${totalJobs} processed (some revoked), but got ${processedIds.size}`,
-    );
+    violations.push(`Expected fewer than ${totalJobs} processed (some revoked), but got ${processedIds.size}`);
   }
 
   return {

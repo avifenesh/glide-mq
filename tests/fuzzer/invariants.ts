@@ -7,10 +7,7 @@
  * Check that every added job ID reached a terminal state.
  * Violation: a job was added but never completed or failed.
  */
-export function checkNoJobLost(
-  addedIds: Set<string>,
-  terminalIds: Set<string>,
-): string[] {
+export function checkNoJobLost(addedIds: Set<string>, terminalIds: Set<string>): string[] {
   const violations: string[] = [];
   for (const id of addedIds) {
     if (!terminalIds.has(id)) {
@@ -24,9 +21,7 @@ export function checkNoJobLost(
  * Check that no job was processed more than once.
  * Violation: a jobId appears multiple times in the process log.
  */
-export function checkNoDuplicates(
-  processLog: { jobId: string }[],
-): string[] {
+export function checkNoDuplicates(processLog: { jobId: string }[]): string[] {
   const violations: string[] = [];
   const seen = new Map<string, number>();
   for (const entry of processLog) {
@@ -43,10 +38,7 @@ export function checkNoDuplicates(
  * Check that job data survived the roundtrip (add -> process) intact.
  * Uses JSON serialization for deep comparison.
  */
-export function checkDataIntegrity(
-  addedData: Map<string, any>,
-  processedData: Map<string, any>,
-): string[] {
+export function checkDataIntegrity(addedData: Map<string, any>, processedData: Map<string, any>): string[] {
   const violations: string[] = [];
   for (const [id, original] of addedData) {
     const received = processedData.get(id);
@@ -54,9 +46,7 @@ export function checkDataIntegrity(
     const origJson = JSON.stringify(original);
     const recvJson = JSON.stringify(received);
     if (origJson !== recvJson) {
-      violations.push(
-        `Job ${id} data mismatch: sent ${origJson.slice(0, 100)}, got ${recvJson.slice(0, 100)}`,
-      );
+      violations.push(`Job ${id} data mismatch: sent ${origJson.slice(0, 100)}, got ${recvJson.slice(0, 100)}`);
     }
   }
   return violations;
@@ -82,8 +72,8 @@ export function checkCountConsistency(
   if (actual !== expectedTotal) {
     violations.push(
       `Count inconsistency: states sum to ${actual} (w=${counts.waiting} a=${counts.active} ` +
-      `d=${counts.delayed} c=${counts.completed} f=${counts.failed} removed=${removedCount}) ` +
-      `but expected ${expectedTotal}`,
+        `d=${counts.delayed} c=${counts.completed} f=${counts.failed} removed=${removedCount}) ` +
+        `but expected ${expectedTotal}`,
     );
   }
   return violations;
@@ -93,9 +83,7 @@ export function checkCountConsistency(
  * Check that all resources were properly closed.
  * Violation: a resource is still open after cleanup.
  */
-export function checkCleanShutdown(
-  openResources: any[],
-): string[] {
+export function checkCleanShutdown(openResources: any[]): string[] {
   const violations: string[] = [];
   if (openResources.length > 0) {
     violations.push(`${openResources.length} resource(s) still open after cleanup`);

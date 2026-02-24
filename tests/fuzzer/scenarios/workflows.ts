@@ -68,9 +68,7 @@ export async function workflows(ctx: ScenarioContext): Promise<ScenarioResult> {
   if (chainOrder.length >= 2) {
     const lastJobName = `chain-step-${chainSize - 1}`;
     if (chainOrder[0] !== lastJobName) {
-      violations.push(
-        `Chain: expected ${lastJobName} to process first but got ${chainOrder[0]}`,
-      );
+      violations.push(`Chain: expected ${lastJobName} to process first but got ${chainOrder[0]}`);
     }
   }
 
@@ -156,9 +154,7 @@ export async function workflows(ctx: ScenarioContext): Promise<ScenarioResult> {
       if (memberIdx === -1) {
         violations.push(`Chord: member chord-member-${i} was not processed`);
       } else if (memberIdx > cbIdx) {
-        violations.push(
-          `Chord: member chord-member-${i} processed after callback (member@${memberIdx} > cb@${cbIdx})`,
-        );
+        violations.push(`Chord: member chord-member-${i} processed after callback (member@${memberIdx} > cb@${cbIdx})`);
       }
     }
   }
