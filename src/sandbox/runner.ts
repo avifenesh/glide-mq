@@ -79,8 +79,8 @@ async function handleProcess(id: string, serialized: SerializedJob): Promise<voi
     send({
       type: 'failed',
       id,
-      error: err?.message ?? String(err),
-      stack: sanitizeStack(err?.stack),
+      error: sanitizePath(err?.message ?? String(err)) || 'Unknown error',
+      stack: sanitizePath(err?.stack),
       errorName: err?.name,
       discarded: job.discarded,
     });
@@ -92,9 +92,9 @@ const cwd = process.cwd();
 const escapedCwd = cwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const cwdRegex = new RegExp(escapedCwd, 'g');
 
-function sanitizeStack(stack: string | undefined): string | undefined {
-  if (!stack) return undefined;
-  return stack.replace(cwdRegex, '[PROJECT_ROOT]');
+function sanitizePath(text: string | undefined): string | undefined {
+  if (!text) return text;
+  return text.replace(cwdRegex, '[PROJECT_ROOT]');
 }
 
 function handleMessage(msg: MainToChild): void {
@@ -106,7 +106,7 @@ function handleMessage(msg: MainToChild): void {
         send({
           type: 'failed',
           id: msg.id,
-          error: err?.message ?? String(err),
+          error: sanitizePath(err?.message ?? String(err)) || 'Unknown error',
         });
       });
       break;

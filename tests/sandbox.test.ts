@@ -25,6 +25,7 @@ const PROCESSORS = path.resolve(__dirname, 'fixtures/processors');
 const ECHO_PROCESSOR = path.join(PROCESSORS, 'echo.js');
 const ECHO_ESM_PROCESSOR = path.join(PROCESSORS, 'echo.mjs');
 const THROW_PROCESSOR = path.join(PROCESSORS, 'throw.js');
+const LEAK_PROCESSOR = path.join(PROCESSORS, 'leak.js');
 const CRASH_PROCESSOR = path.join(PROCESSORS, 'crash.js');
 const SLOW_PROCESSOR = path.join(PROCESSORS, 'slow.js');
 const PROGRESS_PROCESSOR = path.join(PROCESSORS, 'progress.js');
@@ -708,6 +709,36 @@ describe('Sandbox Security', () => {
       expect(err.stack).toBeDefined();
       expect(err.stack).not.toContain(cwd);
       expect(err.stack).toContain('[PROJECT_ROOT]');
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it('should not leak absolute paths in error messages', async () => {
+    const pool = new SandboxPool(LEAK_PROCESSOR, true, 1, RUNNER_PATH);
+
+    const fakeJob = {
+      id: 'job-leak',
+      name: 'test',
+      data: {},
+      opts: {},
+      attemptsMade: 0,
+      timestamp: Date.now(),
+      progress: 0,
+      log: vi.fn(),
+      updateProgress: vi.fn(),
+      updateData: vi.fn(),
+      abortSignal: new AbortController().signal,
+    } as unknown as Job;
+
+    try {
+      await pool.run(fakeJob);
+      expect(true).toBe(false); // Should have thrown
+    } catch (err: any) {
+      const cwd = process.cwd();
+      expect(err.message).toBeDefined();
+      expect(err.message).not.toContain(cwd);
+      expect(err.message).toContain('[PROJECT_ROOT]');
     } finally {
       await pool.close();
     }
