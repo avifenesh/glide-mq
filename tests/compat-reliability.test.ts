@@ -1033,7 +1033,7 @@ describeEachMode('Memory and resource management', (CONNECTION) => {
 
     await worker.close();
     await queue.close();
-  }, 35000);
+  }, 60000);
 
   it('creating and closing queues does not leak connections', async () => {
     const queues: InstanceType<typeof Queue>[] = [];

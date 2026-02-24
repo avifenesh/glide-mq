@@ -75,14 +75,24 @@ export class Job<D = any, R = any> {
    */
   async updateProgress(progress: number | object): Promise<void> {
     const progressStr = typeof progress === 'number' ? progress.toString() : JSON.stringify(progress);
-    await this.client.hset(this.queueKeys.job(this.id), {
+    const isCluster = isClusterClient(this.client);
+    const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
+
+    batch.hset(this.queueKeys.job(this.id), {
       progress: progressStr,
     });
-    await this.client.xadd(this.queueKeys.events, [
+    batch.xadd(this.queueKeys.events, [
       ['event', 'progress'],
       ['jobId', this.id],
       ['data', progressStr],
     ]);
+
+    if (isCluster) {
+      await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false);
+    } else {
+      await (this.client as GlideClient).exec(batch as Batch, false);
+    }
+
     this.progress = progress;
   }
 
@@ -253,14 +263,25 @@ export class Job<D = any, R = any> {
     const priority = this.opts.priority ?? 0;
     const PRIORITY_SHIFT = 2 ** 42;
     const score = priority * PRIORITY_SHIFT + now;
-    await this.client.zrem(this.queueKeys.failed, [this.id]);
-    await this.client.zadd(this.queueKeys.scheduled, [{ element: this.id, score }]);
-    await this.client.hset(this.queueKeys.job(this.id), {
+
+    const isCluster = isClusterClient(this.client);
+    const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
+
+    batch.zrem(this.queueKeys.failed, [this.id]);
+    batch.zadd(this.queueKeys.scheduled, { [this.id]: score });
+    batch.hset(this.queueKeys.job(this.id), {
       state: 'delayed',
       attemptsMade: '0',
       failedReason: '',
       finishedOn: '',
     });
+
+    if (isCluster) {
+      await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false);
+    } else {
+      await (this.client as GlideClient).exec(batch as Batch, false);
+    }
+
     this.attemptsMade = 0;
     this.failedReason = undefined;
     this.finishedOn = undefined;
