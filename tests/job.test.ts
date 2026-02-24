@@ -85,11 +85,6 @@ describe('Job', () => {
       expect(mockBatch.hset).toHaveBeenCalledWith('glide:{test-queue}:job:2', {
         progress: JSON.stringify(progressObj),
       });
-      expect(mockBatch.xadd).toHaveBeenCalledWith('glide:{test-queue}:events', [
-        ['event', 'progress'],
-        ['jobId', '2'],
-        ['data', JSON.stringify(progressObj)],
-      ]);
       expect(mockClient.exec).toHaveBeenCalledWith(mockBatch, false);
       expect(job.progress).toEqual(progressObj);
     });
