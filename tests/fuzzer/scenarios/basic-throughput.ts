@@ -35,7 +35,7 @@ export async function basicThroughput(ctx: ScenarioContext): Promise<ScenarioRes
   const processedData = new Map<string, any>();
   const processLog: { jobId: string }[] = [];
   const counter = { value: 0 };
-  let failedCount = 0;
+  const failedCount = 0;
 
   // Create workers first so they are ready when jobs arrive
   for (let w = 0; w < numWorkers; w++) {

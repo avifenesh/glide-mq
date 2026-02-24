@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import { Job } from '../src/job';
 import { buildKeys } from '../src/utils';
+
+vi.mock('@glidemq/speedkey');
 
 function makeMockClient(overrides: Record<string, unknown> = {}) {
   return {
@@ -23,10 +26,21 @@ const keys = buildKeys('test-queue');
 
 describe('Job', () => {
   let mockClient: ReturnType<typeof makeMockClient>;
+  let mockBatch: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockClient = makeMockClient();
+
+    mockBatch = {
+      hset: vi.fn(),
+      xadd: vi.fn(),
+      zrem: vi.fn(),
+      zadd: vi.fn(),
+      hget: vi.fn(),
+    };
+    (Batch as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockBatch);
+    (ClusterBatch as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockBatch);
   });
 
   describe('constructor', () => {
@@ -47,29 +61,31 @@ describe('Job', () => {
   });
 
   describe('updateProgress', () => {
-    it('should update progress with a numeric value', async () => {
+    it('should update progress with a numeric value using batch', async () => {
       const job = new Job(mockClient as any, keys, '1', 'job', {}, {});
 
       await job.updateProgress(50);
 
-      expect(mockClient.hset).toHaveBeenCalledWith('glide:{test-queue}:job:1', { progress: '50' });
-      expect(mockClient.xadd).toHaveBeenCalledWith('glide:{test-queue}:events', [
+      expect(mockBatch.hset).toHaveBeenCalledWith('glide:{test-queue}:job:1', { progress: '50' });
+      expect(mockBatch.xadd).toHaveBeenCalledWith('glide:{test-queue}:events', [
         ['event', 'progress'],
         ['jobId', '1'],
         ['data', '50'],
       ]);
+      expect(mockClient.exec).toHaveBeenCalledWith(mockBatch, false);
       expect(job.progress).toBe(50);
     });
 
-    it('should update progress with an object value', async () => {
+    it('should update progress with an object value using batch', async () => {
       const job = new Job(mockClient as any, keys, '2', 'job', {}, {});
       const progressObj = { step: 3, total: 10 };
 
       await job.updateProgress(progressObj);
 
-      expect(mockClient.hset).toHaveBeenCalledWith('glide:{test-queue}:job:2', {
+      expect(mockBatch.hset).toHaveBeenCalledWith('glide:{test-queue}:job:2', {
         progress: JSON.stringify(progressObj),
       });
+      expect(mockClient.exec).toHaveBeenCalledWith(mockBatch, false);
       expect(job.progress).toEqual(progressObj);
     });
   });
@@ -237,28 +253,29 @@ describe('Job', () => {
   });
 
   describe('retry', () => {
-    it('should add job to scheduled ZSet and update state', async () => {
+    it('should add job to scheduled ZSet and update state using batch', async () => {
       const job = new Job(mockClient as any, keys, '3', 'job', {}, { priority: 0 });
 
       await job.retry();
 
-      expect(mockClient.zrem).toHaveBeenCalledTimes(1);
-      expect(mockClient.zrem).toHaveBeenCalledWith('glide:{test-queue}:failed', ['3']);
+      expect(mockBatch.zrem).toHaveBeenCalledTimes(1);
+      expect(mockBatch.zrem).toHaveBeenCalledWith('glide:{test-queue}:failed', ['3']);
 
-      expect(mockClient.zadd).toHaveBeenCalledTimes(1);
-      const zaddCall = mockClient.zadd.mock.calls[0];
+      expect(mockBatch.zadd).toHaveBeenCalledTimes(1);
+      const zaddCall = mockBatch.zadd.mock.calls[0];
       expect(zaddCall[0]).toBe('glide:{test-queue}:scheduled');
       // Score should be timestamp (priority=0, so score = 0 + now)
       const score = zaddCall[1][0].score;
       expect(score).toBeGreaterThan(0);
       expect(score).toBeLessThan(Date.now() + 1000); // should be roughly now
 
-      expect(mockClient.hset).toHaveBeenCalledWith('glide:{test-queue}:job:3', {
+      expect(mockBatch.hset).toHaveBeenCalledWith('glide:{test-queue}:job:3', {
         state: 'delayed',
         attemptsMade: '0',
         failedReason: '',
         finishedOn: '',
       });
+      expect(mockClient.exec).toHaveBeenCalledWith(mockBatch, false);
       expect(job.attemptsMade).toBe(0);
       expect(job.failedReason).toBeUndefined();
       expect(job.finishedOn).toBeUndefined();
@@ -269,9 +286,9 @@ describe('Job', () => {
 
       await job.retry();
 
-      expect(mockClient.zrem).toHaveBeenCalledWith('glide:{test-queue}:failed', ['3']);
+      expect(mockBatch.zrem).toHaveBeenCalledWith('glide:{test-queue}:failed', ['3']);
 
-      const score = mockClient.zadd.mock.calls[0][1][0].score;
+      const score = mockBatch.zadd.mock.calls[0][1][0].score;
       const PRIORITY_SHIFT = 2 ** 42;
       // Score should include priority * PRIORITY_SHIFT
       expect(score).toBeGreaterThanOrEqual(2 * PRIORITY_SHIFT);
