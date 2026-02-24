@@ -78,6 +78,25 @@ Gzip compression: **98% payload reduction** on 15 KB payloads.
 
 *Valkey 8.0, single node, no-op processor. Run `npm run bench` to reproduce.*
 
+## Dashboard
+
+[`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) - web UI for monitoring and managing queues in real time.
+
+```bash
+npm install @glidemq/dashboard
+```
+
+```typescript
+import { createDashboard } from '@glidemq/dashboard';
+
+app.use('/dashboard', createDashboard([queue1, queue2], {
+  // readOnly: true,
+  // authorize: (req, action) => checkSession(req),
+}));
+```
+
+Workers, job schedulers, DLQ, metrics, search, bulk actions (drain, retry, clean) - all from the browser. See the [dashboard repo](https://github.com/avifenesh/glidemq-dashboard) for full docs.
+
 ## Documentation
 
 | Guide | What you'll learn |
