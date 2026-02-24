@@ -87,11 +87,7 @@ export class Job<D = any, R = any> {
       ['data', progressStr],
     ]);
 
-    if (isCluster) {
-      await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false);
-    } else {
-      await (this.client as GlideClient).exec(batch as Batch, false);
-    }
+    await this.client.exec(batch as any, false);
 
     this.progress = progress;
   }
@@ -276,11 +272,7 @@ export class Job<D = any, R = any> {
       finishedOn: '',
     });
 
-    if (isCluster) {
-      await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false);
-    } else {
-      await (this.client as GlideClient).exec(batch as Batch, false);
-    }
+    await this.client.exec(batch as any, false);
 
     this.attemptsMade = 0;
     this.failedReason = undefined;
