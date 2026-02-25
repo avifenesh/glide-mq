@@ -2,7 +2,14 @@ import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { JobOptions, Client } from './types';
 import type { QueueKeys } from './functions/index';
-import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
+import {
+  removeJob,
+  failJob,
+  changePriority,
+  changeDelay,
+  promoteJob,
+  updateProgress,
+} from './functions/index';
 import { calculateBackoff, decompress } from './utils';
 import { isClusterClient } from './connection';
 
@@ -74,25 +81,7 @@ export class Job<D = any, R = any> {
    * Update the progress of this job. Persists to the job hash and emits a progress event.
    */
   async updateProgress(progress: number | object): Promise<void> {
-    const progressStr = typeof progress === 'number' ? progress.toString() : JSON.stringify(progress);
-    const isCluster = isClusterClient(this.client);
-    const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
-
-    batch.hset(this.queueKeys.job(this.id), {
-      progress: progressStr,
-    });
-    batch.xadd(this.queueKeys.events, [
-      ['event', 'progress'],
-      ['jobId', this.id],
-      ['data', progressStr],
-    ]);
-
-    if (isCluster) {
-      await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false);
-    } else {
-      await (this.client as GlideClient).exec(batch as Batch, false);
-    }
-
+    await updateProgress(this.client, this.queueKeys, this.id, progress);
     this.progress = progress;
   }
 

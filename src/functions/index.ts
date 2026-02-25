@@ -2025,6 +2025,26 @@ redis.register_function('glidemq_retryJobs', function(keys, args)
   end
   return retried
 end)
+
+-- glidemq_updateProgress(KEYS, ARGS)
+-- Updates job progress and emits an event.
+-- KEYS[1] = job hash key
+-- KEYS[2] = events stream key
+-- ARGS[1] = job ID
+-- ARGS[2] = progress string
+-- Returns: 1
+redis.register_function('glidemq_updateProgress', function(keys, args)
+  local jobKey = keys[1]
+  local eventsKey = keys[2]
+
+  local jobId = args[1]
+  local progress = args[2]
+
+  redis.call('HSET', jobKey, 'progress', progress)
+  emitEvent(eventsKey, 'progress', jobId, {'data', progress})
+
+  return 1
+end)
 `;
 
 // ---- Key set type ----
@@ -2243,6 +2263,25 @@ export async function completeJob(
   }
 
   return client.fcall('glidemq_complete', keys, args);
+}
+
+/**
+ * Update job progress.
+ * Updates the 'progress' field in the job hash and emits a 'progress' event.
+ */
+export async function updateProgress(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  progress: number | object,
+): Promise<number> {
+  const progressStr = typeof progress === 'number' ? progress.toString() : JSON.stringify(progress);
+  const result = await client.fcall(
+    'glidemq_updateProgress',
+    [k.job(jobId), k.events],
+    [jobId, progressStr],
+  );
+  return result as number;
 }
 
 /**

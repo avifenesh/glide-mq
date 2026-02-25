@@ -61,31 +61,32 @@ describe('Job', () => {
   });
 
   describe('updateProgress', () => {
-    it('should update progress with a numeric value using batch', async () => {
+    it('should update progress with a numeric value using glidemq_updateProgress', async () => {
       const job = new Job(mockClient as any, keys, '1', 'job', {}, {});
+      mockClient.fcall.mockResolvedValue(1);
 
       await job.updateProgress(50);
 
-      expect(mockBatch.hset).toHaveBeenCalledWith('glide:{test-queue}:job:1', { progress: '50' });
-      expect(mockBatch.xadd).toHaveBeenCalledWith('glide:{test-queue}:events', [
-        ['event', 'progress'],
-        ['jobId', '1'],
-        ['data', '50'],
-      ]);
-      expect(mockClient.exec).toHaveBeenCalledWith(mockBatch, false);
+      expect(mockClient.fcall).toHaveBeenCalledWith(
+        'glidemq_updateProgress',
+        ['glide:{test-queue}:job:1', 'glide:{test-queue}:events'],
+        ['1', '50'],
+      );
       expect(job.progress).toBe(50);
     });
 
-    it('should update progress with an object value using batch', async () => {
+    it('should update progress with an object value using glidemq_updateProgress', async () => {
       const job = new Job(mockClient as any, keys, '2', 'job', {}, {});
       const progressObj = { step: 3, total: 10 };
+      mockClient.fcall.mockResolvedValue(1);
 
       await job.updateProgress(progressObj);
 
-      expect(mockBatch.hset).toHaveBeenCalledWith('glide:{test-queue}:job:2', {
-        progress: JSON.stringify(progressObj),
-      });
-      expect(mockClient.exec).toHaveBeenCalledWith(mockBatch, false);
+      expect(mockClient.fcall).toHaveBeenCalledWith(
+        'glidemq_updateProgress',
+        ['glide:{test-queue}:job:2', 'glide:{test-queue}:events'],
+        ['2', JSON.stringify(progressObj)],
+      );
       expect(job.progress).toEqual(progressObj);
     });
   });
