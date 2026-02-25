@@ -2276,11 +2276,7 @@ export async function updateProgress(
   progress: number | object,
 ): Promise<number> {
   const progressStr = typeof progress === 'number' ? progress.toString() : JSON.stringify(progress);
-  const result = await client.fcall(
-    'glidemq_updateProgress',
-    [k.job(jobId), k.events],
-    [jobId, progressStr],
-  );
+  const result = await client.fcall('glidemq_updateProgress', [k.job(jobId), k.events], [jobId, progressStr]);
   return result as number;
 }
 

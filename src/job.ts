@@ -2,14 +2,7 @@ import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { JobOptions, Client } from './types';
 import type { QueueKeys } from './functions/index';
-import {
-  removeJob,
-  failJob,
-  changePriority,
-  changeDelay,
-  promoteJob,
-  updateProgress,
-} from './functions/index';
+import { removeJob, failJob, changePriority, changeDelay, promoteJob, updateProgress } from './functions/index';
 import { calculateBackoff, decompress } from './utils';
 import { isClusterClient } from './connection';
 
