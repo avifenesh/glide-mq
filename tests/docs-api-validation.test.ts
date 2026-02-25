@@ -9,7 +9,10 @@ import * as GlideMqTesting from '../src/testing';
 const REPO_ROOT = path.resolve(__dirname, '..');
 const DOC_FILES = [
   path.join(REPO_ROOT, 'README.md'),
-  ...fs.readdirSync(path.join(REPO_ROOT, 'docs')).filter((f) => f.endsWith('.md')).map((f) => path.join(REPO_ROOT, 'docs', f)),
+  ...fs
+    .readdirSync(path.join(REPO_ROOT, 'docs'))
+    .filter((f) => f.endsWith('.md'))
+    .map((f) => path.join(REPO_ROOT, 'docs', f)),
 ];
 
 const CODE_BLOCK_REGEX = /```(?:ts|typescript|js|javascript)\n([\s\S]*?)```/g;
