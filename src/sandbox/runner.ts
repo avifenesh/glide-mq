@@ -79,7 +79,7 @@ async function handleProcess(id: string, serialized: SerializedJob): Promise<voi
     send({
       type: 'failed',
       id,
-      error: sanitizePath(err?.message ?? String(err)) || 'Unknown error',
+      error: sanitizePath(err?.message ?? String(err)) ?? 'Unknown error',
       stack: getSanitizedStack(err),
       errorName: err?.name,
       discarded: job.discarded,
@@ -88,9 +88,13 @@ async function handleProcess(id: string, serialized: SerializedJob): Promise<voi
 }
 
 const cwd = process.cwd();
-// Also resolve symlinks so paths like /home/user/app-link are caught
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const realCwd: string = require('fs').realpathSync(cwd);
+let realCwd: string = cwd;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  realCwd = require('fs').realpathSync(cwd);
+} catch {
+  // If resolving the real path fails (e.g. cwd becomes inaccessible), fall back to cwd
+}
 const paths = realCwd !== cwd ? [cwd, realCwd] : [cwd];
 const cwdRegex = new RegExp(paths.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
 
@@ -123,7 +127,7 @@ function handleMessage(msg: MainToChild): void {
         send({
           type: 'failed',
           id: msg.id,
-          error: sanitizePath(err?.message ?? String(err)) || 'Unknown error',
+          error: sanitizePath(err?.message ?? String(err)) ?? 'Unknown error',
           stack: getSanitizedStack(err),
           errorName: err?.name,
         });
