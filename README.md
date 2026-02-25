@@ -18,28 +18,26 @@ npm install glide-mq
 
 ## Features
 
-- **Queues & Workers** — producer/consumer with configurable concurrency
-- **Delayed & priority jobs** — schedule jobs for later or run high-priority work first
-- **Workflows** — `FlowProducer` parent-child trees, `chain`, `group`, `chord` pipelines with result aggregation
-- **Schedulers** — cron and interval repeatable jobs, persisted across restarts
-- **Per-key ordering** — sequential processing per key while staying parallel across keys
-- **Rate limiting** — token-bucket (cost-based), per-group, and global rate limiting
-- **Retries & DLQ** — exponential/fixed/custom backoff with dead-letter queues
-- **Deduplication** — simple, throttle, and debounce modes with configurable TTL
-- **Job revocation** — cooperative cancellation via AbortSignal for active jobs
-- **Stalled job recovery** — auto-reclaim jobs from crashed workers via XAUTOCLAIM
-- **Global concurrency** — cross-worker active job cap for the entire queue
-- **Pause & resume** — pause/resume at queue level or per-worker, with force option
-- **Drain** — `queue.drain(delayed?)` removes all waiting (and optionally delayed) jobs in a single server-side call
-- **Real-time events** — `QueueEvents` stream for added, completed, failed, stalled, revoked, and more
-- **Job search** — query by state, name, and data filters
-- **Progress tracking** — real-time numeric or object progress updates
-- **Batch API** — `addBulk` for high-throughput ingestion (12.7× faster than serial)
-- **Compression** — transparent gzip (up to 98% size reduction)
-- **Graceful shutdown** — one-liner `gracefulShutdown()` for SIGTERM/SIGINT handling
-- **Connection sharing** — reuse a single client across components to reduce TCP connections
-- **Observability** — OpenTelemetry tracing, per-job logs, [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) web UI
-- **In-memory testing** — `TestQueue` & `TestWorker` with zero dependencies via `glide-mq/testing`
+### Core queueing
+- **Queues & Workers** — producer/consumer with configurable concurrency ([Usage](docs/USAGE.md#queue), [Demo](demo/README.md#demo-scenarios))
+- **Delayed, priority, and batch jobs** — schedule jobs, prioritize critical work, and ingest at high throughput with `addBulk` ([Usage](docs/USAGE.md#queue), [Demo](demo/README.md#demo-scenarios))
+- **Job search & progress tracking** — query by state/name/data and stream progress updates ([Usage](docs/USAGE.md#worker), [Search tests](tests/search.test.ts))
+
+### Reliability & control
+- **Retries, backoff, and DLQ** — exponential/fixed/custom retries with dead-letter queues ([Advanced](docs/ADVANCED.md#retries-and-backoff), [Demo](demo/README.md#demo-scenarios))
+- **Stalled recovery, pause/resume, and drain** — auto-reclaim stuck jobs, pause processing, and server-side drain waiting/delayed jobs ([Usage](docs/USAGE.md#worker), [Demo](demo/README.md#api-endpoints-dashboard-server))
+- **Job revocation + sandboxed processors** — cooperative cancellation and isolated file-based processors in worker threads/child processes ([Advanced](docs/ADVANCED.md#job-revocation), [Architecture](docs/ARCHITECTURE.md#typescript-api), [Sandbox example](tests/sandbox-integration.test.ts))
+
+### Orchestration & scheduling
+- **Workflows** — `FlowProducer` parent-child trees and `chain`/`group`/`chord` helpers ([Workflows](docs/WORKFLOWS.md), [Demo](demo/README.md#demo-scenarios))
+- **Schedulers** — cron and interval repeatable jobs persisted across restarts ([Advanced](docs/ADVANCED.md#job-schedulers), [Demo](demo/README.md#demo-scenarios))
+- **Per-key ordering, global concurrency, and rate limiting** — deterministic ordering with queue-wide and token-bucket controls ([Advanced](docs/ADVANCED.md#ordering-and-group-concurrency), [Advanced](docs/ADVANCED.md#global-concurrency), [Advanced](docs/ADVANCED.md#global-rate-limiting))
+- **Deduplication** — simple, throttle, and debounce modes with TTL ([Advanced](docs/ADVANCED.md#deduplication), [Demo](demo/README.md#demo-scenarios))
+
+### Observability, ops, and testing
+- **QueueEvents, metrics, logs, and dashboard** — real-time events + OpenTelemetry + [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) ([Observability](docs/OBSERVABILITY.md), [Dashboard demo API](demo/dashboard-server.ts))
+- **Compression, graceful shutdown, and shared connections** — lower payload size and easier process lifecycle management ([Advanced](docs/ADVANCED.md#transparent-compression), [Usage](docs/USAGE.md#graceful-shutdown), [Advanced](docs/ADVANCED.md#shared-client))
+- **In-memory testing mode** — `TestQueue` and `TestWorker` with zero Valkey dependency ([Testing](docs/TESTING.md), [Testing-mode test](tests/testing-mode.test.ts))
 
 ## Quick Start
 
@@ -99,15 +97,15 @@ Workers, job schedulers, DLQ, metrics, search, bulk actions (drain, retry, clean
 
 ## Documentation
 
-| Guide | What you'll learn |
-|-------|-------------------|
-| [Usage](docs/USAGE.md) | Queue & Worker basics, graceful shutdown, cluster mode |
-| [Advanced](docs/ADVANCED.md) | Schedulers, rate limiting, dedup, compression, retries & DLQ |
-| [Workflows](docs/WORKFLOWS.md) | FlowProducer, `chain`, `group`, `chord` pipelines |
-| [Observability](docs/OBSERVABILITY.md) | OpenTelemetry, job logs, `@glidemq/dashboard` |
-| [Testing](docs/TESTING.md) | In-memory `TestQueue` & `TestWorker` — no Valkey needed |
-| [Architecture](docs/ARCHITECTURE.md) | Key design, Valkey functions, data layout |
-| [Migration](docs/MIGRATION.md) | Coming from BullMQ? API mapping & workarounds |
+| Guide | What you'll learn | Related examples |
+|-------|-------------------|------------------|
+| [Usage](docs/USAGE.md) | Queue & Worker basics, graceful shutdown, cluster mode | [Demo scenarios](demo/README.md#demo-scenarios) |
+| [Advanced](docs/ADVANCED.md) | Schedulers, rate limiting, dedup, compression, retries & DLQ | [Comprehensive demo app](demo/index.ts) |
+| [Workflows](docs/WORKFLOWS.md) | FlowProducer, `chain`, `group`, `chord` pipelines | [Workflow scenarios](demo/README.md#demo-scenarios) |
+| [Observability](docs/OBSERVABILITY.md) | OpenTelemetry, job logs, `@glidemq/dashboard` | [Dashboard API server](demo/dashboard-server.ts) |
+| [Testing](docs/TESTING.md) | In-memory `TestQueue` & `TestWorker` — no Valkey needed | [Testing mode test](tests/testing-mode.test.ts) |
+| [Architecture](docs/ARCHITECTURE.md) | Key design, Valkey functions, data layout | [Architecture validation tests](tests/review-coverage.test.ts) |
+| [Migration](docs/MIGRATION.md) | Coming from BullMQ? API mapping & workarounds | [Compatibility suites](tests/compat-bull.test.ts) |
 
 ## Get Involved
 
