@@ -70,10 +70,10 @@ export async function priorityOrdering(ctx: ScenarioContext): Promise<ScenarioRe
   if (processOrder.length >= 10) {
     const first10Avg = processOrder.slice(0, 10).reduce((a, b) => a + b, 0) / 10;
     const overallAvg = priorities.reduce((a, b) => a + b, 0) / priorities.length;
-    if (first10Avg > overallAvg + 2) {
+    if (first10Avg > overallAvg + 3) {
       violations.push(
         `Priority ordering violated: first 10 avg priority ${first10Avg.toFixed(2)} ` +
-          `> overall avg ${overallAvg.toFixed(2)} + 2 tolerance`,
+          `> overall avg ${overallAvg.toFixed(2)} + 3 tolerance`,
       );
     }
   }

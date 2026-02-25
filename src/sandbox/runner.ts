@@ -79,8 +79,8 @@ async function handleProcess(id: string, serialized: SerializedJob): Promise<voi
     send({
       type: 'failed',
       id,
-      error: err?.message ?? String(err),
-      stack: sanitizeStack(err?.stack),
+      error: sanitizePath(err?.message ?? String(err)) ?? 'Unknown error',
+      stack: getSanitizedStack(err),
       errorName: err?.name,
       discarded: job.discarded,
     });
@@ -88,13 +88,34 @@ async function handleProcess(id: string, serialized: SerializedJob): Promise<voi
 }
 
 const cwd = process.cwd();
-// Escape potential regex special characters in cwd
-const escapedCwd = cwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const cwdRegex = new RegExp(escapedCwd, 'g');
+let realCwd: string = cwd;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  realCwd = require('fs').realpathSync(cwd);
+} catch {
+  // If resolving the real path fails (e.g. cwd becomes inaccessible), fall back to cwd
+}
+const paths = realCwd !== cwd ? [cwd, realCwd] : [cwd];
+const cwdRegex = new RegExp(paths.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
 
-function sanitizeStack(stack: string | undefined): string | undefined {
-  if (!stack) return undefined;
-  return stack.replace(cwdRegex, '[PROJECT_ROOT]');
+function sanitizePath(text: string | undefined): string | undefined {
+  if (!text) return text;
+  return text.replace(cwdRegex, '[PROJECT_ROOT]');
+}
+
+function getSanitizedStack(err: any): string | undefined {
+  let stack = err?.stack;
+  // If no stack, synthesize one to prevent the parent from generating its own
+  // (which could include host process paths)
+  if (!stack && err != null) {
+    try {
+      stack = new Error(String(err)).stack;
+    } catch {
+      // If even that fails, return undefined
+      stack = undefined;
+    }
+  }
+  return sanitizePath(stack);
 }
 
 function handleMessage(msg: MainToChild): void {
@@ -106,7 +127,9 @@ function handleMessage(msg: MainToChild): void {
         send({
           type: 'failed',
           id: msg.id,
-          error: err?.message ?? String(err),
+          error: sanitizePath(err?.message ?? String(err)) ?? 'Unknown error',
+          stack: getSanitizedStack(err),
+          errorName: err?.name,
         });
       });
       break;
