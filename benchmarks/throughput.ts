@@ -178,7 +178,12 @@ async function bullProcessThroughput(n: number, concurrency: number): Promise<Pr
 
 // ---- Run ----
 
-export async function runThroughput(): Promise<void> {
+export interface ThroughputResults {
+  add: { glideMq: AddResult; bullMq: AddResult };
+  process: ProcessResult[];
+}
+
+export async function runThroughput(): Promise<ThroughputResults> {
   console.log('\n## Add Throughput (time-based, 5s)\n');
 
   await flushDB();
@@ -225,4 +230,6 @@ export async function runThroughput(): Promise<void> {
       fmt(r.rate),
     ]),
   );
+
+  return { add: { glideMq: glideAdd, bullMq: bullAdd }, process: processResults };
 }

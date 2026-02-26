@@ -220,7 +220,30 @@ function summarizePipelined(label: string, entries: PipelinedEntry[]): string[][
   ];
 }
 
-export async function runLatency(): Promise<void> {
+interface PercentileSummary {
+  p50: number;
+  p90: number;
+  p99: number;
+}
+
+function computePercentiles(values: number[]): PercentileSummary {
+  const sorted = [...values].sort((a, b) => a - b);
+  return {
+    p50: percentile(sorted, 50),
+    p90: percentile(sorted, 90),
+    p99: percentile(sorted, 99),
+  };
+}
+
+export interface LatencyResults {
+  serial: { glideMq: PercentileSummary; bullMq: PercentileSummary };
+  pipelined: {
+    glideMq: { addToStart: PercentileSummary; addToComplete: PercentileSummary };
+    bullMq: { addToStart: PercentileSummary; addToComplete: PercentileSummary };
+  };
+}
+
+export async function runLatency(): Promise<LatencyResults> {
   // Serial latency
   console.log(`\n## Serial Latency (${N_SERIAL} jobs, concurrency=1)\n`);
 
@@ -254,4 +277,21 @@ export async function runLatency(): Promise<void> {
     ['Library', 'Metric', 'p50', 'p90', 'p99'],
     [...summarizePipelined('glide-mq', glidePipelined), ...summarizePipelined('bullmq', bullPipelined)],
   );
+
+  return {
+    serial: {
+      glideMq: computePercentiles(glideSerial),
+      bullMq: computePercentiles(bullSerial),
+    },
+    pipelined: {
+      glideMq: {
+        addToStart: computePercentiles(glidePipelined.map((e) => e.addToStart)),
+        addToComplete: computePercentiles(glidePipelined.map((e) => e.addToComplete)),
+      },
+      bullMq: {
+        addToStart: computePercentiles(bullPipelined.map((e) => e.addToStart)),
+        addToComplete: computePercentiles(bullPipelined.map((e) => e.addToComplete)),
+      },
+    },
+  };
 }

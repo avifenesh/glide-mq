@@ -101,7 +101,16 @@ async function bullMemory(): Promise<{ before: MemSnapshot; after: MemSnapshot }
 
 // ---- Run ----
 
-export async function runMemory(): Promise<void> {
+export interface MemoryResults {
+  glideMq: { rssDelta: number; heapDelta: number; rssBefore: number; rssAfter: number; heapBefore: number; heapAfter: number };
+  bullMq: { rssDelta: number; heapDelta: number; rssBefore: number; rssAfter: number; heapBefore: number; heapAfter: number };
+}
+
+function toMB(bytes: number): number {
+  return bytes / 1024 / 1024;
+}
+
+export async function runMemory(): Promise<MemoryResults> {
   console.log(`\n## Memory Benchmark (${fmt(N)} jobs, concurrency=10)\n`);
 
   await flushDB();
@@ -138,4 +147,23 @@ export async function runMemory(): Promise<void> {
     ['Library', 'RSS Before', 'RSS After', 'RSS Delta', 'Heap Before', 'Heap After', 'Heap Delta'],
     rows,
   );
+
+  return {
+    glideMq: {
+      rssDelta: toMB(glide.after.rss - glide.before.rss),
+      heapDelta: toMB(glide.after.heapUsed - glide.before.heapUsed),
+      rssBefore: toMB(glide.before.rss),
+      rssAfter: toMB(glide.after.rss),
+      heapBefore: toMB(glide.before.heapUsed),
+      heapAfter: toMB(glide.after.heapUsed),
+    },
+    bullMq: {
+      rssDelta: toMB(bull.after.rss - bull.before.rss),
+      heapDelta: toMB(bull.after.heapUsed - bull.before.heapUsed),
+      rssBefore: toMB(bull.before.rss),
+      rssAfter: toMB(bull.after.rss),
+      heapBefore: toMB(bull.before.heapUsed),
+      heapAfter: toMB(bull.after.heapUsed),
+    },
+  };
 }
