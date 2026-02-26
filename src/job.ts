@@ -3,7 +3,7 @@ import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { JobOptions, Client } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
-import { calculateBackoff, decompress } from './utils';
+import { calculateBackoff, decompress, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
 export class Job<D = any, R = any> {
@@ -67,6 +67,9 @@ export class Job<D = any, R = any> {
    * Append a log line to this job's log list.
    */
   async log(message: string): Promise<void> {
+    if (message.length > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Log message exceeds maximum size (${message.length} > ${MAX_JOB_DATA_SIZE})`);
+    }
     await this.client.rpush(this.queueKeys.log(this.id), [message]);
   }
 
@@ -75,6 +78,9 @@ export class Job<D = any, R = any> {
    */
   async updateProgress(progress: number | object): Promise<void> {
     const progressStr = typeof progress === 'number' ? progress.toString() : JSON.stringify(progress);
+    if (progressStr.length > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Progress data exceeds maximum size (${progressStr.length} > ${MAX_JOB_DATA_SIZE})`);
+    }
     const isCluster = isClusterClient(this.client);
     const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
 
@@ -100,8 +106,12 @@ export class Job<D = any, R = any> {
    * Replace the data payload of this job.
    */
   async updateData(data: D): Promise<void> {
+    const serialized = JSON.stringify(data);
+    if (serialized.length > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Job data exceeds maximum size (${serialized.length} > ${MAX_JOB_DATA_SIZE})`);
+    }
     await this.client.hset(this.queueKeys.job(this.id), {
-      data: JSON.stringify(data),
+      data: serialized,
     });
     this.data = data;
   }
