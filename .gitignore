@@ -4,4 +4,6 @@ build/
 *.tgz
 .env
 agent-knowledge/
+benchmarks/*.gif
+benchmarks/*.json
 HANDOVER.md

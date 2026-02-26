@@ -28,6 +28,8 @@
     "bench:latency": "npx tsx benchmarks/run.ts latency",
     "bench:memory": "npx tsx benchmarks/run.ts memory",
     "bench:sharing": "npx tsx benchmarks/run.ts sharing",
+    "bench:gif": "npx tsx benchmarks/visualize.ts --sample",
+    "bench:gif:from": "npx tsx benchmarks/visualize.ts",
     "fuzz": "vitest run tests/fuzzer/"
   },
   "engines": {
@@ -42,12 +44,14 @@
     "@glidemq/speedkey": "^0.2.0"
   },
   "devDependencies": {
+    "@napi-rs/canvas": "^0.1.95",
     "@types/express": "^5.0.6",
     "@types/node": "^22",
     "bullmq": "^5.69.2",
     "eslint": "^10.0.1",
     "eslint-config-prettier": "^10.1.8",
     "express": "^5.2.1",
+    "gif-encoder-2": "^1.0.5",
     "ioredis": "^5.9.3",
     "prettier": "^3.8.1",
     "tsx": "^4.21.0",
