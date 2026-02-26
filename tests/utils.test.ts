@@ -31,6 +31,16 @@ describe('utils', () => {
       expect(() => nextCronOccurrence('60 * * * *', now)).toThrow('Cron value out of bounds: 60');
     });
 
+    it('should throw error for reversed in-bounds range', () => {
+      const now = Date.now();
+      expect(() => nextCronOccurrence('10-5 * * * *', now)).toThrow('Cron range reversed: 10-5');
+    });
+
+    it('should throw error for malformed numeric token', () => {
+      const now = Date.now();
+      expect(() => nextCronOccurrence('5foo * * * *', now)).toThrow('Invalid cron token: 5foo');
+    });
+
     it('should handle complex patterns correctly', () => {
       const now = new Date('2024-01-01T10:00:00Z').getTime();
       // At minute 30 past every hour
