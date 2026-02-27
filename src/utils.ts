@@ -250,8 +250,9 @@ function parseCronField(field: string, min: number, max: number): number[] {
   return [...values].sort((a, b) => a - b);
 }
 
-// Maximum iterations when searching for next cron match (1 year of minutes)
-const MAX_CRON_ITERATIONS = 525960;
+// Maximum search horizon in years to prevent infinite loops (e.g. Feb 30)
+// 10 years covers century non-leap-year gaps (e.g. Feb 29 after 2097 -> 2104)
+const MAX_SEARCH_YEARS = 10;
 
 /**
  * Compute the next occurrence of a cron pattern after `afterMs` (epoch ms).
@@ -270,29 +271,65 @@ export function nextCronOccurrence(pattern: string, afterMs: number): number {
   const months = parseCronField(fields[3], 1, 12);
   const daysOfWeek = parseCronField(fields[4], 0, 6); // 0=Sunday
 
-  // Start from the next minute after afterMs
-  const start = new Date(afterMs);
-  start.setSeconds(0, 0);
-  start.setMinutes(start.getMinutes() + 1);
+  // Start from the next minute after afterMs (all operations in UTC)
+  const d = new Date(afterMs);
+  d.setUTCSeconds(0, 0);
+  d.setUTCMinutes(d.getUTCMinutes() + 1);
 
-  const d = new Date(start);
-  let iterations = 0;
+  const endYear = d.getUTCFullYear() + MAX_SEARCH_YEARS;
 
-  while (iterations < MAX_CRON_ITERATIONS) {
-    if (
-      months.includes(d.getMonth() + 1) &&
-      daysOfMonth.includes(d.getDate()) &&
-      daysOfWeek.includes(d.getDay()) &&
-      hours.includes(d.getHours()) &&
-      minutes.includes(d.getMinutes())
-    ) {
-      return d.getTime();
+  while (d.getUTCFullYear() <= endYear) {
+    // 1. Month check
+    const currentMonth = d.getUTCMonth() + 1;
+    if (!months.includes(currentMonth)) {
+      const nextMonth = months.find((m) => m > currentMonth);
+      if (nextMonth != null) {
+        d.setUTCMonth(nextMonth - 1, 1);
+        d.setUTCHours(0, 0, 0, 0);
+      } else {
+        d.setUTCFullYear(d.getUTCFullYear() + 1, months[0] - 1, 1);
+        d.setUTCHours(0, 0, 0, 0);
+      }
+      continue;
     }
 
-    // Advance by 1 minute
-    d.setMinutes(d.getMinutes() + 1);
-    iterations++;
+    // 2. Day check
+    const currentDay = d.getUTCDate();
+    const currentDayOfWeek = d.getUTCDay();
+    if (!daysOfMonth.includes(currentDay) || !daysOfWeek.includes(currentDayOfWeek)) {
+      d.setUTCDate(d.getUTCDate() + 1);
+      d.setUTCHours(0, 0, 0, 0);
+      continue;
+    }
+
+    // 3. Hour check
+    const currentHour = d.getUTCHours();
+    if (!hours.includes(currentHour)) {
+      const nextHour = hours.find((h) => h > currentHour);
+      if (nextHour != null) {
+        d.setUTCHours(nextHour, 0, 0, 0);
+      } else {
+        d.setUTCDate(d.getUTCDate() + 1);
+        d.setUTCHours(0, 0, 0, 0);
+      }
+      continue;
+    }
+
+    // 4. Minute check
+    const currentMinute = d.getUTCMinutes();
+    if (!minutes.includes(currentMinute)) {
+      const nextMinute = minutes.find((m) => m > currentMinute);
+      if (nextMinute != null) {
+        d.setUTCMinutes(nextMinute, 0, 0);
+        return d.getTime();
+      } else {
+        d.setUTCHours(d.getUTCHours() + 1, 0, 0, 0);
+        continue;
+      }
+    }
+
+    return d.getTime();
   }
 
-  throw new Error(`No cron match found within ${MAX_CRON_ITERATIONS} iterations for pattern: ${pattern}`);
+  throw new Error(`No cron match found within ${MAX_SEARCH_YEARS} years for pattern: ${pattern}`);
 }
