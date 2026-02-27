@@ -20,6 +20,11 @@ describe('utils', () => {
       expect(() => nextCronOccurrence('* */0 * * *', now)).toThrow('Invalid cron step: 0');
     });
 
+    it('should throw error for negative step value', () => {
+      const now = Date.now();
+      expect(() => nextCronOccurrence('*/-1 * * * *', now)).toThrow();
+    });
+
     it('should throw error for out of bounds range', () => {
       const now = Date.now();
       // Minutes 0-59
