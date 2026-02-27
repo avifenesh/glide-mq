@@ -285,11 +285,14 @@ export function nextCronOccurrence(pattern: string, afterMs: number): number {
     // 1. Month check
     const currentMonth = d.getUTCMonth() + 1;
     if (!months.includes(currentMonth)) {
+      // Find next valid month in the list that is > currentMonth
       const nextMonth = months.find((m) => m > currentMonth);
       if (nextMonth != null) {
+        // Jump to start of that month in current year
         d.setUTCMonth(nextMonth - 1, 1);
         d.setUTCHours(0, 0, 0, 0);
       } else {
+        // No more valid months this year; jump to first valid month of next year
         d.setUTCFullYear(d.getUTCFullYear() + 1, months[0] - 1, 1);
         d.setUTCHours(0, 0, 0, 0);
       }
@@ -300,6 +303,9 @@ export function nextCronOccurrence(pattern: string, afterMs: number): number {
     const currentDay = d.getUTCDate();
     const currentDayOfWeek = d.getUTCDay();
     if (!daysOfMonth.includes(currentDay) || !daysOfWeek.includes(currentDayOfWeek)) {
+      // Increment day by 1 and reset time to 00:00
+      // Optimization: Could jump to next valid DOM/DOW, but interaction between DOM and DOW is complex.
+      // Iterating days is generally fast enough (max 31 per month).
       d.setUTCDate(d.getUTCDate() + 1);
       d.setUTCHours(0, 0, 0, 0);
       continue;
@@ -308,10 +314,13 @@ export function nextCronOccurrence(pattern: string, afterMs: number): number {
     // 3. Hour check
     const currentHour = d.getUTCHours();
     if (!hours.includes(currentHour)) {
+      // Find next valid hour > currentHour
       const nextHour = hours.find((h) => h > currentHour);
       if (nextHour != null) {
+        // Jump to that hour, minute 0
         d.setUTCHours(nextHour, 0, 0, 0);
       } else {
+        // No more valid hours today; jump to next day
         d.setUTCDate(d.getUTCDate() + 1);
         d.setUTCHours(0, 0, 0, 0);
       }
@@ -321,16 +330,20 @@ export function nextCronOccurrence(pattern: string, afterMs: number): number {
     // 4. Minute check
     const currentMinute = d.getUTCMinutes();
     if (!minutes.includes(currentMinute)) {
+      // Find next valid minute > currentMinute
       const nextMinute = minutes.find((m) => m > currentMinute);
       if (nextMinute != null) {
+        // Found match!
         d.setUTCMinutes(nextMinute, 0, 0);
         return d.getTime();
       } else {
+        // No more valid minutes this hour; jump to next hour
         d.setUTCHours(d.getUTCHours() + 1, 0, 0, 0);
         continue;
       }
     }
 
+    // All fields match
     return d.getTime();
   }
 
