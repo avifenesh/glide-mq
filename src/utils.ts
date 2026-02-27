@@ -204,11 +204,20 @@ function parseCronField(field: string, min: number, max: number): number[] {
     const stepMatch = trimmed.match(/^(\*|(\d+)-(\d+))\/(\d+)$/);
     if (stepMatch) {
       const step = parseInt(stepMatch[4], 10);
+      if (step <= 0) {
+        throw new Error(`Invalid cron step: ${step}`);
+      }
       let start = min;
       let end = max;
       if (stepMatch[2] !== undefined) {
         start = parseInt(stepMatch[2], 10);
         end = parseInt(stepMatch[3], 10);
+      }
+      if (start < min || end > max) {
+        throw new Error(`Cron range out of bounds: ${start}-${end}`);
+      }
+      if (start > end) {
+        throw new Error(`Cron range reversed: ${start}-${end}`);
       }
       for (let i = start; i <= end; i += step) values.add(i);
       continue;
@@ -218,14 +227,24 @@ function parseCronField(field: string, min: number, max: number): number[] {
     if (rangeMatch) {
       const from = parseInt(rangeMatch[1], 10);
       const to = parseInt(rangeMatch[2], 10);
+      if (from < min || to > max) {
+        throw new Error(`Cron range out of bounds: ${from}-${to}`);
+      }
+      if (from > to) {
+        throw new Error(`Cron range reversed: ${from}-${to}`);
+      }
       for (let i = from; i <= to; i++) values.add(i);
       continue;
     }
 
-    const num = parseInt(trimmed, 10);
-    if (!isNaN(num)) {
-      values.add(num);
+    if (!/^\d+$/.test(trimmed)) {
+      throw new Error(`Invalid cron token: ${trimmed}`);
     }
+    const num = parseInt(trimmed, 10);
+    if (num < min || num > max) {
+      throw new Error(`Cron value out of bounds: ${num}`);
+    }
+    values.add(num);
   }
 
   return [...values].sort((a, b) => a - b);
