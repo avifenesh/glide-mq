@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { GlideClient } from '@glidemq/speedkey';
 import { Queue } from '../src/queue';
 import { LIBRARY_VERSION } from '../src/functions/index';
+import { MAX_JOB_DATA_SIZE } from '../src/utils';
 
 // Mock speedkey module
 vi.mock('@glidemq/speedkey', () => {
@@ -363,6 +364,33 @@ describe('Queue', () => {
 
       const keys = mockClient.fcall.mock.calls[1][1];
       expect(keys[0]).toBe('myapp:{orders}:id');
+    });
+  });
+
+  describe('size limits', () => {
+    it('add rejects oversized job data', async () => {
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION);
+      const queue = new Queue('test-queue', connOpts);
+      const oversized = { data: 'x'.repeat(MAX_JOB_DATA_SIZE) };
+      await expect(queue.add('test', oversized)).rejects.toThrow('Job data exceeds maximum size');
+    });
+
+    it('addBulk rejects oversized job data', async () => {
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION);
+      const queue = new Queue('test-queue', connOpts);
+      const oversized = { data: 'x'.repeat(MAX_JOB_DATA_SIZE) };
+      await expect(
+        queue.addBulk([{ name: 'test', data: oversized }]),
+      ).rejects.toThrow('Job data exceeds maximum size');
+    });
+
+    it('add enforces byte length not character count', async () => {
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION);
+      const queue = new Queue('test-queue', connOpts);
+      const multiByteChar = '\u4e16'; // 3 bytes in UTF-8
+      const count = Math.ceil(MAX_JOB_DATA_SIZE / 3) + 1;
+      const oversized = { data: multiByteChar.repeat(count) };
+      await expect(queue.add('test', oversized)).rejects.toThrow('Job data exceeds maximum size');
     });
   });
 });

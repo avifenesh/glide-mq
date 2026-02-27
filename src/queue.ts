@@ -23,6 +23,7 @@ import {
   hashDataToRecord,
   extractJobIdsFromStreamEntries,
   compress,
+  MAX_JOB_DATA_SIZE,
 } from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
@@ -203,9 +204,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
         // Payload size validation - prevent DoS via oversized jobs
         let serialized = JSON.stringify(data);
-        if (serialized.length > 1_048_576) {
+        const byteLen = Buffer.byteLength(serialized, 'utf8');
+        if (byteLen > MAX_JOB_DATA_SIZE) {
           throw new Error(
-            `Job data exceeds maximum size (${serialized.length} bytes > 1MB). Use smaller payloads or store large data externally.`,
+            `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
           );
         }
 
@@ -306,6 +308,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const deduplication = opts.deduplication;
 
       let serializedData = JSON.stringify(entry.data);
+      const byteLen = Buffer.byteLength(serializedData, 'utf8');
+      if (byteLen > MAX_JOB_DATA_SIZE) {
+        throw new Error(
+          `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
+        );
+      }
       if (this.opts.compression === 'gzip') {
         serializedData = compress(serializedData);
       }
