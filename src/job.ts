@@ -67,8 +67,9 @@ export class Job<D = any, R = any> {
    * Append a log line to this job's log list.
    */
   async log(message: string): Promise<void> {
-    if (message.length > MAX_JOB_DATA_SIZE) {
-      throw new Error(`Log message exceeds maximum size (${message.length} > ${MAX_JOB_DATA_SIZE})`);
+    const byteLen = Buffer.byteLength(message, 'utf8');
+    if (byteLen > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Log message exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE})`);
     }
     await this.client.rpush(this.queueKeys.log(this.id), [message]);
   }
@@ -78,8 +79,9 @@ export class Job<D = any, R = any> {
    */
   async updateProgress(progress: number | object): Promise<void> {
     const progressStr = typeof progress === 'number' ? progress.toString() : JSON.stringify(progress);
-    if (progressStr.length > MAX_JOB_DATA_SIZE) {
-      throw new Error(`Progress data exceeds maximum size (${progressStr.length} > ${MAX_JOB_DATA_SIZE})`);
+    const byteLen = Buffer.byteLength(progressStr, 'utf8');
+    if (byteLen > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Progress data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE})`);
     }
     const isCluster = isClusterClient(this.client);
     const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
@@ -107,8 +109,9 @@ export class Job<D = any, R = any> {
    */
   async updateData(data: D): Promise<void> {
     const serialized = JSON.stringify(data);
-    if (serialized.length > MAX_JOB_DATA_SIZE) {
-      throw new Error(`Job data exceeds maximum size (${serialized.length} > ${MAX_JOB_DATA_SIZE})`);
+    const byteLen = Buffer.byteLength(serialized, 'utf8');
+    if (byteLen > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE})`);
     }
     await this.client.hset(this.queueKeys.job(this.id), {
       data: serialized,

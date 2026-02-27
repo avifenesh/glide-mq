@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import { Job } from '../src/job';
-import { buildKeys } from '../src/utils';
+import { buildKeys, MAX_JOB_DATA_SIZE } from '../src/utils';
 
 vi.mock('@glidemq/speedkey');
 
@@ -377,6 +377,45 @@ describe('Job', () => {
       const job = Job.fromHash(mockClient as any, keys, '13', hash);
 
       expect(job.progress).toBe(50);
+    });
+  });
+
+  describe('size limits', () => {
+    it('log rejects messages exceeding MAX_JOB_DATA_SIZE', async () => {
+      const job = new Job(mockClient as any, keys, '1', 'test', {}, {});
+      const oversized = 'x'.repeat(MAX_JOB_DATA_SIZE + 1);
+      await expect(job.log(oversized)).rejects.toThrow('Log message exceeds maximum size');
+    });
+
+    it('log accepts messages at exactly MAX_JOB_DATA_SIZE', async () => {
+      mockClient.rpush = vi.fn().mockResolvedValue(1);
+      const job = new Job(mockClient as any, keys, '1', 'test', {}, {});
+      const exact = 'x'.repeat(MAX_JOB_DATA_SIZE);
+      await expect(job.log(exact)).resolves.toBeUndefined();
+    });
+
+    it('updateProgress rejects oversized progress data', async () => {
+      const job = new Job(mockClient as any, keys, '1', 'test', {}, {});
+      const oversized = { data: 'x'.repeat(MAX_JOB_DATA_SIZE) };
+      await expect(job.updateProgress(oversized)).rejects.toThrow('Progress data exceeds maximum size');
+    });
+
+    it('updateData rejects oversized job data', async () => {
+      const job = new Job(mockClient as any, keys, '1', 'test', {}, {});
+      const oversized = { data: 'x'.repeat(MAX_JOB_DATA_SIZE) };
+      await expect(job.updateData(oversized)).rejects.toThrow('Job data exceeds maximum size');
+    });
+
+    it('log enforces byte length not character count', async () => {
+      const job = new Job(mockClient as any, keys, '1', 'test', {}, {});
+      // Multi-byte chars: each is 3 bytes in UTF-8
+      // Use enough chars that char count < limit but byte count > limit
+      const multiByteChar = '\u4e16'; // 3 bytes in UTF-8
+      const count = Math.ceil(MAX_JOB_DATA_SIZE / 3) + 1;
+      const oversized = multiByteChar.repeat(count);
+      expect(oversized.length).toBeLessThan(MAX_JOB_DATA_SIZE * 2);
+      expect(Buffer.byteLength(oversized, 'utf8')).toBeGreaterThan(MAX_JOB_DATA_SIZE);
+      await expect(job.log(oversized)).rejects.toThrow('Log message exceeds maximum size');
     });
   });
 });

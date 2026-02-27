@@ -204,9 +204,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
         // Payload size validation - prevent DoS via oversized jobs
         let serialized = JSON.stringify(data);
-        if (serialized.length > MAX_JOB_DATA_SIZE) {
+        const byteLen = Buffer.byteLength(serialized, 'utf8');
+        if (byteLen > MAX_JOB_DATA_SIZE) {
           throw new Error(
-            `Job data exceeds maximum size (${serialized.length} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
+            `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
           );
         }
 
@@ -307,6 +308,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const deduplication = opts.deduplication;
 
       let serializedData = JSON.stringify(entry.data);
+      const byteLen = Buffer.byteLength(serializedData, 'utf8');
+      if (byteLen > MAX_JOB_DATA_SIZE) {
+        throw new Error(
+          `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
+        );
+      }
       if (this.opts.compression === 'gzip') {
         serializedData = compress(serializedData);
       }
