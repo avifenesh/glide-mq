@@ -10,6 +10,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.1] - 2026-02-27
+
+### Security
+
+- Reject invalid cron patterns: zero step (`*/0`), out-of-bounds values, reversed ranges, malformed tokens (#56).
+- Enforce 1MB payload limit on job data, progress, and logs using `Buffer.byteLength` for correct UTF-8 byte counting. Covers `add`, `addBulk`, `updateData`, `updateProgress`, and `log` (#61).
+- Fix path leak in sandbox error messages (#54).
+
+### Performance
+
+- Hierarchical cron search replacing brute-force minute iteration - 4400x speedup for yearly schedules. UTC-correct date handling, 10-year search horizon (#59).
+- Batch Redis commands in `Job.retry()` and `updateProgress()` (#53).
+
+### Added
+
+- Comprehensive local fuzzer with pre-push hook.
+
+### Docs
+
+- Dashboard section in README, feature map improvements (#57, #58).
+
+---
+
 ## [0.8.0] - 2026-02-23
 
 ### Added
