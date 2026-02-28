@@ -127,7 +127,7 @@ export function hashDataToRecord(
   hashData: { field?: unknown; key?: unknown; value: unknown }[] | null,
 ): Record<string, string> | null {
   if (!hashData || hashData.length === 0) return null;
-  const record: Record<string, string> = {};
+  const record: Record<string, string> = Object.create(null);
   for (const entry of hashData) {
     // Batch hgetall returns {key, value}; direct hgetall returns {field, value}
     const k = entry.field ?? entry.key;

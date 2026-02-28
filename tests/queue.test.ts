@@ -379,9 +379,7 @@ describe('Queue', () => {
       mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION);
       const queue = new Queue('test-queue', connOpts);
       const oversized = { data: 'x'.repeat(MAX_JOB_DATA_SIZE) };
-      await expect(
-        queue.addBulk([{ name: 'test', data: oversized }]),
-      ).rejects.toThrow('Job data exceeds maximum size');
+      await expect(queue.addBulk([{ name: 'test', data: oversized }])).rejects.toThrow('Job data exceeds maximum size');
     });
 
     it('add enforces byte length not character count', async () => {
