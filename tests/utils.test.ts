@@ -1,5 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { nextCronOccurrence } from '../src/utils';
+import { gzipSync } from 'zlib';
+import { nextCronOccurrence, decompress, MAX_JOB_DATA_SIZE } from '../src/utils';
+
+describe('decompress', () => {
+  it('rejects decompression bombs exceeding MAX_JOB_DATA_SIZE', () => {
+    const huge = Buffer.alloc(MAX_JOB_DATA_SIZE + 1, 0x41);
+    const compressed = gzipSync(huge);
+    const payload = 'gz:' + compressed.toString('base64');
+    expect(() => decompress(payload)).toThrow();
+  });
+});
 
 describe('nextCronOccurrence', () => {
   // --- Input validation (from #56) ---
