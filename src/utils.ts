@@ -28,7 +28,7 @@ export function decompress(data: string): string {
     return data;
   }
   const buf = Buffer.from(data.slice(COMPRESSED_PREFIX.length), 'base64');
-  return gunzipSync(buf).toString('utf8');
+  return gunzipSync(buf, { maxOutputLength: MAX_JOB_DATA_SIZE }).toString('utf8');
 }
 
 // Valkey SCAN glob special characters that must be escaped in key patterns
