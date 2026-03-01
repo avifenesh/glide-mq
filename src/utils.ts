@@ -127,8 +127,9 @@ export function hashDataToRecord(
   hashData: { field?: unknown; key?: unknown; value: unknown }[] | null,
 ): Record<string, string> | null {
   if (!hashData || hashData.length === 0) return null;
-  const record: Record<string, string> = {};
-  for (const entry of hashData) {
+  const record: Record<string, string> = Object.create(null);
+  for (let i = 0; i < hashData.length; i++) {
+    const entry = hashData[i];
     // Batch hgetall returns {key, value}; direct hgetall returns {field, value}
     const k = entry.field ?? entry.key;
     if (k == null) continue;
@@ -145,8 +146,12 @@ export function hashDataToRecord(
  */
 export function extractJobIdsFromStreamEntries(entries: Record<string, [unknown, unknown][]>): string[] {
   const jobIds: string[] = [];
-  for (const fieldPairs of Object.values(entries)) {
-    for (const [field, value] of fieldPairs) {
+  for (const entryId in entries) {
+    if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
+    const fieldPairs = entries[entryId];
+    for (let i = 0; i < fieldPairs.length; i++) {
+      const field = fieldPairs[i][0];
+      const value = fieldPairs[i][1];
       if (String(field) === 'jobId') {
         jobIds.push(String(value));
       }

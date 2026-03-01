@@ -339,12 +339,16 @@ export class Worker<D = any, R = any> extends EventEmitter {
     // i.e. { key, value }[] where value is Record<entryId, fieldPairs | null>
     for (const streamEntry of result) {
       const entries = streamEntry.value;
-      for (const [entryId, fieldPairs] of Object.entries(entries)) {
+      for (const entryId in entries) {
+        if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
+        const fieldPairs = entries[entryId];
         if (!fieldPairs) continue; // deleted entry
 
         // Parse the stream entry fields to extract jobId
         let jobId: string | null = null;
-        for (const [field, value] of fieldPairs) {
+        for (let i = 0; i < fieldPairs.length; i++) {
+          const field = fieldPairs[i][0];
+          const value = fieldPairs[i][1];
           if (String(field) === 'jobId') {
             jobId = String(value);
             break;
