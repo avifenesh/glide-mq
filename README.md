@@ -76,9 +76,16 @@ Gzip compression: **98% payload reduction** on 15 KB payloads.
 
 *Valkey 8.0, single node, no-op processor. Run `npm run bench` to reproduce.*
 
-## Dashboard
+## Ecosystem
 
-[`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) - web UI for monitoring and managing queues in real time.
+| Package | Description |
+|---------|-------------|
+| **glide-mq** | Core queue library (you are here) |
+| [`@glidemq/hono`](https://github.com/avifenesh/glidemq-hono) | Hono middleware - REST API + SSE events for queue management |
+| [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) | Express middleware - web UI for monitoring and managing queues |
+| [`@glidemq/speedkey`](https://github.com/avifenesh/speedkey) | Valkey GLIDE client with native NAPI bindings |
+
+### Dashboard
 
 ```bash
 npm install @glidemq/dashboard
@@ -93,7 +100,29 @@ app.use('/dashboard', createDashboard([queue1, queue2], {
 }));
 ```
 
-Workers, job schedulers, DLQ, metrics, search, bulk actions (drain, retry, clean) - all from the browser. See the [dashboard repo](https://github.com/avifenesh/glidemq-dashboard) for full docs.
+Workers, job schedulers, DLQ, metrics, search, bulk actions (drain, retry, clean) - all from the browser.
+
+### Hono
+
+```bash
+npm install @glidemq/hono glide-mq hono
+```
+
+```typescript
+import { Hono } from 'hono';
+import { glideMQ, glideMQApi } from '@glidemq/hono';
+
+const app = new Hono();
+
+app.use(glideMQ({
+  connection: { addresses: [{ host: 'localhost', port: 6379 }] },
+  queues: { emails: { processor: processEmail, concurrency: 5 } },
+}));
+
+app.route('/api/queues', glideMQApi());
+```
+
+11 REST endpoints + SSE events, type-safe RPC client, optional Zod validation, in-memory testing mode.
 
 ## Documentation
 
