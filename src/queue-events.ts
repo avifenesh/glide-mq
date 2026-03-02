@@ -125,7 +125,7 @@ export class QueueEvents extends EventEmitter {
         const fieldPairs = entries[entryId];
         if (!fieldPairs) continue;
 
-        // Extract event type and payload from field pairs
+        // Parse field pairs into a map
         let eventType: string | undefined;
         const payload: Record<string, string> = {};
 
