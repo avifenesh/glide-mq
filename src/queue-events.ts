@@ -115,26 +115,32 @@ export class QueueEvents extends EventEmitter {
 
     // result: GlideRecord<StreamEntryDataType>
     // i.e. { key, value }[] where value = Record<entryId, [GlideString, GlideString][]>
-    for (const streamEntry of result) {
+    for (let i = 0; i < result.length; i++) {
+      const streamEntry = result[i];
       const entries = streamEntry.value;
-      for (const [entryId, fieldPairs] of Object.entries(entries)) {
+
+      for (const entryId in entries) {
+        if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
+
+        const fieldPairs = entries[entryId];
         if (!fieldPairs) continue;
 
-        // Parse field pairs into a map
-        const fields: Record<string, string> = {};
-        for (const [f, v] of fieldPairs) {
-          fields[String(f)] = String(v);
+        // Extract event type and payload from field pairs
+        let eventType: string | undefined;
+        const payload: Record<string, string> = Object.create(null);
+
+        for (let j = 0; j < fieldPairs.length; j++) {
+          const field = String(fieldPairs[j][0]);
+          const value = String(fieldPairs[j][1]);
+
+          if (field === 'event') {
+            eventType = value;
+          } else {
+            payload[field] = value;
+          }
         }
 
-        const eventType = fields.event;
         if (!eventType) continue;
-
-        // Build the event payload: always include jobId, plus any extra fields
-        const payload: Record<string, string> = {};
-        for (const [key, value] of Object.entries(fields)) {
-          if (key === 'event') continue; // don't include the event type in payload
-          payload[key] = value;
-        }
 
         this.emit(eventType, payload);
 
