@@ -127,7 +127,7 @@ export class QueueEvents extends EventEmitter {
 
         // Parse field pairs into a map
         let eventType: string | undefined;
-        const payload: Record<string, string> = {};
+        const payload: Record<string, string> = Object.create(null);
 
         for (let j = 0; j < fieldPairs.length; j++) {
           const field = String(fieldPairs[j][0]);
