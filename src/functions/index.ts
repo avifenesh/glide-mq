@@ -2313,7 +2313,7 @@ export async function completeAndFetchNext(
 
   // Parse the HGETALL array into a hash map
   const arr = parsed.next as string[];
-  const hash: Record<string, string> = {};
+  const hash: Record<string, string> = Object.create(null);
   for (let i = 0; i < arr.length; i += 2) {
     hash[String(arr[i])] = String(arr[i + 1]);
   }
@@ -2474,7 +2474,7 @@ export async function moveToActive(
   if (str === 'ERR:COST_EXCEEDS_CAPACITY') return 'ERR:COST_EXCEEDS_CAPACITY';
   // Parse the cjson.encode output: [field1, value1, field2, value2, ...]
   const arr = JSON.parse(str) as string[];
-  const hash: Record<string, string> = {};
+  const hash: Record<string, string> = Object.create(null);
   for (let i = 0; i < arr.length; i += 2) {
     hash[String(arr[i])] = String(arr[i + 1]);
   }

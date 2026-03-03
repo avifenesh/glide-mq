@@ -140,7 +140,7 @@ export class Scheduler {
 
     // Collect operations to batch into a single pipeline
     const pendingJobs: { keys: string[]; args: string[] }[] = [];
-    const pendingUpdates: Record<string, string> = {};
+    const pendingUpdates: Record<string, string> = Object.create(null);
     const pendingDeletions: string[] = [];
 
     let fired = 0;

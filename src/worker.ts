@@ -60,7 +60,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private maxStalledCount: number;
   private lockDuration: number;
   private heartbeatIntervals: Map<string, ReturnType<typeof setInterval>> = new Map();
-  private xreadStreams: Record<string, string> = {};
+  private xreadStreams: Record<string, string> = Object.create(null);
   private globalConcurrencyEnabled = false;
   private globalRateLimitEnabled = false;
   private cachedRateLimitMax = 0;
