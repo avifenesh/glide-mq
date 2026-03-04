@@ -133,7 +133,7 @@ export class Job<D = any, R = any> {
   async getChildrenValues(): Promise<Record<string, R>> {
     const depsKey = this.queueKeys.deps(this.id);
     const members = await this.client.smembers(depsKey);
-    const result: Record<string, R> = Object.create(null);
+    const result: Record<string, R> = {};
     if (!members || members.size === 0) return result;
 
     const isCluster = isClusterClient(this.client);
@@ -164,7 +164,13 @@ export class Job<D = any, R = any> {
       for (let i = 0; i < results.length; i++) {
         const val = results[i];
         if (val != null) {
-          result[memberKeys[i]] = JSON.parse(String(val));
+          // Define keys explicitly so magic keys like "__proto__" stay data properties.
+          Object.defineProperty(result, memberKeys[i], {
+            value: JSON.parse(String(val)),
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          });
         }
       }
     }
