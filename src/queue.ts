@@ -913,7 +913,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     // Fetch full job objects
     const jobs: Job<D, R>[] = [];
     // ⚡ Bolt: Fix N+1 query by batching hgetall calls instead of awaiting them in a loop.
-    // Chunking ensures we only load what we need, properly satisfying the limit after filtering.
+    // Chunking bounds each pipeline size; returned jobs are still capped by `limit` after filtering.
     const CHUNK = 100;
     for (let offset = 0; offset < jobIds.length && jobs.length < limit; offset += CHUNK) {
       const chunk = jobIds.slice(offset, offset + CHUNK);
@@ -921,11 +921,13 @@ export class Queue<D = any, R = any> extends EventEmitter {
       for (const id of chunk) {
         (batch as any).hgetall(this.keys.job(id));
       }
-      const batchResults = await client.exec(batch as any, false);
+      const batchResults = this.clusterMode
+        ? await (client as GlideClusterClient).exec(batch as ClusterBatch, false)
+        : await (client as GlideClient).exec(batch as Batch, false);
       if (!batchResults) continue;
 
       for (let i = 0; i < chunk.length && jobs.length < limit; i++) {
-        const hash = hashDataToRecord(batchResults[i] as any);
+        const hash = hashDataToRecord(batchResults[i] as { field?: unknown; key?: unknown; value: unknown }[] | null);
         if (!hash) continue;
 
         const job = Job.fromHash<D, R>(client, this.keys, chunk[i], hash);
