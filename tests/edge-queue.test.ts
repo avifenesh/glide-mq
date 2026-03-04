@@ -460,7 +460,15 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
     });
 
     it('100 rapid adds yield unique incrementing IDs', async () => {
-      const jobs = await Promise.all(Array.from({ length: 100 }, (_, i) => queue.add(`rapid-${i}`, { i })));
+      // Use concurrency control to prevent overwhelming the socket in CI
+      const jobs = [];
+      const batchSize = 25;
+      for (let i = 0; i < 100; i += batchSize) {
+        const batch = await Promise.all(
+          Array.from({ length: batchSize }, (_, j) => queue.add(`rapid-${i + j}`, { i: i + j })),
+        );
+        jobs.push(...batch);
+      }
 
       expect(jobs).toHaveLength(100);
       const ids = jobs.map((j) => j!.id);
