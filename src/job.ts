@@ -133,7 +133,7 @@ export class Job<D = any, R = any> {
   async getChildrenValues(): Promise<Record<string, R>> {
     const depsKey = this.queueKeys.deps(this.id);
     const members = await this.client.smembers(depsKey);
-    const result: Record<string, R> = {};
+    const result: Record<string, R> = Object.create(null);
     if (!members || members.size === 0) return result;
 
     const isCluster = isClusterClient(this.client);
