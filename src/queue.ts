@@ -912,7 +912,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     // Fetch full job objects
     const jobs: Job<D, R>[] = [];
-    // ⚡ Bolt: Fix N+1 query by batching hgetall calls instead of awaiting them in a loop.
+    // Fix N+1 query by batching hgetall calls instead of awaiting them in a loop.
     // Chunking bounds each pipeline size; returned jobs are still capped by `limit` after filtering.
     const CHUNK = 100;
     for (let offset = 0; offset < jobIds.length && jobs.length < limit; offset += CHUNK) {
