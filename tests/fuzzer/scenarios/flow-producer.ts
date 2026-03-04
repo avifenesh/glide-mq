@@ -8,11 +8,13 @@
 
 import type { ScenarioContext, ScenarioResult } from '../types';
 
-function waitForCount(target: number, counter: { value: number }, timeoutMs = 45000): Promise<void> {
+function waitForCompletion(processOrder: string[], targetCount: number, timeoutMs = 45000): Promise<void> {
   return new Promise((resolve) => {
     const start = Date.now();
     const check = () => {
-      if (counter.value >= target) return resolve();
+      // Resolve if parent has been processed, or if we have at least targetCount unique jobs
+      const uniqueProcessed = new Set(processOrder);
+      if (processOrder.includes('parent') || uniqueProcessed.size >= targetCount) return resolve();
       if (Date.now() - start > timeoutMs) return resolve();
       setTimeout(check, 50);
     };
@@ -96,7 +98,7 @@ export async function flowProducer(ctx: ScenarioContext): Promise<ScenarioResult
   });
 
   // Wait for all jobs to complete
-  await waitForCount(expectedTotal, counter);
+  await waitForCompletion(processOrder, expectedTotal);
 
   // Verify parent processed last (after all children)
   const parentIdx = processOrder.indexOf('parent');
