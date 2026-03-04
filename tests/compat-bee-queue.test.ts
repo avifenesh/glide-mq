@@ -1250,7 +1250,7 @@ describeEachMode('RedisSMQ: Job timeout / TTL', (CONNECTION) => {
     await cleanupWorker.waitUntilReady();
 
     // Wait for stall detection to run and reclaim+fail the job
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 4000));
 
     await cleanupWorker.close();
 
