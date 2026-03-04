@@ -8,7 +8,8 @@
 
 import type { ScenarioContext, ScenarioResult } from '../types';
 
-function waitForCompletion(processOrder: string[], targetCount: number, timeoutMs = 45000): Promise<void> {
+// Keep per-scenario waiting below the global round timeout (30s).
+function waitForCompletion(processOrder: string[], targetCount: number, timeoutMs = 25000): Promise<void> {
   return new Promise((resolve) => {
     const start = Date.now();
     const check = () => {
