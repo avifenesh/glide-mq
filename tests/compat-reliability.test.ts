@@ -28,10 +28,12 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
   });
 
   afterAll(async () => {
-    for (const q of localQueues) {
-      await flushQueue(cleanupClient, q);
+    if (cleanupClient) {
+      for (const q of localQueues) {
+        await flushQueue(cleanupClient, q);
+      }
+      cleanupClient.close();
     }
-    cleanupClient.close();
   });
 
   function uniqueQueue(prefix: string): string {
@@ -280,10 +282,12 @@ describeEachMode('Retry exhaustion', (CONNECTION) => {
   });
 
   afterAll(async () => {
-    for (const q of localQueues) {
-      await flushQueue(cleanupClient, q);
+    if (cleanupClient) {
+      for (const q of localQueues) {
+        await flushQueue(cleanupClient, q);
+      }
+      cleanupClient.close();
     }
-    cleanupClient.close();
   });
 
   function uniqueQueue(prefix: string): string {
@@ -553,10 +557,12 @@ describeEachMode('Graceful shutdown', (CONNECTION) => {
   });
 
   afterAll(async () => {
-    for (const q of localQueues) {
-      await flushQueue(cleanupClient, q);
+    if (cleanupClient) {
+      for (const q of localQueues) {
+        await flushQueue(cleanupClient, q);
+      }
+      cleanupClient.close();
     }
-    cleanupClient.close();
   });
 
   function uniqueQueue(prefix: string): string {
@@ -757,10 +763,12 @@ describeEachMode('Operational patterns', (CONNECTION) => {
   });
 
   afterAll(async () => {
-    for (const q of localQueues) {
-      await flushQueue(cleanupClient, q);
+    if (cleanupClient) {
+      for (const q of localQueues) {
+        await flushQueue(cleanupClient, q);
+      }
+      cleanupClient.close();
     }
-    cleanupClient.close();
   });
 
   function uniqueQueue(prefix: string): string {
@@ -982,10 +990,12 @@ describeEachMode('Memory and resource management', (CONNECTION) => {
   });
 
   afterAll(async () => {
-    for (const q of localQueues) {
-      await flushQueue(cleanupClient, q);
+    if (cleanupClient) {
+      for (const q of localQueues) {
+        await flushQueue(cleanupClient, q);
+      }
+      cleanupClient.close();
     }
-    cleanupClient.close();
   });
 
   function uniqueQueue(prefix: string): string {
