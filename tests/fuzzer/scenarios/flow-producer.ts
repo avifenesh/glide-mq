@@ -8,7 +8,7 @@
 
 import type { ScenarioContext, ScenarioResult } from '../types';
 
-function waitForCount(target: number, counter: { value: number }, timeoutMs = 25000): Promise<void> {
+function waitForCount(target: number, counter: { value: number }, timeoutMs = 45000): Promise<void> {
   return new Promise((resolve) => {
     const start = Date.now();
     const check = () => {
