@@ -927,7 +927,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
       if (!batchResults) continue;
 
       for (let i = 0; i < chunk.length && jobs.length < limit; i++) {
-        const hash = hashDataToRecord(batchResults[i] as { field?: unknown; key?: unknown; value: unknown }[] | null);
+        const rawHash = batchResults[i] as unknown;
+        if (rawHash != null && !Array.isArray(rawHash)) {
+          throw new GlideMQError(`searchJobs failed to fetch hash for job ${chunk[i]}`);
+        }
+        const hash = hashDataToRecord(rawHash as { field?: unknown; key?: unknown; value: unknown }[] | null);
         if (!hash) continue;
 
         const job = Job.fromHash<D, R>(client, this.keys, chunk[i], hash);
