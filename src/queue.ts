@@ -929,7 +929,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
       for (let i = 0; i < chunk.length && jobs.length < limit; i++) {
         const rawHash = batchResults[i] as unknown;
         if (rawHash != null && !Array.isArray(rawHash)) {
-          throw new GlideMQError(`searchJobs failed to fetch hash for job ${chunk[i]}`);
+          const rawDetail = rawHash instanceof Error ? rawHash.message : String(rawHash);
+          throw new GlideMQError(
+            `searchJobs failed to fetch hash for job ${chunk[i]}: unexpected HGETALL result ${rawDetail}`,
+          );
         }
         const hash = hashDataToRecord(rawHash as { field?: unknown; key?: unknown; value: unknown }[] | null);
         if (!hash) continue;
