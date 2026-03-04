@@ -134,7 +134,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
     this.blockingClient = await createBlockingClient(this.opts.connection!);
 
-    this.xreadStreams = { [this.queueKeys.stream]: '>' };
+    this.xreadStreams = Object.create(null);
+    this.xreadStreams[this.queueKeys.stream] = '>';
 
     // Create consumer group on the stream (idempotent)
     await createConsumerGroup(this.commandClient, this.queueKeys.stream, CONSUMER_GROUP);
