@@ -912,18 +912,32 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     // Fetch full job objects
     const jobs: Job<D, R>[] = [];
-    for (const id of jobIds) {
-      if (jobs.length >= limit) break;
-      const job = await this.getJob(id);
-      if (!job) continue;
+    // ⚡ Bolt: Fix N+1 query by batching hgetall calls instead of awaiting them in a loop.
+    // Chunking ensures we only load what we need, properly satisfying the limit after filtering.
+    const CHUNK = 100;
+    for (let offset = 0; offset < jobIds.length && jobs.length < limit; offset += CHUNK) {
+      const chunk = jobIds.slice(offset, offset + CHUNK);
+      const batch = this.newBatch();
+      for (const id of chunk) {
+        (batch as any).hgetall(this.keys.job(id));
+      }
+      const batchResults = await client.exec(batch as any, false);
+      if (!batchResults) continue;
 
-      // Apply name filter if we used a non-Lua path
-      if (opts.name && !opts.state && job.name !== opts.name) continue;
+      for (let i = 0; i < chunk.length && jobs.length < limit; i++) {
+        const hash = hashDataToRecord(batchResults[i] as any);
+        if (!hash) continue;
 
-      // Apply data filter (shallow key-value match)
-      if (opts.data && !matchesData(job.data as Record<string, unknown>, opts.data)) continue;
+        const job = Job.fromHash<D, R>(client, this.keys, chunk[i], hash);
 
-      jobs.push(job);
+        // Apply name filter if we used a non-Lua path
+        if (opts.name && !opts.state && job.name !== opts.name) continue;
+
+        // Apply data filter (shallow key-value match)
+        if (opts.data && !matchesData(job.data as Record<string, unknown>, opts.data)) continue;
+
+        jobs.push(job);
+      }
     }
 
     return jobs;
