@@ -651,6 +651,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
         await this.deferOutOfOrderJob(currentJobId, currentEntryId);
         return;
       }
+      const completionHints = {
+        orderingKey: job.orderingKey,
+        orderingSeq: job.orderingSeq,
+        groupKey: job.groupKey,
+      };
 
       this.isDrained = false;
       this.emit('active', job, currentJobId);
@@ -702,11 +707,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
         this.consumerId,
         job.opts.removeOnComplete,
         parentInfo,
-        {
-          orderingKey: job.orderingKey,
-          orderingSeq: job.orderingSeq,
-          groupKey: job.groupKey,
-        },
+        completionHints,
       );
 
       job.returnvalue = processResult;

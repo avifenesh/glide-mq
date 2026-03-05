@@ -168,7 +168,12 @@ describe('Worker', () => {
   });
 
   it('should process a job and call completeAndFetchNext on success (c=1)', async () => {
-    const processor = vi.fn().mockResolvedValue({ result: 42 });
+    const processor = vi.fn().mockImplementation(async (job: any) => {
+      job.orderingKey = 'mutated-ordering-key';
+      job.orderingSeq = 99;
+      job.groupKey = 'mutated-group';
+      return { result: 42 };
+    });
 
     // Return one message from xreadgroup, then block forever
     let xreadCalls = 0;
