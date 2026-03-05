@@ -9,7 +9,17 @@
 import { EventEmitter } from 'events';
 import path from 'path';
 import os from 'os';
-import type { JobOptions, JobCounts, Processor, WorkerInfo, SchedulerEntry, ScheduleOpts, JobTemplate } from './types';
+import type {
+  JobOptions,
+  JobCounts,
+  Processor,
+  WorkerInfo,
+  SchedulerEntry,
+  ScheduleOpts,
+  JobTemplate,
+  Serializer,
+} from './types';
+import { JSON_SERIALIZER } from './types';
 import { GlideMQError, UnrecoverableError } from './errors';
 import { nextCronOccurrence, validateTimezone } from './utils';
 
@@ -121,6 +131,8 @@ function matchesData(data: Record<string, unknown>, filter: Record<string, unkno
 export interface TestQueueOptions {
   /** Enable deduplication in 'simple' mode. */
   dedup?: boolean;
+  /** Custom serializer for job data. When provided, data is roundtripped through serialize/deserialize to match production behavior. */
+  serializer?: Serializer;
 }
 
 export class TestQueue<D = any, R = any> extends EventEmitter {
@@ -130,6 +142,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private idCounter = 0;
   private paused = false;
   private opts: TestQueueOptions;
+  private serializer: Serializer;
 
   /** Workers register themselves here so we can notify on add. */
   /** @internal */ readonly workers: Set<TestWorker<D, R>> = new Set();
@@ -139,6 +152,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     super();
     this.name = name;
     this.opts = opts ?? {};
+    this.serializer = this.opts.serializer ?? JSON_SERIALIZER;
   }
 
   /** Add a single job. Returns null if deduplicated. */
@@ -154,10 +168,12 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     const id = String(++this.idCounter);
     const now = Date.now();
     const ttl = opts?.ttl ?? 0;
+    // Roundtrip data through serializer to match production behavior
+    const roundtrippedData = this.serializer.deserialize(this.serializer.serialize(data)) as D;
     const record: TestJobRecord<D, R> = {
       id,
       name,
-      data,
+      data: roundtrippedData,
       opts: opts ?? {},
       state: 'waiting',
       attemptsMade: 0,

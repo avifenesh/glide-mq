@@ -31,7 +31,10 @@ export type {
   SandboxOptions,
   SearchJobsOptions,
   WorkerInfo,
+  Serializer,
 } from './types';
+
+export { JSON_SERIALIZER } from './types';
 
 export { GlideMQError, ConnectionError, UnrecoverableError } from './errors';
 export { isClusterClient } from './connection';

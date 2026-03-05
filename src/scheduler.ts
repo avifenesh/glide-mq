@@ -1,5 +1,6 @@
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
-import type { Client, SchedulerEntry } from './types';
+import type { Client, SchedulerEntry, Serializer } from './types';
+import { JSON_SERIALIZER } from './types';
 import { CONSUMER_GROUP, promote, promoteRateLimited, reclaimStalled, addJobArgs, nextDueAt } from './functions/index';
 import type { buildKeys } from './utils';
 import { nextCronOccurrence } from './utils';
@@ -14,6 +15,8 @@ export interface SchedulerOptions {
   queuePrefix?: string;
   /** Called at the end of each promotion tick to refresh cached meta flags. */
   onPromotionTick?: () => void;
+  /** Serializer for job template data. Inherited from the parent Worker/Queue. */
+  serializer?: Serializer;
 }
 
 /**
@@ -32,6 +35,7 @@ export class Scheduler {
   private maxStalledCount: number;
   private consumerId: string;
   private onPromotionTick?: () => void;
+  private serializer: Serializer;
   private promotionTimer: ReturnType<typeof setInterval> | null = null;
   private promotionWakeTimer: ReturnType<typeof setTimeout> | null = null;
   private nextPromotionWakeAt = 0;
@@ -48,6 +52,7 @@ export class Scheduler {
     this.maxStalledCount = opts.maxStalledCount ?? 1;
     this.consumerId = opts.consumerId ?? 'scheduler';
     this.onPromotionTick = opts.onPromotionTick;
+    this.serializer = opts.serializer ?? JSON_SERIALIZER;
   }
 
   start(): void {
@@ -228,7 +233,7 @@ export class Scheduler {
       // Compute the job name and data from the template
       const template = config.template ?? {};
       const jobName = template.name ?? schedulerName;
-      const jobData = template.data !== undefined ? JSON.stringify(template.data) : '{}';
+      const jobData = template.data !== undefined ? this.serializer.serialize(template.data) : '{}';
       const jobOpts = template.opts ? JSON.stringify(template.opts) : '{}';
       const priority = template.opts?.priority ?? 0;
       const maxAttempts = template.opts?.attempts ?? 0;
