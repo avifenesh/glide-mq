@@ -32,7 +32,6 @@ interface Adapter {
   waitUntilReady: (worker: any) => Promise<void>;
   closeWorker: (worker: any) => Promise<void>;
   closeQueue: (queue: any) => Promise<void>;
-  jobId: (job: any) => string;
 }
 
 interface RoundResult {
@@ -95,9 +94,6 @@ const glideAdapter: Adapter = {
   closeQueue(queue: any): Promise<void> {
     return queue.close();
   },
-  jobId(job: any): string {
-    return String(job.id);
-  },
 };
 
 const bullAdapter: Adapter = {
@@ -127,12 +123,10 @@ const bullAdapter: Adapter = {
   closeQueue(queue: any): Promise<void> {
     return queue.close();
   },
-  jobId(job: any): string {
-    return String(job.id);
-  },
 };
 
 const ADAPTERS: Adapter[] = [glideAdapter, bullAdapter];
+const LIBRARIES = ADAPTERS.map((adapter) => adapter.name) as LibraryName[];
 
 function median(values: number[]): number {
   if (values.length === 0) return 0;
@@ -159,14 +153,30 @@ async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boo
   return predicate();
 }
 
+function subtractOverhead(
+  rawDelta: ReturnType<typeof diffRedisStats>,
+  overheadDelta: ReturnType<typeof diffRedisStats>,
+) {
+  return {
+    keyspaceHits: Math.max(0, rawDelta.keyspaceHits - overheadDelta.keyspaceHits),
+    keyspaceMisses: Math.max(0, rawDelta.keyspaceMisses - overheadDelta.keyspaceMisses),
+    totalCommands: Math.max(0, rawDelta.totalCommands - overheadDelta.totalCommands),
+    evictedKeys: Math.max(0, rawDelta.evictedKeys - overheadDelta.evictedKeys),
+    expiredKeys: Math.max(0, rawDelta.expiredKeys - overheadDelta.expiredKeys),
+    usedCpuUser: Math.max(0, rawDelta.usedCpuUser - overheadDelta.usedCpuUser),
+    usedCpuSys: Math.max(0, rawDelta.usedCpuSys - overheadDelta.usedCpuSys),
+  };
+}
+
 async function runRound(adapter: Adapter, round: number): Promise<RoundResult> {
   const queueName = `bench-ci-${adapter.name}-r${round}-${Date.now()}`;
   const payload = 'x'.repeat(PAYLOAD_BYTES);
 
   const addLatenciesMs: number[] = [];
   const e2eLatenciesMs: number[] = [];
-  const enqueuedAt = new Map<string, number>();
+  const enqueuedAt = new Map<number, number>();
   let completed = 0;
+  let workerErrorMessage: string | null = null;
 
   let queue: any;
   let worker: any;
@@ -180,29 +190,39 @@ async function runRound(adapter: Adapter, round: number): Promise<RoundResult> {
 
     worker.on('completed', (job: any) => {
       completed++;
-      const id = adapter.jobId(job);
-      const queuedAt = enqueuedAt.get(id);
+      const token = Number(job?.data?.token);
+      const queuedAt = Number.isFinite(token) ? enqueuedAt.get(token) : undefined;
       if (queuedAt != null) {
-        e2eLatenciesMs.push(Date.now() - queuedAt);
-        enqueuedAt.delete(id);
+        e2eLatenciesMs.push(performance.now() - queuedAt);
+        enqueuedAt.delete(token);
       }
     });
-    worker.on('error', () => {});
+    worker.on('error', (err: unknown) => {
+      if (workerErrorMessage) return;
+      workerErrorMessage = err instanceof Error ? err.message : String(err);
+    });
 
     await adapter.waitUntilReady(worker);
     const startedAt = performance.now();
 
     for (let i = 0; i < JOBS; i++) {
       const addStarted = performance.now();
-      const id = await adapter.add(queue, 'ci', { i, payload });
+      enqueuedAt.set(i, addStarted);
+      await adapter.add(queue, 'ci', { i, token: i, payload });
       addLatenciesMs.push(performance.now() - addStarted);
-      enqueuedAt.set(id, Date.now());
     }
 
-    const drained = await waitFor(() => completed >= JOBS, TIMEOUT_MS);
+    const drained = await waitFor(() => completed >= JOBS || workerErrorMessage != null, TIMEOUT_MS);
+    if (workerErrorMessage) {
+      throw new Error(`[${adapter.name}] worker error: ${workerErrorMessage}`);
+    }
+
     const elapsedMs = performance.now() - startedAt;
-    const afterStats = await readRedisStats();
-    const redisDelta = diffRedisStats(beforeStats, afterStats);
+    const afterStatsWorkload = await readRedisStats();
+    const afterStatsOverhead = await readRedisStats();
+    const rawRedisDelta = diffRedisStats(beforeStats, afterStatsWorkload);
+    const overheadDelta = diffRedisStats(afterStatsWorkload, afterStatsOverhead);
+    const redisDelta = subtractOverhead(rawRedisDelta, overheadDelta);
 
     const keyspaceTotal = redisDelta.keyspaceHits + redisDelta.keyspaceMisses;
     const missRatePct = keyspaceTotal === 0 ? 0 : (redisDelta.keyspaceMisses / keyspaceTotal) * 100;
@@ -244,16 +264,18 @@ async function runRound(adapter: Adapter, round: number): Promise<RoundResult> {
 }
 
 function flattenRows(rows: Record<LibraryName, RoundResult[]>): RoundResult[] {
-  return [...rows['glide-mq'], ...rows['bullmq']].sort((a, b) => {
-    if (a.round !== b.round) return a.round - b.round;
-    return a.library.localeCompare(b.library);
-  });
+  return Object.values(rows)
+    .flat()
+    .sort((a, b) => {
+      if (a.round !== b.round) return a.round - b.round;
+      return a.library.localeCompare(b.library);
+    });
 }
 
 function summarize(rows: Record<LibraryName, RoundResult[]>): Record<LibraryName, RoundResult> {
   const out = {} as Record<LibraryName, RoundResult>;
 
-  for (const lib of ['glide-mq', 'bullmq'] as LibraryName[]) {
+  for (const lib of LIBRARIES) {
     const runRows = rows[lib];
     if (runRows.length === 0) {
       throw new Error(`No benchmark rows for ${lib}`);
@@ -341,7 +363,7 @@ export async function runCIFriendly(): Promise<void> {
       'Evicted',
       'Expired',
     ],
-    (['glide-mq', 'bullmq'] as LibraryName[]).map((lib) => [
+    LIBRARIES.map((lib) => [
       lib,
       `${fmt(baseline[lib].throughput)} j/s`,
       fmtMs(baseline[lib].addP95),

@@ -5,7 +5,21 @@
 import Redis from 'ioredis';
 
 const BENCH_HOST = process.env.BENCH_HOST || '127.0.0.1';
-const BENCH_PORT = Number(process.env.BENCH_PORT || 6379);
+
+function parseBenchPort(rawPort: string | undefined): number {
+  if (rawPort == null || rawPort === '') {
+    return 6379;
+  }
+
+  const parsedPort = Number.parseInt(rawPort, 10);
+  if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+    throw new Error(`Invalid BENCH_PORT "${rawPort}". Expected an integer between 1 and 65535.`);
+  }
+
+  return parsedPort;
+}
+
+const BENCH_PORT = parseBenchPort(process.env.BENCH_PORT);
 
 export interface RedisStatsSnapshot {
   keyspaceHits: number;
@@ -45,8 +59,12 @@ function parseInfoNumber(info: string, key: string): number {
 export async function flushDB(): Promise<void> {
   const client = new Redis({ host: BENCH_HOST, port: BENCH_PORT, lazyConnect: true });
   await client.connect();
-  await client.flushdb();
-  await client.quit();
+
+  try {
+    await client.flushdb();
+  } finally {
+    await client.quit();
+  }
 }
 
 /**
