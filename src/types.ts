@@ -74,7 +74,14 @@ export interface QueueOptions {
   deadLetterQueue?: DeadLetterQueueOptions;
   /** Enable transparent compression of job data. Default: 'none'. */
   compression?: 'none' | 'gzip';
-  /** Custom serializer for job data and return values. Default: JSON. */
+  /**
+   * Custom serializer for job data and return values. Default: JSON.
+   *
+   * **Important**: The same serializer must be used across all Queue, Worker,
+   * and FlowProducer instances that operate on the same queue. A mismatch
+   * causes silent data corruption - the consumer will see `{}` and the job's
+   * `deserializationFailed` flag will be `true`.
+   */
   serializer?: Serializer;
 }
 
@@ -156,6 +163,16 @@ export interface TokenBucketConfig {
   refillRate: number;
 }
 
+/**
+ * Custom serializer for job data and return values.
+ *
+ * Implementations must satisfy the roundtrip invariant:
+ * `deserialize(serialize(value))` must produce a value equivalent to `value`
+ * for all values the application stores in jobs.
+ *
+ * Both methods must be synchronous. If `serialize` throws, the job is treated
+ * as a processor failure (in Worker) or skipped (in Scheduler).
+ */
 export interface Serializer {
   /** Serialize a value to a string for storage in Valkey. */
   serialize(data: unknown): string;
@@ -192,7 +209,12 @@ export interface FlowProducerOptions {
    */
   client?: Client;
   prefix?: string;
-  /** Custom serializer for job data and return values. Default: JSON. */
+  /**
+   * Custom serializer for job data and return values. Default: JSON.
+   *
+   * **Important**: Must match the serializer used by the corresponding Queue
+   * and Worker. A mismatch causes silent data corruption.
+   */
   serializer?: Serializer;
 }
 

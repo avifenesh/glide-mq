@@ -41,6 +41,13 @@ export class Job<D = any, R = any> {
   discarded = false;
 
   /**
+   * Set to true when data or returnvalue could not be deserialized from Valkey.
+   * This typically indicates a serializer mismatch between the producer and consumer.
+   * When true, `data` is set to `{} as D` and `returnvalue` to `undefined`.
+   */
+  deserializationFailed = false;
+
+  /**
    * Stream entry ID assigned when the job was added to the stream.
    * Used by Worker to XACK after processing.
    * @internal
@@ -396,10 +403,12 @@ export class Job<D = any, R = any> {
     let data: D;
     let opts: JobOptions;
     let returnvalue: R | undefined;
+    let deserializationFailed = false;
     try {
-      data = s.deserialize(decompress(hash.data || '{}')) as D;
+      data = hash.data ? (s.deserialize(decompress(hash.data)) as D) : ({} as D);
     } catch {
       data = {} as D;
+      deserializationFailed = true;
     }
     try {
       opts = JSON.parse(hash.opts || '{}');
@@ -410,9 +419,11 @@ export class Job<D = any, R = any> {
       returnvalue = hash.returnvalue ? (s.deserialize(hash.returnvalue) as R) : undefined;
     } catch {
       returnvalue = undefined;
+      deserializationFailed = true;
     }
 
-    const job = new Job<D, R>(client, queueKeys, id, hash.name || '', data, opts, serializer);
+    const job = new Job<D, R>(client, queueKeys, id, hash.name || '', data, opts, s);
+    job.deserializationFailed = deserializationFailed;
     job.attemptsMade = parseInt(hash.attemptsMade || '0', 10);
     job.timestamp = parseInt(hash.timestamp || '0', 10);
     job.processedOn = hash.processedOn ? parseInt(hash.processedOn, 10) : undefined;
