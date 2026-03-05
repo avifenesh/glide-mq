@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '32';
+export const LIBRARY_VERSION = '33';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1322,6 +1322,9 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
   local orderingSeq = ''
   local groupKey = ''
   local costVal = ''
+  local stateValueIndex = nil
+  local processedOnValueIndex = nil
+  local lastActiveValueIndex = nil
   for f = 1, #fields, 2 do
     local field = fields[f]
     local value = fields[f + 1]
@@ -1339,6 +1342,13 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       groupKey = value
     elseif field == 'cost' then
       costVal = value
+    elseif field == 'processedOn' then
+      processedOnValueIndex = f + 1
+    elseif field == 'lastActive' then
+      lastActiveValueIndex = f + 1
+    end
+    if field == 'state' then
+      stateValueIndex = f + 1
     end
   end
   if revoked == '1' then
@@ -1450,12 +1460,24 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     redis.call('HINCRBY', groupHashKey, 'active', 1)
   end
   redis.call('HSET', jobKey, 'state', 'active', 'processedOn', timestampStr, 'lastActive', timestampStr)
-  fields[#fields + 1] = 'state'
-  fields[#fields + 1] = 'active'
-  fields[#fields + 1] = 'processedOn'
-  fields[#fields + 1] = timestampStr
-  fields[#fields + 1] = 'lastActive'
-  fields[#fields + 1] = timestampStr
+  if stateValueIndex ~= nil then
+    fields[stateValueIndex] = 'active'
+  else
+    fields[#fields + 1] = 'state'
+    fields[#fields + 1] = 'active'
+  end
+  if processedOnValueIndex ~= nil then
+    fields[processedOnValueIndex] = timestampStr
+  else
+    fields[#fields + 1] = 'processedOn'
+    fields[#fields + 1] = timestampStr
+  end
+  if lastActiveValueIndex ~= nil then
+    fields[lastActiveValueIndex] = timestampStr
+  else
+    fields[#fields + 1] = 'lastActive'
+    fields[#fields + 1] = timestampStr
+  end
   return fields
 end)
 
