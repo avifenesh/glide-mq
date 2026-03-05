@@ -138,8 +138,14 @@ describeEachMode('moveToActive hash reuse', (CONNECTION) => {
     const job = await queue.add('activate', { ok: true });
     const k = buildKeys(Q);
     const timestamp = 1234567890;
+    const entryId = '0-1';
+    const group = 'review-moveToActive-group';
 
-    const raw = await cleanupClient.fcall('glidemq_moveToActive', [k.job(job.id)], [timestamp.toString()]);
+    const raw = await cleanupClient.fcall(
+      'glidemq_moveToActive',
+      [k.job(job.id), k.stream],
+      [timestamp.toString(), entryId, group, job.id],
+    );
     expect(Array.isArray(raw)).toBe(true);
 
     const valuesByField = new Map<string, string[]>();

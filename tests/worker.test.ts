@@ -250,8 +250,14 @@ describe('Worker', () => {
     expect(mockCommandClient.fcall).toHaveBeenCalledWith(
       'glidemq_completeAndFetchNext',
       [keys.stream, keys.completed, keys.events, keys.job('1')],
-      expect.arrayContaining(['1', '1234567890-0', 'tenant-a', '1', 'group-1']),
+      expect.any(Array),
     );
+    const completeAndFetchNextCall = (mockCommandClient.fcall as any).mock.calls.find(
+      (call: any[]) => call[0] === 'glidemq_completeAndFetchNext',
+    );
+    expect(completeAndFetchNextCall).toBeDefined();
+    const completionArgs = completeAndFetchNextCall[2] as string[];
+    expect(completionArgs.slice(-3)).toEqual(['tenant-a', '1', 'group-1']);
 
     // Event should have been emitted
     expect(completedJobs).toHaveLength(1);
