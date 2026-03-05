@@ -26,6 +26,7 @@ npm install glide-mq
 ### Reliability & control
 - **Retries, backoff, and DLQ** — exponential/fixed/custom retries with dead-letter queues ([Advanced](docs/ADVANCED.md#retries-and-backoff), [Demo](demo/README.md#demo-scenarios))
 - **Stalled recovery, pause/resume, and drain** — auto-reclaim stuck jobs, pause processing, and server-side drain waiting/delayed jobs ([Usage](docs/USAGE.md#worker), [Demo](demo/README.md#api-endpoints-dashboard-server))
+- **Durability & recovery guide** — persistence modes, crash windows, worker recovery, and failover caveats ([Durability](docs/DURABILITY.md))
 - **Job revocation + sandboxed processors** — cooperative cancellation and isolated file-based processors in worker threads/child processes ([Advanced](docs/ADVANCED.md#job-revocation), [Architecture](docs/ARCHITECTURE.md#typescript-api), [Sandbox example](tests/sandbox-integration.test.ts))
 
 ### Orchestration & scheduling
