@@ -202,6 +202,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
         }
         validateOrderingKey(orderingKey);
 
+        if (opts?.ttl != null) {
+          if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
+        }
+
         // Payload size validation - prevent DoS via oversized jobs
         let serialized = JSON.stringify(data);
         const byteLen = Buffer.byteLength(serialized, 'utf8');
@@ -216,6 +220,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
         }
 
         let jobId: string;
+
+        const ttl = opts?.ttl ?? 0;
 
         if (opts?.deduplication) {
           const dedupOpts = opts.deduplication;
@@ -240,6 +246,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             tbCapacity,
             tbRefillRate,
             jobCost,
+            ttl,
           );
           if (result === 'skipped') {
             return null;
@@ -267,6 +274,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             tbCapacity,
             tbRefillRate,
             jobCost,
+            ttl,
           );
           if (result === 'ERR:COST_EXCEEDS_CAPACITY') {
             throw new Error('Job cost exceeds token bucket capacity');
@@ -305,6 +313,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const maxAttempts = opts.attempts ?? 0;
       const orderingKey = opts.ordering?.key ?? '';
       validateOrderingKey(orderingKey);
+      if (opts.ttl != null) {
+        if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
+      }
       const deduplication = opts.deduplication;
 
       let serializedData = JSON.stringify(entry.data);
@@ -354,6 +365,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         tbCapacity,
         tbRefillRate,
         jobCost,
+        ttl: opts.ttl ?? 0,
         deduplication,
         serializedData,
       };
@@ -385,6 +397,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.tbCapacity.toString(),
           p.tbRefillRate.toString(),
           p.jobCost.toString(),
+          p.ttl.toString(),
         ]);
       } else {
         batch.fcall('glidemq_addJob', keys, [
@@ -403,6 +416,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.tbCapacity.toString(),
           p.tbRefillRate.toString(),
           p.jobCost.toString(),
+          p.ttl.toString(),
         ]);
       }
     }

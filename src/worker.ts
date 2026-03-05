@@ -410,6 +410,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     moveResult:
       | Record<string, string>
       | 'REVOKED'
+      | 'EXPIRED'
       | 'GROUP_FULL'
       | 'GROUP_RATE_LIMITED'
       | 'GROUP_TOKEN_LIMITED'
@@ -433,6 +434,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
       } catch (err) {
         this.emit('error', err);
       }
+      return true;
+    }
+    if (moveResult === 'EXPIRED') {
+      // Already handled server-side by checkExpired in Lua
       return true;
     }
     if (

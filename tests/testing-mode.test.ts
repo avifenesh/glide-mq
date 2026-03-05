@@ -738,3 +738,81 @@ describe('TestQueue.getJobScheduler', () => {
     await queue.removeJobScheduler('b');
   });
 });
+
+describe('TestWorker - TTL', () => {
+  let queue: TestQueue;
+  let worker: TestWorker;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    if (queue) await queue.close();
+  });
+
+  it('expired job is failed with reason "expired"', async () => {
+    queue = new TestQueue('ttl-test');
+    // Add a job with ttl=1ms
+    const job = await queue.add('task', { v: 1 }, { ttl: 1 });
+    expect(job).not.toBeNull();
+    expect(job!.opts.ttl).toBe(1);
+
+    // Wait for TTL to pass
+    await new Promise<void>((r) => setTimeout(r, 10));
+
+    const failed: { job: any; err: Error }[] = [];
+    const completed: any[] = [];
+
+    worker = new TestWorker(queue, async () => {
+      return 'should not run';
+    });
+    worker.on('failed', (j: any, err: Error) => failed.push({ job: j, err }));
+    worker.on('completed', (j: any) => completed.push(j));
+
+    // Wait for processing
+    await new Promise<void>((r) => setTimeout(r, 50));
+
+    expect(completed).toHaveLength(0);
+    expect(failed).toHaveLength(1);
+    expect(failed[0].err.message).toBe('expired');
+    expect(failed[0].job.failedReason).toBe('expired');
+
+    const record = queue.jobs.get(job!.id);
+    expect(record?.state).toBe('failed');
+    expect(record?.failedReason).toBe('expired');
+  });
+
+  it('job with ttl processes normally when not expired', async () => {
+    queue = new TestQueue('ttl-test-ok');
+    const job = await queue.add('task', { v: 2 }, { ttl: 60000 });
+    expect(job).not.toBeNull();
+
+    const completed: any[] = [];
+    worker = new TestWorker(queue, async () => 'done');
+    worker.on('completed', (j: any) => completed.push(j));
+
+    await new Promise<void>((r) => setTimeout(r, 50));
+
+    expect(completed).toHaveLength(1);
+    expect(completed[0].returnvalue).toBe('done');
+  });
+
+  it('job without ttl has no expireAt', async () => {
+    queue = new TestQueue('ttl-test-none');
+    const job = await queue.add('task', { v: 3 });
+    expect(job).not.toBeNull();
+
+    const record = queue.jobs.get(job!.id);
+    expect(record?.expireAt).toBeUndefined();
+  });
+
+  it('expireAt is stored correctly on the record', async () => {
+    queue = new TestQueue('ttl-test-store');
+    const before = Date.now();
+    const job = await queue.add('task', { v: 4 }, { ttl: 5000 });
+    const after = Date.now();
+
+    const record = queue.jobs.get(job!.id);
+    expect(record?.expireAt).toBeDefined();
+    expect(record!.expireAt!).toBeGreaterThanOrEqual(before + 5000);
+    expect(record!.expireAt!).toBeLessThanOrEqual(after + 5000);
+  });
+});

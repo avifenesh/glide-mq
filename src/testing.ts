@@ -27,6 +27,7 @@ export interface TestJobRecord<D = any, R = any> {
   timestamp: number;
   finishedOn: number | undefined;
   processedOn: number | undefined;
+  expireAt?: number;
 }
 
 /**
@@ -45,6 +46,7 @@ export class TestJob<D = any, R = any> {
   timestamp: number;
   finishedOn: number | undefined;
   processedOn: number | undefined;
+  expireAt?: number;
 
   constructor(record: TestJobRecord<D, R>) {
     this.id = record.id;
@@ -58,6 +60,7 @@ export class TestJob<D = any, R = any> {
     this.timestamp = record.timestamp;
     this.finishedOn = record.finishedOn;
     this.processedOn = record.processedOn;
+    this.expireAt = record.expireAt;
   }
 
   async log(_message: string): Promise<void> {
@@ -149,6 +152,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
 
     const id = String(++this.idCounter);
+    const now = Date.now();
+    const ttl = opts?.ttl ?? 0;
     const record: TestJobRecord<D, R> = {
       id,
       name,
@@ -158,9 +163,10 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       attemptsMade: 0,
       returnvalue: undefined,
       failedReason: undefined,
-      timestamp: Date.now(),
+      timestamp: now,
       finishedOn: undefined,
       processedOn: undefined,
+      expireAt: ttl > 0 ? now + ttl : undefined,
     };
     this.jobs.set(id, record);
 
@@ -475,6 +481,22 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   }
 
   private processJob(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
+    // Check TTL expiration before processing
+    if (record.expireAt && Date.now() > record.expireAt) {
+      record.state = 'failed';
+      record.failedReason = 'expired';
+      record.finishedOn = Date.now();
+      job.failedReason = 'expired';
+      job.finishedOn = record.finishedOn;
+      const err = new Error('expired');
+      this.emit('failed', job, err);
+      this.queue.emit('failed', job, err);
+      this.activeCount--;
+      if (this.running && !this.queue.isPaused()) {
+        this.processAvailable();
+      }
+      return;
+    }
     this.processor(job as any)
       .then((result) => {
         record.state = 'completed';
