@@ -5,7 +5,14 @@ import { TimeUnit } from '@glidemq/speedkey';
 import type { WorkerOptions, Processor, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
-import { buildKeys, calculateBackoff, keyPrefix, nextReconnectDelay, reconnectWithBackoff } from './utils';
+import {
+  buildKeys,
+  calculateBackoff,
+  keyPrefix,
+  nextReconnectDelay,
+  reconnectWithBackoff,
+  MAX_JOB_DATA_SIZE,
+} from './utils';
 import { createSandboxedProcessor } from './sandbox';
 import {
   createClient,
@@ -657,7 +664,31 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
       if (!this.commandClient) return;
 
-      const returnvalue = processResult !== undefined ? this.serializer.serialize(processResult) : 'null';
+      let returnvalue: string;
+      try {
+        returnvalue = processResult !== undefined ? this.serializer.serialize(processResult) : 'null';
+      } catch (serializeErr) {
+        const err = serializeErr instanceof Error ? serializeErr : new Error(String(serializeErr));
+        await this.handleJobFailure(
+          job,
+          currentJobId,
+          currentEntryId,
+          new Error(`Serializer failed on return value: ${err.message}`),
+        );
+        return;
+      }
+      const byteLen = Buffer.byteLength(returnvalue, 'utf8');
+      if (byteLen > MAX_JOB_DATA_SIZE) {
+        await this.handleJobFailure(
+          job,
+          currentJobId,
+          currentEntryId,
+          new Error(
+            `Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller return values or store large data externally.`,
+          ),
+        );
+        return;
+      }
       const parentInfo = this.buildParentInfo(job, currentJobId);
 
       const fetchResult = await completeAndFetchNext(
@@ -757,6 +788,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
     const dlqName = this.opts.deadLetterQueue.name;
     const dlqKeys = buildKeys(dlqName, this.opts.prefix);
     try {
+      // DLQ envelope is always JSON. The data field is the already-deserialized
+      // job.data embedded directly - this means non-JSON types (Date, Map, Set)
+      // undergo lossy JSON conversion. BigInt will throw, caught by outer catch.
+      // A future major version could change this to use the queue's serializer.
       const dlqData = JSON.stringify({
         originalQueue: this.name,
         originalJobId: job.id,

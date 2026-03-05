@@ -3,7 +3,7 @@ import type { Client, SchedulerEntry, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import { CONSUMER_GROUP, promote, promoteRateLimited, reclaimStalled, addJobArgs, nextDueAt } from './functions/index';
 import type { buildKeys } from './utils';
-import { nextCronOccurrence } from './utils';
+import { nextCronOccurrence, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
 export interface SchedulerOptions {
@@ -233,7 +233,16 @@ export class Scheduler {
       // Compute the job name and data from the template
       const template = config.template ?? {};
       const jobName = template.name ?? schedulerName;
-      const jobData = template.data !== undefined ? this.serializer.serialize(template.data) : '{}';
+      let jobData: string;
+      try {
+        jobData = template.data !== undefined ? this.serializer.serialize(template.data) : '{}';
+      } catch {
+        continue; // Skip entry if serializer fails
+      }
+      const byteLen = Buffer.byteLength(jobData, 'utf8');
+      if (byteLen > MAX_JOB_DATA_SIZE) {
+        continue; // Skip oversized entries
+      }
       const jobOpts = template.opts ? JSON.stringify(template.opts) : '{}';
       const priority = template.opts?.priority ?? 0;
       const maxAttempts = template.opts?.attempts ?? 0;

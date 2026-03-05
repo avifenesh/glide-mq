@@ -131,7 +131,7 @@ function matchesData(data: Record<string, unknown>, filter: Record<string, unkno
 export interface TestQueueOptions {
   /** Enable deduplication in 'simple' mode. */
   dedup?: boolean;
-  /** Custom serializer for job data. When provided, data is roundtripped through serialize/deserialize to match production behavior. */
+  /** Custom serializer for job data and return values. When provided, values are roundtripped through serialize/deserialize to match production behavior. */
   serializer?: Serializer;
 }
 
@@ -142,7 +142,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private idCounter = 0;
   private paused = false;
   private opts: TestQueueOptions;
-  private serializer: Serializer;
+  /** @internal */ readonly serializer: Serializer;
 
   /** Workers register themselves here so we can notify on add. */
   /** @internal */ readonly workers: Set<TestWorker<D, R>> = new Set();
@@ -519,13 +519,16 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
     this.processor(job as any)
       .then((result) => {
+        // Roundtrip returnvalue through serializer to match production behavior
+        const s = this.queue.serializer;
+        const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
         record.state = 'completed';
-        record.returnvalue = result;
+        record.returnvalue = roundtripped;
         record.finishedOn = Date.now();
-        job.returnvalue = result;
+        job.returnvalue = roundtripped;
         job.finishedOn = record.finishedOn;
-        this.emit('completed', job, result);
-        this.queue.emit('completed', job, result);
+        this.emit('completed', job, roundtripped);
+        this.queue.emit('completed', job, roundtripped);
       })
       .catch((err: Error) => {
         record.attemptsMade++;
