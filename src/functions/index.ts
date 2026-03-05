@@ -1334,6 +1334,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       expireAt = tonumber(value) or 0
     elseif field == 'state' then
       curState = value
+      stateValueIndex = f + 1
     elseif field == 'orderingKey' then
       orderingKey = value
     elseif field == 'orderingSeq' then
@@ -1346,9 +1347,6 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       processedOnValueIndex = f + 1
     elseif field == 'lastActive' then
       lastActiveValueIndex = f + 1
-    end
-    if field == 'state' then
-      stateValueIndex = f + 1
     end
   end
   if revoked == '1' then
