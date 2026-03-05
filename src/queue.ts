@@ -1201,7 +1201,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
       for (let i = 0; i < batchResults.length; i++) {
         const hash = hashDataToRecord(batchResults[i] as any);
         if (!hash) continue;
-        jobs.push(Job.fromHash<D, R>(client, dlqKeys, sliced[i], hash, this.serializer));
+        // DLQ envelope is always JSON (written by Worker.moveToDLQ with JSON.stringify),
+        // regardless of the queue's custom serializer.
+        jobs.push(Job.fromHash<D, R>(client, dlqKeys, sliced[i], hash));
       }
     }
     return jobs;

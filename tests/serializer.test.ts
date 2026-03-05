@@ -243,6 +243,283 @@ describeEachMode('Serializer - FlowProducer', (CONNECTION) => {
   });
 });
 
+describeEachMode('Serializer - updateData', (CONNECTION) => {
+  const Q = 'test-ser-updatedata-' + Date.now();
+  let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    queue = new Queue(Q, { connection: CONNECTION, serializer: reverseSerializer });
+  });
+
+  afterAll(async () => {
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('updateData persists with custom serializer and roundtrips via getJob', async () => {
+    const job = await queue.add('upd-test', { original: true });
+
+    // Worker calls updateData during processing
+    let updateDone = false;
+    const worker = new Worker(
+      Q,
+      async (j: any) => {
+        await j.updateData({ modified: true, value: 99 });
+        updateDone = true;
+        return 'ok';
+      },
+      { connection: CONNECTION, serializer: reverseSerializer },
+    );
+
+    await worker.waitUntilReady();
+    await job!.waitUntilFinished(200, 10000);
+    await worker.close();
+
+    expect(updateDone).toBe(true);
+
+    // Verify the raw data in Valkey uses custom serializer
+    const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+    const keys = buildKeys(Q);
+    const rawData = String(await cleanupClient.hget(keys.job(job!.id), 'data'));
+    expect(rawData.startsWith('REV:')).toBe(true);
+
+    // Verify getJob reads it back correctly
+    const fetched = await queue.getJob(job!.id);
+    expect(fetched!.data).toEqual({ modified: true, value: 99 });
+  });
+});
+
+describeEachMode('Serializer - getChildrenValues', (CONNECTION) => {
+  const Q = 'test-ser-children-' + Date.now();
+  let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    queue = new Queue(Q, { connection: CONNECTION, serializer: reverseSerializer });
+  });
+
+  afterAll(async () => {
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('parent getChildrenValues deserializes child return values with custom serializer', async () => {
+    const flow = new FlowProducer({
+      connection: CONNECTION,
+      serializer: reverseSerializer,
+    });
+
+    const result = await flow.add({
+      name: 'parent',
+      queueName: Q,
+      data: { role: 'parent' },
+      children: [
+        { name: 'child-a', queueName: Q, data: { role: 'child', idx: 1 } },
+        { name: 'child-b', queueName: Q, data: { role: 'child', idx: 2 } },
+      ],
+    });
+
+    let capturedChildValues: any = null;
+    const worker = new Worker(
+      Q,
+      async (j: any) => {
+        if (j.name === 'parent') {
+          capturedChildValues = await j.getChildrenValues();
+          return { parentDone: true };
+        }
+        return { childResult: j.data.idx * 10 };
+      },
+      { connection: CONNECTION, serializer: reverseSerializer },
+    );
+
+    await worker.waitUntilReady();
+
+    // Wait for parent to complete (children complete first, then parent unblocks)
+    await waitFor(async () => {
+      const fetched = await queue.getJob(result.job.id);
+      return fetched?.finishedOn != null;
+    }, 15000);
+
+    await worker.close();
+    await flow.close();
+
+    // capturedChildValues should have deserialized return values from both children
+    expect(capturedChildValues).not.toBeNull();
+    const values = Object.values(capturedChildValues) as any[];
+    expect(values).toHaveLength(2);
+    // Children returned { childResult: 10 } and { childResult: 20 }
+    const sorted = values.sort((a: any, b: any) => a.childResult - b.childResult);
+    expect(sorted[0]).toEqual({ childResult: 10 });
+    expect(sorted[1]).toEqual({ childResult: 20 });
+  });
+});
+
+describeEachMode('Serializer - addBulk integration', (CONNECTION) => {
+  const Q = 'test-ser-addbulk-' + Date.now();
+  let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    queue = new Queue(Q, { connection: CONNECTION, serializer: reverseSerializer });
+  });
+
+  afterAll(async () => {
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('addBulk stores all jobs with custom serializer', async () => {
+    const jobs = await queue.addBulk([
+      { name: 'bulk-a', data: { v: 'first' } },
+      { name: 'bulk-b', data: { v: 'second' } },
+      { name: 'bulk-c', data: { v: 'third' } },
+    ]);
+    expect(jobs).toHaveLength(3);
+
+    // Verify raw data in Valkey uses custom serializer for all jobs
+    const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+    const keys = buildKeys(Q);
+    for (const job of jobs) {
+      const rawData = String(await cleanupClient.hget(keys.job(job.id), 'data'));
+      expect(rawData.startsWith('REV:')).toBe(true);
+    }
+
+    // Verify getJob roundtrip for each
+    for (let i = 0; i < jobs.length; i++) {
+      const fetched = await queue.getJob(jobs[i].id);
+      expect(fetched!.data).toEqual(jobs[i].data);
+    }
+  });
+});
+
+describeEachMode('Serializer - DLQ', (CONNECTION) => {
+  const Q = 'test-ser-dlq-' + Date.now();
+  const DLQ = Q + '-dlq';
+  let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    queue = new Queue(Q, {
+      connection: CONNECTION,
+      serializer: reverseSerializer,
+      deadLetterQueue: { name: DLQ },
+    });
+  });
+
+  afterAll(async () => {
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+    await flushQueue(cleanupClient, DLQ);
+    cleanupClient.close();
+  });
+
+  it('DLQ jobs are readable despite custom serializer on source queue', async () => {
+    const payload = { critical: true, id: Date.now() };
+    const job = await queue.add('dlq-test', payload, { attempts: 1 });
+
+    const failedPromise = new Promise<void>((resolve) => {
+      const worker = new Worker(
+        Q,
+        async () => {
+          throw new Error('permanent failure');
+        },
+        {
+          connection: CONNECTION,
+          serializer: reverseSerializer,
+          deadLetterQueue: { name: DLQ },
+          stalledInterval: 60000,
+        },
+      );
+      worker.on('failed', async (_job: any, _err: any) => {
+        // Wait a tick for DLQ write to complete
+        setTimeout(async () => {
+          await worker.close();
+          resolve();
+        }, 200);
+      });
+    });
+
+    await failedPromise;
+
+    // Read DLQ jobs - these should be readable (DLQ envelope is always JSON)
+    const dlqJobs = await queue.getDeadLetterJobs();
+    expect(dlqJobs.length).toBeGreaterThanOrEqual(1);
+
+    // DLQ envelope contains the original data as a plain object (JSON-serialized in the envelope)
+    const dlqJob = dlqJobs.find((j: any) => j.data?.originalJobId === job!.id);
+    expect(dlqJob).toBeDefined();
+    const dlqData = dlqJob!.data as any;
+    expect(dlqData.originalQueue).toBe(Q);
+    expect(dlqData.data).toEqual(payload);
+    expect(dlqData.failedReason).toBe('permanent failure');
+  });
+});
+
+describeEachMode('Serializer - compression combo', (CONNECTION) => {
+  const Q = 'test-ser-compress-' + Date.now();
+  let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    queue = new Queue(Q, {
+      connection: CONNECTION,
+      serializer: reverseSerializer,
+      compression: 'gzip',
+    });
+  });
+
+  afterAll(async () => {
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('compression wraps custom serializer output', async () => {
+    const payload = { compressed: true, data: 'hello world'.repeat(50) };
+    const job = await queue.add('compress-ser', payload);
+
+    // Raw value should be compressed (gz: prefix wrapping the serialized data)
+    const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+    const keys = buildKeys(Q);
+    const rawData = String(await cleanupClient.hget(keys.job(job!.id), 'data'));
+    expect(rawData.startsWith('gz:')).toBe(true);
+
+    // getJob should decompress then deserialize correctly
+    const fetched = await queue.getJob(job!.id);
+    expect(fetched!.data).toEqual(payload);
+  });
+
+  it('Worker roundtrips compressed + serialized data', async () => {
+    const payload = { action: 'compress-test', items: Array.from({ length: 100 }, (_, i) => i) };
+    const job = await queue.add('compress-worker', payload);
+
+    let receivedData: any = null;
+    const worker = new Worker(
+      Q,
+      async (j: any) => {
+        receivedData = j.data;
+        return { ok: true };
+      },
+      { connection: CONNECTION, serializer: reverseSerializer, compression: 'gzip' } as any,
+    );
+
+    await worker.waitUntilReady();
+    await job!.waitUntilFinished(200, 10000);
+    await worker.close();
+
+    expect(receivedData).toEqual(payload);
+  });
+});
+
 describeEachMode('Serializer - backward compatibility', (CONNECTION) => {
   const Q = 'test-serializer-compat-' + Date.now();
   let cleanupClient: any;
