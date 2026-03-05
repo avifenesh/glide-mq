@@ -4,11 +4,14 @@
 
 import Redis from 'ioredis';
 
+const BENCH_HOST = process.env.BENCH_HOST || '127.0.0.1';
+const BENCH_PORT = Number(process.env.BENCH_PORT || 6379);
+
 /**
  * Flush the entire database between benchmark runs.
  */
 export async function flushDB(): Promise<void> {
-  const client = new Redis({ host: '127.0.0.1', port: 6379, lazyConnect: true });
+  const client = new Redis({ host: BENCH_HOST, port: BENCH_PORT, lazyConnect: true });
   await client.connect();
   await client.flushdb();
   await client.quit();
@@ -41,9 +44,7 @@ export function fmtMs(n: number): string {
  * Print a markdown table.
  */
 export function printTable(headers: string[], rows: string[][]): void {
-  const colWidths = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => (r[i] || '').length)),
-  );
+  const colWidths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] || '').length)));
 
   const pad = (s: string, w: number) => s + ' '.repeat(Math.max(0, w - s.length));
   const sep = colWidths.map((w) => '-'.repeat(w));
@@ -66,13 +67,13 @@ export function sleep(ms: number): Promise<void> {
  * Connection config for glide-mq.
  */
 export const GLIDE_CONNECTION = {
-  addresses: [{ host: '127.0.0.1', port: 6379 }],
+  addresses: [{ host: BENCH_HOST, port: BENCH_PORT }],
 };
 
 /**
  * Connection config for BullMQ.
  */
 export const BULL_CONNECTION = {
-  host: '127.0.0.1',
-  port: 6379,
+  host: BENCH_HOST,
+  port: BENCH_PORT,
 };
