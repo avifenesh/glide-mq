@@ -168,7 +168,12 @@ describe('Worker', () => {
   });
 
   it('should process a job and call completeAndFetchNext on success (c=1)', async () => {
-    const processor = vi.fn().mockResolvedValue({ result: 42 });
+    const processor = vi.fn().mockImplementation(async (job: any) => {
+      job.orderingKey = 'mutated-ordering-key';
+      job.orderingSeq = 99;
+      job.groupKey = 'mutated-group';
+      return { result: 42 };
+    });
 
     // Return one message from xreadgroup, then block forever
     let xreadCalls = 0;
@@ -202,6 +207,12 @@ describe('Worker', () => {
       '1000',
       'attemptsMade',
       '0',
+      'orderingKey',
+      'tenant-a',
+      'orderingSeq',
+      '1',
+      'groupKey',
+      'group-1',
       'state',
       'active',
     ]);
@@ -239,8 +250,14 @@ describe('Worker', () => {
     expect(mockCommandClient.fcall).toHaveBeenCalledWith(
       'glidemq_completeAndFetchNext',
       [keys.stream, keys.completed, keys.events, keys.job('1')],
-      expect.arrayContaining(['1', '1234567890-0']),
+      expect.any(Array),
     );
+    const completeAndFetchNextCall = (mockCommandClient.fcall as any).mock.calls.find(
+      (call: any[]) => call[0] === 'glidemq_completeAndFetchNext',
+    );
+    expect(completeAndFetchNextCall).toBeDefined();
+    const completionArgs = completeAndFetchNextCall[2] as string[];
+    expect(completionArgs.slice(-3)).toEqual(['tenant-a', '1', 'group-1']);
 
     // Event should have been emitted
     expect(completedJobs).toHaveLength(1);

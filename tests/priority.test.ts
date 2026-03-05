@@ -100,6 +100,13 @@ describeEachMode('Priority jobs', (CONNECTION) => {
     const scoreLong = Number(await cleanupClient.zscore(k.scheduled, jobLong.id));
     expect(scoreShort).toBeLessThan(scoreLong);
 
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Promote explicitly before starting the worker so the assertion is not racing
+    // the worker's internal scheduler, which also promotes due delayed jobs.
+    const promoted = await promote(cleanupClient, buildKeys(qName), Number.MAX_SAFE_INTEGER);
+    expect(promoted).toBe(2);
+
     const processedLabels: string[] = [];
     const allDone = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
@@ -119,11 +126,6 @@ describeEachMode('Priority jobs', (CONNECTION) => {
       );
       worker.on('error', () => {});
     });
-
-    await new Promise((r) => setTimeout(r, 500));
-
-    const promoted = await promote(cleanupClient, buildKeys(qName), Number.MAX_SAFE_INTEGER);
-    expect(promoted).toBe(2);
 
     await allDone;
     expect(processedLabels).toEqual(['short', 'long']);
