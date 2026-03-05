@@ -1023,15 +1023,19 @@ describeEachMode('Memory and resource management', (CONNECTION) => {
       completedCount.value++;
     });
 
-    // Add 100 jobs rapidly
-    const addPromises = [];
-    for (let i = 0; i < jobCount; i++) {
-      addPromises.push(queue.add(`rapid-${i}`, { i }));
+    // Add jobs rapidly, but in bounded batches to avoid cluster request timeouts in CI.
+    const bulkJobs = Array.from({ length: jobCount }, (_, i) => ({
+      name: `rapid-${i}`,
+      data: { i },
+    }));
+    const bulkSize = 25;
+    for (let i = 0; i < bulkJobs.length; i += bulkSize) {
+      await queue.addBulk(bulkJobs.slice(i, i + bulkSize));
     }
-    await Promise.all(addPromises);
 
     // Wait for all to be processed
-    await waitFor(() => completedCount.value >= jobCount, 30000, 200);
+    const processTimeoutMs = CONNECTION.clusterMode ? 45000 : 30000;
+    await waitFor(() => completedCount.value >= jobCount, processTimeoutMs, 200);
 
     // Wait for activePromises cleanup (finally() blocks are async)
     await waitFor(() => ((worker as any).activePromises?.size ?? 0) === 0, 5000, 50);

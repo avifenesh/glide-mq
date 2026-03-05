@@ -7,12 +7,12 @@
 
 import type { ScenarioContext, ScenarioResult } from '../types';
 
-function waitForCount(target: number, counter: { value: number }, timeoutMs = 25000): Promise<void> {
+function waitForCount(target: number, counter: { value: number }, timeoutMs = 25000): Promise<boolean> {
   return new Promise((resolve) => {
     const start = Date.now();
     const check = () => {
-      if (counter.value >= target) return resolve();
-      if (Date.now() - start > timeoutMs) return resolve();
+      if (counter.value >= target) return resolve(true);
+      if (Date.now() - start > timeoutMs) return resolve(false);
       setTimeout(check, 50);
     };
     check();
@@ -60,7 +60,10 @@ export async function cleanDrain(ctx: ScenarioContext): Promise<ScenarioResult> 
     await new Promise((r) => setTimeout(r, 100));
   }
 
-  await waitForCount(phase1Count, counter1, 15000);
+  const phase1Done = await waitForCount(phase1Count, counter1, 15000);
+  if (!phase1Done) {
+    violations.push(`Phase 1 timed out: processed ${counter1.value}/${phase1Count}`);
+  }
   totalProcessed += counter1.value;
 
   // Small delay to ensure finishedOn timestamps are old enough for grace
@@ -93,7 +96,14 @@ export async function cleanDrain(ctx: ScenarioContext): Promise<ScenarioResult> 
   // Resume worker
   await queue.resume();
 
-  const counts = await queue.getJobCounts();
+  let counts = await queue.getJobCounts();
+  if (counts.waiting > 0) {
+    const drainDeadline = Date.now() + 2000;
+    while (counts.waiting > 0 && Date.now() < drainDeadline) {
+      await new Promise((r) => setTimeout(r, 50));
+      counts = await queue.getJobCounts();
+    }
+  }
   if (counts.waiting > 0) {
     violations.push(`After drain(), waiting count is ${counts.waiting} (expected 0)`);
   }
@@ -118,7 +128,10 @@ export async function cleanDrain(ctx: ScenarioContext): Promise<ScenarioResult> 
     await new Promise((r) => setTimeout(r, 100));
   }
 
-  await waitForCount(phase4Count, failCounter, 10000);
+  const phase4Done = await waitForCount(phase4Count, failCounter, 10000);
+  if (!phase4Done) {
+    violations.push(`Phase 4 timed out: failed ${failCounter.value}/${phase4Count}`);
+  }
   totalFailed += failCounter.value;
 
   // Now retry the failed jobs - switch to success mode
@@ -135,7 +148,10 @@ export async function cleanDrain(ctx: ScenarioContext): Promise<ScenarioResult> 
   }
 
   // Wait for retried jobs to complete
-  await waitForCount(retryStart + retried, counter1, 10000);
+  const retryDone = await waitForCount(retryStart + retried, counter1, 10000);
+  if (!retryDone) {
+    violations.push(`Retry phase timed out: completed ${counter1.value}/${retryStart + retried}`);
+  }
 
   if (retried === 0 && failCounter.value > 0) {
     violations.push(`retryJobs() retried 0 jobs but ${failCounter.value} had failed`);

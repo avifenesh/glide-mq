@@ -1,18 +1,20 @@
 /**
  * Benchmark CLI entry point.
- * Usage: npx tsx benchmarks/run.ts [throughput|latency|memory|all]
+ * Usage: npx tsx benchmarks/run.ts [throughput|latency|memory|sharing|ci|all]
  */
 
 import { runThroughput } from './throughput';
 import { runLatency } from './latency';
 import { runMemory } from './memory';
 import { runSharing } from './client-sharing';
+import { runCIFriendly } from './ci-friendly';
 
 const SUITES: Record<string, () => Promise<void>> = {
   throughput: runThroughput,
   latency: runLatency,
   memory: runMemory,
   sharing: runSharing,
+  ci: runCIFriendly,
 };
 
 async function main(): Promise<void> {
