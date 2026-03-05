@@ -737,6 +737,39 @@ describe('TestQueue.getJobScheduler', () => {
     await queue.removeJobScheduler('a');
     await queue.removeJobScheduler('b');
   });
+
+  // --- Timezone support (#74) ---
+
+  it('upsertJobScheduler stores tz for cron scheduler', async () => {
+    queue = new TestQueue('sched-tz');
+    await queue.upsertJobScheduler('tz-cron', { pattern: '0 9 * * *', tz: 'America/New_York' });
+
+    const entry = await queue.getJobScheduler('tz-cron');
+    expect(entry).not.toBeNull();
+    expect(entry!.pattern).toBe('0 9 * * *');
+    expect(entry!.tz).toBe('America/New_York');
+    expect(entry!.nextRun).toBeGreaterThan(0);
+
+    await queue.removeJobScheduler('tz-cron');
+  });
+
+  it('upsertJobScheduler without tz does not include tz in entry', async () => {
+    queue = new TestQueue('sched-no-tz');
+    await queue.upsertJobScheduler('no-tz', { pattern: '0 9 * * *' });
+
+    const entry = await queue.getJobScheduler('no-tz');
+    expect(entry).not.toBeNull();
+    expect(entry!.tz).toBeUndefined();
+
+    await queue.removeJobScheduler('no-tz');
+  });
+
+  it('upsertJobScheduler rejects invalid timezone', async () => {
+    queue = new TestQueue('sched-bad-tz');
+    await expect(queue.upsertJobScheduler('bad', { pattern: '0 9 * * *', tz: 'Fake/Zone' })).rejects.toThrow(
+      'Invalid timezone',
+    );
+  });
 });
 
 describe('TestWorker - TTL', () => {

@@ -259,7 +259,7 @@ export class Scheduler {
       // Compute next run
       let nextRun: number;
       if (config.pattern) {
-        nextRun = nextCronOccurrence(config.pattern, now);
+        nextRun = nextCronOccurrence(config.pattern, now, config.tz);
       } else if (config.every) {
         nextRun = now + config.every;
       } else {
