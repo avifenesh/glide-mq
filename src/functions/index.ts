@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '29';
+export const LIBRARY_VERSION = '31';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -502,6 +502,33 @@ redis.register_function('glidemq_promote', function(keys, args)
   return count
 end)
 
+redis.register_function('glidemq_nextDue', function(keys, args)
+  local scheduledKey = keys[1]
+  local rateLimitedKey = keys[2]
+  local nextDue = nil
+
+  local scheduled = redis.call('ZRANGE', scheduledKey, 0, 0, 'WITHSCORES')
+  if scheduled and #scheduled >= 2 then
+    local score = tonumber(scheduled[2]) or 0
+    local due = score % PRIORITY_SHIFT
+    nextDue = due
+  end
+
+  local limited = redis.call('ZRANGE', rateLimitedKey, 0, 0, 'WITHSCORES')
+  if limited and #limited >= 2 then
+    local limitedDue = tonumber(limited[2]) or 0
+    if (not nextDue) or limitedDue < nextDue then
+      nextDue = limitedDue
+    end
+  end
+
+  if not nextDue then
+    return -1
+  end
+
+  return math.floor(nextDue)
+end)
+
 redis.register_function('glidemq_complete', function(keys, args)
   local streamKey = keys[1]
   local completedKey = keys[2]
@@ -640,17 +667,22 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     end
   end
 
+  -- Return protocol (array-based to avoid cjson encode/decode per job):
+  -- {'NEXT_NONE', completedJobId}
+  -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId}
+  -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ...}
+
   -- Phase 2: Fetch next job (non-blocking XREADGROUP), skip expired (up to 3 attempts)
   local nextJobId, nextEntryId, nextJobKey
   for _fetchAttempt = 1, 3 do
     local nextEntries = redis.call('XREADGROUP', 'GROUP', group, consumer, 'COUNT', 1, 'STREAMS', streamKey, '>')
     if not nextEntries or #nextEntries == 0 then
-      return cjson.encode({completed = jobId, next = false})
+      return {'NEXT_NONE', jobId}
     end
     local streamData = nextEntries[1]
     local entries = streamData[2]
     if not entries or #entries == 0 then
-      return cjson.encode({completed = jobId, next = false})
+      return {'NEXT_NONE', jobId}
     end
     local nextEntry = entries[1]
     nextEntryId = nextEntry[1]
@@ -663,16 +695,16 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       end
     end
     if not nextJobId then
-      return cjson.encode({completed = jobId, next = false})
+      return {'NEXT_NONE', jobId}
     end
     nextJobKey = prefix .. 'job:' .. nextJobId
     local nextExists = redis.call('EXISTS', nextJobKey)
     if nextExists == 0 then
-      return cjson.encode({completed = jobId, next = false, nextEntryId = nextEntryId})
+      return {'NEXT_NONE', jobId}
     end
     local revoked = redis.call('HGET', nextJobKey, 'revoked')
     if revoked == '1' then
-      return cjson.encode({completed = jobId, next = 'REVOKED', nextJobId = nextJobId, nextEntryId = nextEntryId})
+      return {'NEXT_REVOKED', jobId, nextJobId, nextEntryId}
     end
     if checkExpired(nextJobKey, nextJobId, prefix, tonumber(timestamp)) then
       redis.call('XACK', streamKey, group, nextEntryId)
@@ -683,7 +715,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     end
   end
   if not nextJobId then
-    return cjson.encode({completed = jobId, next = false})
+    return {'NEXT_NONE', jobId}
   end
 
   -- Phase 3: Activate next job (same as moveToActive)
@@ -703,7 +735,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
       redis.call('RPUSH', nextWaitListKey, nextJobId)
       redis.call('HSET', nextJobKey, 'state', 'group-waiting')
-      return cjson.encode({completed = jobId, next = false})
+      return {'NEXT_NONE', jobId}
     end
     -- Token bucket gate (read-only)
     local nextTbCapacity = tonumber(nGrp.tbCapacity) or 0
@@ -724,7 +756,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
           'failedReason', 'cost exceeds token bucket capacity',
           'finishedOn', tostring(timestamp))
         emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'})
-        return cjson.encode({completed = jobId, next = false})
+        return {'NEXT_NONE', jobId}
       end
       if nextTbTokens < nextJobCostVal then
         nextTbBlocked = true
@@ -755,7 +787,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       local nextMaxDelay = math.max(nextTbDelay, nextRlDelay)
       local rateLimitedKey = prefix .. 'ratelimited'
       redis.call('ZADD', rateLimitedKey, tonumber(timestamp) + nextMaxDelay, nextGroupKey)
-      return cjson.encode({completed = jobId, next = false})
+      return {'NEXT_NONE', jobId}
     end
     -- All gates passed: mutate state
     if nextTbCapacity > 0 then
@@ -776,7 +808,11 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   end
   redis.call('HSET', nextJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
   local nextHash = redis.call('HGETALL', nextJobKey)
-  return cjson.encode({completed = jobId, next = nextHash, nextJobId = nextJobId, nextEntryId = nextEntryId})
+  local out = {'NEXT_HASH', jobId, nextJobId, nextEntryId}
+  for i = 1, #nextHash do
+    out[#out + 1] = nextHash[i]
+  end
+  return out
 end)
 
 redis.register_function('glidemq_fail', function(keys, args)
@@ -1370,7 +1406,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
   end
   redis.call('HSET', jobKey, 'state', 'active', 'processedOn', timestamp, 'lastActive', timestamp)
   local fields = redis.call('HGETALL', jobKey)
-  return cjson.encode(fields)
+  return fields
 end)
 
 redis.register_function('glidemq_deferActive', function(keys, args)
@@ -2271,6 +2307,22 @@ export async function promote(client: Client, k: QueueKeys, timestamp: number): 
 }
 
 /**
+ * Returns the earliest known due timestamp for delayed/priority promotion work.
+ * - delayed/prioritized jobs come from the scheduled ZSet (decoded score timestamp)
+ * - group rate/token wakeups come from the ratelimited ZSet (raw score timestamp)
+ *
+ * Returns null when no pending due work exists.
+ */
+export async function nextDueAt(client: Client, k: QueueKeys): Promise<number | null> {
+  const result = await client.fcall('glidemq_nextDue', [k.scheduled, k.ratelimited], []);
+  const ts = Number(result);
+  if (!Number.isFinite(ts) || ts < 0) {
+    return null;
+  }
+  return ts;
+}
+
+/**
  * Encode a removeOnComplete/removeOnFail option into Lua args.
  */
 function encodeRetention(opt?: boolean | number | { age: number; count: number }): {
@@ -2343,7 +2395,7 @@ export async function completeJob(
  */
 export interface CompleteAndFetchResult {
   completed: string;
-  next: false | 'REVOKED' | string[];
+  next: false | 'REVOKED' | Record<string, string>;
   nextJobId?: string;
   nextEntryId?: string;
 }
@@ -2384,8 +2436,39 @@ export async function completeAndFetchNext(
   }
 
   const raw = await client.fcall('glidemq_completeAndFetchNext', keys, args);
-  const parsed = JSON.parse(String(raw));
 
+  // Fast path: array protocol from Lua function
+  if (Array.isArray(raw)) {
+    const arr = raw.map((v) => String(v));
+    const tag = arr[0];
+    if (tag === 'NEXT_NONE') {
+      return { completed: arr[1] ?? jobId, next: false };
+    }
+    if (tag === 'NEXT_REVOKED') {
+      return {
+        completed: arr[1] ?? jobId,
+        next: 'REVOKED',
+        nextJobId: arr[2],
+        nextEntryId: arr[3],
+      };
+    }
+    if (tag === 'NEXT_HASH') {
+      const hash: Record<string, string> = Object.create(null);
+      for (let i = 4; i + 1 < arr.length; i += 2) {
+        hash[arr[i]] = arr[i + 1];
+      }
+      return {
+        completed: arr[1] ?? jobId,
+        next: hash,
+        nextJobId: arr[2],
+        nextEntryId: arr[3],
+      };
+    }
+    throw new Error(`Unexpected glidemq_completeAndFetchNext tag: ${tag}`);
+  }
+
+  // Backward compatibility: JSON protocol (older library versions)
+  const parsed = JSON.parse(String(raw));
   if (!parsed.next || parsed.next === false) {
     return { completed: parsed.completed, next: false };
   }
@@ -2397,16 +2480,14 @@ export async function completeAndFetchNext(
       nextEntryId: parsed.nextEntryId,
     };
   }
-
-  // Parse the HGETALL array into a hash map
-  const arr = parsed.next as string[];
+  const parsedHash = parsed.next as string[];
   const hash: Record<string, string> = Object.create(null);
-  for (let i = 0; i < arr.length; i += 2) {
-    hash[String(arr[i])] = String(arr[i + 1]);
+  for (let i = 0; i < parsedHash.length; i += 2) {
+    hash[String(parsedHash[i])] = String(parsedHash[i + 1]);
   }
   return {
     completed: parsed.completed,
-    next: hash as any,
+    next: hash,
     nextJobId: parsed.nextJobId,
     nextEntryId: parsed.nextEntryId,
   };
@@ -2553,6 +2634,16 @@ export async function moveToActive(
     args.push(entryId, group, jobId);
   }
   const result = await client.fcall('glidemq_moveToActive', keys, args);
+
+  if (Array.isArray(result)) {
+    if (result.length === 0) return null;
+    const hash: Record<string, string> = Object.create(null);
+    for (let i = 0; i + 1 < result.length; i += 2) {
+      hash[String(result[i])] = String(result[i + 1]);
+    }
+    return hash;
+  }
+
   const str = String(result);
   if (str === '' || str === 'null') return null;
   if (str === 'REVOKED') return 'REVOKED';
@@ -2561,7 +2652,7 @@ export async function moveToActive(
   if (str === 'GROUP_RATE_LIMITED') return 'GROUP_RATE_LIMITED';
   if (str === 'GROUP_TOKEN_LIMITED') return 'GROUP_TOKEN_LIMITED';
   if (str === 'ERR:COST_EXCEEDS_CAPACITY') return 'ERR:COST_EXCEEDS_CAPACITY';
-  // Parse the cjson.encode output: [field1, value1, field2, value2, ...]
+  // Backward compatibility: older library returns cjson string
   const arr = JSON.parse(str) as string[];
   const hash: Record<string, string> = Object.create(null);
   for (let i = 0; i < arr.length; i += 2) {

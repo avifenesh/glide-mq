@@ -27,6 +27,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
       if (func === 'glidemq_complete') return Promise.resolve(1);
       if (func === 'glidemq_fail') return Promise.resolve('failed');
       if (func === 'glidemq_promote') return Promise.resolve(0);
+      if (func === 'glidemq_nextDue') return Promise.resolve(-1);
       if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
       if (func === 'glidemq_completeAndFetchNext') {
         const jobId = args?.[0] ?? '0';
@@ -690,6 +691,41 @@ describe('Scheduler', () => {
       [queueKeys.scheduled, queueKeys.stream, queueKeys.events],
       [now.toString()],
     );
+  });
+
+  it('should run an early promotion wake when next due is sooner than interval', async () => {
+    const now = 1700000000000;
+    vi.setSystemTime(now);
+
+    let nextDueCalls = 0;
+    mockClient.fcall = vi.fn().mockImplementation((func: string) => {
+      if (func === 'glidemq_promote') return Promise.resolve(0);
+      if (func === 'glidemq_promoteRateLimited') return Promise.resolve(0);
+      if (func === 'glidemq_nextDue') {
+        nextDueCalls++;
+        if (nextDueCalls === 1) return Promise.resolve(now + 40);
+        return Promise.resolve(-1);
+      }
+      if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
+      return Promise.resolve(0);
+    });
+
+    const scheduler = new Scheduler(mockClient as any, queueKeys, {
+      promotionInterval: 1000,
+      stalledInterval: 5000,
+    });
+
+    scheduler.start();
+
+    const initialPromoteCalls = mockClient.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_promote').length;
+    expect(initialPromoteCalls).toBeGreaterThanOrEqual(1);
+
+    await vi.advanceTimersByTimeAsync(60);
+
+    const promoteCallsAfterWake = mockClient.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_promote').length;
+    expect(promoteCallsAfterWake).toBeGreaterThan(initialPromoteCalls);
+
+    scheduler.stop();
   });
 
   it('reclaimStalledJobs should call reclaimStalled with correct args', async () => {
