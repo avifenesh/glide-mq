@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '31';
+export const LIBRARY_VERSION = '32';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -24,12 +24,20 @@ local function emitEvent(eventsKey, eventType, jobId, extraFields)
   redis.call('XADD', eventsKey, 'MAXLEN', '~', '1000', '*', unpack(fields))
 end
 
-local function markOrderingDone(jobKey, jobId)
-  local orderingKey = redis.call('HGET', jobKey, 'orderingKey')
+local function markOrderingDone(jobKey, jobId, hintOrderingKey, hintOrderingSeq)
+  local orderingKey = hintOrderingKey
+  if not orderingKey or orderingKey == '' then
+    orderingKey = redis.call('HGET', jobKey, 'orderingKey')
+  end
   if not orderingKey or orderingKey == '' then
     return
   end
-  local orderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+  local orderingSeq = nil
+  if hintOrderingSeq ~= nil and hintOrderingSeq ~= '' then
+    orderingSeq = tonumber(hintOrderingSeq) or 0
+  else
+    orderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+  end
   if orderingSeq <= 0 then
     return
   end
@@ -86,8 +94,11 @@ local function tbRefill(groupHashKey, g, now)
   return newTokens
 end
 
-local function releaseGroupSlotAndPromote(jobKey, jobId, now)
-  local gk = redis.call('HGET', jobKey, 'groupKey')
+local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
+  local gk = hintGroupKey
+  if not gk or gk == '' then
+    gk = redis.call('HGET', jobKey, 'groupKey')
+  end
   if not gk or gk == '' then return end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   local groupHashKey = prefix .. 'group:' .. gk
@@ -190,12 +201,7 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now)
   end
 end
 
-local function checkExpired(jobKey, jobId, prefix, now)
-  local expireAt = tonumber(redis.call('HGET', jobKey, 'expireAt'))
-  if not expireAt or expireAt <= 0 then return false end
-  if now <= expireAt then return false end
-  -- Idempotency guard: if already expired, skip side effects
-  local curState = redis.call('HGET', jobKey, 'state')
+local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, hintOrderingSeq, hintGroupKey)
   if curState == 'failed' then return true end
   local wasActive = (curState == 'active')
   local failedKey = prefix .. 'failed'
@@ -205,13 +211,22 @@ local function checkExpired(jobKey, jobId, prefix, now)
     'state', 'failed',
     'failedReason', 'expired',
     'finishedOn', tostring(now))
-  markOrderingDone(jobKey, jobId)
+  markOrderingDone(jobKey, jobId, hintOrderingKey, hintOrderingSeq)
   -- Only release group slot if the job was actually active (held a slot)
   if wasActive then
-    releaseGroupSlotAndPromote(jobKey, jobId, now)
+    releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   end
   emitEvent(eventsKey, 'expired', jobId, nil)
   return true
+end
+
+local function checkExpired(jobKey, jobId, prefix, now)
+  local expireAt = tonumber(redis.call('HGET', jobKey, 'expireAt'))
+  if not expireAt or expireAt <= 0 then return false end
+  if now <= expireAt then return false end
+  -- Idempotency guard: if already expired, skip side effects
+  local curState = redis.call('HGET', jobKey, 'state')
+  return expireJob(jobKey, jobId, prefix, now, curState, nil, nil, nil)
 end
 
 local function extractOrderingKeyFromOpts(optsJson)
@@ -612,6 +627,9 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local removeAge = tonumber(args[9]) or 0
   local depsMember = args[10] or ''
   local parentId = args[11] or ''
+  local currentOrderingKey = args[12] or ''
+  local currentOrderingSeq = args[13] or ''
+  local currentGroupKey = args[14] or ''
 
   -- Phase 1: Complete current job (same as glidemq_complete)
   redis.call('XACK', streamKey, group, entryId)
@@ -622,8 +640,8 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     'returnvalue', returnvalue,
     'finishedOn', tostring(timestamp)
   )
-  markOrderingDone(jobKey, jobId)
-  releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
+  markOrderingDone(jobKey, jobId, currentOrderingKey, currentOrderingSeq)
+  releaseGroupSlotAndPromote(jobKey, jobId, timestamp, currentGroupKey)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
 
@@ -706,7 +724,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     if revoked == '1' then
       return {'NEXT_REVOKED', jobId, nextJobId, nextEntryId}
     end
-    if checkExpired(nextJobKey, nextJobId, prefix, tonumber(timestamp)) then
+    if checkExpired(nextJobKey, nextJobId, prefix, timestamp) then
       redis.call('XACK', streamKey, group, nextEntryId)
       redis.call('XDEL', streamKey, nextEntryId)
       nextJobId = nil
@@ -1291,23 +1309,50 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
   local entryId = args[2] or ''
   local group = args[3] or ''
   local jobId = args[4] or ''
-  local exists = redis.call('EXISTS', jobKey)
-  if exists == 0 then
+  local ts = tonumber(timestamp) or 0
+  local timestampStr = tostring(ts)
+  local fields = redis.call('HGETALL', jobKey)
+  if not fields or #fields == 0 then
     return ''
   end
-  local revoked = redis.call('HGET', jobKey, 'revoked')
+  local revoked = ''
+  local expireAt = 0
+  local curState = ''
+  local orderingKey = ''
+  local orderingSeq = ''
+  local groupKey = ''
+  local costVal = ''
+  for f = 1, #fields, 2 do
+    local field = fields[f]
+    local value = fields[f + 1]
+    if field == 'revoked' then
+      revoked = value
+    elseif field == 'expireAt' then
+      expireAt = tonumber(value) or 0
+    elseif field == 'state' then
+      curState = value
+    elseif field == 'orderingKey' then
+      orderingKey = value
+    elseif field == 'orderingSeq' then
+      orderingSeq = value
+    elseif field == 'groupKey' then
+      groupKey = value
+    elseif field == 'cost' then
+      costVal = value
+    end
+  end
   if revoked == '1' then
     return 'REVOKED'
   end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-  if checkExpired(jobKey, jobId, prefix, tonumber(timestamp)) then
+  if expireAt > 0 and ts > expireAt then
+    expireJob(jobKey, jobId, prefix, ts, curState, orderingKey, orderingSeq, groupKey)
     if streamKey ~= '' and entryId ~= '' and group ~= '' then
       redis.call('XACK', streamKey, group, entryId)
       redis.call('XDEL', streamKey, entryId)
     end
     return 'EXPIRED'
   end
-  local groupKey = redis.call('HGET', jobKey, 'groupKey')
   if groupKey and groupKey ~= '' then
     local groupHashKey = prefix .. 'group:' .. groupKey
     -- Load all group fields in one call
@@ -1334,19 +1379,19 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     local tbTokens = 0
     local jobCostVal = 0
     if tbCapacity > 0 then
-      tbTokens = tbRefill(groupHashKey, grp, tonumber(timestamp))
-      jobCostVal = tonumber(redis.call('HGET', jobKey, 'cost')) or 1000
+      tbTokens = tbRefill(groupHashKey, grp, ts)
+      jobCostVal = tonumber(costVal) or 1000
       -- DLQ guard: cost > capacity
       if jobCostVal > tbCapacity then
         if streamKey ~= '' and entryId ~= '' and group ~= '' then
           redis.call('XACK', streamKey, group, entryId)
           redis.call('XDEL', streamKey, entryId)
         end
-        redis.call('ZADD', prefix .. 'failed', tonumber(timestamp), jobId)
+        redis.call('ZADD', prefix .. 'failed', ts, jobId)
         redis.call('HSET', jobKey,
           'state', 'failed',
           'failedReason', 'cost exceeds token bucket capacity',
-          'finishedOn', timestamp)
+          'finishedOn', timestampStr)
         emitEvent(prefix .. 'events', 'failed', jobId, {'failedReason', 'cost exceeds token bucket capacity'})
         return 'ERR:COST_EXCEEDS_CAPACITY'
       end
@@ -1365,7 +1410,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       local rateDuration = tonumber(grp.rateDuration) or 0
       local rateWindowStart = tonumber(grp.rateWindowStart) or 0
       local rateCount = tonumber(grp.rateCount) or 0
-      local now = tonumber(timestamp)
+      local now = ts
       if rateDuration > 0 and now - rateWindowStart < rateDuration and rateCount >= rateMax then
         rlBlocked = true
         rlDelay = (rateWindowStart + rateDuration) - now
@@ -1382,7 +1427,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       redis.call('HSET', jobKey, 'state', 'group-waiting')
       local maxDelay = math.max(tbDelay, rlDelay)
       local rateLimitedKey = prefix .. 'ratelimited'
-      redis.call('ZADD', rateLimitedKey, tonumber(timestamp) + maxDelay, groupKey)
+      redis.call('ZADD', rateLimitedKey, ts + maxDelay, groupKey)
       if tbBlocked then return 'GROUP_TOKEN_LIMITED' end
       return 'GROUP_RATE_LIMITED'
     end
@@ -1394,7 +1439,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       local rateDuration = tonumber(grp.rateDuration) or 0
       if rateDuration > 0 then
         local rateWindowStart = tonumber(grp.rateWindowStart) or 0
-        local now = tonumber(timestamp)
+        local now = ts
         if now - rateWindowStart >= rateDuration then
           redis.call('HSET', groupHashKey, 'rateWindowStart', tostring(now), 'rateCount', '1')
         else
@@ -1404,8 +1449,13 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     end
     redis.call('HINCRBY', groupHashKey, 'active', 1)
   end
-  redis.call('HSET', jobKey, 'state', 'active', 'processedOn', timestamp, 'lastActive', timestamp)
-  local fields = redis.call('HGETALL', jobKey)
+  redis.call('HSET', jobKey, 'state', 'active', 'processedOn', timestampStr, 'lastActive', timestampStr)
+  fields[#fields + 1] = 'state'
+  fields[#fields + 1] = 'active'
+  fields[#fields + 1] = 'processedOn'
+  fields[#fields + 1] = timestampStr
+  fields[#fields + 1] = 'lastActive'
+  fields[#fields + 1] = timestampStr
   return fields
 end)
 
@@ -2400,6 +2450,12 @@ export interface CompleteAndFetchResult {
   nextEntryId?: string;
 }
 
+export interface CompleteAndFetchHints {
+  orderingKey?: string;
+  orderingSeq?: number;
+  groupKey?: string;
+}
+
 export async function completeAndFetchNext(
   client: Client,
   k: QueueKeys,
@@ -2411,6 +2467,7 @@ export async function completeAndFetchNext(
   consumer: string,
   removeOnComplete?: boolean | number | { age: number; count: number },
   parentInfo?: { depsMember: string; parentId: string; parentKeys: QueueKeys },
+  hints?: CompleteAndFetchHints,
 ): Promise<CompleteAndFetchResult> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
@@ -2434,6 +2491,10 @@ export async function completeAndFetchNext(
   } else {
     args.push('', '');
   }
+
+  const orderingSeqHint =
+    hints?.orderingSeq != null && Number.isFinite(hints.orderingSeq) ? Math.trunc(hints.orderingSeq).toString() : '';
+  args.push(hints?.orderingKey ?? '', orderingSeqHint, hints?.groupKey ?? '');
 
   const raw = await client.fcall('glidemq_completeAndFetchNext', keys, args);
 

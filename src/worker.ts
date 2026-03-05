@@ -702,6 +702,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
         this.consumerId,
         job.opts.removeOnComplete,
         parentInfo,
+        {
+          orderingKey: job.orderingKey,
+          orderingSeq: job.orderingSeq,
+          groupKey: job.groupKey,
+        },
       );
 
       job.returnvalue = processResult;

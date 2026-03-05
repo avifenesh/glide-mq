@@ -202,6 +202,12 @@ describe('Worker', () => {
       '1000',
       'attemptsMade',
       '0',
+      'orderingKey',
+      'tenant-a',
+      'orderingSeq',
+      '1',
+      'groupKey',
+      'group-1',
       'state',
       'active',
     ]);
@@ -239,7 +245,7 @@ describe('Worker', () => {
     expect(mockCommandClient.fcall).toHaveBeenCalledWith(
       'glidemq_completeAndFetchNext',
       [keys.stream, keys.completed, keys.events, keys.job('1')],
-      expect.arrayContaining(['1', '1234567890-0']),
+      expect.arrayContaining(['1', '1234567890-0', 'tenant-a', '1', 'group-1']),
     );
 
     // Event should have been emitted
