@@ -163,7 +163,28 @@ export class Scheduler {
       const priority = template.opts?.priority ?? 0;
       const maxAttempts = template.opts?.attempts ?? 0;
 
-      pendingJobs.push(addJobArgs(this.queueKeys, jobName, jobData, jobOpts, now, 0, priority, '', maxAttempts));
+      const jobTtl = template.opts?.ttl ?? 0;
+      pendingJobs.push(
+        addJobArgs(
+          this.queueKeys,
+          jobName,
+          jobData,
+          jobOpts,
+          now,
+          0,
+          priority,
+          '',
+          maxAttempts,
+          '',
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          jobTtl,
+        ),
+      );
 
       // Compute next run
       let nextRun: number;

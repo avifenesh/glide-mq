@@ -136,6 +136,8 @@ export interface JobOptions {
   removeOnFail?: boolean | number | { age: number; count: number };
   deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
   parent?: { queue: string; id: string };
+  /** Time-to-live in milliseconds. Jobs not processed within this window are failed as 'expired'. */
+  ttl?: number;
 }
 
 export interface RateLimitConfig {

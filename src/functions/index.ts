@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '28';
+export const LIBRARY_VERSION = '29';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -190,6 +190,30 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now)
   end
 end
 
+local function checkExpired(jobKey, jobId, prefix, now)
+  local expireAt = tonumber(redis.call('HGET', jobKey, 'expireAt'))
+  if not expireAt or expireAt <= 0 then return false end
+  if now <= expireAt then return false end
+  -- Idempotency guard: if already expired, skip side effects
+  local curState = redis.call('HGET', jobKey, 'state')
+  if curState == 'failed' then return true end
+  local wasActive = (curState == 'active')
+  local failedKey = prefix .. 'failed'
+  local eventsKey = prefix .. 'events'
+  redis.call('ZADD', failedKey, now, jobId)
+  redis.call('HSET', jobKey,
+    'state', 'failed',
+    'failedReason', 'expired',
+    'finishedOn', tostring(now))
+  markOrderingDone(jobKey, jobId)
+  -- Only release group slot if the job was actually active (held a slot)
+  if wasActive then
+    releaseGroupSlotAndPromote(jobKey, jobId, now)
+  end
+  emitEvent(eventsKey, 'expired', jobId, nil)
+  return true
+end
+
 local function extractOrderingKeyFromOpts(optsJson)
   if not optsJson or optsJson == '' then
     return ''
@@ -270,6 +294,13 @@ local function extractCostFromOpts(optsJson)
   return math.floor(cost * 1000)
 end
 
+local function extractTtlFromOpts(optsJson)
+  if not optsJson or optsJson == '' then return 0 end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then return 0 end
+  return tonumber(decoded['ttl']) or 0
+end
+
 -- Remove excess jobs from a sorted set in capped, stack-safe batches.
 -- Deletes job hashes and removes from the set in chunks of 1000.
 local function removeExcessJobs(setKey, prefix, ids)
@@ -305,6 +336,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local tbCapacity = tonumber(args[13]) or 0
   local tbRefillRate = tonumber(args[14]) or 0
   local jobCost = tonumber(args[15]) or 0
+  local ttl = tonumber(args[16]) or 0
   local jobId = redis.call('INCR', idKey)
   local jobIdStr = tostring(jobId)
   local prefix = string.sub(idKey, 1, #idKey - 2)
@@ -397,6 +429,10 @@ redis.register_function('glidemq_addJob', function(keys, args)
     hashFields[#hashFields + 1] = 'cost'
     hashFields[#hashFields + 1] = tostring(jobCost)
   end
+  if ttl > 0 then
+    hashFields[#hashFields + 1] = 'expireAt'
+    hashFields[#hashFields + 1] = tostring(timestamp + ttl)
+  end
   if parentId ~= '' then
     hashFields[#hashFields + 1] = 'parentId'
     hashFields[#hashFields + 1] = parentId
@@ -451,13 +487,15 @@ redis.register_function('glidemq_promote', function(keys, args)
     )
     for i = 1, #members do
       local jobId = members[i]
-      redis.call('XADD', streamKey, '*', 'jobId', jobId)
-      redis.call('ZREM', scheduledKey, jobId)
       local prefix = string.sub(scheduledKey, 1, #scheduledKey - 9)
       local jobKey = prefix .. 'job:' .. jobId
-      redis.call('HSET', jobKey, 'state', 'waiting')
-      emitEvent(eventsKey, 'promoted', jobId, nil)
-      count = count + 1
+      redis.call('ZREM', scheduledKey, jobId)
+      if not checkExpired(jobKey, jobId, prefix, now) then
+        redis.call('XADD', streamKey, '*', 'jobId', jobId)
+        redis.call('HSET', jobKey, 'state', 'waiting')
+        emitEvent(eventsKey, 'promoted', jobId, nil)
+        count = count + 1
+      end
     end
     cursorMin = (priority + 1) * PRIORITY_SHIFT
   end
@@ -602,23 +640,45 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     end
   end
 
-  -- Phase 2: Fetch next job (non-blocking XREADGROUP)
-  local nextEntries = redis.call('XREADGROUP', 'GROUP', group, consumer, 'COUNT', 1, 'STREAMS', streamKey, '>')
-  if not nextEntries or #nextEntries == 0 then
-    return cjson.encode({completed = jobId, next = false})
-  end
-  local streamData = nextEntries[1]
-  local entries = streamData[2]
-  if not entries or #entries == 0 then
-    return cjson.encode({completed = jobId, next = false})
-  end
-  local nextEntry = entries[1]
-  local nextEntryId = nextEntry[1]
-  local nextFields = nextEntry[2]
-  local nextJobId = nil
-  for i = 1, #nextFields, 2 do
-    if nextFields[i] == 'jobId' then
-      nextJobId = nextFields[i + 1]
+  -- Phase 2: Fetch next job (non-blocking XREADGROUP), skip expired (up to 3 attempts)
+  local nextJobId, nextEntryId, nextJobKey
+  for _fetchAttempt = 1, 3 do
+    local nextEntries = redis.call('XREADGROUP', 'GROUP', group, consumer, 'COUNT', 1, 'STREAMS', streamKey, '>')
+    if not nextEntries or #nextEntries == 0 then
+      return cjson.encode({completed = jobId, next = false})
+    end
+    local streamData = nextEntries[1]
+    local entries = streamData[2]
+    if not entries or #entries == 0 then
+      return cjson.encode({completed = jobId, next = false})
+    end
+    local nextEntry = entries[1]
+    nextEntryId = nextEntry[1]
+    local nextFields = nextEntry[2]
+    nextJobId = nil
+    for i = 1, #nextFields, 2 do
+      if nextFields[i] == 'jobId' then
+        nextJobId = nextFields[i + 1]
+        break
+      end
+    end
+    if not nextJobId then
+      return cjson.encode({completed = jobId, next = false})
+    end
+    nextJobKey = prefix .. 'job:' .. nextJobId
+    local nextExists = redis.call('EXISTS', nextJobKey)
+    if nextExists == 0 then
+      return cjson.encode({completed = jobId, next = false, nextEntryId = nextEntryId})
+    end
+    local revoked = redis.call('HGET', nextJobKey, 'revoked')
+    if revoked == '1' then
+      return cjson.encode({completed = jobId, next = 'REVOKED', nextJobId = nextJobId, nextEntryId = nextEntryId})
+    end
+    if checkExpired(nextJobKey, nextJobId, prefix, tonumber(timestamp)) then
+      redis.call('XACK', streamKey, group, nextEntryId)
+      redis.call('XDEL', streamKey, nextEntryId)
+      nextJobId = nil
+    else
       break
     end
   end
@@ -627,15 +687,6 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   end
 
   -- Phase 3: Activate next job (same as moveToActive)
-  local nextJobKey = prefix .. 'job:' .. nextJobId
-  local nextExists = redis.call('EXISTS', nextJobKey)
-  if nextExists == 0 then
-    return cjson.encode({completed = jobId, next = false, nextEntryId = nextEntryId})
-  end
-  local revoked = redis.call('HGET', nextJobKey, 'revoked')
-  if revoked == '1' then
-    return cjson.encode({completed = jobId, next = 'REVOKED', nextJobId = nextJobId, nextEntryId = nextEntryId})
-  end
   local nextGroupKey = redis.call('HGET', nextJobKey, 'groupKey')
   if nextGroupKey and nextGroupKey ~= '' then
     local nextGroupHashKey = prefix .. 'group:' .. nextGroupKey
@@ -834,6 +885,11 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
     end
     if jobId then
       local jobKey = prefix .. 'job:' .. jobId
+      if checkExpired(jobKey, jobId, prefix, timestamp) then
+        redis.call('XACK', streamKey, group, entryId)
+        redis.call('XDEL', streamKey, entryId)
+        count = count + 1
+      else
       local lastActive = tonumber(redis.call('HGET', jobKey, 'lastActive'))
       if lastActive and (timestamp - lastActive) < minIdleMs then
         count = count + 1
@@ -858,6 +914,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
         emitEvent(eventsKey, 'stalled', jobId, nil)
       end
       count = count + 1
+      end
       end
     end
   end
@@ -904,6 +961,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local tbCapacity = tonumber(args[16]) or 0
   local tbRefillRate = tonumber(args[17]) or 0
   local jobCost = tonumber(args[18]) or 0
+  local ttl = tonumber(args[19]) or 0
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local existing = redis.call('HGET', dedupKey, dedupId)
   if mode == 'simple' then
@@ -1034,6 +1092,10 @@ redis.register_function('glidemq_dedup', function(keys, args)
     hashFields[#hashFields + 1] = 'cost'
     hashFields[#hashFields + 1] = tostring(jobCost)
   end
+  if ttl > 0 then
+    hashFields[#hashFields + 1] = 'expireAt'
+    hashFields[#hashFields + 1] = tostring(timestamp + ttl)
+  end
   if parentId ~= '' then
     hashFields[#hashFields + 1] = 'parentId'
     hashFields[#hashFields + 1] = parentId
@@ -1157,10 +1219,12 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
       for j = 1, canPromote do
         local nextJobId = redis.call('LPOP', waitListKey)
         if not nextJobId then break end
-        redis.call('XADD', streamKey, '*', 'jobId', nextJobId)
         local nextJobKey = prefix .. 'job:' .. nextJobId
-        redis.call('HSET', nextJobKey, 'state', 'waiting')
-        promoted = promoted + 1
+        if not checkExpired(nextJobKey, nextJobId, prefix, now) then
+          redis.call('XADD', streamKey, '*', 'jobId', nextJobId)
+          redis.call('HSET', nextJobKey, 'state', 'waiting')
+          promoted = promoted + 1
+        end
       end
     end
   end
@@ -1199,9 +1263,16 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
   if revoked == '1' then
     return 'REVOKED'
   end
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  if checkExpired(jobKey, jobId, prefix, tonumber(timestamp)) then
+    if streamKey ~= '' and entryId ~= '' and group ~= '' then
+      redis.call('XACK', streamKey, group, entryId)
+      redis.call('XDEL', streamKey, entryId)
+    end
+    return 'EXPIRED'
+  end
   local groupKey = redis.call('HGET', jobKey, 'groupKey')
   if groupKey and groupKey ~= '' then
-    local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     local groupHashKey = prefix .. 'group:' .. groupKey
     -- Load all group fields in one call
     local grpFields = redis.call('HGETALL', groupHashKey)
@@ -1389,6 +1460,11 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     parentHash[#parentHash + 1] = 'cost'
     parentHash[#parentHash + 1] = tostring(parentCost)
   end
+  local parentTtl = extractTtlFromOpts(parentOpts)
+  if parentTtl > 0 then
+    parentHash[#parentHash + 1] = 'expireAt'
+    parentHash[#parentHash + 1] = tostring(timestamp + parentTtl)
+  end
   redis.call('HSET', parentJobKey, unpack(parentHash))
   -- Pre-validate all children's cost vs capacity before any child writes
   local childArgOffset = 8
@@ -1474,6 +1550,11 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     if childCost > 0 then
       childHash[#childHash + 1] = 'cost'
       childHash[#childHash + 1] = tostring(childCost)
+    end
+    local childTtl = extractTtlFromOpts(childOpts)
+    if childTtl > 0 then
+      childHash[#childHash + 1] = 'expireAt'
+      childHash[#childHash + 1] = tostring(timestamp + childTtl)
     end
     if childDelay > 0 or childPriority > 0 then
       childHash[#childHash + 1] = 'state'
@@ -2057,6 +2138,7 @@ export function addJobArgs(
   tbCapacity: number = 0,
   tbRefillRate: number = 0,
   jobCost: number = 0,
+  ttl: number = 0,
 ): { keys: string[]; args: string[] } {
   return {
     keys: [k.id, k.stream, k.scheduled, k.events],
@@ -2076,6 +2158,7 @@ export function addJobArgs(
       tbCapacity.toString(),
       tbRefillRate.toString(),
       jobCost.toString(),
+      ttl.toString(),
     ],
   };
 }
@@ -2098,6 +2181,7 @@ export async function addJob(
   tbCapacity: number = 0,
   tbRefillRate: number = 0,
   jobCost: number = 0,
+  ttl: number = 0,
 ): Promise<string> {
   const { keys, args } = addJobArgs(
     k,
@@ -2116,6 +2200,7 @@ export async function addJob(
     tbCapacity,
     tbRefillRate,
     jobCost,
+    ttl,
   );
   const result = await client.fcall('glidemq_addJob', keys, args);
   return result as string;
@@ -2146,6 +2231,7 @@ export async function dedup(
   tbCapacity: number = 0,
   tbRefillRate: number = 0,
   jobCost: number = 0,
+  jobTtl: number = 0,
 ): Promise<string> {
   const result = await client.fcall(
     'glidemq_dedup',
@@ -2169,6 +2255,7 @@ export async function dedup(
       tbCapacity.toString(),
       tbRefillRate.toString(),
       jobCost.toString(),
+      jobTtl.toString(),
     ],
   );
   return result as string;
@@ -2452,6 +2539,7 @@ export async function moveToActive(
 ): Promise<
   | Record<string, string>
   | 'REVOKED'
+  | 'EXPIRED'
   | 'GROUP_FULL'
   | 'GROUP_RATE_LIMITED'
   | 'GROUP_TOKEN_LIMITED'
@@ -2468,6 +2556,7 @@ export async function moveToActive(
   const str = String(result);
   if (str === '' || str === 'null') return null;
   if (str === 'REVOKED') return 'REVOKED';
+  if (str === 'EXPIRED') return 'EXPIRED';
   if (str === 'GROUP_FULL') return 'GROUP_FULL';
   if (str === 'GROUP_RATE_LIMITED') return 'GROUP_RATE_LIMITED';
   if (str === 'GROUP_TOKEN_LIMITED') return 'GROUP_TOKEN_LIMITED';

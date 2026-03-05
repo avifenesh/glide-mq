@@ -96,6 +96,9 @@ export class FlowProducer {
       const tbCapacity = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.capacity * 1000) : 0;
       const tbRefillRate = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.refillRate * 1000) : 0;
       const jobCost = opts.cost != null ? Math.round(opts.cost * 1000) : 0;
+      if (opts.ttl != null && (!Number.isFinite(opts.ttl) || opts.ttl < 0)) {
+        throw new Error('ttl must be a non-negative finite number');
+      }
       let groupConcurrency = opts.ordering?.concurrency ?? 0;
       // Force group path when rate limit or token bucket is set
       if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
@@ -119,6 +122,7 @@ export class FlowProducer {
         tbCapacity,
         tbRefillRate,
         jobCost,
+        opts.ttl ?? 0,
       );
       if (String(jobId) === 'ERR:COST_EXCEEDS_CAPACITY') {
         throw new Error('Job cost exceeds token bucket capacity');
