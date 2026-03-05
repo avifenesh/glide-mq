@@ -28,8 +28,7 @@
     "bench:latency": "npx tsx benchmarks/run.ts latency",
     "bench:memory": "npx tsx benchmarks/run.ts memory",
     "bench:sharing": "npx tsx benchmarks/run.ts sharing",
-    "bench:user": "npx tsx benchmarks/run.ts user",
-    "bench:user:docker": "npx tsx benchmarks/docker-run.ts user",
+    "bench:ci": "npx tsx benchmarks/run.ts ci",
     "fuzz": "vitest run tests/fuzzer/"
   },
   "engines": {
