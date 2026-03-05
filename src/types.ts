@@ -195,6 +195,8 @@ export interface ScheduleOpts {
   pattern?: string;
   /** Repeat interval in milliseconds */
   every?: number;
+  /** IANA timezone for cron patterns (e.g. 'America/New_York'). Defaults to UTC. */
+  tz?: string;
 }
 
 export interface JobTemplate {
@@ -206,6 +208,8 @@ export interface JobTemplate {
 export interface SchedulerEntry {
   pattern?: string;
   every?: number;
+  /** IANA timezone for cron patterns (e.g. 'America/New_York'). Defaults to UTC. */
+  tz?: string;
   template?: JobTemplate;
   lastRun?: number;
   nextRun: number;

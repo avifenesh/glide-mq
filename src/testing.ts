@@ -11,7 +11,7 @@ import path from 'path';
 import os from 'os';
 import type { JobOptions, JobCounts, Processor, WorkerInfo, SchedulerEntry, ScheduleOpts, JobTemplate } from './types';
 import { GlideMQError, UnrecoverableError } from './errors';
-import { nextCronOccurrence } from './utils';
+import { nextCronOccurrence, validateTimezone } from './utils';
 
 // ---- Lightweight in-memory Job representation ----
 
@@ -348,11 +348,15 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     if (!schedule.pattern && !schedule.every) {
       throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
     }
+    if (schedule.tz) {
+      validateTimezone(schedule.tz);
+    }
     const now = Date.now();
-    const nextRun = schedule.pattern ? nextCronOccurrence(schedule.pattern, now) : now + schedule.every!;
+    const nextRun = schedule.pattern ? nextCronOccurrence(schedule.pattern, now, schedule.tz) : now + schedule.every!;
     const entry: SchedulerEntry = {
       pattern: schedule.pattern,
       every: schedule.every,
+      tz: schedule.tz,
       template,
       nextRun,
     };

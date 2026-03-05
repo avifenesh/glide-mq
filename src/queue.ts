@@ -20,6 +20,7 @@ import {
   keyPrefix,
   keyPrefixPattern,
   nextCronOccurrence,
+  validateTimezone,
   hashDataToRecord,
   extractJobIdsFromStreamEntries,
   compress,
@@ -599,9 +600,13 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const client = await this.getClient();
     const now = Date.now();
 
+    if (schedule.tz) {
+      validateTimezone(schedule.tz);
+    }
+
     let nextRun: number;
     if (schedule.pattern) {
-      nextRun = nextCronOccurrence(schedule.pattern, now);
+      nextRun = nextCronOccurrence(schedule.pattern, now, schedule.tz);
     } else if (schedule.every) {
       nextRun = now + schedule.every;
     } else {
@@ -611,6 +616,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const entry: SchedulerEntry = {
       pattern: schedule.pattern,
       every: schedule.every,
+      tz: schedule.tz,
       template,
       nextRun,
     };
