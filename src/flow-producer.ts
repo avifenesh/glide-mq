@@ -1,4 +1,5 @@
-import type { FlowProducerOptions, FlowJob, Client } from './types';
+import type { FlowProducerOptions, FlowJob, Client, Serializer } from './types';
+import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import { buildKeys, keyPrefix } from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
@@ -16,12 +17,14 @@ export class FlowProducer {
   private client: Client | null = null;
   private clientOwned = true;
   private closing = false;
+  private serializer: Serializer;
 
   constructor(opts: FlowProducerOptions) {
     if (!opts.connection && !opts.client) {
       throw new GlideMQError('Either `connection` or `client` must be provided.');
     }
     this.opts = opts;
+    this.serializer = opts.serializer ?? JSON_SERIALIZER;
   }
 
   /** @internal */
@@ -108,7 +111,7 @@ export class FlowProducer {
         client,
         parentKeys,
         flow.name,
-        JSON.stringify(flow.data),
+        this.serializer.serialize(flow.data),
         JSON.stringify(opts),
         timestamp,
         opts.delay ?? 0,
@@ -127,7 +130,7 @@ export class FlowProducer {
       if (String(jobId) === 'ERR:COST_EXCEEDS_CAPACITY') {
         throw new Error('Job cost exceeds token bucket capacity');
       }
-      const job = new Job(client, parentKeys, String(jobId), flow.name, flow.data, opts);
+      const job = new Job(client, parentKeys, String(jobId), flow.name, flow.data, opts, this.serializer);
       job.timestamp = timestamp;
       return { job };
     }
@@ -148,7 +151,7 @@ export class FlowProducer {
         const childOpts = child.opts ?? {};
         return {
           name: child.name,
-          data: JSON.stringify(child.data),
+          data: this.serializer.serialize(child.data),
           opts: JSON.stringify(childOpts),
           delay: childOpts.delay ?? 0,
           priority: childOpts.priority ?? 0,
@@ -173,7 +176,7 @@ export class FlowProducer {
       client,
       parentKeys,
       flow.name,
-      JSON.stringify(flow.data),
+      this.serializer.serialize(flow.data),
       JSON.stringify(parentOpts),
       timestamp,
       parentOpts.delay ?? 0,
@@ -213,6 +216,7 @@ export class FlowProducer {
           child.name,
           child.data,
           child.opts ?? {},
+          this.serializer,
         );
         childJob.timestamp = timestamp;
         childJob.parentId = parentId;
@@ -222,7 +226,7 @@ export class FlowProducer {
       }
     }
 
-    const parentJob = new Job(client, parentKeys, parentId, flow.name, flow.data, parentOpts);
+    const parentJob = new Job(client, parentKeys, parentId, flow.name, flow.data, parentOpts, this.serializer);
     parentJob.timestamp = timestamp;
 
     return { job: parentJob, children: childNodes };

@@ -13,7 +13,9 @@ import type {
   SearchJobsOptions,
   RateLimitConfig,
   WorkerInfo,
+  Serializer,
 } from './types';
+import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import {
   buildKeys,
@@ -69,6 +71,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
   private closing = false;
   private keys: QueueKeys;
 
+  private serializer: Serializer;
+
   constructor(name: string, opts: QueueOptions) {
     super();
     if (!opts.connection && !opts.client) {
@@ -76,6 +80,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     }
     this.name = name;
     this.opts = opts;
+    this.serializer = opts.serializer ?? JSON_SERIALIZER;
     this.keys = buildKeys(name, opts.prefix);
     if (opts.connection) {
       this._clusterMode = opts.connection.clusterMode ?? false;
@@ -208,7 +213,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         }
 
         // Payload size validation - prevent DoS via oversized jobs
-        let serialized = JSON.stringify(data);
+        let serialized = this.serializer.serialize(data);
         const byteLen = Buffer.byteLength(serialized, 'utf8');
         if (byteLen > MAX_JOB_DATA_SIZE) {
           throw new Error(
@@ -285,7 +290,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
         span.setAttribute('glide-mq.job.id', String(jobId));
 
-        const job = new Job<D, R>(client, this.keys, String(jobId), name, data, opts ?? {});
+        const job = new Job<D, R>(client, this.keys, String(jobId), name, data, opts ?? {}, this.serializer);
         job.timestamp = timestamp;
         job.parentId = parentId || undefined;
         return job;
@@ -319,7 +324,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       }
       const deduplication = opts.deduplication;
 
-      let serializedData = JSON.stringify(entry.data);
+      let serializedData = this.serializer.serialize(entry.data);
       const byteLen = Buffer.byteLength(serializedData, 'utf8');
       if (byteLen > MAX_JOB_DATA_SIZE) {
         throw new Error(
@@ -446,7 +451,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         throw new Error('Job cost exceeds token bucket capacity');
       }
       const jobId = raw;
-      const job = new Job<D, R>(client, this.keys, jobId, p.entry.name, p.entry.data, p.opts);
+      const job = new Job<D, R>(client, this.keys, jobId, p.entry.name, p.entry.data, p.opts, this.serializer);
       job.timestamp = timestamp;
       job.parentId = p.parentId || undefined;
       return [job];
@@ -463,7 +468,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const hash = hashDataToRecord(hashData);
     if (!hash) return null;
 
-    return Job.fromHash<D, R>(client, this.keys, id, hash);
+    return Job.fromHash<D, R>(client, this.keys, id, hash, this.serializer);
   }
 
   /**
@@ -899,7 +904,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (batchResults) {
       for (let i = 0; i < batchResults.length; i++) {
         const hash = hashDataToRecord(batchResults[i] as any);
-        if (hash) jobs.push(Job.fromHash<D, R>(client, this.keys, jobIds[i], hash));
+        if (hash) jobs.push(Job.fromHash<D, R>(client, this.keys, jobIds[i], hash, this.serializer));
       }
     }
     return jobs;
@@ -948,7 +953,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const hash = hashDataToRecord(batchResults[i] as any);
         if (!hash) continue;
 
-        const job = Job.fromHash<D, R>(client, this.keys, chunk[i], hash);
+        const job = Job.fromHash<D, R>(client, this.keys, chunk[i], hash, this.serializer);
 
         // Apply name filter if we used a non-Lua path
         if (opts.name && !opts.state && job.name !== opts.name) continue;
@@ -1196,7 +1201,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       for (let i = 0; i < batchResults.length; i++) {
         const hash = hashDataToRecord(batchResults[i] as any);
         if (!hash) continue;
-        jobs.push(Job.fromHash<D, R>(client, dlqKeys, sliced[i], hash));
+        jobs.push(Job.fromHash<D, R>(client, dlqKeys, sliced[i], hash, this.serializer));
       }
     }
     return jobs;

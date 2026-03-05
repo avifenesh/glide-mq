@@ -1,6 +1,7 @@
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
-import type { JobOptions, Client } from './types';
+import type { JobOptions, Client, Serializer } from './types';
+import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
 import { calculateBackoff, decompress, MAX_JOB_DATA_SIZE } from './utils';
@@ -50,11 +51,22 @@ export class Job<D = any, R = any> {
   private client: Client;
   /** @internal */
   private queueKeys: QueueKeys;
+  /** @internal */
+  private serializer: Serializer;
 
   /** @internal */
-  constructor(client: Client, queueKeys: QueueKeys, id: string, name: string, data: D, opts: JobOptions) {
+  constructor(
+    client: Client,
+    queueKeys: QueueKeys,
+    id: string,
+    name: string,
+    data: D,
+    opts: JobOptions,
+    serializer?: Serializer,
+  ) {
     this.client = client;
     this.queueKeys = queueKeys;
+    this.serializer = serializer ?? JSON_SERIALIZER;
     this.id = id;
     this.name = name;
     this.data = data;
@@ -109,7 +121,7 @@ export class Job<D = any, R = any> {
    * Replace the data payload of this job.
    */
   async updateData(data: D): Promise<void> {
-    const serialized = JSON.stringify(data);
+    const serialized = this.serializer.serialize(data);
     const byteLen = Buffer.byteLength(serialized, 'utf8');
     if (byteLen > MAX_JOB_DATA_SIZE) {
       throw new Error(`Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE})`);
@@ -165,7 +177,7 @@ export class Job<D = any, R = any> {
       for (let i = 0; i < results.length; i++) {
         const val = results[i];
         if (val != null) {
-          result[memberKeys[i]] = JSON.parse(String(val));
+          result[memberKeys[i]] = this.serializer.deserialize(String(val)) as R;
         }
       }
     }
@@ -373,12 +385,19 @@ export class Job<D = any, R = any> {
    * Construct a Job instance from a hash returned by HGETALL.
    * @internal
    */
-  static fromHash<D, R>(client: Client, queueKeys: QueueKeys, id: string, hash: Record<string, string>): Job<D, R> {
+  static fromHash<D, R>(
+    client: Client,
+    queueKeys: QueueKeys,
+    id: string,
+    hash: Record<string, string>,
+    serializer?: Serializer,
+  ): Job<D, R> {
+    const s = serializer ?? JSON_SERIALIZER;
     let data: D;
     let opts: JobOptions;
     let returnvalue: R | undefined;
     try {
-      data = JSON.parse(decompress(hash.data || '{}'));
+      data = s.deserialize(decompress(hash.data || '{}')) as D;
     } catch {
       data = {} as D;
     }
@@ -388,12 +407,12 @@ export class Job<D = any, R = any> {
       opts = {};
     }
     try {
-      returnvalue = hash.returnvalue ? JSON.parse(hash.returnvalue) : undefined;
+      returnvalue = hash.returnvalue ? (s.deserialize(hash.returnvalue) as R) : undefined;
     } catch {
       returnvalue = undefined;
     }
 
-    const job = new Job<D, R>(client, queueKeys, id, hash.name || '', data, opts);
+    const job = new Job<D, R>(client, queueKeys, id, hash.name || '', data, opts, serializer);
     job.attemptsMade = parseInt(hash.attemptsMade || '0', 10);
     job.timestamp = parseInt(hash.timestamp || '0', 10);
     job.processedOn = hash.processedOn ? parseInt(hash.processedOn, 10) : undefined;

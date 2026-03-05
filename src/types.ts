@@ -74,6 +74,8 @@ export interface QueueOptions {
   deadLetterQueue?: DeadLetterQueueOptions;
   /** Enable transparent compression of job data. Default: 'none'. */
   compression?: 'none' | 'gzip';
+  /** Custom serializer for job data and return values. Default: JSON. */
+  serializer?: Serializer;
 }
 
 export interface SandboxOptions {
@@ -154,6 +156,19 @@ export interface TokenBucketConfig {
   refillRate: number;
 }
 
+export interface Serializer {
+  /** Serialize a value to a string for storage in Valkey. */
+  serialize(data: unknown): string;
+  /** Deserialize a string from Valkey back to a value. */
+  deserialize(raw: string): unknown;
+}
+
+/** Default JSON serializer used when no custom serializer is provided. */
+export const JSON_SERIALIZER: Serializer = {
+  serialize: (data) => JSON.stringify(data),
+  deserialize: (raw) => JSON.parse(raw),
+};
+
 export interface JobData {
   [key: string]: unknown;
 }
@@ -177,6 +192,8 @@ export interface FlowProducerOptions {
    */
   client?: Client;
   prefix?: string;
+  /** Custom serializer for job data and return values. Default: JSON. */
+  serializer?: Serializer;
 }
 
 export interface QueueEventsOptions {

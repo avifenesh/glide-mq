@@ -2,7 +2,8 @@ import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
 import { TimeUnit } from '@glidemq/speedkey';
-import type { WorkerOptions, Processor, Client } from './types';
+import type { WorkerOptions, Processor, Client, Serializer } from './types';
+import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import { buildKeys, calculateBackoff, keyPrefix, nextReconnectDelay, reconnectWithBackoff } from './utils';
 import { createSandboxedProcessor } from './sandbox';
@@ -69,6 +70,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private workerHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private readonly startedAt = Date.now();
   private readonly hostname = os.hostname();
+  private serializer: Serializer;
 
   constructor(name: string, processor: Processor<D, R> | string, opts: WorkerOptions) {
     super();
@@ -98,6 +100,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       this.processor = processor;
     }
     this.opts = opts;
+    this.serializer = opts.serializer ?? JSON_SERIALIZER;
     this.queueKeys = buildKeys(name, opts.prefix);
     this.consumerId = `worker-${Date.now()}-${randomBytes(4).toString('hex')}`;
 
@@ -150,6 +153,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       consumerId: this.consumerId,
       queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
       onPromotionTick: () => this.refreshMetaFlags(),
+      serializer: this.serializer,
     });
     this.scheduler.start();
 
@@ -257,6 +261,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
           consumerId: this.consumerId,
           queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
           onPromotionTick: () => this.refreshMetaFlags(),
+          serializer: this.serializer,
         });
         this.scheduler.start();
 
@@ -631,7 +636,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
         currentHash = moveResult as Record<string, string>;
       }
 
-      const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash);
+      const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash, this.serializer);
       job.entryId = currentEntryId;
 
       const orderingReady = await this.isOrderingTurn(job);
@@ -652,7 +657,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
       if (!this.commandClient) return;
 
-      const returnvalue = processResult !== undefined ? JSON.stringify(processResult) : 'null';
+      const returnvalue = processResult !== undefined ? this.serializer.serialize(processResult) : 'null';
       const parentInfo = this.buildParentInfo(job, currentJobId);
 
       const fetchResult = await completeAndFetchNext(
