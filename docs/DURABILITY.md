@@ -72,6 +72,7 @@ For most production queue workloads, start here and tune from measurement:
 ```conf
 appendonly yes
 appendfsync everysec
+# If supported by your Valkey version:
 aof-use-rdb-preamble yes
 ```
 
