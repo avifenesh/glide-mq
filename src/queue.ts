@@ -886,14 +886,22 @@ export class Queue<D = any, R = any> extends EventEmitter {
     }
 
     if (jobIds.length === 0) return [];
-    const batch = this.newBatch();
-    for (const id of jobIds) (batch as any).hgetall(this.keys.job(id));
-    const batchResults = await client.exec(batch as any, false);
     const jobs: Job<D, R>[] = [];
-    if (batchResults) {
-      for (let i = 0; i < batchResults.length; i++) {
-        const hash = hashDataToRecord(batchResults[i] as any);
-        if (hash) jobs.push(Job.fromHash<D, R>(client, this.keys, jobIds[i], hash));
+
+    // ⚡ Bolt: Fix potential Node.js event loop blocking by chunking batched requests.
+    // Processing all job IDs at once can create excessively large command batches.
+    // Impact: Avoids unbounded memory allocation and blocking the event loop on large queues.
+    const CHUNK = 1000;
+    for (let offset = 0; offset < jobIds.length; offset += CHUNK) {
+      const chunk = jobIds.slice(offset, offset + CHUNK);
+      const batch = this.newBatch();
+      for (const id of chunk) (batch as any).hgetall(this.keys.job(id));
+      const batchResults = await client.exec(batch as any, false);
+      if (batchResults) {
+        for (let i = 0; i < batchResults.length; i++) {
+          const hash = hashDataToRecord(batchResults[i] as any);
+          if (hash) jobs.push(Job.fromHash<D, R>(client, this.keys, chunk[i], hash));
+        }
       }
     }
     return jobs;
@@ -1182,15 +1190,23 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const jobIds = extractJobIdsFromStreamEntries(entries);
     const sliced = jobIds.slice(start, end >= 0 ? end + 1 : undefined);
     if (sliced.length === 0) return [];
-    const batch = this.newBatch();
-    for (const id of sliced) (batch as any).hgetall(dlqKeys.job(id));
-    const batchResults = await client.exec(batch as any, false);
     const jobs: Job<D, R>[] = [];
-    if (batchResults) {
-      for (let i = 0; i < batchResults.length; i++) {
-        const hash = hashDataToRecord(batchResults[i] as any);
-        if (!hash) continue;
-        jobs.push(Job.fromHash<D, R>(client, dlqKeys, sliced[i], hash));
+
+    // ⚡ Bolt: Fix potential Node.js event loop blocking by chunking batched requests.
+    // Processing all job IDs at once can create excessively large command batches.
+    // Impact: Avoids unbounded memory allocation and blocking the event loop on large queues.
+    const CHUNK = 1000;
+    for (let offset = 0; offset < sliced.length; offset += CHUNK) {
+      const chunk = sliced.slice(offset, offset + CHUNK);
+      const batch = this.newBatch();
+      for (const id of chunk) (batch as any).hgetall(dlqKeys.job(id));
+      const batchResults = await client.exec(batch as any, false);
+      if (batchResults) {
+        for (let i = 0; i < batchResults.length; i++) {
+          const hash = hashDataToRecord(batchResults[i] as any);
+          if (!hash) continue;
+          jobs.push(Job.fromHash<D, R>(client, dlqKeys, chunk[i], hash));
+        }
       }
     }
     return jobs;
