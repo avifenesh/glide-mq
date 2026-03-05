@@ -11,7 +11,12 @@ function parseBenchPort(rawPort: string | undefined): number {
     return 6379;
   }
 
-  const parsedPort = Number.parseInt(rawPort, 10);
+  const normalized = rawPort.trim();
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(`Invalid BENCH_PORT "${rawPort}". Expected an integer between 1 and 65535.`);
+  }
+
+  const parsedPort = Number(normalized);
   if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
     throw new Error(`Invalid BENCH_PORT "${rawPort}". Expected an integer between 1 and 65535.`);
   }
