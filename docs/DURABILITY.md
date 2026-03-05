@@ -46,8 +46,8 @@ Pros:
 
 Trade-offs:
 
-- a crash can lose every write since the last successful snapshot
-- not ideal if you need queue state to survive process or host failure with a small loss window
+- A crash can lose every write since the last successful snapshot
+- Not ideal if you need queue state to survive process or host failure with a small loss window
 
 For queues, RDB-only is usually a recovery/snapshot tool, not the primary durability strategy.
 
@@ -115,7 +115,7 @@ glide-mq works with Valkey cluster replication and re-ensures its function libra
 Important caveat:
 
 - Valkey replication is asynchronous
-- a primary failure can still lose recently acknowledged writes that were not yet replicated or fsynced
+- A primary failure can still lose recently acknowledged writes that were not yet replicated or fsynced
 
 That means failover improves availability, but it does not by itself create exactly-once or zero-loss guarantees.
 
@@ -123,7 +123,7 @@ That means failover improves availability, but it does not by itself create exac
 
 glide-mq is designed for **at-least-once** processing:
 
-- a job may be redelivered after worker crash, connection loss, or stalled reclaim
+- A job may be redelivered after worker crash, connection loss, or stalled reclaim
 - processors should therefore be idempotent whenever side effects matter
 
 glide-mq does **not** guarantee:
