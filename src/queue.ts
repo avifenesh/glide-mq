@@ -231,6 +231,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const client = await this.getClient();
         const timestamp = Date.now();
         const parentId = opts?.parent ? opts.parent.id : '';
+        const parentQueue = opts?.parent ? opts.parent.queue : '';
         const maxAttempts = opts?.attempts ?? 0;
         const orderingKey = opts?.ordering?.key ?? '';
         const groupRateMax = opts?.ordering?.rateLimit?.max ?? 0;
@@ -283,6 +284,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
         const ttl = opts?.ttl ?? 0;
 
+        // Compute parent deps key for same-queue parent (atomic SADD in Lua)
+        let parentDepsKey = '';
+        if (parentId && parentQueue && parentQueue === this.name) {
+          parentDepsKey = this.keys.deps(parentId);
+        }
+
         if (opts?.deduplication) {
           const dedupOpts = opts.deduplication;
           const result = await dedup(
@@ -308,6 +315,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
             jobCost,
             ttl,
             customJobId,
+            parentQueue,
+            parentDepsKey,
           );
           if (result === 'skipped' || result === 'duplicate') {
             return null;
@@ -340,6 +349,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
             jobCost,
             ttl,
             customJobId,
+            parentQueue,
+            parentDepsKey,
           );
           if (result === 'duplicate') {
             return null;
@@ -351,6 +362,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
             throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
           }
           jobId = result;
+
+          // Cross-queue parent: register child in parent deps separately
+          if (parentId && parentQueue && parentQueue !== this.name) {
+            const parentKeys = buildKeys(parentQueue, this.opts.prefix);
+            const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+            const depsMember = `${prefix}:${jobId}`;
+            await client.sadd(parentKeys.deps(parentId), [depsMember]);
+          }
         }
 
         span.setAttribute('glide-mq.job.id', String(jobId));
@@ -358,6 +377,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const job = new Job<D, R>(client, this.keys, String(jobId), name, data, opts ?? {}, this.serializer);
         job.timestamp = timestamp;
         job.parentId = parentId || undefined;
+        job.parentQueue = parentQueue || undefined;
         return job;
       },
     );
@@ -432,6 +452,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const delay = opts.delay ?? 0;
       const priority = opts.priority ?? 0;
       const parentId = opts.parent ? opts.parent.id : '';
+      const parentQueue = opts.parent ? opts.parent.queue : '';
       const maxAttempts = opts.attempts ?? 0;
       const orderingKey = opts.ordering?.key ?? '';
       validateOrderingKey(orderingKey);
@@ -481,6 +502,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         delay,
         priority,
         parentId,
+        parentQueue,
         maxAttempts,
         orderingKey,
         groupConcurrency,
@@ -526,7 +548,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.customJobId,
         ]);
       } else {
-        batch.fcall('glidemq_addJob', keys, [
+        let jobKeys = keys;
+        if (p.parentId && p.parentQueue && p.parentQueue === this.name) {
+          const parentKeys = buildKeys(p.parentQueue, this.opts.prefix);
+          jobKeys = [...keys, parentKeys.deps(p.parentId)];
+        }
+        batch.fcall('glidemq_addJob', jobKeys, [
           p.entry.name,
           p.serializedData,
           JSON.stringify(p.opts),
@@ -544,6 +571,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
+          p.parentQueue,
         ]);
       }
     }
@@ -552,7 +580,20 @@ export class Queue<D = any, R = any> extends EventEmitter {
       ? await (client as GlideClusterClient).exec(batch as ClusterBatch, true)
       : await (client as GlideClient).exec(batch as Batch, true);
 
-    return this.buildBulkJobs(client, prepared, rawResults, timestamp);
+    const builtJobs = await this.buildBulkJobs(client, prepared, rawResults, timestamp);
+
+    // Handle cross-queue parent deps registration (non-atomic, after batch)
+    for (let i = 0; i < prepared.length; i++) {
+      const p = prepared[i];
+      if (p.parentId && p.parentQueue && p.parentQueue !== this.name && builtJobs[i]) {
+        const parentKeys = buildKeys(p.parentQueue, this.opts.prefix);
+        const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+        const depsMember = `${prefix}:${builtJobs[i].id}`;
+        await client.sadd(parentKeys.deps(p.parentId), [depsMember]);
+      }
+    }
+
+    return builtJobs;
   }
 
   private async latestEventCursor(client: Client): Promise<string> {

@@ -4,7 +4,7 @@ import type { JobOptions, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
-import { DelayedError } from './errors';
+import { DelayedError, WaitingChildrenError } from './errors';
 import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
@@ -43,6 +43,9 @@ export class Job<D = any, R = any> {
 
   /** @internal Request captured by moveToDelayed() while inside the worker. */
   moveToDelayedRequest?: { delayedUntil: number; serializedData?: string; nextData?: D };
+
+  /** @internal Request captured by moveToWaitingChildren() while inside the worker. */
+  moveToWaitingChildrenRequest?: boolean;
 
   /**
    * Set to true when data or returnvalue could not be deserialized from Valkey.
@@ -168,6 +171,27 @@ export class Job<D = any, R = any> {
     | undefined {
     const requested = this.moveToDelayedRequest;
     this.moveToDelayedRequest = undefined;
+    return requested;
+  }
+
+  /**
+   * Pause an active job and wait for dynamically-added child jobs to complete.
+   * When all children finish, this job resumes and the processor is invoked again.
+   *
+   * This method must be called from inside a Worker processor.
+   */
+  async moveToWaitingChildren(): Promise<never> {
+    if (!this.entryId) {
+      throw new Error('moveToWaitingChildren() can only be used while the job is active in a Worker');
+    }
+    this.moveToWaitingChildrenRequest = true;
+    throw new WaitingChildrenError();
+  }
+
+  /** @internal */
+  consumeMoveToWaitingChildrenRequest(): boolean {
+    const requested = this.moveToWaitingChildrenRequest ?? false;
+    this.moveToWaitingChildrenRequest = undefined;
     return requested;
   }
 

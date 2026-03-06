@@ -21,7 +21,7 @@ import {
   ensureFunctionLibraryOnce,
   createConsumerGroup,
 } from './connection';
-import { GlideMQError, ConnectionError, DelayedError, UnrecoverableError, BatchError } from './errors';
+import { GlideMQError, ConnectionError, DelayedError, WaitingChildrenError, UnrecoverableError, BatchError } from './errors';
 import {
   CONSUMER_GROUP,
   completeJob,
@@ -32,6 +32,7 @@ import {
   checkConcurrency,
   moveToActive,
   moveActiveToDelayed,
+  moveToWaitingChildren,
   deferActive,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
@@ -1112,6 +1113,23 @@ export class Worker<D = any, R = any> extends EventEmitter {
           });
         } catch (delayErr) {
           const err = delayErr instanceof Error ? delayErr : new Error(String(delayErr));
+          await this.handleJobFailure(job, currentJobId, currentEntryId, err);
+        }
+        return;
+      }
+
+      const waitingChildrenRequest = job.consumeMoveToWaitingChildrenRequest();
+      if (processError instanceof WaitingChildrenError || waitingChildrenRequest) {
+        try {
+          await moveToWaitingChildren(
+            this.commandClient,
+            this.queueKeys,
+            currentJobId,
+            currentEntryId,
+            CONSUMER_GROUP,
+          );
+        } catch (wtcErr) {
+          const err = wtcErr instanceof Error ? wtcErr : new Error(String(wtcErr));
           await this.handleJobFailure(job, currentJobId, currentEntryId, err);
         }
         return;
