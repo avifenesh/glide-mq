@@ -95,8 +95,9 @@ end)
 -- ARGS[7] = parentId (empty string = no parent)
 -- ARGS[8] = maxAttempts (0 = no retry)
 -- ARGS[9] = orderingKey (empty string = no per-key ordering)
+-- ARGS[10]-[16] = groupConcurrency, groupRateMax, groupRateDuration, tbCapacity, tbRefillRate, jobCost, ttl (see index.ts)
 -- ARGS[17] = customJobId (empty string = auto-generate via INCR)
--- Returns: job ID (string), or 'duplicate' if custom ID already exists
+-- Returns: job ID (string), 'duplicate', or 'ERR:ID_EXHAUSTED'
 redis.register_function('glidemq_addJob', function(keys, args)
   local idKey = keys[1]
   local streamKey = keys[2]
@@ -132,7 +133,10 @@ redis.register_function('glidemq_addJob', function(keys, args)
     local jobId = redis.call('INCR', idKey)
     jobIdStr = tostring(jobId)
     jobKey = prefix .. 'job:' .. jobIdStr
+    local retries = 0
     while redis.call('EXISTS', jobKey) == 1 do
+      retries = retries + 1
+      if retries >= 1000 then return 'ERR:ID_EXHAUSTED' end
       jobId = redis.call('INCR', idKey)
       jobIdStr = tostring(jobId)
       jobKey = prefix .. 'job:' .. jobIdStr
@@ -723,7 +727,10 @@ redis.register_function('glidemq_dedup', function(keys, args)
     local jobId = redis.call('INCR', idKey)
     jobIdStr = tostring(jobId)
     jobKey = prefix .. 'job:' .. jobIdStr
+    local retries = 0
     while redis.call('EXISTS', jobKey) == 1 do
+      retries = retries + 1
+      if retries >= 1000 then return 'ERR:ID_EXHAUSTED' end
       jobId = redis.call('INCR', idKey)
       jobIdStr = tostring(jobId)
       jobKey = prefix .. 'job:' .. jobIdStr
@@ -913,7 +920,7 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   return 1
 end)
 
--- Returns: cjson array [parentId, childId1, childId2, ...]
+-- Returns: cjson array [parentId, childId1, childId2, ...], or ['duplicate'] / ['ERR:ID_EXHAUSTED']
 redis.register_function('glidemq_addFlow', function(keys, args)
   local parentIdKey = keys[1]
   local parentStreamKey = keys[2]
@@ -946,10 +953,32 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     local parentJobId = redis.call('INCR', parentIdKey)
     parentJobIdStr = tostring(parentJobId)
     parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
+    local retries = 0
     while redis.call('EXISTS', parentJobKey) == 1 do
+      retries = retries + 1
+      if retries >= 1000 then return cjson.encode({'ERR:ID_EXHAUSTED'}) end
       parentJobId = redis.call('INCR', parentIdKey)
       parentJobIdStr = tostring(parentJobId)
       parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
+    end
+  end
+  -- Pre-validate all children's custom IDs for duplicates before any writes
+  local seenChildKeys = {}
+  for i = 1, numChildren do
+    local base = 9 + (i - 1) * 9
+    local preChildCustomId = args[base + 9] or ''
+    if preChildCustomId ~= '' then
+      local ckBase = 4 + (i - 1) * 4
+      local preChildIdKey = keys[ckBase + 1]
+      local preChildPrefix = string.sub(preChildIdKey, 1, #preChildIdKey - 2)
+      local preChildJobKey = preChildPrefix .. 'job:' .. preChildCustomId
+      if preChildJobKey == parentJobKey or seenChildKeys[preChildJobKey] then
+        return cjson.encode({'duplicate'})
+      end
+      seenChildKeys[preChildJobKey] = true
+      if redis.call('EXISTS', preChildJobKey) == 1 then
+        return cjson.encode({'duplicate'})
+      end
     end
   end
   local depsKey = parentPrefix .. 'deps:' .. parentJobIdStr
@@ -1009,20 +1038,20 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     -- Derive child prefix from child id key
     local childPrefix = string.sub(childIdKey, 1, #childIdKey - 2)
 
-    -- Create child job ID
+    -- Create child job ID (custom IDs pre-validated above)
     local childJobIdStr
     local childJobKey
     if childCustomId ~= '' then
       childJobKey = childPrefix .. 'job:' .. childCustomId
-      if redis.call('EXISTS', childJobKey) == 1 then
-        return cjson.encode({'duplicate'})
-      end
       childJobIdStr = childCustomId
     else
       local childJobId = redis.call('INCR', childIdKey)
       childJobIdStr = tostring(childJobId)
       childJobKey = childPrefix .. 'job:' .. childJobIdStr
+      local cRetries = 0
       while redis.call('EXISTS', childJobKey) == 1 do
+        cRetries = cRetries + 1
+        if cRetries >= 1000 then return cjson.encode({'ERR:ID_EXHAUSTED'}) end
         childJobId = redis.call('INCR', childIdKey)
         childJobIdStr = tostring(childJobId)
         childJobKey = childPrefix .. 'job:' .. childJobIdStr

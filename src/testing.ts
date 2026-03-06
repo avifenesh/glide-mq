@@ -145,6 +145,14 @@ export interface TestQueueOptions {
   serializer?: Serializer;
 }
 
+const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}]/;
+function validateJobId(jobId: string): void {
+  if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
+  if (INVALID_JOB_ID_CHARS.test(jobId)) {
+    throw new Error('jobId must not contain control characters or curly braces');
+  }
+}
+
 export class TestQueue<D = any, R = any> extends EventEmitter {
   readonly name: string;
   /** @internal */ readonly jobs: Map<string, TestJobRecord<D, R>> = new Map();
@@ -179,9 +187,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
 
     const customJobId = opts?.jobId ?? '';
-    if (customJobId !== '' && customJobId.length > 256) {
-      throw new Error('jobId must be at most 256 characters');
-    }
+    if (customJobId !== '') validateJobId(customJobId);
 
     let id: string;
     if (customJobId !== '') {
@@ -191,6 +197,9 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       id = customJobId;
     } else {
       id = String(++this.idCounter);
+      while (this.jobs.has(id)) {
+        id = String(++this.idCounter);
+      }
     }
     const now = Date.now();
     const ttl = opts?.ttl ?? 0;

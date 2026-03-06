@@ -12,6 +12,14 @@ export interface JobNode {
   children?: JobNode[];
 }
 
+const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}]/;
+function validateJobId(jobId: string): void {
+  if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
+  if (INVALID_JOB_ID_CHARS.test(jobId)) {
+    throw new Error('jobId must not contain control characters or curly braces');
+  }
+}
+
 const LATE_PARENT_RECONCILE_ATTEMPTS = 5;
 const LATE_PARENT_RECONCILE_DELAY_MS = 10;
 
@@ -118,9 +126,7 @@ export class FlowProducer {
         );
       }
       const customJobId = opts.jobId ?? '';
-      if (customJobId !== '' && customJobId.length > 256) {
-        throw new Error('jobId must be at most 256 characters');
-      }
+      if (customJobId !== '') validateJobId(customJobId);
       const jobId = await addJob(
         client,
         parentKeys,
@@ -143,7 +149,10 @@ export class FlowProducer {
         customJobId,
       );
       if (String(jobId) === 'duplicate') {
-        throw new Error(`Duplicate job ID: ${customJobId}`);
+        throw new Error('Duplicate job ID in flow');
+      }
+      if (String(jobId) === 'ERR:ID_EXHAUSTED') {
+        throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
       }
       if (String(jobId) === 'ERR:COST_EXCEEDS_CAPACITY') {
         throw new Error('Job cost exceeds token bucket capacity');
@@ -175,9 +184,7 @@ export class FlowProducer {
           );
         }
         const childCustomId = childOpts.jobId ?? '';
-        if (childCustomId !== '' && childCustomId.length > 256) {
-          throw new Error('jobId must be at most 256 characters');
-        }
+        if (childCustomId !== '') validateJobId(childCustomId);
         return {
           name: child.name,
           data: childData,
@@ -210,9 +217,7 @@ export class FlowProducer {
       );
     }
     const parentCustomId = parentOpts.jobId ?? '';
-    if (parentCustomId !== '' && parentCustomId.length > 256) {
-      throw new Error('jobId must be at most 256 characters');
-    }
+    if (parentCustomId !== '') validateJobId(parentCustomId);
     const ids = await addFlow(
       client,
       parentKeys,
@@ -229,7 +234,10 @@ export class FlowProducer {
     );
 
     if (ids[0] === 'duplicate') {
-      throw new Error(`Duplicate job ID in flow`);
+      throw new Error('Duplicate job ID in flow');
+    }
+    if (ids[0] === 'ERR:ID_EXHAUSTED') {
+      throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
     }
     const parentId = ids[0];
 

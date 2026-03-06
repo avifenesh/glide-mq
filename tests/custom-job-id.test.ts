@@ -104,6 +104,15 @@ describeEachMode('Custom Job IDs', (CONNECTION) => {
     await expect(queue.add('task', {}, { jobId: longId })).rejects.toThrow('jobId must be at most 256 characters');
   });
 
+  it('throws for jobId containing curly braces', async () => {
+    await expect(queue.add('task', {}, { jobId: 'bad{id}' })).rejects.toThrow('control characters or curly braces');
+  });
+
+  it('throws for jobId containing control characters', async () => {
+    await expect(queue.add('task', {}, { jobId: 'bad\x00id' })).rejects.toThrow('control characters or curly braces');
+    await expect(queue.add('task', {}, { jobId: 'bad\nid' })).rejects.toThrow('control characters or curly braces');
+  });
+
   it('accepts jobId of exactly 256 characters', async () => {
     const id256 = 'b'.repeat(256);
     const job = await queue.add('task', { boundary: true }, { jobId: id256 });
@@ -179,8 +188,7 @@ describeEachMode('Custom Job IDs - addBulk', (CONNECTION) => {
 });
 
 describeEachMode('Custom Job IDs - FlowProducer', (CONNECTION) => {
-  const Q_PARENT = 'test-flow-parent-custom-' + Date.now();
-  const Q_CHILD = 'test-flow-child-custom-' + Date.now();
+  const Q = 'test-flow-custom-' + Date.now();
   let flow: InstanceType<typeof FlowProducer>;
   let cleanupClient: any;
 
@@ -191,27 +199,26 @@ describeEachMode('Custom Job IDs - FlowProducer', (CONNECTION) => {
 
   afterAll(async () => {
     await flow.close();
-    await flushQueue(cleanupClient, Q_PARENT);
-    await flushQueue(cleanupClient, Q_CHILD);
+    await flushQueue(cleanupClient, Q);
     cleanupClient.close();
   });
 
   it('flow with custom IDs on parent and children', async () => {
     const result = await flow.add({
       name: 'parent-task',
-      queueName: Q_PARENT,
+      queueName: Q,
       data: { parent: true },
       opts: { jobId: 'flow-parent-1' },
       children: [
         {
           name: 'child-task-1',
-          queueName: Q_CHILD,
+          queueName: Q,
           data: { child: 1 },
           opts: { jobId: 'flow-child-1' },
         },
         {
           name: 'child-task-2',
-          queueName: Q_CHILD,
+          queueName: Q,
           data: { child: 2 },
           opts: { jobId: 'flow-child-2' },
         },
@@ -228,11 +235,11 @@ describeEachMode('Custom Job IDs - FlowProducer', (CONNECTION) => {
     await expect(
       flow.add({
         name: 'parent-dup',
-        queueName: Q_PARENT,
+        queueName: Q,
         data: {},
         opts: { jobId: 'flow-parent-1' }, // already exists
         children: [
-          { name: 'child', queueName: Q_CHILD, data: {} },
+          { name: 'child', queueName: Q, data: {} },
         ],
       }),
     ).rejects.toThrow('Duplicate job ID');
@@ -242,10 +249,10 @@ describeEachMode('Custom Job IDs - FlowProducer', (CONNECTION) => {
     await expect(
       flow.add({
         name: 'parent-new',
-        queueName: Q_PARENT,
+        queueName: Q,
         data: {},
         children: [
-          { name: 'child-dup', queueName: Q_CHILD, data: {}, opts: { jobId: 'flow-child-1' } }, // already exists
+          { name: 'child-dup', queueName: Q, data: {}, opts: { jobId: 'flow-child-1' } }, // already exists
         ],
       }),
     ).rejects.toThrow('Duplicate job ID');
@@ -255,7 +262,7 @@ describeEachMode('Custom Job IDs - FlowProducer', (CONNECTION) => {
     // First add a leaf flow job
     await flow.add({
       name: 'leaf',
-      queueName: Q_PARENT,
+      queueName: Q,
       data: {},
       opts: { jobId: 'leaf-custom-1' },
     });
@@ -264,7 +271,7 @@ describeEachMode('Custom Job IDs - FlowProducer', (CONNECTION) => {
     await expect(
       flow.add({
         name: 'leaf-dup',
-        queueName: Q_PARENT,
+        queueName: Q,
         data: {},
         opts: { jobId: 'leaf-custom-1' },
       }),
@@ -354,5 +361,23 @@ describe('Custom Job IDs - Testing Mode', () => {
     const queue = new TestQueue('test-q5');
     const longId = 'a'.repeat(257);
     await expect(queue.add('task', {}, { jobId: longId })).rejects.toThrow('jobId must be at most 256 characters');
+  });
+
+  it('TestQueue throws for invalid jobId characters', async () => {
+    const queue = new TestQueue('test-q6');
+    await expect(queue.add('task', {}, { jobId: 'bad{id}' })).rejects.toThrow('control characters or curly braces');
+    await expect(queue.add('task', {}, { jobId: 'bad\nid' })).rejects.toThrow('control characters or curly braces');
+  });
+
+  it('TestQueue auto-increment skips custom ID collisions', async () => {
+    const queue = new TestQueue('test-q7');
+    const auto1 = await queue.add('first', { i: 1 });
+    expect(auto1!.id).toBe('1');
+
+    const custom = await queue.add('custom', { i: 2 }, { jobId: '2' });
+    expect(custom!.id).toBe('2');
+
+    const auto2 = await queue.add('third', { i: 3 });
+    expect(auto2!.id).toBe('3');
   });
 });
