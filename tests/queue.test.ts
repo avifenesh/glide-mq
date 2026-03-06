@@ -247,10 +247,7 @@ describe('Queue', () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       try {
         const commandClient = makeMockClient({
-          fcall: vi
-            .fn()
-            .mockResolvedValueOnce(LIBRARY_VERSION)
-            .mockResolvedValueOnce('1'),
+          fcall: vi.fn().mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1'),
           xrevrange: vi.fn().mockResolvedValue({}),
         });
         const blockingClient1 = makeMockClient({

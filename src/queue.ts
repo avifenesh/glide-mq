@@ -492,7 +492,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
     return latestId ?? '0-0';
   }
 
-  private async waitForJobResult(blockingClient: Client, jobId: string, lastId: string, waitTimeout: number): Promise<R> {
+  private async waitForJobResult(
+    blockingClient: Client,
+    jobId: string,
+    lastId: string,
+    waitTimeout: number,
+  ): Promise<R> {
     let cursor = lastId;
     const deadline = Date.now() + waitTimeout;
     let reconnectBackoff = 0;
