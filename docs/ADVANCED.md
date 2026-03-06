@@ -5,6 +5,7 @@
 - [Shared Client (Connection Reuse)](#shared-client)
 - [Job Schedulers (Repeatable / Cron Jobs)](#job-schedulers)
 - [Sequential Processing (Per-Key Ordering)](#sequential-processing)
+- [Custom Job IDs](#custom-job-ids)
 - [Deduplication](#deduplication)
 - [Token Bucket Rate Limiting](#token-bucket-rate-limiting)
 - [Global Concurrency](#global-concurrency)
@@ -276,6 +277,39 @@ await queue.add('bulk-export', data, {
 - Group concurrency and global concurrency (`setGlobalConcurrency`) compose: both limits are enforced.
 - Per-group rate limiting, token bucket, group concurrency, and global concurrency all compose: all applicable limits are enforced.
 - Group slots are released on job complete, fail, retry, DLQ move, and stall recovery.
+
+---
+
+## Custom Job IDs
+
+By default glide-mq assigns a monotonically increasing integer ID to each job. You can supply your own ID via `opts.jobId` to get deterministic, idempotent job creation:
+
+```typescript
+// Deterministic job: safe to call multiple times
+const job = await queue.add('send-email', { to: 'user@example.com' }, {
+  jobId: 'email-user-42',
+});
+// job is null if a job with this ID already exists (silent skip)
+```
+
+**Constraints**
+
+- Max 256 characters.
+- Must not contain control characters (U+0000-U+001F, U+007F), curly braces (`{`, `}`), or colons (`:`).
+- Violating either constraint throws synchronously before the network call.
+
+**Duplicate behaviour by surface**
+
+| Surface | Behaviour on duplicate ID |
+|---------|--------------------------|
+| `Queue.add` | Returns `null` (silent skip) |
+| `Queue.addBulk` | Silently omits the duplicate from the returned array |
+| `FlowProducer.add` | Throws - flows cannot be partially created |
+| `TestQueue.add` | Returns `null` (mirrors production) |
+
+**Interaction with deduplication**
+
+`opts.jobId` and `opts.deduplication` are independent mechanisms. When both are set the deduplication check runs first; if the job is deduplicated, the custom ID is never stored. If the dedup check passes, the custom ID collision check runs next.
 
 ---
 

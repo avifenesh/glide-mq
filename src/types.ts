@@ -118,6 +118,13 @@ export interface WorkerOptions extends QueueOptions {
 }
 
 export interface JobOptions {
+  /**
+   * Custom job ID. Max 256 characters, must not contain control characters,
+   * curly braces, or colons. If a job with this ID already exists, Queue.add returns null
+   * and FlowProducer.add throws. When combined with deduplication, the dedup
+   * check runs first.
+   */
+  jobId?: string;
   delay?: number;
   priority?: number;
   /**

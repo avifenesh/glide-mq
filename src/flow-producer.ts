@@ -12,6 +12,14 @@ export interface JobNode {
   children?: JobNode[];
 }
 
+const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
+function validateJobId(jobId: string): void {
+  if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
+  if (INVALID_JOB_ID_CHARS.test(jobId)) {
+    throw new Error('jobId must not contain control characters, curly braces, or colons');
+  }
+}
+
 const LATE_PARENT_RECONCILE_ATTEMPTS = 5;
 const LATE_PARENT_RECONCILE_DELAY_MS = 10;
 
@@ -117,6 +125,8 @@ export class FlowProducer {
           `Job data exceeds maximum size (${dataByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
         );
       }
+      const customJobId = opts.jobId ?? '';
+      if (customJobId !== '') validateJobId(customJobId);
       const jobId = await addJob(
         client,
         parentKeys,
@@ -136,13 +146,31 @@ export class FlowProducer {
         tbRefillRate,
         jobCost,
         opts.ttl ?? 0,
+        customJobId,
       );
+      if (String(jobId) === 'duplicate') {
+        throw new Error('Duplicate job ID in flow');
+      }
+      if (String(jobId) === 'ERR:ID_EXHAUSTED') {
+        throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
+      }
       if (String(jobId) === 'ERR:COST_EXCEEDS_CAPACITY') {
         throw new Error('Job cost exceeds token bucket capacity');
       }
       const job = new Job(client, parentKeys, String(jobId), flow.name, flow.data, opts, this.serializer);
       job.timestamp = timestamp;
       return { job };
+    }
+
+    // Early check: if parent has a custom ID, verify it doesn't already exist
+    // before recursing into children (to avoid orphaning sub-flow children).
+    const parentCustomId = (flow.opts ?? {}).jobId ?? '';
+    if (parentCustomId !== '') {
+      validateJobId(parentCustomId);
+      const exists = await client.exists([parentKeys.job(parentCustomId)]);
+      if (exists > 0) {
+        throw new Error('Duplicate job ID in flow');
+      }
     }
 
     // Recursively process children that themselves have children (bottom-up).
@@ -166,6 +194,8 @@ export class FlowProducer {
             `Job data exceeds maximum size (${childByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
           );
         }
+        const childCustomId = childOpts.jobId ?? '';
+        if (childCustomId !== '') validateJobId(childCustomId);
         return {
           name: child.name,
           data: childData,
@@ -176,6 +206,7 @@ export class FlowProducer {
           keys: buildKeys(child.queueName, prefix),
           queuePrefix: keyPrefix(prefix, child.queueName),
           parentQueueName: parentQueueName,
+          customId: childCustomId,
         };
       });
 
@@ -208,8 +239,15 @@ export class FlowProducer {
       parentOpts.attempts ?? 0,
       childrenForLua,
       extraDeps,
+      parentCustomId,
     );
 
+    if (ids[0] === 'duplicate') {
+      throw new Error('Duplicate job ID in flow');
+    }
+    if (ids[0] === 'ERR:ID_EXHAUSTED') {
+      throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
+    }
     const parentId = ids[0];
 
     // Set parentId and parentQueue on pre-existing sub-flow children

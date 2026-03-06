@@ -145,6 +145,14 @@ export interface TestQueueOptions {
   serializer?: Serializer;
 }
 
+const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
+function validateJobId(jobId: string): void {
+  if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
+  if (INVALID_JOB_ID_CHARS.test(jobId)) {
+    throw new Error('jobId must not contain control characters, curly braces, or colons');
+  }
+}
+
 export class TestQueue<D = any, R = any> extends EventEmitter {
   readonly name: string;
   /** @internal */ readonly jobs: Map<string, TestJobRecord<D, R>> = new Map();
@@ -168,17 +176,36 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     this.serializer = this.opts.serializer ?? JSON_SERIALIZER;
   }
 
-  /** Add a single job. Returns null if deduplicated. */
+  /** Add a single job. Returns null if deduplicated or duplicate custom ID. */
   async add(name: string, data: D, opts?: JobOptions): Promise<TestJob<D, R> | null> {
+    const customJobId = opts?.jobId ?? '';
+    if (customJobId !== '') validateJobId(customJobId);
+
     if (opts?.deduplication && this.opts.dedup) {
       const dedupId = opts.deduplication.id;
       if (this.dedupSet.has(dedupId)) {
         return null;
       }
-      this.dedupSet.add(dedupId);
     }
 
-    const id = String(++this.idCounter);
+    let id: string;
+    if (customJobId !== '') {
+      if (this.jobs.has(customJobId)) {
+        return null;
+      }
+      id = customJobId;
+    } else {
+      id = String(++this.idCounter);
+      let retries = 0;
+      while (this.jobs.has(id)) {
+        if (++retries >= 1000) throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
+        id = String(++this.idCounter);
+      }
+    }
+    // Record dedup key only after all checks pass (custom ID, etc.)
+    if (opts?.deduplication && this.opts.dedup) {
+      this.dedupSet.add(opts.deduplication.id);
+    }
     const now = Date.now();
     const ttl = opts?.ttl ?? 0;
     // Roundtrip data through serializer to match production behavior

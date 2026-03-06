@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '38';
+export const LIBRARY_VERSION = '40';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -352,10 +352,29 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local tbRefillRate = tonumber(args[14]) or 0
   local jobCost = tonumber(args[15]) or 0
   local ttl = tonumber(args[16]) or 0
-  local jobId = redis.call('INCR', idKey)
-  local jobIdStr = tostring(jobId)
+  local customJobId = args[17] or ''
   local prefix = string.sub(idKey, 1, #idKey - 2)
-  local jobKey = prefix .. 'job:' .. jobIdStr
+  local jobIdStr
+  local jobKey
+  if customJobId ~= '' then
+    jobKey = prefix .. 'job:' .. customJobId
+    if redis.call('EXISTS', jobKey) == 1 then
+      return 'duplicate'
+    end
+    jobIdStr = customJobId
+  else
+    local jobId = redis.call('INCR', idKey)
+    jobIdStr = tostring(jobId)
+    jobKey = prefix .. 'job:' .. jobIdStr
+    local retries = 0
+    while redis.call('EXISTS', jobKey) == 1 do
+      retries = retries + 1
+      if retries >= 1000 then return 'ERR:ID_EXHAUSTED' end
+      jobId = redis.call('INCR', idKey)
+      jobIdStr = tostring(jobId)
+      jobKey = prefix .. 'job:' .. jobIdStr
+    end
+  end
   local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0 or tbCapacity > 0))
   local orderingSeq = 0
   if orderingKey ~= '' and not useGroupConcurrency then
@@ -1056,6 +1075,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local tbRefillRate = tonumber(args[17]) or 0
   local jobCost = tonumber(args[18]) or 0
   local ttl = tonumber(args[19]) or 0
+  local customJobId = args[20] or ''
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local existing = redis.call('HGET', dedupKey, dedupId)
   if mode == 'simple' then
@@ -1098,9 +1118,27 @@ redis.register_function('glidemq_dedup', function(keys, args)
       end
     end
   end
-  local jobId = redis.call('INCR', idKey)
-  local jobIdStr = tostring(jobId)
-  local jobKey = prefix .. 'job:' .. jobIdStr
+  local jobIdStr
+  local jobKey
+  if customJobId ~= '' then
+    jobKey = prefix .. 'job:' .. customJobId
+    if redis.call('EXISTS', jobKey) == 1 then
+      return 'duplicate'
+    end
+    jobIdStr = customJobId
+  else
+    local jobId = redis.call('INCR', idKey)
+    jobIdStr = tostring(jobId)
+    jobKey = prefix .. 'job:' .. jobIdStr
+    local retries = 0
+    while redis.call('EXISTS', jobKey) == 1 do
+      retries = retries + 1
+      if retries >= 1000 then return 'ERR:ID_EXHAUSTED' end
+      jobId = redis.call('INCR', idKey)
+      jobIdStr = tostring(jobId)
+      jobKey = prefix .. 'job:' .. jobIdStr
+    end
+  end
   local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0 or tbCapacity > 0))
   local orderingSeq = 0
   if orderingKey ~= '' and not useGroupConcurrency then
@@ -1549,10 +1587,48 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   local parentPriority = tonumber(args[6]) or 0
   local parentMaxAttempts = tonumber(args[7]) or 0
   local numChildren = tonumber(args[8])
-  local parentJobId = redis.call('INCR', parentIdKey)
-  local parentJobIdStr = tostring(parentJobId)
+  local parentCustomId = args[9] or ''
   local parentPrefix = string.sub(parentIdKey, 1, #parentIdKey - 2)
-  local parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
+  local parentJobIdStr
+  local parentJobKey
+  if parentCustomId ~= '' then
+    parentJobKey = parentPrefix .. 'job:' .. parentCustomId
+    if redis.call('EXISTS', parentJobKey) == 1 then
+      return cjson.encode({'duplicate'})
+    end
+    parentJobIdStr = parentCustomId
+  else
+    local parentJobId = redis.call('INCR', parentIdKey)
+    parentJobIdStr = tostring(parentJobId)
+    parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
+    local retries = 0
+    while redis.call('EXISTS', parentJobKey) == 1 do
+      retries = retries + 1
+      if retries >= 1000 then return cjson.encode({'ERR:ID_EXHAUSTED'}) end
+      parentJobId = redis.call('INCR', parentIdKey)
+      parentJobIdStr = tostring(parentJobId)
+      parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
+    end
+  end
+  -- Pre-validate all children's custom IDs for duplicates before any writes
+  local seenChildKeys = {}
+  for i = 1, numChildren do
+    local base = 9 + (i - 1) * 9
+    local preChildCustomId = args[base + 9] or ''
+    if preChildCustomId ~= '' then
+      local ckBase = 4 + (i - 1) * 4
+      local preChildIdKey = keys[ckBase + 1]
+      local preChildPrefix = string.sub(preChildIdKey, 1, #preChildIdKey - 2)
+      local preChildJobKey = preChildPrefix .. 'job:' .. preChildCustomId
+      if preChildJobKey == parentJobKey or seenChildKeys[preChildJobKey] then
+        return cjson.encode({'duplicate'})
+      end
+      seenChildKeys[preChildJobKey] = true
+      if redis.call('EXISTS', preChildJobKey) == 1 then
+        return cjson.encode({'duplicate'})
+      end
+    end
+  end
   local depsKey = parentPrefix .. 'deps:' .. parentJobIdStr
   local parentOrderingKey = extractOrderingKeyFromOpts(parentOpts)
   local parentGroupConc = extractGroupConcurrencyFromOpts(parentOpts)
@@ -1613,10 +1689,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   end
   redis.call('HSET', parentJobKey, unpack(parentHash))
   -- Pre-validate all children's cost vs capacity before any child writes
-  local childArgOffset = 8
+  local childArgOffset = 9
   local childKeyOffset = 4
   for i = 1, numChildren do
-    local base = childArgOffset + (i - 1) * 8
+    local base = childArgOffset + (i - 1) * 9
     local preChildOpts = args[base + 3]
     local preChildTbCap, _ = extractTokenBucketFromOpts(preChildOpts)
     if preChildTbCap > 0 then
@@ -1629,7 +1705,7 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   end
   local childIds = {}
   for i = 1, numChildren do
-    local base = childArgOffset + (i - 1) * 8
+    local base = childArgOffset + (i - 1) * 9
     local childName = args[base + 1]
     local childData = args[base + 2]
     local childOpts = args[base + 3]
@@ -1638,15 +1714,31 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     local childMaxAttempts = tonumber(args[base + 6]) or 0
     local childQueuePrefix = args[base + 7]
     local childParentQueue = args[base + 8]
+    local childCustomId = args[base + 9] or ''
     local ckBase = childKeyOffset + (i - 1) * 4
     local childIdKey = keys[ckBase + 1]
     local childStreamKey = keys[ckBase + 2]
     local childScheduledKey = keys[ckBase + 3]
     local childEventsKey = keys[ckBase + 4]
-    local childJobId = redis.call('INCR', childIdKey)
-    local childJobIdStr = tostring(childJobId)
     local childPrefix = string.sub(childIdKey, 1, #childIdKey - 2)
-    local childJobKey = childPrefix .. 'job:' .. childJobIdStr
+    local childJobIdStr
+    local childJobKey
+    if childCustomId ~= '' then
+      childJobKey = childPrefix .. 'job:' .. childCustomId
+      childJobIdStr = childCustomId
+    else
+      local childJobId = redis.call('INCR', childIdKey)
+      childJobIdStr = tostring(childJobId)
+      childJobKey = childPrefix .. 'job:' .. childJobIdStr
+      local cRetries = 0
+      while redis.call('EXISTS', childJobKey) == 1 do
+        cRetries = cRetries + 1
+        if cRetries >= 1000 then return cjson.encode({'ERR:ID_EXHAUSTED'}) end
+        childJobId = redis.call('INCR', childIdKey)
+        childJobIdStr = tostring(childJobId)
+        childJobKey = childPrefix .. 'job:' .. childJobIdStr
+      end
+    end
     local childOrderingKey = extractOrderingKeyFromOpts(childOpts)
     local childGroupConc = extractGroupConcurrencyFromOpts(childOpts)
     local childRateMax, childRateDuration = extractGroupRateLimitFromOpts(childOpts)
@@ -1724,7 +1816,7 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     emitEvent(childEventsKey, 'added', childJobIdStr, {'name', childName})
     childIds[#childIds + 1] = childJobIdStr
   end
-  local extraDepsOffset = childArgOffset + numChildren * 8
+  local extraDepsOffset = childArgOffset + numChildren * 9
   local numExtraDeps = tonumber(args[extraDepsOffset + 1]) or 0
   for i = 1, numExtraDeps do
     local extraMember = args[extraDepsOffset + 1 + i]
@@ -2333,6 +2425,7 @@ export function addJobArgs(
   tbRefillRate: number = 0,
   jobCost: number = 0,
   ttl: number = 0,
+  customJobId: string = '',
 ): { keys: string[]; args: string[] } {
   return {
     keys: [k.id, k.stream, k.scheduled, k.events],
@@ -2353,6 +2446,7 @@ export function addJobArgs(
       tbRefillRate.toString(),
       jobCost.toString(),
       ttl.toString(),
+      customJobId,
     ],
   };
 }
@@ -2376,6 +2470,7 @@ export async function addJob(
   tbRefillRate: number = 0,
   jobCost: number = 0,
   ttl: number = 0,
+  customJobId: string = '',
 ): Promise<string> {
   const { keys, args } = addJobArgs(
     k,
@@ -2395,6 +2490,7 @@ export async function addJob(
     tbRefillRate,
     jobCost,
     ttl,
+    customJobId,
   );
   const result = await client.fcall('glidemq_addJob', keys, args);
   return result as string;
@@ -2426,6 +2522,7 @@ export async function dedup(
   tbRefillRate: number = 0,
   jobCost: number = 0,
   jobTtl: number = 0,
+  customJobId: string = '',
 ): Promise<string> {
   const result = await client.fcall(
     'glidemq_dedup',
@@ -2450,6 +2547,7 @@ export async function dedup(
       tbRefillRate.toString(),
       jobCost.toString(),
       jobTtl.toString(),
+      customJobId,
     ],
   );
   return result as string;
@@ -3086,8 +3184,10 @@ export async function addFlow(
     keys: QueueKeys;
     queuePrefix: string;
     parentQueueName: string;
+    customId: string;
   }[],
   extraDeps: string[] = [],
+  parentCustomId: string = '',
 ): Promise<string[]> {
   const keys: string[] = [parentKeys.id, parentKeys.stream, parentKeys.scheduled, parentKeys.events];
   const args: string[] = [
@@ -3099,6 +3199,7 @@ export async function addFlow(
     parentPriority.toString(),
     parentMaxAttempts.toString(),
     children.length.toString(),
+    parentCustomId,
   ];
 
   for (const child of children) {
@@ -3112,6 +3213,7 @@ export async function addFlow(
       child.maxAttempts.toString(),
       child.queuePrefix,
       child.parentQueueName,
+      child.customId,
     );
   }
 
