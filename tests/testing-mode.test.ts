@@ -1313,6 +1313,48 @@ describe('TestWorker batch mode', () => {
     expect(batchSizes).toContain(2);
   });
 
+  it('fails all jobs when processor returns wrong number of results', async () => {
+    queue = new TestQueue('batch-mismatch');
+    const failedIds: string[] = [];
+    const failReasons: string[] = [];
+
+    // Add jobs BEFORE creating worker so all 3 are waiting
+    await queue.addBulk([
+      { name: 'a', data: {} },
+      { name: 'b', data: {} },
+      { name: 'c', data: {} },
+    ]);
+
+    worker = new TestWorker(
+      queue,
+      async (_jobs: TestJob[]) => {
+        // Return 1 result for 3 jobs - mismatch
+        return ['only-one'] as any;
+      },
+      { batch: { size: 3 } },
+    );
+
+    worker.on('failed', (job: any, err: Error) => {
+      failedIds.push(job.id);
+      failReasons.push(err.message);
+    });
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(async () => {
+        const counts = await queue.getJobCounts();
+        if (counts.failed === 3) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 10);
+    });
+
+    expect(failedIds).toHaveLength(3);
+    for (const reason of failReasons) {
+      expect(reason).toContain('returned 1 results but batch had 3 jobs');
+    }
+  });
+
   it('retries failed jobs from batch', async () => {
     queue = new TestQueue('batch-retry');
     let callCount = 0;

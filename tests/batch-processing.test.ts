@@ -295,6 +295,58 @@ describeEachMode('Worker batch processing', (CONNECTION) => {
     await flushQueue(cleanupClient, qName);
   }, 20000);
 
+  it('fails all jobs when processor returns wrong number of results', async () => {
+    const qName = Q + '-mismatch';
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const failedJobs: { id: string; reason: string }[] = [];
+
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
+
+      const worker = new Worker(
+        qName,
+        async (_jobs: any[]) => {
+          // Always return empty - guarantees mismatch regardless of batch partition
+          return [];
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 1000,
+          batch: { size: 3 },
+        },
+      );
+
+      worker.on('failed', (job: any, err: Error) => {
+        failedJobs.push({ id: job.id, reason: err.message });
+        if (failedJobs.length >= 3) {
+          clearTimeout(timeout);
+          setTimeout(() => worker.close(true).then(resolve), 200);
+        }
+      });
+      worker.on('error', () => {});
+    });
+
+    await new Promise((r) => setTimeout(r, 500));
+
+    await queue.addBulk([
+      { name: 'm1', data: {} },
+      { name: 'm2', data: {} },
+      { name: 'm3', data: {} },
+    ]);
+
+    await done;
+
+    expect(failedJobs).toHaveLength(3);
+    // Each failure should mention the mismatch
+    for (const f of failedJobs) {
+      expect(f.reason).toMatch(/returned 0 results but batch had \d+ jobs/);
+    }
+
+    await queue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 20000);
+
   it('emits active event for each job in batch', async () => {
     const qName = Q + '-events';
     const queue = new Queue(qName, { connection: CONNECTION });
