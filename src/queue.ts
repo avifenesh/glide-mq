@@ -323,6 +323,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (!Number.isFinite(waitTimeout) || waitTimeout <= 0) {
       throw new Error('waitTimeout must be a positive finite number');
     }
+    if (opts?.removeOnComplete || opts?.removeOnFail) {
+      throw new GlideMQError(
+        'Queue.addAndWait does not support removeOnComplete/removeOnFail because it may need the job hash as a fallback.',
+      );
+    }
 
     const { waitTimeout: _waitTimeout, ...jobOpts } = opts ?? {};
     const client = await this.getClient();

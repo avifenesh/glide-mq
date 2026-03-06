@@ -314,6 +314,7 @@ Notes:
 - `addAndWait()` requires a real `connection` because it uses a dedicated blocking connection to wait on the queue events stream.
 - `addAndWait()` is a short-lived request-reply helper. Each in-flight call owns its own blocking wait connection.
 - If `add()` is deduplicated and returns `null`, `addAndWait()` rejects instead of hanging.
+- `addAndWait()` does not support `removeOnComplete` or `removeOnFail`, because it may need the job hash as a terminal-state fallback.
 
 ### Pause and Resume a Job Later (Step Jobs)
 

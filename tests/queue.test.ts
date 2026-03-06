@@ -175,6 +175,16 @@ describe('Queue', () => {
       await expect(queue.addAndWait('job', {}, { waitTimeout: 1000 })).rejects.toThrow('requires `connection`');
     });
 
+    it('should reject removeOnComplete/removeOnFail because the fallback needs the job hash', async () => {
+      const queue = new Queue('test-queue', connOpts);
+      await expect(queue.addAndWait('job', {}, { waitTimeout: 1000, removeOnComplete: true })).rejects.toThrow(
+        'does not support removeOnComplete/removeOnFail',
+      );
+      await expect(queue.addAndWait('job', {}, { waitTimeout: 1000, removeOnFail: true })).rejects.toThrow(
+        'does not support removeOnComplete/removeOnFail',
+      );
+    });
+
     it('should fail before enqueue if the blocking wait client cannot be created', async () => {
       const commandClient = makeMockClient({
         fcall: vi.fn().mockResolvedValueOnce(LIBRARY_VERSION),
