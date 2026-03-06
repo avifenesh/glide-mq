@@ -78,10 +78,14 @@ describeEachMode('Custom Job IDs', (CONNECTION) => {
     let worker: InstanceType<typeof Worker> | undefined;
     try {
       const processedId = await new Promise<string>(async (resolve, reject) => {
-        worker = new Worker(workerQ, async (job: any) => {
-          resolve(job.id);
-          return 'done';
-        }, { connection: CONNECTION });
+        worker = new Worker(
+          workerQ,
+          async (job: any) => {
+            resolve(job.id);
+            return 'done';
+          },
+          { connection: CONNECTION },
+        );
 
         try {
           await wQueue.add('work', { val: 42 }, { jobId: 'worker-custom-id' });
@@ -121,18 +125,26 @@ describeEachMode('Custom Job IDs', (CONNECTION) => {
   });
 
   it('custom ID with deduplication', async () => {
-    const job = await queue.add('dedup-task', { v: 1 }, {
-      jobId: 'custom-with-dedup',
-      deduplication: { id: 'dedup-key-1', mode: 'simple' },
-    });
+    const job = await queue.add(
+      'dedup-task',
+      { v: 1 },
+      {
+        jobId: 'custom-with-dedup',
+        deduplication: { id: 'dedup-key-1', mode: 'simple' },
+      },
+    );
     expect(job).not.toBeNull();
     expect(job!.id).toBe('custom-with-dedup');
 
     // Same dedup key should skip (dedup takes precedence)
-    const job2 = await queue.add('dedup-task', { v: 2 }, {
-      jobId: 'custom-with-dedup-2',
-      deduplication: { id: 'dedup-key-1', mode: 'simple' },
-    });
+    const job2 = await queue.add(
+      'dedup-task',
+      { v: 2 },
+      {
+        jobId: 'custom-with-dedup-2',
+        deduplication: { id: 'dedup-key-1', mode: 'simple' },
+      },
+    );
     expect(job2).toBeNull();
   });
 });
@@ -181,9 +193,9 @@ describeEachMode('Custom Job IDs - addBulk', (CONNECTION) => {
 
   it('addBulk throws for jobId exceeding 256 characters', async () => {
     const longId = 'z'.repeat(257);
-    await expect(
-      queue.addBulk([{ name: 'task', data: {}, opts: { jobId: longId } }]),
-    ).rejects.toThrow('jobId must be at most 256 characters');
+    await expect(queue.addBulk([{ name: 'task', data: {}, opts: { jobId: longId } }])).rejects.toThrow(
+      'jobId must be at most 256 characters',
+    );
   });
 });
 
@@ -238,9 +250,7 @@ describeEachMode('Custom Job IDs - FlowProducer', (CONNECTION) => {
         queueName: Q,
         data: {},
         opts: { jobId: 'flow-parent-1' }, // already exists
-        children: [
-          { name: 'child', queueName: Q, data: {} },
-        ],
+        children: [{ name: 'child', queueName: Q, data: {} }],
       }),
     ).rejects.toThrow('Duplicate job ID');
   });

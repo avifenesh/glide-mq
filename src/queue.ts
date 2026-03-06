@@ -396,7 +396,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
     try {
       const job = await this.add(name, data, jobOpts);
       if (!job) {
-        throw new GlideMQError('Queue.addAndWait() cannot wait on a deduplicated/skipped/duplicate-ID add that returned null.');
+        throw new GlideMQError(
+          'Queue.addAndWait() cannot wait on a deduplicated/skipped/duplicate-ID add that returned null.',
+        );
       }
       if (this.closing) {
         throw new GlideMQError('Queue is closing');
