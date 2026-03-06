@@ -31,6 +31,8 @@ import {
   validateTimezone,
 } from './utils';
 
+const MAX_TIMEOUT_DELAY_MS = 2_147_483_647;
+
 // ---- Lightweight in-memory Job representation ----
 
 export interface TestJobRecord<D = any, R = any> {
@@ -496,12 +498,13 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     this.clearSchedulerTimer();
 
     const delay = Math.max(0, nextDue - now);
-    this.nextSchedulerWakeAt = nextDue;
+    const clampedDelay = Math.min(delay, MAX_TIMEOUT_DELAY_MS);
+    this.nextSchedulerWakeAt = now + clampedDelay;
     this.schedulerTimer = setTimeout(() => {
       this.schedulerTimer = null;
       this.nextSchedulerWakeAt = null;
       void this.runDueSchedulers();
-    }, delay);
+    }, clampedDelay);
   }
 
   private async runDueSchedulers(): Promise<void> {

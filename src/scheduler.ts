@@ -57,6 +57,7 @@ export class Scheduler {
   private running = false;
   private promotionInFlight = false;
   private promotionQueued = false;
+  private pendingRuns = new Set<Promise<unknown>>();
 
   constructor(client: Client, queueKeys: ReturnType<typeof buildKeys>, opts: SchedulerOptions = {}) {
     this.client = client;
@@ -109,6 +110,19 @@ export class Scheduler {
     }
   }
 
+  async waitForIdle(): Promise<void> {
+    while (this.pendingRuns.size > 0) {
+      await Promise.allSettled(Array.from(this.pendingRuns));
+    }
+  }
+
+  private trackRun(run: Promise<unknown>): void {
+    this.pendingRuns.add(run);
+    void run.finally(() => {
+      this.pendingRuns.delete(run);
+    });
+  }
+
   private runPromotion(): void {
     if (!this.running) return;
     if (this.promotionInFlight) {
@@ -117,25 +131,27 @@ export class Scheduler {
     }
 
     this.promotionInFlight = true;
-    this.promoteDelayed()
-      .then(() => this.promoteRateLimitedGroups())
-      .then(() => this.runSchedulers())
-      .then(() => {
-        this.onPromotionTick?.();
-      })
-      .then(() => this.scheduleNextPromotionWake())
-      .catch((err) => {
-        // Scheduler has no EventEmitter - errors are transient connection issues
-        // that self-heal on the next interval tick. Worker reconnect handles the rest.
-        this.reportError(err);
-      })
-      .finally(() => {
-        this.promotionInFlight = false;
-        if (this.running && this.promotionQueued) {
-          this.promotionQueued = false;
-          this.runPromotion();
-        }
-      });
+    this.trackRun(
+      this.promoteDelayed()
+        .then(() => this.promoteRateLimitedGroups())
+        .then(() => this.runSchedulers())
+        .then(() => {
+          this.onPromotionTick?.();
+        })
+        .then(() => this.scheduleNextPromotionWake())
+        .catch((err) => {
+          // Scheduler has no EventEmitter - errors are transient connection issues
+          // that self-heal on the next interval tick. Worker reconnect handles the rest.
+          this.reportError(err);
+        })
+        .finally(() => {
+          this.promotionInFlight = false;
+          if (this.running && this.promotionQueued) {
+            this.promotionQueued = false;
+            this.runPromotion();
+          }
+        }),
+    );
   }
 
   private async scheduleNextPromotionWake(): Promise<void> {
@@ -184,11 +200,13 @@ export class Scheduler {
   }
 
   private runStalledRecovery(): void {
-    this.reclaimStalledJobs().catch((err) => {
-      // Scheduler has no EventEmitter - errors are transient connection issues
-      // that self-heal on the next interval tick. Worker reconnect handles the rest.
-      this.reportError(err);
-    });
+    this.trackRun(
+      this.reclaimStalledJobs().catch((err) => {
+        // Scheduler has no EventEmitter - errors are transient connection issues
+        // that self-heal on the next interval tick. Worker reconnect handles the rest.
+        this.reportError(err);
+      }),
+    );
   }
 
   /**
@@ -257,10 +275,22 @@ export class Scheduler {
     const tickLock = await this.acquireSchedulerLock('__tick__');
     if (!tickLock) return 0;
     const renewEveryMs = Math.max(250, Math.floor(this.schedulerLockTtlMs() / 3));
+    let lockLost = false;
+    const markTickLockLost = () => {
+      if (lockLost) return;
+      lockLost = true;
+      this.reportError(new Error('Lost scheduler tick lock while processing schedulers'));
+    };
     const renewTimer = setInterval(() => {
-      void renewLock(this.client, tickLock.key, tickLock.token, this.schedulerLockTtlMs()).catch((err) => {
-        this.reportError(err);
-      });
+      void renewLock(this.client, tickLock.key, tickLock.token, this.schedulerLockTtlMs())
+        .then((renewed) => {
+          if (!renewed) {
+            markTickLockLost();
+          }
+        })
+        .catch((err) => {
+          this.reportError(err);
+        });
     }, renewEveryMs);
 
     let fired = 0;
@@ -278,6 +308,10 @@ export class Scheduler {
       }
 
       for (const entry of allEntries) {
+        if (lockLost) {
+          break;
+        }
+
         const schedulerName = String(entry.field);
         let config: SchedulerEntry;
         try {
@@ -376,6 +410,19 @@ export class Scheduler {
         return 0;
       }
 
+      if (lockLost) {
+        return 0;
+      }
+
+      const lockStillHeld = await renewLock(this.client, tickLock.key, tickLock.token, this.schedulerLockTtlMs());
+      if (!lockStillHeld) {
+        markTickLockLost();
+        return 0;
+      }
+
+      // This batch intentionally uses MULTI/EXEC so job creation and scheduler
+      // state updates stay in one transaction. All queue keys share the same hash
+      // tag, so the transactional batch remains single-slot in cluster mode.
       const batch = isClusterClient(this.client) ? new ClusterBatch(true) : new Batch(true);
 
       for (const { keys, args } of pendingJobs) {

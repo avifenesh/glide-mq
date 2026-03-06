@@ -365,12 +365,19 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const client = await this.getClient();
     const eventCursor = await this.latestEventCursor(client);
     const blockingClient = await createBlockingClient(this.opts.connection!);
+    if (this.closing) {
+      blockingClient.close();
+      throw new GlideMQError('Queue is closing');
+    }
     this.waitClients.add(blockingClient);
     let handedOff = false;
     try {
       const job = await this.add(name, data, jobOpts);
       if (!job) {
         throw new GlideMQError('Queue.addAndWait() cannot wait on a deduplicated/skipped add that returned null.');
+      }
+      if (this.closing) {
+        throw new GlideMQError('Queue is closing');
       }
       handedOff = true;
       return this.waitForJobResult(blockingClient, job.id, eventCursor, waitTimeout);
@@ -832,13 +839,13 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void> {
     const client = await this.getClient();
 
-    if (!schedule.pattern && !schedule.every) {
-      throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
-    }
     if (schedule.tz) {
       validateTimezone(schedule.tz);
     }
     validateSchedulerEvery(schedule.every);
+    if (!schedule.pattern && !schedule.every) {
+      throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
+    }
     const startDate = normalizeScheduleDate(schedule.startDate, 'startDate');
     const endDate = normalizeScheduleDate(schedule.endDate, 'endDate');
     validateSchedulerBounds(startDate, endDate, schedule.limit);

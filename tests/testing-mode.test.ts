@@ -1048,4 +1048,22 @@ describe('TestQueue scheduler runtime', () => {
 
     expect(processed[0]).toBe('sooner-job');
   });
+
+  it('clamps far-future testing-mode wake-ups to the maximum timer delay', async () => {
+    queue = new TestQueue('sched-runtime-far-future');
+    worker = new TestWorker(queue, async () => 'ok');
+
+    const maxTimerDelayMs = 2_147_483_647;
+    const farFutureStartDate = Date.now() + maxTimerDelayMs + 60_000;
+    await queue.upsertJobScheduler(
+      'far-future',
+      { every: 60_000, startDate: farFutureStartDate, limit: 1 },
+      { name: 'far-future-job' },
+    );
+
+    const nextWakeAt = (queue as any).nextSchedulerWakeAt as number | null;
+    expect(nextWakeAt).not.toBeNull();
+    expect(nextWakeAt! - Date.now()).toBeLessThanOrEqual(maxTimerDelayMs);
+    expect((queue as any).schedulerTimer).not.toBeNull();
+  });
 });
