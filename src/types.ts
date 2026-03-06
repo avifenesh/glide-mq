@@ -149,6 +149,11 @@ export interface JobOptions {
   ttl?: number;
 }
 
+export interface AddAndWaitOptions extends JobOptions {
+  /** Maximum time to wait for a completed/failed event before rejecting. Default: 30000ms. */
+  waitTimeout?: number;
+}
+
 export interface RateLimitConfig {
   /** Maximum jobs allowed within the time window. */
   max: number;

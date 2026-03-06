@@ -438,6 +438,7 @@ The processor function signature is identical. The only change is the connection
 | `queue.clean(grace, limit, type)` | `queue.clean(grace, limit, type)` | Full |
 | `queue.retryJobs(opts)` | `queue.retryJobs(opts?)` | Full |
 | `queue.close()` | `queue.close()` | Full |
+| BullMQ request-reply pattern | `queue.addAndWait(name, data, { waitTimeout })` | glide-mq extension |
 | - | `queue.revoke(jobId)` | glide-mq only |
 | - | `queue.getDeadLetterJobs(start, end)` | glide-mq only |
 | - | `queue.searchJobs(opts)` | glide-mq only |
