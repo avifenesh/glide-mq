@@ -192,6 +192,79 @@ describe('TestQueue', () => {
     expect(completed).toHaveLength(1);
     expect(completed[0].id).toBe('1');
   });
+
+  describe('excludeData', () => {
+    it('getJob with excludeData returns job without data or returnvalue', async () => {
+      queue = new TestQueue('test-q');
+      const added = await queue.add('job-a', { big: 'payload' });
+      // Simulate completion with returnvalue
+      queue.jobs.get(added!.id)!.returnvalue = 'result' as any;
+
+      const job = await queue.getJob(added!.id, { excludeData: true });
+      expect(job).not.toBeNull();
+      expect(job!.id).toBe(added!.id);
+      expect(job!.name).toBe('job-a');
+      expect(job!.data).toBeUndefined();
+      expect(job!.returnvalue).toBeUndefined();
+    });
+
+    it('getJob without excludeData returns full data', async () => {
+      queue = new TestQueue('test-q');
+      await queue.add('job-b', { big: 'payload' });
+      const job = await queue.getJob('1');
+      expect(job).not.toBeNull();
+      expect(job!.data).toEqual({ big: 'payload' });
+    });
+
+    it('getJobs with excludeData returns jobs without data', async () => {
+      queue = new TestQueue('test-q');
+      await queue.add('j1', { x: 1 });
+      await queue.add('j2', { x: 2 });
+
+      const jobs = await queue.getJobs('waiting', 0, -1, { excludeData: true });
+      expect(jobs).toHaveLength(2);
+      for (const j of jobs) {
+        expect(j.data).toBeUndefined();
+        expect(j.returnvalue).toBeUndefined();
+        expect(j.name).toBeDefined();
+      }
+    });
+
+    it('getJobs without opts returns full data (backwards compat)', async () => {
+      queue = new TestQueue('test-q');
+      await queue.add('j1', { x: 1 });
+      const jobs = await queue.getJobs('waiting');
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0].data).toEqual({ x: 1 });
+    });
+
+    it('searchJobs with excludeData returns jobs without data', async () => {
+      queue = new TestQueue('test-q');
+      await queue.add('find-me', { val: 100 });
+      await queue.add('find-me', { val: 200 });
+
+      const results = await queue.searchJobs({ name: 'find-me', excludeData: true });
+      expect(results).toHaveLength(2);
+      for (const j of results) {
+        expect(j.name).toBe('find-me');
+        expect(j.data).toBeUndefined();
+        expect(j.returnvalue).toBeUndefined();
+      }
+    });
+
+    it('searchJobs with excludeData and data filter still filters correctly', async () => {
+      queue = new TestQueue('test-q');
+      await queue.add('j1', { color: 'red' });
+      await queue.add('j2', { color: 'blue' });
+
+      // When both excludeData and data filter are provided, data filter takes precedence
+      const results = await queue.searchJobs({ data: { color: 'red' }, excludeData: true });
+      expect(results).toHaveLength(1);
+      expect(results[0].name).toBe('j1');
+      // data filter needed data to work, so data is present
+      expect(results[0].data).toEqual({ color: 'red' });
+    });
+  });
 });
 
 describe('TestWorker', () => {

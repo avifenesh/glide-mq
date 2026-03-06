@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { gzipSync } from 'zlib';
-import { nextCronOccurrence, validateTimezone, decompress, MAX_JOB_DATA_SIZE } from '../src/utils';
+import { nextCronOccurrence, validateTimezone, decompress, MAX_JOB_DATA_SIZE, hmgetArrayToRecord, JOB_METADATA_FIELDS } from '../src/utils';
 
 describe('decompress', () => {
   it('rejects decompression bombs exceeding MAX_JOB_DATA_SIZE', () => {
@@ -250,5 +250,50 @@ describe('nextCronOccurrence with timezone', () => {
     // nextCronOccurrenceTz uses getFormatter which calls Intl.DateTimeFormat
     // An invalid tz string will throw
     expect(() => nextCronOccurrence('0 9 * * *', now, 'Invalid/Zone')).toThrow();
+  });
+});
+
+describe('hmgetArrayToRecord', () => {
+  it('converts an array of values to a Record keyed by field names', () => {
+    const fields = ['a', 'b', 'c'];
+    const values = ['1', '2', '3'];
+    const result = hmgetArrayToRecord(values, fields);
+    expect(result).toEqual({ a: '1', b: '2', c: '3' });
+  });
+
+  it('skips null values', () => {
+    const fields = ['a', 'b', 'c'];
+    const values = ['1', null, '3'];
+    const result = hmgetArrayToRecord(values, fields);
+    expect(result).toEqual({ a: '1', c: '3' });
+  });
+
+  it('returns null when all values are null', () => {
+    const fields = ['a', 'b'];
+    const values = [null, null];
+    const result = hmgetArrayToRecord(values, fields);
+    expect(result).toBeNull();
+  });
+
+  it('converts non-string values to strings', () => {
+    const fields = ['num', 'buf'];
+    const values = [42, Buffer.from('hello')];
+    const result = hmgetArrayToRecord(values, fields);
+    expect(result).not.toBeNull();
+    expect(result!.num).toBe('42');
+    expect(typeof result!.buf).toBe('string');
+  });
+});
+
+describe('JOB_METADATA_FIELDS', () => {
+  it('does not include data or returnvalue', () => {
+    expect(JOB_METADATA_FIELDS).not.toContain('data');
+    expect(JOB_METADATA_FIELDS).not.toContain('returnvalue');
+  });
+
+  it('includes essential metadata fields', () => {
+    for (const field of ['id', 'name', 'opts', 'timestamp', 'attemptsMade', 'state']) {
+      expect(JOB_METADATA_FIELDS).toContain(field);
+    }
   });
 });
