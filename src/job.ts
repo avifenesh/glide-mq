@@ -4,8 +4,15 @@ import type { JobOptions, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
+import { DelayedError } from './errors';
 import { calculateBackoff, decompress, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
+
+function isPlainStepPayload(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype;
+}
 
 export class Job<D = any, R = any> {
   readonly id: string;
@@ -39,6 +46,9 @@ export class Job<D = any, R = any> {
    * Set by calling `discard()` inside the processor.
    */
   discarded = false;
+
+  /** @internal Request captured by moveToDelayed() while inside the worker. */
+  moveToDelayedRequest?: { delayedUntil: number; serializedData?: string; nextData?: D };
 
   /**
    * Set to true when data or returnvalue could not be deserialized from Valkey.
@@ -128,11 +138,7 @@ export class Job<D = any, R = any> {
    * Replace the data payload of this job.
    */
   async updateData(data: D): Promise<void> {
-    const serialized = this.serializer.serialize(data);
-    const byteLen = Buffer.byteLength(serialized, 'utf8');
-    if (byteLen > MAX_JOB_DATA_SIZE) {
-      throw new Error(`Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE})`);
-    }
+    const serialized = this.serializeData(data);
     await this.client.hset(this.queueKeys.job(this.id), {
       data: serialized,
     });
@@ -145,6 +151,30 @@ export class Job<D = any, R = any> {
    */
   discard(): void {
     this.discarded = true;
+  }
+
+  /** @internal */
+  requestMoveToDelayed(timestamp: number, nextData?: D): void {
+    this.moveToDelayedRequest = {
+      delayedUntil: Math.trunc(timestamp),
+      ...(nextData !== undefined ? { serializedData: this.serializeData(nextData), nextData } : {}),
+    };
+    if (nextData !== undefined) {
+      this.data = nextData;
+    }
+  }
+
+  /** @internal */
+  consumeMoveToDelayedRequest():
+    | {
+        delayedUntil: number;
+        serializedData?: string;
+        nextData?: D;
+      }
+    | undefined {
+    const requested = this.moveToDelayedRequest;
+    this.moveToDelayedRequest = undefined;
+    return requested;
   }
 
   /**
@@ -284,6 +314,32 @@ export class Job<D = any, R = any> {
     if (result === 'ok') {
       this.opts.delay = 0;
     }
+  }
+
+  /**
+   * Pause an active job and resume it after the given UNIX timestamp in ms.
+   * Optionally updates `job.data.step` before yielding back to the worker.
+   *
+   * This method must be called from inside a Worker processor.
+   */
+  async moveToDelayed(timestamp: number, nextStep?: string): Promise<never> {
+    if (!Number.isFinite(timestamp) || timestamp < 0) {
+      throw new Error('Timestamp must be a finite Unix millisecond value >= 0');
+    }
+    if (!this.entryId) {
+      throw new Error('moveToDelayed() can only be used while the job is active in a Worker');
+    }
+
+    const delayedUntil = Math.trunc(timestamp);
+    if (nextStep !== undefined) {
+      if (!isPlainStepPayload(this.data)) {
+        throw new Error('moveToDelayed(nextStep) requires plain-object job data');
+      }
+      this.requestMoveToDelayed(delayedUntil, { ...this.data, step: nextStep } as D);
+    } else {
+      this.requestMoveToDelayed(delayedUntil);
+    }
+    throw new DelayedError(delayedUntil);
   }
 
   /**
@@ -445,5 +501,14 @@ export class Job<D = any, R = any> {
       }
     }
     return job;
+  }
+
+  private serializeData(data: D): string {
+    const serialized = this.serializer.serialize(data);
+    const byteLen = Buffer.byteLength(serialized, 'utf8');
+    if (byteLen > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE})`);
+    }
+    return serialized;
   }
 }

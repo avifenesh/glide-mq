@@ -25,3 +25,16 @@ export class UnrecoverableError extends GlideMQError {
     this.name = 'UnrecoverableError';
   }
 }
+
+export class DelayedError extends GlideMQError {
+  readonly delayedUntil: number;
+
+  constructor(delayedUntil: number, message = 'Job moved to delayed state') {
+    if (!Number.isFinite(delayedUntil) || delayedUntil < 0) {
+      throw new GlideMQError('DelayedError requires a finite Unix millisecond timestamp >= 0');
+    }
+    super(message);
+    this.name = 'DelayedError';
+    this.delayedUntil = delayedUntil;
+  }
+}

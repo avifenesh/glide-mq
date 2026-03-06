@@ -294,3 +294,30 @@ await events.close();
 // wait until job completes or fails (polls the job hash at the given interval)
 const state = await job.waitUntilFinished(500, 30000); // 'completed' | 'failed'
 ```
+
+### Pause and Resume a Job Later (Step Jobs)
+
+Use `job.moveToDelayed(timestampMs, nextStep?)` inside a processor when the same logical job should sleep and resume later instead of completing.
+
+```typescript
+const worker = new Worker('drip-campaign', async (job) => {
+  switch (job.data.step) {
+    case 'send':
+      await sendEmail(job.data);
+      await job.moveToDelayed(Date.now() + 24 * 3600_000, 'check');
+    case 'check':
+      if (!(await checkOpened(job.data))) {
+        await job.moveToDelayed(Date.now() + 3600_000, 'followup');
+      }
+      return 'done';
+    case 'followup':
+      await sendFollowUp(job.data);
+      return 'done';
+  }
+});
+```
+
+Notes:
+- `moveToDelayed()` must be called from an active worker processor.
+- `nextStep` is a convenience for plain object payloads; it updates `job.data.step` atomically with the delayed transition.
+- `DelayedError` is exported for advanced/manual control, but `job.moveToDelayed()` is the normal API.

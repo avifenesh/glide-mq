@@ -305,6 +305,7 @@ class Job<D = any, R = any> {
   retry(): Promise<void>
   changePriority(newPriority: number): Promise<void>
   changeDelay(newDelay: number): Promise<void>
+  moveToDelayed(timestampMs: number, nextStep?: string): Promise<never>
   promote(): Promise<void>
   waitUntilFinished(pollIntervalMs?: number, timeoutMs?: number): Promise<'completed' | 'failed'>
 
