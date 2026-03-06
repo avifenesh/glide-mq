@@ -280,10 +280,11 @@ export function validateTimezone(tz: string): void {
 }
 
 export function isValidSchedulerEvery(every: unknown): every is number {
-  return every == null || (typeof every === 'number' && Number.isSafeInteger(every) && every > 0);
+  return typeof every === 'number' && Number.isSafeInteger(every) && every > 0;
 }
 
 export function validateSchedulerEvery(every: number | undefined): void {
+  if (every == null) return;
   if (!isValidSchedulerEvery(every)) {
     throw new Error('every must be a positive safe integer');
   }

@@ -633,13 +633,16 @@ redis.register_function('glidemq_complete', function(keys, args)
     local parentJobKey = keys[6]
     local parentStreamKey = keys[7]
     local parentEventsKey = keys[8]
-    local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-    local totalDeps = redis.call('SCARD', parentDepsKey)
-    local remaining = totalDeps - doneCount
-    if remaining <= 0 then
-      redis.call('HSET', parentJobKey, 'state', 'waiting')
-      redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
-      emitEvent(parentEventsKey, 'active', parentId, nil)
+    local depMarker = 'depdone:' .. depsMember
+    if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
+      local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+      local totalDeps = redis.call('SCARD', parentDepsKey)
+      local remaining = totalDeps - doneCount
+      if remaining <= 0 then
+        redis.call('HSET', parentJobKey, 'state', 'waiting')
+        redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
+        emitEvent(parentEventsKey, 'active', parentId, nil)
+      end
     end
   end
   return 1
@@ -710,12 +713,15 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local parentJobKey = keys[6]
     local parentStreamKey = keys[7]
     local parentEventsKey = keys[8]
-    local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-    local totalDeps = redis.call('SCARD', parentDepsKey)
-    if totalDeps - doneCount <= 0 then
-      redis.call('HSET', parentJobKey, 'state', 'waiting')
-      redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
-      emitEvent(parentEventsKey, 'active', parentId, nil)
+    local depMarker = 'depdone:' .. depsMember
+    if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
+      local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+      local totalDeps = redis.call('SCARD', parentDepsKey)
+      if totalDeps - doneCount <= 0 then
+        redis.call('HSET', parentJobKey, 'state', 'waiting')
+        redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
+        emitEvent(parentEventsKey, 'active', parentId, nil)
+      end
     end
   end
 
@@ -1739,6 +1745,12 @@ redis.register_function('glidemq_completeChild', function(keys, args)
   local parentEventsKey = keys[4]
   local depsMember = args[1]
   local parentId = args[2]
+  local depMarker = 'depdone:' .. depsMember
+  if redis.call('HSETNX', parentJobKey, depMarker, '1') == 0 then
+    local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
+    local totalDeps = redis.call('SCARD', depsKey)
+    return totalDeps - doneCount
+  end
   local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
   local totalDeps = redis.call('SCARD', depsKey)
   local remaining = totalDeps - doneCount
