@@ -87,6 +87,7 @@ Gzip compression: **98% payload reduction** on 15 KB payloads.
 | [`@glidemq/hono`](https://github.com/avifenesh/glidemq-hono) | Hono middleware - REST API + SSE events for queue management |
 | [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) | Express middleware - web UI for monitoring and managing queues |
 | [`@glidemq/speedkey`](https://github.com/avifenesh/speedkey) | Valkey GLIDE client with native NAPI bindings |
+| [examples](https://github.com/avifenesh/glidemq-examples) | Framework integrations and use-case examples |
 
 ### Dashboard
 
