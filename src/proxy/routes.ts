@@ -1,4 +1,4 @@
-import type { Router, Request, Response } from 'express';
+import type { Router, Request, Response, NextFunction } from 'express';
 import { Queue } from '../queue';
 import type { ProxyOptions, AddJobRequest, AddJobResponse, AddJobSkippedResponse } from './types';
 
@@ -14,19 +14,22 @@ function param(req: Request, key: string): string {
  * The router manages a cache of Queue instances (one per queue name, lazily created).
  * Call the returned `closeQueues()` to shut down all cached Queue instances.
  */
-export function createRoutes(opts: ProxyOptions): {
+export function createRoutes(
+  opts: ProxyOptions,
+  createRouter: () => Router,
+): {
   router: Router;
   closeQueues: () => Promise<void>;
 } {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const express = require('express') as typeof import('express');
-  const router = express.Router();
+  const router = createRouter();
 
   const queueCache = new Map<string, Queue>();
   const startTime = Date.now();
   const allowedQueues = opts.queues ? new Set(opts.queues) : null;
+  let closed = false;
 
   function getQueue(name: string): Queue {
+    if (closed) throw new Error('Proxy is shutting down');
     let q = queueCache.get(name);
     if (!q) {
       q = new Queue(name, {
@@ -35,6 +38,7 @@ export function createRoutes(opts: ProxyOptions): {
         prefix: opts.prefix,
         compression: opts.compression,
       });
+      q.on('error', () => {});
       queueCache.set(name, q);
     }
     return q;
@@ -44,7 +48,7 @@ export function createRoutes(opts: ProxyOptions): {
     if (!allowedQueues) return true;
     const name = param(req, 'name');
     if (allowedQueues.has(name)) return true;
-    res.status(403).json({ error: `Queue "${name}" is not in the allowlist` });
+    res.status(403).json({ error: 'Queue is not in the allowlist' });
     return false;
   }
 
@@ -59,7 +63,7 @@ export function createRoutes(opts: ProxyOptions): {
       }
 
       const queue = getQueue(param(req, 'name'));
-      const job = await queue.add(body.name, body.data, body.opts);
+      const job = await queue.add(body.name, body.data ?? null, body.opts);
 
       if (!job) {
         const skipped: AddJobSkippedResponse = { skipped: true };
@@ -74,8 +78,7 @@ export function createRoutes(opts: ProxyOptions): {
       };
       res.status(201).json(response);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Internal server error';
-      res.status(500).json({ error: message });
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -98,32 +101,20 @@ export function createRoutes(opts: ProxyOptions): {
       }
 
       const queue = getQueue(param(req, 'name'));
-      const results = await queue.addBulk(
-        jobs.map((j) => ({ name: j.name, data: j.data, opts: j.opts })),
+      const results = await Promise.all(
+        jobs.map((j) => queue.add(j.name, j.data ?? null, j.opts)),
       );
 
-      // addBulk filters out skipped/duplicate jobs, so reconcile by index.
-      let resultIdx = 0;
-      const responseJobs: (AddJobResponse | AddJobSkippedResponse)[] = [];
+      const responseJobs: (AddJobResponse | AddJobSkippedResponse)[] = results.map((job) =>
+        job
+          ? { id: job.id, name: job.name, timestamp: job.timestamp }
+          : { skipped: true },
+      );
 
-      for (let i = 0; i < jobs.length; i++) {
-        const result = results[resultIdx];
-        if (result && resultIdx < results.length) {
-          responseJobs.push({
-            id: result.id,
-            name: result.name,
-            timestamp: result.timestamp,
-          });
-          resultIdx++;
-        } else {
-          responseJobs.push({ skipped: true });
-        }
-      }
-
-      res.status(201).json({ jobs: responseJobs });
+      const anyCreated = results.some((j) => j !== null);
+      res.status(anyCreated ? 201 : 200).json({ jobs: responseJobs });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Internal server error';
-      res.status(500).json({ error: message });
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -155,8 +146,7 @@ export function createRoutes(opts: ProxyOptions): {
         parentId: job.parentId,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Internal server error';
-      res.status(500).json({ error: message });
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -167,8 +157,7 @@ export function createRoutes(opts: ProxyOptions): {
       await queue.pause();
       res.status(204).send();
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Internal server error';
-      res.status(500).json({ error: message });
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -179,8 +168,7 @@ export function createRoutes(opts: ProxyOptions): {
       await queue.resume();
       res.status(204).send();
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Internal server error';
-      res.status(500).json({ error: message });
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -191,8 +179,7 @@ export function createRoutes(opts: ProxyOptions): {
       const counts = await queue.getJobCounts();
       res.status(200).json(counts);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Internal server error';
-      res.status(500).json({ error: message });
+      res.status(500).json({ error: 'Internal server error' });
     }
   });
 
@@ -205,11 +192,8 @@ export function createRoutes(opts: ProxyOptions): {
   });
 
   async function closeQueues(): Promise<void> {
-    const closers: Promise<void>[] = [];
-    for (const q of queueCache.values()) {
-      closers.push(q.close());
-    }
-    await Promise.all(closers);
+    closed = true;
+    await Promise.allSettled([...queueCache.values()].map((q) => q.close()));
     queueCache.clear();
   }
 

@@ -340,7 +340,7 @@ describe('HTTP Proxy - Queue Allowlist', () => {
     });
     expect(res.status).toBe(403);
     const body = await res.json();
-    expect(body.error).toContain('allowlist');
+    expect(body.error).toContain('not in the allowlist');
   });
 
   it('blocked queue GET also returns 403', async () => {

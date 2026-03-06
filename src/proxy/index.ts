@@ -57,10 +57,17 @@ export function createProxyServer(opts: ProxyOptions): {
   }
 
   const app = express();
+  app.disable('x-powered-by');
   app.use(express.json({ limit: '1mb' }));
 
-  const { router, closeQueues } = createRoutes(opts);
+  const { router, closeQueues } = createRoutes(opts, () => express.Router());
   app.use(router);
+
+  // Consistent JSON error responses for Express-level errors (malformed JSON, payload too large)
+  app.use((err: any, _req: any, res: any, _next: any) => {
+    const status = err.status || err.statusCode || 500;
+    res.status(status).json({ error: err.type === 'entity.too.large' ? 'Payload too large' : 'Bad request' });
+  });
 
   return {
     app,
