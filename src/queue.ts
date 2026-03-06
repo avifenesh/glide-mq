@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import { randomBytes } from 'crypto';
 import { InfBoundary, Batch, ClusterBatch, ClusterScanCursor } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type {
@@ -23,8 +24,11 @@ import {
   keyPrefix,
   keyPrefixPattern,
   nextReconnectDelay,
-  nextCronOccurrence,
   validateTimezone,
+  validateSchedulerEvery,
+  normalizeScheduleDate,
+  validateSchedulerBounds,
+  computeInitialSchedulerNextRun,
   hashDataToRecord,
   extractJobIdsFromStreamEntries,
   compress,
@@ -46,6 +50,8 @@ import {
   pause,
   resume,
   revokeJob,
+  tryLock,
+  unlock,
   searchByName,
   cleanJobs,
   drainQueue,
@@ -110,6 +116,29 @@ export class Queue<D = any, R = any> extends EventEmitter {
   /** @internal Create a Batch appropriate for the client type. */
   private newBatch(): InstanceType<typeof Batch> | InstanceType<typeof ClusterBatch> {
     return this.clusterMode ? new ClusterBatch(false) : new Batch(false);
+  }
+
+  private schedulerLockKey(): string {
+    return `${this.keys.schedulers}:lock:__tick__`;
+  }
+
+  private async acquireSchedulerMutationLock(client: Client): Promise<{ key: string; token: string }> {
+    const key = this.schedulerLockKey();
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const token = randomBytes(8).toString('hex');
+      const acquired = await tryLock(client, key, token, 5000);
+      if (acquired) return { key, token };
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    throw new GlideMQError('Scheduler is busy; try again');
+  }
+
+  private async releaseSchedulerMutationLock(client: Client, lock: { key: string; token: string }): Promise<void> {
+    try {
+      await unlock(client, lock.key, lock.token);
+    } catch {
+      // Best effort - the lock has a TTL fallback.
+    }
   }
 
   /**
@@ -799,30 +828,70 @@ export class Queue<D = any, R = any> extends EventEmitter {
    */
   async upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void> {
     const client = await this.getClient();
-    const now = Date.now();
 
     if (schedule.tz) {
       validateTimezone(schedule.tz);
     }
+    validateSchedulerEvery(schedule.every);
+    const startDate = normalizeScheduleDate(schedule.startDate, 'startDate');
+    const endDate = normalizeScheduleDate(schedule.endDate, 'endDate');
+    validateSchedulerBounds(startDate, endDate, schedule.limit);
 
-    let nextRun: number;
-    if (schedule.pattern) {
-      nextRun = nextCronOccurrence(schedule.pattern, now, schedule.tz);
-    } else if (schedule.every) {
-      nextRun = now + schedule.every;
-    } else {
-      throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
+    const lock = await this.acquireSchedulerMutationLock(client);
+    try {
+      const now = Date.now();
+      let iterationCount = 0;
+      let lastRun: number | undefined;
+      let nextRun = computeInitialSchedulerNextRun(
+        {
+          pattern: schedule.pattern,
+          every: schedule.every,
+          tz: schedule.tz,
+          startDate,
+          endDate,
+        },
+        now,
+      );
+      const existingRaw = await client.hget(this.keys.schedulers, name);
+      if (existingRaw != null) {
+        try {
+          const existing = JSON.parse(String(existingRaw)) as SchedulerEntry;
+          const scheduleUnchanged =
+            existing.pattern === schedule.pattern &&
+            existing.every === schedule.every &&
+            existing.tz === schedule.tz &&
+            existing.startDate === startDate &&
+            existing.endDate === endDate;
+          if (scheduleUnchanged && existing.nextRun) {
+            iterationCount = existing.iterationCount ?? 0;
+            lastRun = existing.lastRun;
+            nextRun = existing.nextRun;
+          }
+        } catch {
+          // Ignore malformed existing state and treat as a fresh upsert.
+        }
+      }
+      if (nextRun == null) {
+        throw new Error('Schedule has no occurrences within the configured bounds');
+      }
+
+      const entry: SchedulerEntry = {
+        pattern: schedule.pattern,
+        every: schedule.every,
+        tz: schedule.tz,
+        startDate,
+        endDate,
+        limit: schedule.limit,
+        iterationCount,
+        template,
+        lastRun,
+        nextRun,
+      };
+
+      await client.hset(this.keys.schedulers, { [name]: JSON.stringify(entry) });
+    } finally {
+      await this.releaseSchedulerMutationLock(client, lock);
     }
-
-    const entry: SchedulerEntry = {
-      pattern: schedule.pattern,
-      every: schedule.every,
-      tz: schedule.tz,
-      template,
-      nextRun,
-    };
-
-    await client.hset(this.keys.schedulers, { [name]: JSON.stringify(entry) });
   }
 
   /**
@@ -830,7 +899,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
    */
   async removeJobScheduler(name: string): Promise<void> {
     const client = await this.getClient();
-    await client.hdel(this.keys.schedulers, [name]);
+    const lock = await this.acquireSchedulerMutationLock(client);
+    try {
+      await client.hdel(this.keys.schedulers, [name]);
+    } finally {
+      await this.releaseSchedulerMutationLock(client, lock);
+    }
   }
 
   /**

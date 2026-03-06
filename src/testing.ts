@@ -21,7 +21,15 @@ import type {
 } from './types';
 import { JSON_SERIALIZER } from './types';
 import { GlideMQError, UnrecoverableError } from './errors';
-import { nextCronOccurrence, validateTimezone } from './utils';
+import {
+  MAX_JOB_DATA_SIZE,
+  computeFollowingSchedulerNextRun,
+  computeInitialSchedulerNextRun,
+  normalizeScheduleDate,
+  validateSchedulerBounds,
+  validateSchedulerEvery,
+  validateTimezone,
+} from './utils';
 
 // ---- Lightweight in-memory Job representation ----
 
@@ -147,6 +155,9 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   /** Workers register themselves here so we can notify on add. */
   /** @internal */ readonly workers: Set<TestWorker<D, R>> = new Set();
   private schedulers: Map<string, SchedulerEntry> = new Map();
+  private schedulerTimer: ReturnType<typeof setTimeout> | null = null;
+  private schedulerRunning = false;
+  private nextSchedulerWakeAt: number | null = null;
 
   constructor(name: string, opts?: TestQueueOptions) {
     super();
@@ -255,6 +266,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     for (const w of this.workers) {
       w.onJobAdded();
     }
+    this.ensureSchedulerLoop();
   }
 
   /** Check if paused. */
@@ -361,27 +373,66 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   }
 
   async upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void> {
+    validateSchedulerEvery(schedule.every);
     if (!schedule.pattern && !schedule.every) {
       throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
     }
     if (schedule.tz) {
       validateTimezone(schedule.tz);
     }
+    const startDate = normalizeScheduleDate(schedule.startDate, 'startDate');
+    const endDate = normalizeScheduleDate(schedule.endDate, 'endDate');
+    validateSchedulerBounds(startDate, endDate, schedule.limit);
     const now = Date.now();
-    const nextRun = schedule.pattern ? nextCronOccurrence(schedule.pattern, now, schedule.tz) : now + schedule.every!;
+    let iterationCount = 0;
+    let lastRun: number | undefined;
+    let nextRun = computeInitialSchedulerNextRun(
+      {
+        pattern: schedule.pattern,
+        every: schedule.every,
+        tz: schedule.tz,
+        startDate,
+        endDate,
+      },
+      now,
+    );
+    const existing = this.schedulers.get(name);
+    if (existing) {
+      const scheduleUnchanged =
+        existing.pattern === schedule.pattern &&
+        existing.every === schedule.every &&
+        existing.tz === schedule.tz &&
+        existing.startDate === startDate &&
+        existing.endDate === endDate;
+      if (scheduleUnchanged && existing.nextRun) {
+        iterationCount = existing.iterationCount ?? 0;
+        lastRun = existing.lastRun;
+        nextRun = existing.nextRun;
+      }
+    }
+    if (nextRun == null) {
+      throw new Error('Schedule has no occurrences within the configured bounds');
+    }
     const entry: SchedulerEntry = {
       pattern: schedule.pattern,
       every: schedule.every,
       tz: schedule.tz,
+      startDate,
+      endDate,
+      limit: schedule.limit,
+      iterationCount,
       template,
+      lastRun,
       nextRun,
     };
     // Store via JSON roundtrip to detach from caller references (matches production serialization)
     this.schedulers.set(name, JSON.parse(JSON.stringify(entry)));
+    this.ensureSchedulerLoop();
   }
 
   async removeJobScheduler(name: string): Promise<void> {
     this.schedulers.delete(name);
+    this.ensureSchedulerLoop();
   }
 
   async getJobScheduler(name: string): Promise<SchedulerEntry | null> {
@@ -399,8 +450,127 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   /** Close the queue. */
   async close(): Promise<void> {
+    this.clearSchedulerTimer();
     this.removeAllListeners();
     this.workers.clear();
+  }
+
+  /** @internal Called by TestWorker when it attaches. */
+  onWorkerAttached(): void {
+    this.ensureSchedulerLoop();
+  }
+
+  /** @internal Called by TestWorker when it detaches. */
+  onWorkerDetached(): void {
+    if (this.workers.size === 0) {
+      this.clearSchedulerTimer();
+    }
+  }
+
+  private clearSchedulerTimer(): void {
+    if (this.schedulerTimer) {
+      clearTimeout(this.schedulerTimer);
+      this.schedulerTimer = null;
+    }
+    this.nextSchedulerWakeAt = null;
+  }
+
+  private ensureSchedulerLoop(): void {
+    if (this.schedulerRunning || this.workers.size === 0 || this.schedulers.size === 0) {
+      return;
+    }
+
+    let nextDue = Number.POSITIVE_INFINITY;
+    const now = Date.now();
+    for (const entry of this.schedulers.values()) {
+      if (entry.nextRun != null && entry.nextRun < nextDue) {
+        nextDue = entry.nextRun;
+      }
+    }
+    if (!Number.isFinite(nextDue)) return;
+
+    if (this.schedulerTimer && this.nextSchedulerWakeAt != null && this.nextSchedulerWakeAt <= nextDue) {
+      return;
+    }
+
+    this.clearSchedulerTimer();
+
+    const delay = Math.max(0, nextDue - now);
+    this.nextSchedulerWakeAt = nextDue;
+    this.schedulerTimer = setTimeout(() => {
+      this.schedulerTimer = null;
+      this.nextSchedulerWakeAt = null;
+      void this.runDueSchedulers();
+    }, delay);
+  }
+
+  private async runDueSchedulers(): Promise<void> {
+    if (this.schedulerRunning || this.workers.size === 0) return;
+    this.schedulerRunning = true;
+
+    try {
+      const now = Date.now();
+      const dueNames: string[] = [];
+      for (const [name, entry] of this.schedulers.entries()) {
+        if (!entry.pattern && !entry.every) {
+          dueNames.push(name);
+          continue;
+        }
+        if (entry.nextRun != null && entry.nextRun <= now) {
+          dueNames.push(name);
+        }
+      }
+
+      for (const name of dueNames) {
+        const entry = this.schedulers.get(name);
+        if (!entry) continue;
+
+        if (!entry.pattern && !entry.every) {
+          this.schedulers.delete(name);
+          continue;
+        }
+        if (entry.nextRun == null || entry.nextRun > now) continue;
+
+        const currentIterationCount = entry.iterationCount ?? 0;
+        if ((entry.limit != null && currentIterationCount >= entry.limit) || (entry.endDate != null && entry.nextRun > entry.endDate)) {
+          this.schedulers.delete(name);
+          continue;
+        }
+
+        const template = entry.template ?? {};
+        const jobName = template.name ?? name;
+        let jobData = template.data !== undefined ? template.data : ({} as D);
+        try {
+          const serialized = this.serializer.serialize(jobData);
+          const byteLen = Buffer.byteLength(serialized, 'utf8');
+          if (byteLen > MAX_JOB_DATA_SIZE) {
+            continue;
+          }
+          jobData = this.serializer.deserialize(serialized) as D;
+        } catch {
+          continue;
+        }
+        const job = await this.add(jobName, jobData, template.opts as JobOptions | undefined);
+        if (!job) continue;
+
+        entry.lastRun = now;
+        entry.iterationCount = currentIterationCount + 1;
+        if (entry.limit != null && entry.iterationCount >= entry.limit) {
+          this.schedulers.delete(name);
+        } else {
+          const nextRun = computeFollowingSchedulerNextRun(entry, now);
+          if (nextRun == null) {
+            this.schedulers.delete(name);
+          } else {
+            entry.nextRun = nextRun;
+            this.schedulers.set(name, JSON.parse(JSON.stringify(entry)));
+          }
+        }
+      }
+    } finally {
+      this.schedulerRunning = false;
+      this.ensureSchedulerLoop();
+    }
   }
 }
 
@@ -448,6 +618,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
     // Register with the queue
     queue.workers.add(this);
+    queue.onWorkerAttached();
 
     // Process any jobs already in the queue
     queueMicrotask(() => this.drain());
@@ -568,6 +739,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   async close(): Promise<void> {
     this.running = false;
     this.queue.workers.delete(this);
+    this.queue.onWorkerDetached();
     this.removeAllListeners();
   }
 }

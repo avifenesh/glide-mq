@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '36';
+export const LIBRARY_VERSION = '37';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -542,6 +542,40 @@ redis.register_function('glidemq_nextDue', function(keys, args)
   end
 
   return math.floor(nextDue)
+end)
+
+redis.register_function('glidemq_tryLock', function(keys, args)
+  local lockKey = keys[1]
+  local token = args[1]
+  local ttl = tonumber(args[2]) or 1000
+  local result = redis.call('SET', lockKey, token, 'PX', tostring(ttl), 'NX')
+  if result then
+    return 1
+  end
+  return 0
+end)
+
+redis.register_function('glidemq_unlock', function(keys, args)
+  local lockKey = keys[1]
+  local token = args[1]
+  local current = redis.call('GET', lockKey)
+  if current == token then
+    redis.call('DEL', lockKey)
+    return 1
+  end
+  return 0
+end)
+
+redis.register_function('glidemq_renewLock', function(keys, args)
+  local lockKey = keys[1]
+  local token = args[1]
+  local ttl = tonumber(args[2]) or 1000
+  local current = redis.call('GET', lockKey)
+  if current == token then
+    redis.call('PEXPIRE', lockKey, ttl)
+    return 1
+  end
+  return 0
 end)
 
 redis.register_function('glidemq_complete', function(keys, args)
@@ -2432,6 +2466,21 @@ export async function nextDueAt(client: Client, k: QueueKeys): Promise<number | 
     return null;
   }
   return ts;
+}
+
+export async function tryLock(client: Client, lockKey: string, token: string, ttlMs: number): Promise<boolean> {
+  const result = await client.fcall('glidemq_tryLock', [lockKey], [token, ttlMs.toString()]);
+  return Number(result) === 1;
+}
+
+export async function unlock(client: Client, lockKey: string, token: string): Promise<boolean> {
+  const result = await client.fcall('glidemq_unlock', [lockKey], [token]);
+  return Number(result) === 1;
+}
+
+export async function renewLock(client: Client, lockKey: string, token: string, ttlMs: number): Promise<boolean> {
+  const result = await client.fcall('glidemq_renewLock', [lockKey], [token, ttlMs.toString()]);
+  return Number(result) === 1;
 }
 
 /**

@@ -701,6 +701,74 @@ describe('TestQueue.getJobScheduler', () => {
     await queue.removeJobScheduler('test-sched');
   });
 
+  it('stores scheduler bounds and iteration count after upsert', async () => {
+    queue = new TestQueue('sched-bounds');
+    const startDate = Date.now() + 1000;
+    const endDate = startDate + 2000;
+    await queue.upsertJobScheduler('bounded', {
+      every: 250,
+      startDate: new Date(startDate),
+      endDate,
+      limit: 2,
+    });
+
+    const entry = await queue.getJobScheduler('bounded');
+    expect(entry).not.toBeNull();
+    expect(entry!.startDate).toBe(startDate);
+    expect(entry!.endDate).toBe(endDate);
+    expect(entry!.limit).toBe(2);
+    expect(entry!.iterationCount).toBe(0);
+    expect(entry!.nextRun).toBe(startDate);
+
+    await queue.removeJobScheduler('bounded');
+  });
+
+  it('preserves iteration state when re-upserting an unchanged scheduler', async () => {
+    queue = new TestQueue('sched-preserve');
+    const startDate = Date.now() + 2000;
+    await queue.upsertJobScheduler('preserve', { every: 250, startDate, limit: 3 }, { name: 'preserve-job' });
+    (queue as any).schedulers.set('preserve', {
+      every: 250,
+      startDate,
+      limit: 3,
+      iterationCount: 2,
+      lastRun: startDate,
+      nextRun: startDate + 250,
+      template: { name: 'preserve-job' },
+    });
+
+    await queue.upsertJobScheduler('preserve', { every: 250, startDate, limit: 3 }, { name: 'preserve-job-v2' });
+
+    const entry = await queue.getJobScheduler('preserve');
+    expect(entry).not.toBeNull();
+    expect(entry!.iterationCount).toBe(2);
+    expect(entry!.lastRun).toBe(startDate);
+    expect(entry!.nextRun).toBe(startDate + 250);
+  });
+
+  it('resets iteration state when re-upserting a changed scheduler', async () => {
+    queue = new TestQueue('sched-reset');
+    const startDate = Date.now() + 2000;
+    await queue.upsertJobScheduler('reset', { every: 250, startDate, limit: 3 }, { name: 'reset-job' });
+    (queue as any).schedulers.set('reset', {
+      every: 250,
+      startDate,
+      limit: 3,
+      iterationCount: 2,
+      lastRun: startDate,
+      nextRun: startDate + 250,
+      template: { name: 'reset-job' },
+    });
+
+    await queue.upsertJobScheduler('reset', { every: 500, startDate, limit: 3 }, { name: 'reset-job-v2' });
+
+    const entry = await queue.getJobScheduler('reset');
+    expect(entry).not.toBeNull();
+    expect(entry!.iterationCount).toBe(0);
+    expect(entry!.lastRun).toBeUndefined();
+    expect(entry!.nextRun).toBe(startDate);
+  });
+
   it('getJobScheduler returns null for missing name', async () => {
     queue = new TestQueue('sched-miss');
     const entry = await queue.getJobScheduler('nonexistent');
@@ -768,6 +836,57 @@ describe('TestQueue.getJobScheduler', () => {
     queue = new TestQueue('sched-bad-tz');
     await expect(queue.upsertJobScheduler('bad', { pattern: '0 9 * * *', tz: 'Fake/Zone' })).rejects.toThrow(
       'Invalid timezone',
+    );
+  });
+
+  it('upsertJobScheduler rejects invalid bounds', async () => {
+    queue = new TestQueue('sched-bad-bounds');
+    const startDate = Date.now() + 5000;
+    const endDate = startDate - 1000;
+    await expect(queue.upsertJobScheduler('bad-window', { every: 1000, startDate, endDate })).rejects.toThrow(
+      'startDate must be less than or equal to endDate',
+    );
+    await expect(queue.upsertJobScheduler('bad-limit', { every: 1000, limit: 0 })).rejects.toThrow(
+      'limit must be a positive integer',
+    );
+  });
+
+  it('upsertJobScheduler rejects invalid every intervals', async () => {
+    queue = new TestQueue('sched-bad-every');
+    await expect(queue.upsertJobScheduler('bad-every-negative', { every: -100 })).rejects.toThrow(
+      'every must be a positive safe integer',
+    );
+    await expect(queue.upsertJobScheduler('bad-every-zero', { every: 0 as any })).rejects.toThrow(
+      'every must be a positive safe integer',
+    );
+    await expect(queue.upsertJobScheduler('bad-every-string', { every: '100' as any })).rejects.toThrow(
+      'every must be a positive safe integer',
+    );
+    await expect(queue.upsertJobScheduler('bad-every-float', { every: 1.5 as any })).rejects.toThrow(
+      'every must be a positive safe integer',
+    );
+  });
+
+  it('upsertJobScheduler rejects schedules with no occurrences inside the configured bounds', async () => {
+    queue = new TestQueue('sched-empty-bounds');
+    const startDate = new Date('2024-01-02T00:00:00Z').getTime();
+    const endDate = new Date('2024-01-02T00:00:00Z').getTime();
+    await expect(
+      queue.upsertJobScheduler('no-window', {
+        pattern: '0 0 1 1 *',
+        startDate,
+        endDate,
+      }),
+    ).rejects.toThrow('Schedule has no occurrences within the configured bounds');
+  });
+
+  it('upsertJobScheduler rejects invalid dates', async () => {
+    queue = new TestQueue('sched-bad-dates');
+    await expect(
+      queue.upsertJobScheduler('bad-start-date', { every: 1000, startDate: new Date(Number.NaN) }),
+    ).rejects.toThrow('startDate must be a valid Date or timestamp');
+    await expect(queue.upsertJobScheduler('bad-end-date', { every: 1000, endDate: Number.NaN as any })).rejects.toThrow(
+      'endDate must be a valid Date or timestamp',
     );
   });
 });
@@ -847,5 +966,78 @@ describe('TestWorker - TTL', () => {
     expect(record?.expireAt).toBeDefined();
     expect(record!.expireAt!).toBeGreaterThanOrEqual(before + 5000);
     expect(record!.expireAt!).toBeLessThanOrEqual(after + 5000);
+  });
+});
+
+describe('TestQueue scheduler runtime', () => {
+  let queue: TestQueue;
+  let worker: TestWorker;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    if (queue) await queue.close();
+  });
+
+  it('fires repeat schedulers and removes them after reaching limit', async () => {
+    queue = new TestQueue('sched-runtime-limit');
+    const processed: string[] = [];
+    worker = new TestWorker(queue, async (job: any) => {
+      processed.push(job.id);
+      return 'ok';
+    });
+
+    await queue.upsertJobScheduler('runtime-repeat', { every: 20, limit: 2 }, { name: 'tick', data: { ok: true } });
+
+    const deadline = Date.now() + 1000;
+    while (processed.length < 2 && Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, 20));
+    }
+
+    expect(processed).toHaveLength(2);
+    await new Promise<void>((r) => setTimeout(r, 50));
+    expect(await queue.getJobScheduler('runtime-repeat')).toBeNull();
+  });
+
+  it('waits for future startDate before firing a scheduler in testing mode', async () => {
+    queue = new TestQueue('sched-runtime-start');
+    const processed: string[] = [];
+    worker = new TestWorker(queue, async (job: any) => {
+      processed.push(job.id);
+      return 'ok';
+    });
+
+    const startDate = Date.now() + 120;
+    await queue.upsertJobScheduler('runtime-start', { every: 50, startDate, limit: 1 }, { name: 'tick' });
+
+    await new Promise<void>((r) => setTimeout(r, 60));
+    expect(processed).toHaveLength(0);
+
+    const deadline = Date.now() + 500;
+    while (processed.length < 1 && Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, 20));
+    }
+
+    expect(processed).toHaveLength(1);
+    expect(await queue.getJobScheduler('runtime-start')).toBeNull();
+  });
+
+  it('reschedules the testing-mode wake-up when a sooner scheduler is added later', async () => {
+    queue = new TestQueue('sched-runtime-reschedule');
+    const processed: string[] = [];
+    worker = new TestWorker(queue, async (job: any) => {
+      processed.push(job.name);
+      return 'ok';
+    });
+
+    await queue.upsertJobScheduler('later', { every: 200, startDate: Date.now() + 500, limit: 1 }, { name: 'later-job' });
+    await new Promise<void>((r) => setTimeout(r, 20));
+    await queue.upsertJobScheduler('sooner', { every: 200, startDate: Date.now() + 60, limit: 1 }, { name: 'sooner-job' });
+
+    const deadline = Date.now() + 500;
+    while (processed.length < 1 && Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, 20));
+    }
+
+    expect(processed[0]).toBe('sooner-job');
   });
 });

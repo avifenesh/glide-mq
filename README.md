@@ -32,7 +32,7 @@ npm install glide-mq
 
 ### Orchestration & scheduling
 - **Workflows** — `FlowProducer` parent-child trees and `chain`/`group`/`chord` helpers ([Workflows](docs/WORKFLOWS.md), [Demo](demo/README.md#demo-scenarios))
-- **Schedulers** — cron and interval repeatable jobs persisted across restarts ([Advanced](docs/ADVANCED.md#job-schedulers), [Demo](demo/README.md#demo-scenarios))
+- **Schedulers** — cron and interval repeatable jobs with optional start/end bounds and run limits, persisted across restarts ([Advanced](docs/ADVANCED.md#job-schedulers), [Demo](demo/README.md#demo-scenarios))
 - **Step jobs** — pause an active job and resume it later with `job.moveToDelayed(...)` for multi-step workflows ([Usage](docs/USAGE.md#pause-and-resume-a-job-later-step-jobs))
 - **Per-key ordering, global concurrency, and rate limiting** — deterministic ordering with queue-wide and token-bucket controls ([Advanced](docs/ADVANCED.md#ordering-and-group-concurrency), [Advanced](docs/ADVANCED.md#global-concurrency), [Advanced](docs/ADVANCED.md#global-rate-limiting))
 - **Deduplication** — simple, throttle, and debounce modes with TTL ([Advanced](docs/ADVANCED.md#deduplication), [Demo](demo/README.md#demo-scenarios))

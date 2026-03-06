@@ -121,6 +121,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     // Auto-init: start the worker immediately
     this.initPromise = this.init();
+    this.initPromise.catch((err) => {
+      if (!this.closing && !this.closed) {
+        this.emit('error', err);
+      }
+    });
   }
 
   /**

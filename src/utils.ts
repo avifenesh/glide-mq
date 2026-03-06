@@ -1,5 +1,6 @@
 import { gzipSync, gunzipSync } from 'zlib';
 import { randomBytes } from 'crypto';
+import type { ScheduleOpts, SchedulerEntry } from './types';
 
 const DEFAULT_PREFIX = 'glide';
 
@@ -278,6 +279,38 @@ export function validateTimezone(tz: string): void {
   }
 }
 
+export function isValidSchedulerEvery(every: unknown): every is number {
+  return every == null || (typeof every === 'number' && Number.isSafeInteger(every) && every > 0);
+}
+
+export function validateSchedulerEvery(every: number | undefined): void {
+  if (!isValidSchedulerEvery(every)) {
+    throw new Error('every must be a positive safe integer');
+  }
+}
+
+export function normalizeScheduleDate(value: Date | number | undefined, fieldName: 'startDate' | 'endDate'): number | undefined {
+  if (value == null) return undefined;
+  const ts = value instanceof Date ? value.getTime() : value;
+  if (!Number.isFinite(ts)) {
+    throw new Error(`${fieldName} must be a valid Date or timestamp`);
+  }
+  return ts;
+}
+
+export function validateSchedulerBounds(
+  startDate: number | undefined,
+  endDate: number | undefined,
+  limit: number | undefined,
+): void {
+  if (startDate != null && endDate != null && startDate > endDate) {
+    throw new Error('startDate must be less than or equal to endDate');
+  }
+  if (limit != null && (!Number.isInteger(limit) || limit <= 0)) {
+    throw new Error('limit must be a positive integer');
+  }
+}
+
 // Cache DateTimeFormat instances per timezone for performance
 const dtfCache = new Map<string, Intl.DateTimeFormat>();
 
@@ -380,6 +413,59 @@ export function nextCronOccurrence(pattern: string, afterMs: number, tz?: string
     return nextCronOccurrenceTz(pattern, afterMs, tz);
   }
   return nextCronOccurrenceUtc(pattern, afterMs);
+}
+
+export function computeInitialSchedulerNextRun(
+  schedule: Pick<ScheduleOpts, 'pattern' | 'every' | 'tz'> & { startDate?: number; endDate?: number },
+  now: number,
+): number | null {
+  if (!schedule.pattern) {
+    validateSchedulerEvery(schedule.every);
+  }
+  let nextRun: number;
+  if (schedule.pattern) {
+    const base = schedule.startDate != null && schedule.startDate > now ? schedule.startDate : now;
+    nextRun = nextCronOccurrence(schedule.pattern, base - 1, schedule.tz);
+  } else if (schedule.every) {
+    if (schedule.startDate == null) {
+      nextRun = now + schedule.every;
+    } else if (schedule.startDate > now) {
+      nextRun = schedule.startDate;
+    } else {
+      const elapsed = now - schedule.startDate;
+      const steps = Math.ceil(elapsed / schedule.every);
+      nextRun = schedule.startDate + steps * schedule.every;
+    }
+  } else {
+    throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
+  }
+
+  if (schedule.endDate != null && nextRun > schedule.endDate) {
+    return null;
+  }
+  return nextRun;
+}
+
+export function computeFollowingSchedulerNextRun(
+  schedule: Pick<SchedulerEntry, 'pattern' | 'every' | 'tz' | 'endDate'>,
+  afterMs: number,
+): number | null {
+  if (!schedule.pattern && !isValidSchedulerEvery(schedule.every)) {
+    return null;
+  }
+  let nextRun: number;
+  if (schedule.pattern) {
+    nextRun = nextCronOccurrence(schedule.pattern, afterMs, schedule.tz);
+  } else if (schedule.every) {
+    nextRun = afterMs + schedule.every;
+  } else {
+    return null;
+  }
+
+  if (schedule.endDate != null && nextRun > schedule.endDate) {
+    return null;
+  }
+  return nextRun;
 }
 
 function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {

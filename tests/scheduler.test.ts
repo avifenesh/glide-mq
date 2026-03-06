@@ -2,8 +2,8 @@
  * Integration tests for job schedulers (repeatable/cron jobs).
  * Runs against both standalone (:6379) and cluster (:7000).
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
+import { it, expect, beforeAll, afterAll } from 'vitest';
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -82,7 +82,7 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     const processed: string[] = [];
     let worker: InstanceType<typeof Worker>;
     const done = new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
+      setTimeout(() => {
         worker.close(true).then(() => resolve());
       }, 4000);
 
@@ -148,6 +148,126 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     await queue.removeJobScheduler('cron-lookup');
   });
 
+  it('upsertJobScheduler stores bounds and seeds a future every scheduler from startDate', async () => {
+    const startDate = Date.now() + 2000;
+    const endDate = startDate + 5000;
+    await queue.upsertJobScheduler(
+      'bounded-every',
+      { every: 500, startDate: new Date(startDate), endDate, limit: 3 },
+      { name: 'bounded-job', data: { bounded: true } },
+    );
+
+    const result = await queue.getJobScheduler('bounded-every');
+    expect(result).not.toBeNull();
+    expect(result!.startDate).toBe(startDate);
+    expect(result!.endDate).toBe(endDate);
+    expect(result!.limit).toBe(3);
+    expect(result!.iterationCount).toBe(0);
+    expect(result!.nextRun).toBe(startDate);
+
+    await queue.removeJobScheduler('bounded-every');
+  });
+
+  it('upsertJobScheduler preserves iteration state when the schedule itself is unchanged', async () => {
+    const startDate = Date.now() + 4000;
+    const k = buildKeys(Q);
+
+    await queue.upsertJobScheduler('preserve-state', { every: 500, startDate, limit: 3 }, { name: 'preserve-job' });
+    await cleanupClient.hset(k.schedulers, {
+      'preserve-state': JSON.stringify({
+        every: 500,
+        startDate,
+        limit: 3,
+        iterationCount: 2,
+        lastRun: startDate,
+        nextRun: startDate + 500,
+        template: { name: 'preserve-job' },
+      }),
+    });
+
+    await queue.upsertJobScheduler('preserve-state', { every: 500, startDate, limit: 3 }, { name: 'preserve-job-v2' });
+
+    const result = await queue.getJobScheduler('preserve-state');
+    expect(result).not.toBeNull();
+    expect(result!.iterationCount).toBe(2);
+    expect(result!.lastRun).toBe(startDate);
+    expect(result!.nextRun).toBe(startDate + 500);
+
+    await queue.removeJobScheduler('preserve-state');
+  });
+
+  it('upsertJobScheduler resets iteration state when the schedule changes', async () => {
+    const startDate = Date.now() + 4000;
+    const k = buildKeys(Q);
+
+    await queue.upsertJobScheduler('reset-state', { every: 500, startDate, limit: 3 }, { name: 'reset-job' });
+    await cleanupClient.hset(k.schedulers, {
+      'reset-state': JSON.stringify({
+        every: 500,
+        startDate,
+        limit: 3,
+        iterationCount: 2,
+        lastRun: startDate,
+        nextRun: startDate + 500,
+        template: { name: 'reset-job' },
+      }),
+    });
+
+    await queue.upsertJobScheduler('reset-state', { every: 250, startDate, limit: 3 }, { name: 'reset-job-v2' });
+
+    const result = await queue.getJobScheduler('reset-state');
+    expect(result).not.toBeNull();
+    expect(result!.iterationCount).toBe(0);
+    expect(result!.lastRun).toBeUndefined();
+    expect(result!.nextRun).toBe(startDate);
+
+    await queue.removeJobScheduler('reset-state');
+  });
+
+  it('upsertJobScheduler seeds cron schedulers from the first occurrence on or after startDate', async () => {
+    const start = new Date();
+    start.setUTCSeconds(0, 0);
+    const minutesUntilBoundary = 5 - (start.getUTCMinutes() % 5 || 5);
+    start.setUTCMinutes(start.getUTCMinutes() + minutesUntilBoundary + 5);
+    const startDate = start.getTime();
+
+    await queue.upsertJobScheduler(
+      'bounded-cron',
+      { pattern: '*/5 * * * *', startDate, tz: 'UTC' },
+      { name: 'bounded-cron-job', data: { cron: true } },
+    );
+
+    const result = await queue.getJobScheduler('bounded-cron');
+    expect(result).not.toBeNull();
+    expect(result!.startDate).toBe(startDate);
+    expect(result!.nextRun).toBe(startDate);
+
+    await queue.removeJobScheduler('bounded-cron');
+  });
+
+  it('upsertJobScheduler rounds an off-boundary cron startDate up to the next matching slot', async () => {
+    const start = new Date();
+    start.setUTCSeconds(0, 0);
+    const baseMinute = start.getUTCMinutes();
+    const offset = (5 - (baseMinute % 5)) % 5;
+    start.setUTCMinutes(baseMinute + offset + 5, 0, 0);
+    const boundary = start.getTime();
+    const offBoundary = boundary - 90_000;
+
+    await queue.upsertJobScheduler(
+      'bounded-cron-off',
+      { pattern: '*/5 * * * *', startDate: offBoundary, tz: 'UTC' },
+      { name: 'bounded-cron-off-job', data: { cron: true } },
+    );
+
+    const result = await queue.getJobScheduler('bounded-cron-off');
+    expect(result).not.toBeNull();
+    expect(result!.startDate).toBe(offBoundary);
+    expect(result!.nextRun).toBe(boundary);
+
+    await queue.removeJobScheduler('bounded-cron-off');
+  });
+
   it('getJobScheduler returns null for malformed JSON data', async () => {
     const k = buildKeys(Q);
     await cleanupClient.hset(k.schedulers, { corrupt: 'not-valid-json{' });
@@ -194,6 +314,56 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     );
   });
 
+  it('upsertJobScheduler rejects startDate after endDate', async () => {
+    const startDate = Date.now() + 5000;
+    const endDate = startDate - 1000;
+    await expect(queue.upsertJobScheduler('bad-window', { every: 1000, startDate, endDate })).rejects.toThrow(
+      'startDate must be less than or equal to endDate',
+    );
+  });
+
+  it('upsertJobScheduler rejects non-positive limit', async () => {
+    await expect(queue.upsertJobScheduler('bad-limit', { every: 1000, limit: 0 })).rejects.toThrow(
+      'limit must be a positive integer',
+    );
+  });
+
+  it('upsertJobScheduler rejects invalid every intervals', async () => {
+    await expect(queue.upsertJobScheduler('bad-every-negative', { every: -100 })).rejects.toThrow(
+      'every must be a positive safe integer',
+    );
+    await expect(queue.upsertJobScheduler('bad-every-zero', { every: 0 as any })).rejects.toThrow(
+      'every must be a positive safe integer',
+    );
+    await expect(queue.upsertJobScheduler('bad-every-string', { every: '100' as any })).rejects.toThrow(
+      'every must be a positive safe integer',
+    );
+    await expect(queue.upsertJobScheduler('bad-every-float', { every: 1.5 as any })).rejects.toThrow(
+      'every must be a positive safe integer',
+    );
+  });
+
+  it('upsertJobScheduler rejects schedules with no occurrences inside the configured bounds', async () => {
+    const startDate = new Date('2024-01-02T00:00:00Z').getTime();
+    const endDate = new Date('2024-01-02T00:00:00Z').getTime();
+    await expect(
+      queue.upsertJobScheduler('no-window', {
+        pattern: '0 0 1 1 *',
+        startDate,
+        endDate,
+      }),
+    ).rejects.toThrow('Schedule has no occurrences within the configured bounds');
+  });
+
+  it('upsertJobScheduler rejects invalid dates', async () => {
+    await expect(
+      queue.upsertJobScheduler('bad-start-date', { every: 1000, startDate: new Date(Number.NaN) }),
+    ).rejects.toThrow('startDate must be a valid Date or timestamp');
+    await expect(queue.upsertJobScheduler('bad-end-date', { every: 1000, endDate: Number.NaN as any })).rejects.toThrow(
+      'endDate must be a valid Date or timestamp',
+    );
+  });
+
   it('getJobScheduler returns tz for timezone-aware scheduler', async () => {
     await queue.upsertJobScheduler('tz-lookup', { pattern: '30 14 * * *', tz: 'Asia/Tokyo' });
 
@@ -220,4 +390,297 @@ describeEachMode('Job schedulers', (CONNECTION) => {
 
     await queue.removeJobScheduler('tz-every');
   });
+
+  it('scheduler removes itself after reaching the configured limit', async () => {
+    const qName = Q + '-limit';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const keys = buildKeys(qName);
+
+    await localQueue.upsertJobScheduler(
+      'limited-repeat',
+      { every: 200, limit: 2 },
+      {
+        name: 'limited-job',
+        data: { limited: true },
+      },
+    );
+
+    const processed: string[] = [];
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        processed.push(job.id);
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        promotionInterval: 100,
+        stalledInterval: 60000,
+      },
+    );
+    worker.on('error', () => {});
+
+    const deadline = Date.now() + 5000;
+    while (processed.length < 2 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(processed).toHaveLength(2);
+
+    await new Promise((r) => setTimeout(r, 500));
+    expect(processed).toHaveLength(2);
+    const counts = await localQueue.getJobCounts();
+    expect(counts.waiting).toBe(0);
+    expect(counts.delayed).toBe(0);
+    const raw = await cleanupClient.hget(keys.schedulers, 'limited-repeat');
+    expect(raw).toBeNull();
+
+    await worker.close(true);
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
+  it('two workers do not overshoot the configured limit for the same scheduler', async () => {
+    const qName = Q + '-dual-worker-limit';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const keys = buildKeys(qName);
+
+    await localQueue.upsertJobScheduler(
+      'single-shot',
+      { every: 200, limit: 1 },
+      {
+        name: 'single-shot-job',
+        data: { limit: true },
+      },
+    );
+
+    const processed: string[] = [];
+    const workerA = new Worker(
+      qName,
+      async (job: any) => {
+        processed.push(job.id);
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        promotionInterval: 100,
+        stalledInterval: 60000,
+      },
+    );
+    const workerB = new Worker(
+      qName,
+      async (job: any) => {
+        processed.push(job.id);
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        promotionInterval: 100,
+        stalledInterval: 60000,
+      },
+    );
+    workerA.on('error', () => {});
+    workerB.on('error', () => {});
+
+    const deadline = Date.now() + 4000;
+    while (processed.length < 1 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(processed).toHaveLength(1);
+
+    await new Promise((r) => setTimeout(r, 500));
+    expect(processed).toHaveLength(1);
+    const raw = await cleanupClient.hget(keys.schedulers, 'single-shot');
+    expect(raw).toBeNull();
+
+    await workerA.close(true);
+    await workerB.close(true);
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
+  it('scheduler removes itself once the next run would exceed endDate', async () => {
+    const qName = Q + '-end-date';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const keys = buildKeys(qName);
+    const startDate = Date.now() + 300;
+
+    await localQueue.upsertJobScheduler(
+      'bounded-repeat',
+      { every: 200, startDate, endDate: startDate },
+      {
+        name: 'bounded-job',
+        data: { bounded: true },
+      },
+    );
+
+    const processed: string[] = [];
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        processed.push(job.id);
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        promotionInterval: 100,
+        stalledInterval: 60000,
+      },
+    );
+    worker.on('error', () => {});
+
+    const deadline = Date.now() + 4000;
+    while (processed.length < 1 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(processed).toHaveLength(1);
+
+    await new Promise((r) => setTimeout(r, 500));
+    expect(processed).toHaveLength(1);
+    const counts = await localQueue.getJobCounts();
+    expect(counts.waiting).toBe(0);
+    expect(counts.delayed).toBe(0);
+    const raw = await cleanupClient.hget(keys.schedulers, 'bounded-repeat');
+    expect(raw).toBeNull();
+
+    await worker.close(true);
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
+  it('scheduler deletes an already-exhausted entry without creating new jobs', async () => {
+    const qName = Q + '-stale-limit';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const keys = buildKeys(qName);
+
+    await cleanupClient.hset(keys.schedulers, {
+      stale: JSON.stringify({
+        every: 200,
+        limit: 1,
+        iterationCount: 1,
+        nextRun: Date.now() - 100,
+        template: { name: 'stale-job', data: { stale: true } },
+      }),
+    });
+
+    const processed: string[] = [];
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        processed.push(job.id);
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        promotionInterval: 100,
+        stalledInterval: 60000,
+      },
+    );
+    worker.on('error', () => {});
+
+    await new Promise((r) => setTimeout(r, 500));
+    expect(processed).toHaveLength(0);
+
+    const raw = await cleanupClient.hget(keys.schedulers, 'stale');
+    expect(raw).toBeNull();
+
+    await worker.close(true);
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
+  it('scheduler deletes invalid negative-interval entries without creating jobs', async () => {
+    const qName = Q + '-invalid-every';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const keys = buildKeys(qName);
+
+    await cleanupClient.hset(keys.schedulers, {
+      invalid: JSON.stringify({
+        every: -100,
+        nextRun: Date.now() - 100,
+        template: { name: 'invalid-job', data: { invalid: true } },
+      }),
+    });
+
+    const processed: string[] = [];
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        processed.push(job.id);
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        promotionInterval: 100,
+        stalledInterval: 60000,
+      },
+    );
+    worker.on('error', () => {});
+
+    await new Promise((r) => setTimeout(r, 500));
+    expect(processed).toHaveLength(0);
+
+    const raw = await cleanupClient.hget(keys.schedulers, 'invalid');
+    expect(raw).toBeNull();
+
+    await worker.close(true);
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
+  it('invalid persisted cron scheduler does not block a valid scheduler tick', async () => {
+    const qName = Q + '-invalid-cron';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const keys = buildKeys(qName);
+
+    await cleanupClient.hset(keys.schedulers, {
+      broken: JSON.stringify({
+        pattern: 'invalid cron',
+        nextRun: Date.now() - 100,
+        template: { name: 'broken-job' },
+      }),
+    });
+    await localQueue.upsertJobScheduler('healthy', { every: 200, limit: 1 }, { name: 'healthy-job' });
+
+    const processed: string[] = [];
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        processed.push(job.name);
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        promotionInterval: 100,
+        stalledInterval: 60000,
+      },
+    );
+    worker.on('error', () => {});
+
+    const deadline = Date.now() + 4000;
+    while (processed.length < 1 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    expect(processed).toEqual(['healthy-job']);
+    expect(await cleanupClient.hget(keys.schedulers, 'broken')).toBeNull();
+
+    await worker.close(true);
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
 });
