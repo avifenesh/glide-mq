@@ -178,15 +178,15 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   /** Add a single job. Returns null if deduplicated or duplicate custom ID. */
   async add(name: string, data: D, opts?: JobOptions): Promise<TestJob<D, R> | null> {
+    const customJobId = opts?.jobId ?? '';
+    if (customJobId !== '') validateJobId(customJobId);
+
     if (opts?.deduplication && this.opts.dedup) {
       const dedupId = opts.deduplication.id;
       if (this.dedupSet.has(dedupId)) {
         return null;
       }
     }
-
-    const customJobId = opts?.jobId ?? '';
-    if (customJobId !== '') validateJobId(customJobId);
 
     let id: string;
     if (customJobId !== '') {
@@ -196,7 +196,9 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       id = customJobId;
     } else {
       id = String(++this.idCounter);
+      let retries = 0;
       while (this.jobs.has(id)) {
+        if (++retries >= 1000) throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
         id = String(++this.idCounter);
       }
     }
