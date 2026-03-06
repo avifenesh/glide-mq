@@ -1029,9 +1029,17 @@ describe('TestQueue scheduler runtime', () => {
       return 'ok';
     });
 
-    await queue.upsertJobScheduler('later', { every: 200, startDate: Date.now() + 500, limit: 1 }, { name: 'later-job' });
+    await queue.upsertJobScheduler(
+      'later',
+      { every: 200, startDate: Date.now() + 500, limit: 1 },
+      { name: 'later-job' },
+    );
     await new Promise<void>((r) => setTimeout(r, 20));
-    await queue.upsertJobScheduler('sooner', { every: 200, startDate: Date.now() + 60, limit: 1 }, { name: 'sooner-job' });
+    await queue.upsertJobScheduler(
+      'sooner',
+      { every: 200, startDate: Date.now() + 60, limit: 1 },
+      { name: 'sooner-job' },
+    );
 
     const deadline = Date.now() + 500;
     while (processed.length < 1 && Date.now() < deadline) {

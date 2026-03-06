@@ -285,7 +285,10 @@ export class Scheduler {
         }
 
         const currentIterationCount = config.iterationCount ?? 0;
-        if ((config.limit != null && currentIterationCount >= config.limit) || (config.endDate != null && config.nextRun > config.endDate)) {
+        if (
+          (config.limit != null && currentIterationCount >= config.limit) ||
+          (config.endDate != null && config.nextRun > config.endDate)
+        ) {
           pendingDeletions.push(schedulerName);
           continue;
         }

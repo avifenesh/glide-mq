@@ -532,7 +532,10 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
         if (entry.nextRun == null || entry.nextRun > now) continue;
 
         const currentIterationCount = entry.iterationCount ?? 0;
-        if ((entry.limit != null && currentIterationCount >= entry.limit) || (entry.endDate != null && entry.nextRun > entry.endDate)) {
+        if (
+          (entry.limit != null && currentIterationCount >= entry.limit) ||
+          (entry.endDate != null && entry.nextRun > entry.endDate)
+        ) {
           this.schedulers.delete(name);
           continue;
         }

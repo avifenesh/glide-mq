@@ -682,5 +682,4 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     await localQueue.close();
     await flushQueue(cleanupClient, qName);
   }, 15000);
-
 });

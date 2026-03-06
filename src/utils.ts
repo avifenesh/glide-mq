@@ -289,7 +289,10 @@ export function validateSchedulerEvery(every: number | undefined): void {
   }
 }
 
-export function normalizeScheduleDate(value: Date | number | undefined, fieldName: 'startDate' | 'endDate'): number | undefined {
+export function normalizeScheduleDate(
+  value: Date | number | undefined,
+  fieldName: 'startDate' | 'endDate',
+): number | undefined {
   if (value == null) return undefined;
   const ts = value instanceof Date ? value.getTime() : value;
   if (!Number.isFinite(ts)) {
