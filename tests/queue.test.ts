@@ -293,10 +293,7 @@ describe('Queue', () => {
 
     it('should fall back to the job hash if the terminal event is no longer in the stream', async () => {
       const commandClient = makeMockClient({
-        fcall: vi
-          .fn()
-          .mockResolvedValueOnce(LIBRARY_VERSION)
-          .mockResolvedValueOnce('1'),
+        fcall: vi.fn().mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1'),
         xrevrange: vi.fn().mockResolvedValue({}),
         hget: vi.fn().mockImplementation(async (_key: string, field: string) => {
           if (field === 'state') return 'completed';
