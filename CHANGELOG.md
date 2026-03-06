@@ -14,6 +14,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `queue.addAndWait(name, data, { waitTimeout })` - enqueue a job and wait for the matching completed/failed event on the queue events stream without polling the job hash.
 - `job.moveToDelayed(timestampMs, nextStep?)` - pause an active job mid-processor and resume it later from the scheduled set. Supports step-job workflows and updates `job.data.step` atomically for plain object payloads.
 - `DelayedError` - exported error type for advanced/manual step-job control.
+- Batch processing - workers can process multiple jobs at once via `batch: { size, timeout? }` option. Processor receives `Job[]` and returns `R[]`. Use `BatchError` for per-job partial failure reporting. Supported in both Worker and TestWorker (#81).
 
 ---
 

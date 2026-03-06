@@ -316,6 +316,47 @@ Notes:
 - If `add()` is deduplicated and returns `null`, `addAndWait()` rejects instead of hanging.
 - `addAndWait()` does not support `removeOnComplete` or `removeOnFail`, because it may need the job hash as a terminal-state fallback.
 
+### Batch Processing
+
+Process multiple jobs at once for higher throughput on I/O-bound operations (bulk database inserts, batch API calls, ML inference).
+
+```typescript
+import { Worker, BatchError } from 'glide-mq';
+
+const worker = new Worker('bulk-insert', async (jobs) => {
+  // jobs is Job[] - process all at once
+  const results = await db.insertMany(jobs.map(j => j.data));
+  return results; // must return R[] with length === jobs.length
+}, {
+  connection,
+  batch: {
+    size: 50,        // max jobs per batch
+    timeout: 1000,   // wait up to 1s for a full batch (optional)
+  },
+});
+```
+
+Options:
+- `batch.size` - maximum number of jobs to collect before invoking the processor (1-1000).
+- `batch.timeout` - maximum time in ms to wait for additional jobs after a partial batch is received. When omitted, processes whatever is available immediately.
+
+**Partial failures** - throw `BatchError` to report per-job outcomes:
+
+```typescript
+const worker = new Worker('mixed', async (jobs) => {
+  const results = await Promise.allSettled(jobs.map(processOne));
+  const mapped = results.map(r =>
+    r.status === 'fulfilled' ? r.value : r.reason
+  );
+  if (mapped.some(r => r instanceof Error)) {
+    throw new BatchError(mapped);
+  }
+  return mapped;
+}, { connection, batch: { size: 10 } });
+```
+
+Each job is individually completed or failed based on its corresponding entry in the `BatchError.results` array. Failed jobs follow normal retry/backoff/DLQ rules.
+
 ### Pause and Resume a Job Later (Step Jobs)
 
 Use `job.moveToDelayed(timestampMs, nextStep?)` inside a processor when the same logical job should sleep and resume later instead of completing.

@@ -20,7 +20,8 @@ npm install glide-mq
 
 ### Core queueing
 - **Queues & Workers** — producer/consumer with configurable concurrency ([Usage](docs/USAGE.md#queue), [Demo](demo/README.md#demo-scenarios))
-- **Delayed, priority, and batch jobs** — schedule jobs, prioritize critical work, and ingest at high throughput with `addBulk` ([Usage](docs/USAGE.md#queue), [Demo](demo/README.md#demo-scenarios))
+- **Delayed, priority, and bulk enqueue** — schedule jobs, prioritize critical work, and ingest at high throughput with `addBulk` ([Usage](docs/USAGE.md#queue), [Demo](demo/README.md#demo-scenarios))
+- **Batch processing** — process multiple jobs at once for higher throughput on bulk I/O operations ([Usage](docs/USAGE.md#batch-processing))
 - **Request-reply** — enqueue and await a single job result with `queue.addAndWait(...)` ([Usage](docs/USAGE.md#request-reply-with-addandwait))
 - **Job search & progress tracking** — query by state/name/data and stream progress updates ([Usage](docs/USAGE.md#worker), [Search tests](tests/search.test.ts))
 
