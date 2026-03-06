@@ -256,10 +256,7 @@ describe('HTTP Proxy', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        jobs: [
-          { name: 'valid', data: {} },
-          { data: { no_name: true } },
-        ],
+        jobs: [{ name: 'valid', data: {} }, { data: { no_name: true } }],
       }),
     });
     expect(res.status).toBe(400);

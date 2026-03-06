@@ -101,14 +101,10 @@ export function createRoutes(
       }
 
       const queue = getQueue(param(req, 'name'));
-      const results = await Promise.all(
-        jobs.map((j) => queue.add(j.name, j.data ?? null, j.opts)),
-      );
+      const results = await Promise.all(jobs.map((j) => queue.add(j.name, j.data ?? null, j.opts)));
 
       const responseJobs: (AddJobResponse | AddJobSkippedResponse)[] = results.map((job) =>
-        job
-          ? { id: job.id, name: job.name, timestamp: job.timestamp }
-          : { skipped: true },
+        job ? { id: job.id, name: job.name, timestamp: job.timestamp } : { skipped: true },
       );
 
       const anyCreated = results.some((j) => j !== null);

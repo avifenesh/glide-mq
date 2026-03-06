@@ -51,9 +51,7 @@ export function createProxyServer(opts: ProxyOptions): {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     express = require('express');
   } catch {
-    throw new Error(
-      'express is required for glide-mq/proxy. Install it: npm install express',
-    );
+    throw new Error('express is required for glide-mq/proxy. Install it: npm install express');
   }
 
   const app = express();
