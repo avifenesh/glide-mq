@@ -13,6 +13,7 @@ import type {
   Metrics,
   JobCounts,
   SearchJobsOptions,
+  GetJobsOptions,
   RateLimitConfig,
   WorkerInfo,
   Serializer,
@@ -30,9 +31,11 @@ import {
   validateSchedulerBounds,
   computeInitialSchedulerNextRun,
   hashDataToRecord,
+  hmgetArrayToRecord,
   extractJobIdsFromStreamEntries,
   compress,
   MAX_JOB_DATA_SIZE,
+  JOB_METADATA_FIELDS,
 } from './utils';
 import {
   createBlockingClient,
@@ -782,13 +785,22 @@ export class Queue<D = any, R = any> extends EventEmitter {
   /**
    * Retrieve a job by ID from the queue.
    * Returns null if the job does not exist.
+   * @param id - The job ID
+   * @param opts - Options; set `excludeData: true` to omit `data` and `returnvalue` fields
    */
-  async getJob(id: string): Promise<Job<D, R> | null> {
+  async getJob(id: string, opts?: GetJobsOptions): Promise<Job<D, R> | null> {
     const client = await this.getClient();
+
+    if (opts?.excludeData) {
+      const values = await client.hmget(this.keys.job(id), JOB_METADATA_FIELDS);
+      const hash = hmgetArrayToRecord(values, JOB_METADATA_FIELDS);
+      if (!hash) return null;
+      return Job.fromHash<D, R>(client, this.keys, id, hash, this.serializer, true);
+    }
+
     const hashData = await client.hgetall(this.keys.job(id));
     const hash = hashDataToRecord(hashData);
     if (!hash) return null;
-
     return Job.fromHash<D, R>(client, this.keys, id, hash, this.serializer);
   }
 
@@ -1307,25 +1319,29 @@ export class Queue<D = any, R = any> extends EventEmitter {
       jobIds = await this.scanJobIds(client, pfx, opts.name, limit);
     }
 
-    // Fetch full job objects
+    // Fetch job objects. When excludeData is set and no data filter is needed,
+    // use HMGET to skip data/returnvalue fields for better performance.
+    const excludeData = opts.excludeData === true && !opts.data;
     const jobs: Job<D, R>[] = [];
-    // ⚡ Bolt: Fix N+1 query by batching hgetall calls instead of awaiting them in a loop.
-    // Chunking ensures we only load what we need, properly satisfying the limit after filtering.
     const CHUNK = 100;
     for (let offset = 0; offset < jobIds.length && jobs.length < limit; offset += CHUNK) {
       const chunk = jobIds.slice(offset, offset + CHUNK);
       const batch = this.newBatch();
-      for (const id of chunk) {
-        (batch as any).hgetall(this.keys.job(id));
+      if (excludeData) {
+        for (const id of chunk) (batch as any).hmget(this.keys.job(id), JOB_METADATA_FIELDS);
+      } else {
+        for (const id of chunk) (batch as any).hgetall(this.keys.job(id));
       }
       const batchResults = await client.exec(batch as any, false);
       if (!batchResults) continue;
 
       for (let i = 0; i < chunk.length && jobs.length < limit; i++) {
-        const hash = hashDataToRecord(batchResults[i] as any);
+        const hash = excludeData
+          ? hmgetArrayToRecord(batchResults[i] as (unknown | null)[], JOB_METADATA_FIELDS)
+          : hashDataToRecord(batchResults[i] as any);
         if (!hash) continue;
 
-        const job = Job.fromHash<D, R>(client, this.keys, chunk[i], hash, this.serializer);
+        const job = Job.fromHash<D, R>(client, this.keys, chunk[i], hash, this.serializer, excludeData);
 
         // Apply name filter if we used a non-Lua path
         if (opts.name && !opts.state && job.name !== opts.name) continue;
@@ -1548,8 +1564,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * Returns an empty array if no DLQ is configured.
    * @param start - Start index (default 0)
    * @param end - End index (default -1, meaning all)
+   * @param opts - Options; set `excludeData: true` to omit `data` and `returnvalue` fields
    */
-  async getDeadLetterJobs(start = 0, end = -1): Promise<Job<D, R>[]> {
+  async getDeadLetterJobs(start = 0, end = -1, opts?: GetJobsOptions): Promise<Job<D, R>[]> {
     if (!this.opts.deadLetterQueue) return [];
     const client = await this.getClient();
     const dlqKeys = buildKeys(this.opts.deadLetterQueue.name, this.opts.prefix);
@@ -1565,19 +1582,26 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const jobIds = extractJobIdsFromStreamEntries(entries);
     const sliced = jobIds.slice(start, end >= 0 ? end + 1 : undefined);
     if (sliced.length === 0) return [];
+    const excludeData = opts?.excludeData === true;
     const jobs: Job<D, R>[] = [];
     for (let offset = 0; offset < sliced.length; offset += PIPELINE_CHUNK_SIZE) {
       const chunk = sliced.slice(offset, offset + PIPELINE_CHUNK_SIZE);
       const batch = this.newBatch();
-      for (const id of chunk) (batch as any).hgetall(dlqKeys.job(id));
+      if (excludeData) {
+        for (const id of chunk) (batch as any).hmget(dlqKeys.job(id), JOB_METADATA_FIELDS);
+      } else {
+        for (const id of chunk) (batch as any).hgetall(dlqKeys.job(id));
+      }
       const batchResults = await client.exec(batch as any, false);
       if (batchResults) {
         for (let i = 0; i < batchResults.length; i++) {
-          const hash = hashDataToRecord(batchResults[i] as any);
+          const hash = excludeData
+            ? hmgetArrayToRecord(batchResults[i] as (unknown | null)[], JOB_METADATA_FIELDS)
+            : hashDataToRecord(batchResults[i] as any);
           if (!hash) continue;
           // DLQ envelope is always JSON (written by Worker.moveToDLQ with JSON.stringify),
           // regardless of the queue's custom serializer.
-          jobs.push(Job.fromHash<D, R>(client, dlqKeys, chunk[i], hash));
+          jobs.push(Job.fromHash<D, R>(client, dlqKeys, chunk[i], hash, undefined, excludeData));
         }
       }
     }
