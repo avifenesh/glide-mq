@@ -36,6 +36,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     xgroupCreate: vi.fn(),
     zadd: vi.fn(),
     smembers: vi.fn().mockResolvedValue(new Set()),
+    sadd: vi.fn().mockResolvedValue(1),
     exec: vi.fn().mockResolvedValue(['1', '2', '3']),
     close: vi.fn(),
     ...overrides,

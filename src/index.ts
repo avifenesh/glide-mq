@@ -39,7 +39,14 @@ export type {
 
 export { JSON_SERIALIZER } from './types';
 
-export { GlideMQError, ConnectionError, UnrecoverableError, DelayedError, BatchError, WaitingChildrenError } from './errors';
+export {
+  GlideMQError,
+  ConnectionError,
+  UnrecoverableError,
+  DelayedError,
+  BatchError,
+  WaitingChildrenError,
+} from './errors';
 export { isClusterClient } from './connection';
 export { gracefulShutdown } from './graceful-shutdown';
 export type { GracefulShutdownHandle } from './graceful-shutdown';

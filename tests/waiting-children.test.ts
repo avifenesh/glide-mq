@@ -275,9 +275,7 @@ describeEachMode('moveToWaitingChildren', (CONNECTION) => {
       name: 'mixed-parent',
       queueName: Q,
       data: { type: 'mixed' },
-      children: [
-        { name: 'static-child', queueName: Q, data: { static: true } },
-      ],
+      children: [{ name: 'static-child', queueName: Q, data: { static: true } }],
     });
 
     const result = await new Promise<any>((resolve) => {

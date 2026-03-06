@@ -1251,6 +1251,10 @@ redis.register_function('glidemq_dedup', function(keys, args)
   if parentId ~= '' then
     hashFields[#hashFields + 1] = 'parentId'
     hashFields[#hashFields + 1] = parentId
+    if parentQueue ~= '' then
+      hashFields[#hashFields + 1] = 'parentQueue'
+      hashFields[#hashFields + 1] = parentQueue
+    end
   end
   if delay > 0 or priority > 0 then
     hashFields[#hashFields + 1] = 'state'
@@ -1260,6 +1264,13 @@ redis.register_function('glidemq_dedup', function(keys, args)
     hashFields[#hashFields + 1] = 'waiting'
   end
   redis.call('HSET', jobKey, unpack(hashFields))
+  -- Register child in parent's deps set when parentDepsKey is provided (keys[6])
+  if parentId ~= '' and parentQueue ~= '' and #keys >= 6 then
+    local parentDepsKey = keys[6]
+    local queuePrefix = string.sub(prefix, 1, #prefix - 1)
+    local depsMember = queuePrefix .. ':' .. jobIdStr
+    redis.call('SADD', parentDepsKey, depsMember)
+  end
   if delay > 0 then
     local score = priority * PRIORITY_SHIFT + (timestamp + delay)
     redis.call('ZADD', scheduledKey, score, jobIdStr)
@@ -2245,11 +2256,10 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
   local group = args[3]
   local now = tonumber(args[4]) or 0
 
-  if redis.call('EXISTS', jobKey) == 0 then
+  local state = redis.call('HGET', jobKey, 'state')
+  if not state then
     return 'error:not_found'
   end
-
-  local state = redis.call('HGET', jobKey, 'state')
   if state ~= 'active' then
     return 'error:not_active'
   end
@@ -2606,33 +2616,29 @@ export async function dedup(
   if (parentDepsKey) {
     keys.push(parentDepsKey);
   }
-  const result = await client.fcall(
-    'glidemq_dedup',
-    keys,
-    [
-      dedupId,
-      ttlMs.toString(),
-      mode,
-      jobName,
-      data,
-      opts,
-      timestamp.toString(),
-      delay.toString(),
-      priority.toString(),
-      parentId,
-      maxAttempts.toString(),
-      orderingKey,
-      groupConcurrency.toString(),
-      groupRateMax.toString(),
-      groupRateDuration.toString(),
-      tbCapacity.toString(),
-      tbRefillRate.toString(),
-      jobCost.toString(),
-      jobTtl.toString(),
-      customJobId,
-      parentQueue,
-    ],
-  );
+  const result = await client.fcall('glidemq_dedup', keys, [
+    dedupId,
+    ttlMs.toString(),
+    mode,
+    jobName,
+    data,
+    opts,
+    timestamp.toString(),
+    delay.toString(),
+    priority.toString(),
+    parentId,
+    maxAttempts.toString(),
+    orderingKey,
+    groupConcurrency.toString(),
+    groupRateMax.toString(),
+    groupRateDuration.toString(),
+    tbCapacity.toString(),
+    tbRefillRate.toString(),
+    jobCost.toString(),
+    jobTtl.toString(),
+    customJobId,
+    parentQueue,
+  ]);
   return result as string;
 }
 

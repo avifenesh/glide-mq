@@ -328,6 +328,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
             throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
           }
           jobId = result;
+
+          // Cross-queue parent: register dedup child in parent deps separately
+          if (parentId && parentQueue && parentQueue !== this.name) {
+            const parentKeys = buildKeys(parentQueue, this.opts.prefix);
+            const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+            const depsMember = `${prefix}:${jobId}`;
+            await client.sadd(parentKeys.deps(parentId), [depsMember]);
+          }
         } else {
           const result = await addJob(
             client,
@@ -525,7 +533,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     for (const p of prepared) {
       if (p.deduplication) {
-        batch.fcall('glidemq_dedup', dedupKeys, [
+        let dKeys = dedupKeys;
+        if (p.parentId && p.parentQueue && p.parentQueue === this.name) {
+          dKeys = [...dedupKeys, this.keys.deps(p.parentId)];
+        }
+        batch.fcall('glidemq_dedup', dKeys, [
           p.deduplication.id,
           String(p.deduplication.ttl ?? 0),
           p.deduplication.mode ?? 'simple',
@@ -546,12 +558,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
+          p.parentQueue,
         ]);
       } else {
         let jobKeys = keys;
         if (p.parentId && p.parentQueue && p.parentQueue === this.name) {
-          const parentKeys = buildKeys(p.parentQueue, this.opts.prefix);
-          jobKeys = [...keys, parentKeys.deps(p.parentId)];
+          jobKeys = [...keys, this.keys.deps(p.parentId)];
         }
         batch.fcall('glidemq_addJob', jobKeys, [
           p.entry.name,
