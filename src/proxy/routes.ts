@@ -2,6 +2,12 @@ import type { Router, Request, Response } from 'express';
 import { Queue } from '../queue';
 import type { ProxyOptions, AddJobRequest, AddJobResponse, AddJobSkippedResponse } from './types';
 
+/** Extract a single string from a route param (Express 5 params can be string | string[]). */
+function param(req: Request, key: string): string {
+  const v = req.params[key];
+  return Array.isArray(v) ? v[0] : v;
+}
+
 /**
  * Create an Express Router with all proxy endpoints.
  *
@@ -36,7 +42,7 @@ export function createRoutes(opts: ProxyOptions): {
 
   function checkAllowlist(req: Request, res: Response): boolean {
     if (!allowedQueues) return true;
-    const name = req.params.name;
+    const name = param(req, 'name');
     if (allowedQueues.has(name)) return true;
     res.status(403).json({ error: `Queue "${name}" is not in the allowlist` });
     return false;
@@ -53,7 +59,7 @@ export function createRoutes(opts: ProxyOptions): {
         return;
       }
 
-      const queue = getQueue(req.params.name);
+      const queue = getQueue(param(req, 'name'));
       const job = await queue.add(body.name, body.data, body.opts);
 
       if (!job) {
@@ -93,14 +99,12 @@ export function createRoutes(opts: ProxyOptions): {
         }
       }
 
-      const queue = getQueue(req.params.name);
+      const queue = getQueue(param(req, 'name'));
       const results = await queue.addBulk(
         jobs.map((j) => ({ name: j.name, data: j.data, opts: j.opts })),
       );
 
-      // Map results back. addBulk filters out skipped/duplicate jobs, so we
-      // need to reconcile by comparing IDs. For simplicity, build a map.
-      const resultMap = new Map<number, (typeof results)[number]>();
+      // addBulk filters out skipped/duplicate jobs, so reconcile by index.
       let resultIdx = 0;
       const responseJobs: (AddJobResponse | AddJobSkippedResponse)[] = [];
 
@@ -130,8 +134,8 @@ export function createRoutes(opts: ProxyOptions): {
     try {
       if (!checkAllowlist(req, res)) return;
 
-      const queue = getQueue(req.params.name);
-      const job = await queue.getJob(req.params.id);
+      const queue = getQueue(param(req, 'name'));
+      const job = await queue.getJob(param(req, 'id'));
 
       if (!job) {
         res.status(404).json({ error: 'Job not found' });
@@ -163,7 +167,7 @@ export function createRoutes(opts: ProxyOptions): {
   router.post('/queues/:name/pause', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
-      const queue = getQueue(req.params.name);
+      const queue = getQueue(param(req, 'name'));
       await queue.pause();
       res.status(204).send();
     } catch (err) {
@@ -176,7 +180,7 @@ export function createRoutes(opts: ProxyOptions): {
   router.post('/queues/:name/resume', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
-      const queue = getQueue(req.params.name);
+      const queue = getQueue(param(req, 'name'));
       await queue.resume();
       res.status(204).send();
     } catch (err) {
@@ -189,7 +193,7 @@ export function createRoutes(opts: ProxyOptions): {
   router.get('/queues/:name/counts', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
-      const queue = getQueue(req.params.name);
+      const queue = getQueue(param(req, 'name'));
       const counts = await queue.getJobCounts();
       res.status(200).json(counts);
     } catch (err) {
