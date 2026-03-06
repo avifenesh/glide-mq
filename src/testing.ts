@@ -12,6 +12,7 @@ import os from 'os';
 import type {
   JobOptions,
   JobCounts,
+  GetJobsOptions,
   Processor,
   WorkerInfo,
   SchedulerEntry,
@@ -126,6 +127,8 @@ export interface SearchJobsOptions {
   name?: string;
   data?: Record<string, unknown>;
   state?: TestJobRecord['state'];
+  /** When true, excludes `data` and `returnvalue` fields from returned jobs. */
+  excludeData?: boolean;
 }
 
 /** Check if all key-value pairs in filter exist in data (shallow match). */
@@ -252,10 +255,15 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   }
 
   /** Retrieve a job by ID. */
-  async getJob(id: string): Promise<TestJob<D, R> | null> {
+  async getJob(id: string, opts?: GetJobsOptions): Promise<TestJob<D, R> | null> {
     const record = this.jobs.get(id);
     if (!record) return null;
-    return new TestJob<D, R>(record);
+    const job = new TestJob<D, R>(record);
+    if (opts?.excludeData) {
+      job.data = undefined as unknown as D;
+      job.returnvalue = undefined;
+    }
+    return job;
   }
 
   /** Retrieve jobs by state. */
@@ -263,11 +271,17 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed',
     start = 0,
     end = -1,
+    opts?: GetJobsOptions,
   ): Promise<TestJob<D, R>[]> {
     const matching: TestJob<D, R>[] = [];
     for (const record of this.jobs.values()) {
       if (record.state === type) {
-        matching.push(new TestJob<D, R>(record));
+        const job = new TestJob<D, R>(record);
+        if (opts?.excludeData) {
+          job.data = undefined as unknown as D;
+          job.returnvalue = undefined;
+        }
+        matching.push(job);
       }
     }
     const sliceEnd = end >= 0 ? end + 1 : undefined;
@@ -306,11 +320,17 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   /** Search jobs by name and/or data fields. */
   async searchJobs(opts: SearchJobsOptions): Promise<TestJob<D, R>[]> {
     const results: TestJob<D, R>[] = [];
+    const excludeData = opts.excludeData === true && !opts.data;
     for (const record of this.jobs.values()) {
       if (opts.name !== undefined && record.name !== opts.name) continue;
       if (opts.state !== undefined && record.state !== opts.state) continue;
       if (opts.data !== undefined && !matchesData(record.data as Record<string, unknown>, opts.data)) continue;
-      results.push(new TestJob<D, R>(record));
+      const job = new TestJob<D, R>(record);
+      if (excludeData) {
+        job.data = undefined as unknown as D;
+        job.returnvalue = undefined;
+      }
+      results.push(job);
     }
     return results;
   }
