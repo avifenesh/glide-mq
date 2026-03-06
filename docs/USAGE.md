@@ -304,10 +304,10 @@ const worker = new Worker('drip-campaign', async (job) => {
   switch (job.data.step) {
     case 'send':
       await sendEmail(job.data);
-      await job.moveToDelayed(Date.now() + 24 * 3600_000, 'check');
+      return job.moveToDelayed(Date.now() + 24 * 3600_000, 'check');
     case 'check':
       if (!(await checkOpened(job.data))) {
-        await job.moveToDelayed(Date.now() + 3600_000, 'followup');
+        return job.moveToDelayed(Date.now() + 3600_000, 'followup');
       }
       return 'done';
     case 'followup':

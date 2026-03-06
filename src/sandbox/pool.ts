@@ -198,11 +198,13 @@ export class SandboxPool {
               if (msg.id === invocationId) {
                 cleanup();
                 this.release(pw);
+                const hasValidDelayedUntil =
+                  typeof msg.delayedUntil === 'number' && Number.isFinite(msg.delayedUntil) && msg.delayedUntil >= 0;
                 const err =
                   msg.errorName === 'UnrecoverableError'
                     ? new UnrecoverableError(msg.error)
-                    : msg.errorName === 'DelayedError'
-                      ? new DelayedError(msg.delayedUntil ?? 0, msg.error)
+                    : msg.errorName === 'DelayedError' && hasValidDelayedUntil
+                      ? new DelayedError(msg.delayedUntil!, msg.error)
                       : new Error(msg.error);
                 if (msg.stack) err.stack = msg.stack;
                 if (msg.discarded) job.discarded = true;

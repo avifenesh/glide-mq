@@ -35,6 +35,7 @@ const CONDITIONAL_CRASH_PROCESSOR = path.join(PROCESSORS, 'conditional-crash.js'
 const CONDITIONAL_PROXY_CRASH_PROCESSOR = path.join(PROCESSORS, 'conditional-proxy-crash.js');
 const MOVE_TO_DELAYED_PROCESSOR = path.join(PROCESSORS, 'move-to-delayed.js');
 const THROW_DELAYED_ERROR_PROCESSOR = path.join(PROCESSORS, 'throw-delayed-error.js');
+const THROW_SPOOFED_DELAYED_ERROR_PROCESSOR = path.join(PROCESSORS, 'throw-spoofed-delayed-error.js');
 
 // The compiled runner.js lives in dist/sandbox/
 const RUNNER_PATH = path.resolve(__dirname, '..', 'dist', 'sandbox', 'runner.js');
@@ -319,6 +320,33 @@ describe('SandboxPool', () => {
       name: 'DelayedError',
       delayedUntil: 654321,
     });
+    expect(fakeJob.requestMoveToDelayed).not.toHaveBeenCalled();
+
+    await pool.close();
+  });
+
+  it('should not treat spoofed DelayedError names as real delayed requests', async () => {
+    const pool = new SandboxPool(THROW_SPOOFED_DELAYED_ERROR_PROCESSOR, true, 1, RUNNER_PATH);
+
+    const fakeJob: any = {
+      id: 'job-spoofed-delay-error',
+      name: 'test',
+      data: { step: 'send' },
+      opts: {},
+      attemptsMade: 0,
+      timestamp: Date.now(),
+      progress: 0,
+      entryId: '1-0',
+      log: vi.fn(),
+      updateProgress: vi.fn(),
+      updateData: vi.fn(),
+      requestMoveToDelayed: vi.fn(),
+    };
+
+    const error = await pool.run(fakeJob as Job).catch((err) => err);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(DelayedError);
+    expect(error.message).toContain('not really delayed');
     expect(fakeJob.requestMoveToDelayed).not.toHaveBeenCalled();
 
     await pool.close();
