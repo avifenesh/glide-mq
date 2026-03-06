@@ -1085,11 +1085,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       this.blockingClient.close();
       this.blockingClient = null;
     }
-    if (force) {
-      void this.pollLoopPromise?.catch(() => {});
-    } else {
-      await this.pollLoopPromise?.catch(() => {});
-    }
+    void this.pollLoopPromise?.catch(() => {});
     this.pollLoopPromise = null;
 
     if (this.commandClient) {
