@@ -521,8 +521,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
           this.waitClients.delete(blockingClient);
           try {
             blockingClient.close();
-          } catch {
-            /* ignore */
+          } catch (closeErr) {
+            if (this.listenerCount('error') > 0) {
+              this.emit('error', closeErr as Error);
+            }
           }
           if (this.closing) {
             throw new GlideMQError('Queue is closing');
@@ -553,6 +555,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
               const reconnectDelay = Math.min(nextReconnectDelay(reconnectBackoff), reconnectRemaining);
               reconnectBackoff = reconnectDelay;
               await Promise.race([new Promise<void>((resolve) => setTimeout(resolve, reconnectDelay)), closePromise]);
+              if (this.closing) {
+                throw new GlideMQError('Queue is closing');
+              }
             }
           }
           continue;
@@ -597,7 +602,24 @@ export class Queue<D = any, R = any> extends EventEmitter {
         this.waitRejectors.delete(rejectOnClose);
       }
       this.waitClients.delete(blockingClient);
-      blockingClient.close();
+      try {
+        blockingClient.close();
+      } catch (closeErr) {
+        if (this.listenerCount('error') > 0) {
+          this.emit('error', closeErr as Error);
+        }
+      }
+    }
+
+    const client = await this.getClient();
+    const state = await client.hget(this.keys.job(jobId), 'state');
+    if (state && String(state) === 'completed') {
+      const raw = await client.hget(this.keys.job(jobId), 'returnvalue');
+      return this.serializer.deserialize(raw != null ? String(raw) : 'null') as R;
+    }
+    if (state && String(state) === 'failed') {
+      const reason = await client.hget(this.keys.job(jobId), 'failedReason');
+      throw new Error(reason ? String(reason) : `Job ${jobId} failed`);
     }
 
     throw new Error(`Job ${jobId} did not finish within ${waitTimeout}ms`);
@@ -1396,8 +1418,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
     for (const waitClient of this.waitClients) {
       try {
         waitClient.close();
-      } catch {
-        /* ignore */
+      } catch (closeErr) {
+        if (this.listenerCount('error') > 0) {
+          this.emit('error', closeErr as Error);
+        }
       }
     }
     this.waitClients.clear();

@@ -290,6 +290,33 @@ describe('Queue', () => {
         vi.useRealTimers();
       }
     });
+
+    it('should fall back to the job hash if the terminal event is no longer in the stream', async () => {
+      const commandClient = makeMockClient({
+        fcall: vi
+          .fn()
+          .mockResolvedValueOnce(LIBRARY_VERSION)
+          .mockResolvedValueOnce('1'),
+        xrevrange: vi.fn().mockResolvedValue({}),
+        hget: vi.fn().mockImplementation(async (_key: string, field: string) => {
+          if (field === 'state') return 'completed';
+          if (field === 'returnvalue') return '"done"';
+          return null;
+        }),
+      });
+      const blockingClient = makeMockClient({
+        xread: vi.fn().mockResolvedValue(null),
+      });
+
+      let callCount = 0;
+      vi.mocked(GlideClient.createClient).mockImplementation(async () => {
+        callCount++;
+        return (callCount === 1 ? commandClient : blockingClient) as any;
+      });
+
+      const queue = new Queue('test-queue', connOpts);
+      await expect(queue.addAndWait('job', {}, { waitTimeout: 1 })).resolves.toBe('done');
+    });
   });
 
   describe('addBulk', () => {
