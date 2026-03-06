@@ -295,6 +295,27 @@ await events.close();
 const state = await job.waitUntilFinished(500, 30000); // 'completed' | 'failed'
 ```
 
+### Request-reply with `addAndWait()`
+
+Use `queue.addAndWait()` when the producer needs the final worker result in the same request cycle without polling the job hash.
+
+```typescript
+const result = await queue.addAndWait(
+  'inference',
+  { prompt: 'Hello', model: 'mini' },
+  { waitTimeout: 30_000 },
+);
+
+console.log(result);
+```
+
+Notes:
+- `waitTimeout` is the producer-side wait budget. It is separate from the job’s own `timeout`, which still controls processor execution time.
+- `addAndWait()` requires a real `connection` because it uses a dedicated blocking connection to wait on the queue events stream.
+- `addAndWait()` is a short-lived request-reply helper. Each in-flight call owns its own blocking wait connection.
+- If `add()` is deduplicated and returns `null`, `addAndWait()` rejects instead of hanging.
+- `addAndWait()` does not support `removeOnComplete` or `removeOnFail`, because it may need the job hash as a terminal-state fallback.
+
 ### Pause and Resume a Job Later (Step Jobs)
 
 Use `job.moveToDelayed(timestampMs, nextStep?)` inside a processor when the same logical job should sleep and resume later instead of completing.

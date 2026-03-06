@@ -195,6 +195,7 @@ Workers share commandClient for all non-blocking ops. blockingClient is dedicate
 class Queue<D = any, R = any> extends EventEmitter {
   constructor(name: string, opts: QueueOptions)
   add(name: string, data: D, opts?: JobOptions): Promise<Job<D, R> | null>
+  addAndWait(name: string, data: D, opts?: AddAndWaitOptions): Promise<R>
   addBulk(jobs: { name: string; data: D; opts?: JobOptions }[]): Promise<Job<D, R>[]>
   getJob(id: string): Promise<Job<D, R> | null>
   getJobs(type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed', start?: number, end?: number): Promise<Job<D, R>[]>

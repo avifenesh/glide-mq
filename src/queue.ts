@@ -4,6 +4,7 @@ import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type {
   QueueOptions,
   JobOptions,
+  AddAndWaitOptions,
   Client,
   ScheduleOpts,
   JobTemplate,
@@ -21,6 +22,7 @@ import {
   buildKeys,
   keyPrefix,
   keyPrefixPattern,
+  nextReconnectDelay,
   nextCronOccurrence,
   validateTimezone,
   hashDataToRecord,
@@ -28,7 +30,13 @@ import {
   compress,
   MAX_JOB_DATA_SIZE,
 } from './utils';
-import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
+import {
+  createBlockingClient,
+  createClient,
+  ensureFunctionLibrary,
+  ensureFunctionLibraryOnce,
+  isClusterClient,
+} from './connection';
 import { GlideMQError } from './errors';
 import {
   LIBRARY_SOURCE,
@@ -69,6 +77,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
   private clientOwned = true;
   private _clusterMode: boolean | undefined;
   private closing = false;
+  private waitClients: Set<Client> = new Set();
+  private waitRejectors: Set<(err: Error) => void> = new Set();
   private keys: QueueKeys;
 
   private serializer: Serializer;
@@ -299,6 +309,48 @@ export class Queue<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Add a job and wait for its completed/failed event using the queue events stream.
+   * Captures the current tail entry ID before enqueue so fast completions are not missed.
+   */
+  async addAndWait(name: string, data: D, opts?: AddAndWaitOptions): Promise<R> {
+    if (!this.opts.connection) {
+      throw new GlideMQError(
+        'Queue.addAndWait requires `connection` because it uses a dedicated blocking connection to wait for events.',
+      );
+    }
+
+    const waitTimeout = opts?.waitTimeout ?? 30000;
+    if (!Number.isFinite(waitTimeout) || waitTimeout <= 0) {
+      throw new Error('waitTimeout must be a positive finite number');
+    }
+    if (opts?.removeOnComplete || opts?.removeOnFail) {
+      throw new GlideMQError(
+        'Queue.addAndWait does not support removeOnComplete/removeOnFail because it may need the job hash as a fallback.',
+      );
+    }
+
+    const { waitTimeout: _waitTimeout, ...jobOpts } = opts ?? {};
+    const client = await this.getClient();
+    const eventCursor = await this.latestEventCursor(client);
+    const blockingClient = await createBlockingClient(this.opts.connection!);
+    this.waitClients.add(blockingClient);
+    let handedOff = false;
+    try {
+      const job = await this.add(name, data, jobOpts);
+      if (!job) {
+        throw new GlideMQError('Queue.addAndWait() cannot wait on a deduplicated/skipped add that returned null.');
+      }
+      handedOff = true;
+      return this.waitForJobResult(blockingClient, job.id, eventCursor, waitTimeout);
+    } finally {
+      if (!handedOff) {
+        this.waitClients.delete(blockingClient);
+        blockingClient.close();
+      }
+    }
+  }
+
+  /**
    * Add multiple jobs to the queue in a pipeline.
    * Uses GLIDE's Batch API to pipeline all addJob FCALL commands in a single round trip.
    * Non-atomic: each job is independent, but all are sent together for efficiency.
@@ -432,6 +484,150 @@ export class Queue<D = any, R = any> extends EventEmitter {
       : await (client as GlideClient).exec(batch as Batch, true);
 
     return this.buildBulkJobs(client, prepared, rawResults, timestamp);
+  }
+
+  private async latestEventCursor(client: Client): Promise<string> {
+    const entries = await client.xrevrange(
+      this.keys.events,
+      InfBoundary.PositiveInfinity,
+      InfBoundary.NegativeInfinity,
+      { count: 1 },
+    );
+    const latestId = Object.keys(entries ?? {})[0];
+    return latestId ?? '0-0';
+  }
+
+  private async waitForJobResult(
+    blockingClient: Client,
+    jobId: string,
+    lastId: string,
+    waitTimeout: number,
+  ): Promise<R> {
+    let cursor = lastId;
+    const deadline = Date.now() + waitTimeout;
+    let reconnectBackoff = 0;
+    let rejectOnClose: ((err: Error) => void) | null = null;
+    const closePromise = new Promise<never>((_, reject) => {
+      rejectOnClose = reject;
+      this.waitRejectors.add(reject);
+    });
+
+    try {
+      while (Date.now() < deadline) {
+        let result;
+        try {
+          const remaining = Math.max(1, deadline - Date.now());
+          result = await Promise.race([
+            blockingClient.xread({ [this.keys.events]: cursor }, { block: remaining, count: 100 }),
+            closePromise,
+          ]);
+          reconnectBackoff = 0;
+        } catch (err) {
+          this.waitClients.delete(blockingClient);
+          try {
+            blockingClient.close();
+          } catch (closeErr) {
+            if (this.listenerCount('error') > 0) {
+              this.emit('error', closeErr as Error);
+            }
+          }
+          if (this.closing) {
+            throw new GlideMQError('Queue is closing');
+          }
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            throw err;
+          }
+          const delay = Math.min(nextReconnectDelay(reconnectBackoff), remaining);
+          reconnectBackoff = delay;
+          await Promise.race([new Promise<void>((resolve) => setTimeout(resolve, delay)), closePromise]);
+          if (this.closing) {
+            throw new GlideMQError('Queue is closing');
+          }
+          while (true) {
+            try {
+              blockingClient = await createBlockingClient(this.opts.connection!);
+              this.waitClients.add(blockingClient);
+              break;
+            } catch (createErr) {
+              const reconnectRemaining = deadline - Date.now();
+              if (this.closing) {
+                throw new GlideMQError('Queue is closing');
+              }
+              if (reconnectRemaining <= 0) {
+                throw createErr;
+              }
+              const reconnectDelay = Math.min(nextReconnectDelay(reconnectBackoff), reconnectRemaining);
+              reconnectBackoff = reconnectDelay;
+              await Promise.race([new Promise<void>((resolve) => setTimeout(resolve, reconnectDelay)), closePromise]);
+              if (this.closing) {
+                throw new GlideMQError('Queue is closing');
+              }
+            }
+          }
+          continue;
+        }
+
+        if (!result) break;
+
+        for (const streamEntry of result) {
+          const entries = streamEntry.value;
+          for (const entryId in entries) {
+            if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
+            const fieldPairs = entries[entryId];
+            if (!fieldPairs) continue;
+
+            let eventType: string | undefined;
+            const payload: Record<string, string> = Object.create(null);
+            for (const [field, value] of fieldPairs) {
+              const fieldStr = String(field);
+              if (fieldStr === 'event') {
+                eventType = String(value);
+              } else {
+                payload[fieldStr] = String(value);
+              }
+            }
+
+            cursor = String(entryId);
+            if (!eventType || payload.jobId !== jobId) continue;
+
+            if (eventType === 'completed') {
+              const raw = payload.returnvalue ?? 'null';
+              return this.serializer.deserialize(raw) as R;
+            }
+
+            if (eventType === 'failed' || eventType === 'expired' || eventType === 'revoked') {
+              throw new Error(payload.failedReason || `Job ${jobId} ended with event '${eventType}'`);
+            }
+          }
+        }
+      }
+    } finally {
+      if (rejectOnClose) {
+        this.waitRejectors.delete(rejectOnClose);
+      }
+      this.waitClients.delete(blockingClient);
+      try {
+        blockingClient.close();
+      } catch (closeErr) {
+        if (this.listenerCount('error') > 0) {
+          this.emit('error', closeErr as Error);
+        }
+      }
+    }
+
+    const client = await this.getClient();
+    const state = await client.hget(this.keys.job(jobId), 'state');
+    if (state && String(state) === 'completed') {
+      const raw = await client.hget(this.keys.job(jobId), 'returnvalue');
+      return this.serializer.deserialize(raw != null ? String(raw) : 'null') as R;
+    }
+    if (state && String(state) === 'failed') {
+      const reason = await client.hget(this.keys.job(jobId), 'failedReason');
+      throw new Error(reason ? String(reason) : `Job ${jobId} failed`);
+    }
+
+    throw new Error(`Job ${jobId} did not finish within ${waitTimeout}ms`);
   }
 
   /** @internal Build Job objects from batch exec results. */
@@ -1216,6 +1412,24 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
+    for (const rejectWaiter of this.waitRejectors) {
+      try {
+        rejectWaiter(new GlideMQError('Queue is closing'));
+      } catch {
+        /* ignore */
+      }
+    }
+    this.waitRejectors.clear();
+    for (const waitClient of this.waitClients) {
+      try {
+        waitClient.close();
+      } catch (closeErr) {
+        if (this.listenerCount('error') > 0) {
+          this.emit('error', closeErr as Error);
+        }
+      }
+    }
+    this.waitClients.clear();
     if (this.client) {
       if (this.clientOwned) {
         this.client.close();

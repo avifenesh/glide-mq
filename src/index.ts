@@ -11,6 +11,7 @@ export type {
   QueueOptions,
   WorkerOptions,
   JobOptions,
+  AddAndWaitOptions,
   JobData,
   Processor,
   FlowJob,

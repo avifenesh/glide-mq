@@ -31,6 +31,8 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     hset: vi.fn(),
     hgetall: vi.fn().mockResolvedValue([]),
     xadd: vi.fn(),
+    xread: vi.fn().mockResolvedValue(null),
+    xrevrange: vi.fn().mockResolvedValue({}),
     xgroupCreate: vi.fn(),
     zadd: vi.fn(),
     smembers: vi.fn().mockResolvedValue(new Set()),
@@ -164,6 +166,163 @@ describe('Queue', () => {
         'Ordering key exceeds maximum length',
       );
       expect(mockClient.fcall).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('addAndWait', () => {
+    it('should require a connection because it needs a blocking client', async () => {
+      const queue = new Queue('test-queue', { client: mockClient as any } as any);
+      await expect(queue.addAndWait('job', {}, { waitTimeout: 1000 })).rejects.toThrow('requires `connection`');
+    });
+
+    it('should reject removeOnComplete/removeOnFail because the fallback needs the job hash', async () => {
+      const queue = new Queue('test-queue', connOpts);
+      await expect(queue.addAndWait('job', {}, { waitTimeout: 1000, removeOnComplete: true })).rejects.toThrow(
+        'does not support removeOnComplete/removeOnFail',
+      );
+      await expect(queue.addAndWait('job', {}, { waitTimeout: 1000, removeOnFail: true })).rejects.toThrow(
+        'does not support removeOnComplete/removeOnFail',
+      );
+    });
+
+    it('should fail before enqueue if the blocking wait client cannot be created', async () => {
+      const commandClient = makeMockClient({
+        fcall: vi.fn().mockResolvedValueOnce(LIBRARY_VERSION),
+        xrevrange: vi.fn().mockResolvedValue({}),
+      });
+
+      let callCount = 0;
+      vi.mocked(GlideClient.createClient).mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) return commandClient as any;
+        throw new Error('blocking client failed');
+      });
+
+      const queue = new Queue('test-queue', connOpts);
+      await expect(queue.addAndWait('job', {}, { waitTimeout: 1000 })).rejects.toThrow('blocking client failed');
+      expect((commandClient.fcall as any).mock.calls.some((call: any[]) => call[0] === 'glidemq_addJob')).toBe(false);
+    });
+
+    it('should reconnect the blocking wait client after an xread error', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const commandClient = makeMockClient({
+          fcall: vi
+            .fn()
+            .mockResolvedValueOnce(LIBRARY_VERSION) // ensureFunctionLibrary
+            .mockResolvedValueOnce('1'), // addJob
+          xrevrange: vi.fn().mockResolvedValue({}),
+        });
+        const blockingClient1 = makeMockClient({
+          xread: vi.fn().mockRejectedValue(new Error('socket lost')),
+        });
+        const blockingClient2 = makeMockClient({
+          xread: vi.fn().mockResolvedValue([
+            {
+              key: 'glide:{test-queue}:events',
+              value: {
+                '1-0': [
+                  ['event', 'completed'],
+                  ['jobId', '1'],
+                  ['returnvalue', '"done"'],
+                ],
+              },
+            },
+          ]),
+        });
+
+        let callCount = 0;
+        vi.mocked(GlideClient.createClient).mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) return commandClient as any;
+          if (callCount === 2) return blockingClient1 as any;
+          return blockingClient2 as any;
+        });
+
+        const queue = new Queue('test-queue', connOpts);
+        const pending = queue.addAndWait('job', {}, { waitTimeout: 3000 });
+        await vi.advanceTimersByTimeAsync(1100);
+
+        await expect(pending).resolves.toBe('done');
+        expect(blockingClient1.close).toHaveBeenCalled();
+        expect(blockingClient2.xread).toHaveBeenCalled();
+
+        await queue.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should retry when reconnecting the blocking wait client also fails once', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const commandClient = makeMockClient({
+          fcall: vi.fn().mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1'),
+          xrevrange: vi.fn().mockResolvedValue({}),
+        });
+        const blockingClient1 = makeMockClient({
+          xread: vi.fn().mockRejectedValue(new Error('socket lost')),
+        });
+        const blockingClient2 = makeMockClient({
+          xread: vi.fn().mockResolvedValue([
+            {
+              key: 'glide:{test-queue}:events',
+              value: {
+                '1-0': [
+                  ['event', 'completed'],
+                  ['jobId', '1'],
+                  ['returnvalue', '"done"'],
+                ],
+              },
+            },
+          ]),
+        });
+
+        let callCount = 0;
+        vi.mocked(GlideClient.createClient).mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) return commandClient as any;
+          if (callCount === 2) return blockingClient1 as any;
+          if (callCount === 3) throw new Error('reconnect failed');
+          return blockingClient2 as any;
+        });
+
+        const queue = new Queue('test-queue', connOpts);
+        const pending = queue.addAndWait('job', {}, { waitTimeout: 5000 });
+        await vi.advanceTimersByTimeAsync(2100);
+
+        await expect(pending).resolves.toBe('done');
+        expect(blockingClient1.close).toHaveBeenCalled();
+        expect(blockingClient2.xread).toHaveBeenCalled();
+
+        await queue.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should fall back to the job hash if the terminal event is no longer in the stream', async () => {
+      const commandClient = makeMockClient({
+        fcall: vi.fn().mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1'),
+        xrevrange: vi.fn().mockResolvedValue({}),
+        hget: vi.fn().mockImplementation(async (_key: string, field: string) => {
+          if (field === 'state') return 'completed';
+          if (field === 'returnvalue') return '"done"';
+          return null;
+        }),
+      });
+      const blockingClient = makeMockClient({
+        xread: vi.fn().mockResolvedValue(null),
+      });
+
+      let callCount = 0;
+      vi.mocked(GlideClient.createClient).mockImplementation(async () => {
+        callCount++;
+        return (callCount === 1 ? commandClient : blockingClient) as any;
+      });
+
+      const queue = new Queue('test-queue', connOpts);
+      await expect(queue.addAndWait('job', {}, { waitTimeout: 1 })).resolves.toBe('done');
     });
   });
 
