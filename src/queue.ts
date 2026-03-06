@@ -786,7 +786,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * Retrieve a job by ID from the queue.
    * Returns null if the job does not exist.
    * @param id - The job ID
-   * @param opts - Options; set `excludeData: true` to omit `data` and `returnvalue` fields
+   * @param opts - Set `excludeData: true` to omit `data` and `returnvalue` fields
    */
   async getJob(id: string, opts?: GetJobsOptions): Promise<Job<D, R> | null> {
     const client = await this.getClient();
@@ -1232,7 +1232,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * @param type - The job state to query
    * @param start - Start index for pagination (default 0)
    * @param end - End index for pagination (default -1, meaning all)
-   * @param opts - Options; set `excludeData: true` to omit `data` and `returnvalue` fields
+   * @param opts - Set `excludeData: true` to omit `data` and `returnvalue` fields
    */
   async getJobs(
     type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed',
@@ -1328,8 +1328,6 @@ export class Queue<D = any, R = any> extends EventEmitter {
       jobIds = await this.scanJobIds(client, pfx, opts.name, limit);
     }
 
-    // Fetch job objects. When excludeData is set and no data filter is needed,
-    // use HMGET to skip data/returnvalue fields for better performance.
     const excludeData = opts.excludeData === true && !opts.data;
     const jobs: Job<D, R>[] = [];
     const CHUNK = 100;
@@ -1573,7 +1571,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * Returns an empty array if no DLQ is configured.
    * @param start - Start index (default 0)
    * @param end - End index (default -1, meaning all)
-   * @param opts - Options; set `excludeData: true` to omit `data` and `returnvalue` fields
+   * @param opts - Set `excludeData: true` to omit `data` and `returnvalue` fields
    */
   async getDeadLetterJobs(start = 0, end = -1, opts?: GetJobsOptions): Promise<Job<D, R>[]> {
     if (!this.opts.deadLetterQueue) return [];

@@ -1,8 +1,3 @@
-/**
- * Integration tests for the excludeData option on job getters.
- * Verifies getJob, getJobs, and searchJobs with excludeData: true.
- * Runs against both standalone (:6379) and cluster (:7000).
- */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 

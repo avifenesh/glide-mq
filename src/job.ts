@@ -463,8 +463,7 @@ export class Job<D = any, R = any> {
   }
 
   /**
-   * Construct a Job instance from a hash returned by HGETALL (or HMGET metadata).
-   * When `excludeData` is true, `data` is set to `undefined` and `returnvalue` is skipped.
+   * Construct a Job instance from a hash returned by HGETALL or HMGET.
    * @internal
    */
   static fromHash<D, R>(
