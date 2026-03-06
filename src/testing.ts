@@ -320,13 +320,12 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   /** Search jobs by name and/or data fields. */
   async searchJobs(opts: SearchJobsOptions): Promise<TestJob<D, R>[]> {
     const results: TestJob<D, R>[] = [];
-    const excludeData = opts.excludeData === true && !opts.data;
     for (const record of this.jobs.values()) {
       if (opts.name !== undefined && record.name !== opts.name) continue;
       if (opts.state !== undefined && record.state !== opts.state) continue;
       if (opts.data !== undefined && !matchesData(record.data as Record<string, unknown>, opts.data)) continue;
       const job = new TestJob<D, R>(record);
-      if (excludeData) {
+      if (opts.excludeData) {
         job.data = undefined as unknown as D;
         job.returnvalue = undefined;
       }

@@ -792,7 +792,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const client = await this.getClient();
 
     if (opts?.excludeData) {
-      const values = await client.hmget(this.keys.job(id), JOB_METADATA_FIELDS);
+      const values = await client.hmget(this.keys.job(id), JOB_METADATA_FIELDS as string[]);
       const hash = hmgetArrayToRecord(values, JOB_METADATA_FIELDS);
       if (!hash) return null;
       return Job.fromHash<D, R>(client, this.keys, id, hash, this.serializer, true);
@@ -1355,6 +1355,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
         // Apply data filter (shallow key-value match)
         if (opts.data && !matchesData(job.data as Record<string, unknown>, opts.data)) continue;
+
+        // Strip data after filtering if caller originally requested excludeData
+        if (opts.excludeData && !excludeData) {
+          job.data = undefined as unknown as D;
+          job.returnvalue = undefined;
+        }
 
         jobs.push(job);
       }

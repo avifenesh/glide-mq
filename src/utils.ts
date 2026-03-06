@@ -150,7 +150,8 @@ export function hashDataToRecord(
  * All known job hash fields except `data` and `returnvalue`.
  * Used by getJob/getJobs with `excludeData: true` to fetch only metadata via HMGET.
  */
-export const JOB_METADATA_FIELDS = [
+// Keep in sync with hash fields written by Lua addJob/completeJob/failJob functions.
+export const JOB_METADATA_FIELDS: readonly string[] = Object.freeze([
   'id',
   'name',
   'opts',
@@ -173,7 +174,7 @@ export const JOB_METADATA_FIELDS = [
   'progress',
   'revoked',
   'lastActive',
-];
+]);
 
 /**
  * Convert an HMGET result array to a Record keyed by field name.
@@ -181,11 +182,11 @@ export const JOB_METADATA_FIELDS = [
  */
 export function hmgetArrayToRecord(
   values: (unknown | null)[],
-  fields: string[],
+  fields: readonly string[],
 ): Record<string, string> | null {
   const record: Record<string, string> = Object.create(null);
   let hasAny = false;
-  for (let i = 0; i < fields.length; i++) {
+  for (let i = 0; i < fields.length && i < values.length; i++) {
     if (values[i] != null) {
       record[fields[i]] = String(values[i]);
       hasAny = true;

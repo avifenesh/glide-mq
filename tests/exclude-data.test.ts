@@ -95,6 +95,62 @@ describeEachMode('excludeData option', (CONNECTION) => {
       await flushQueue(cleanupClient, qName);
     });
 
+    it('excludeData: false returns full data', async () => {
+      const qName = Q + '-getjobs-false';
+      const q = new Queue(qName, { connection: CONNECTION });
+      await q.add('j1', { val: 'hello' });
+
+      const jobs = await q.getJobs('waiting', 0, -1, { excludeData: false });
+      expect(jobs.length).toBe(1);
+      expect(jobs[0].data).toEqual({ val: 'hello' });
+
+      await q.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('works for failed state with excludeData', async () => {
+      const qName = Q + '-getjobs-failed';
+      const q = new Queue(qName, { connection: CONNECTION });
+
+      await q.add('fail-work', { input: 'data' }, { attempts: 1 });
+
+      const w = new Worker(qName, async () => { throw new Error('intentional'); }, {
+        connection: CONNECTION,
+        stalledInterval: 60000,
+      });
+
+      await waitFor(async () => {
+        const counts = await q.getJobCounts();
+        return counts.failed === 1;
+      });
+
+      const failedJobs = await q.getJobs('failed', 0, -1, { excludeData: true });
+      expect(failedJobs.length).toBe(1);
+      expect(failedJobs[0].data).toBeUndefined();
+      expect(failedJobs[0].returnvalue).toBeUndefined();
+      expect(failedJobs[0].failedReason).toBeDefined();
+
+      await w.close();
+      await q.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('works for delayed state with excludeData', async () => {
+      const qName = Q + '-getjobs-delayed';
+      const q = new Queue(qName, { connection: CONNECTION });
+
+      await q.add('delayed-work', { payload: 'big' }, { delay: 60000 });
+
+      const jobs = await q.getJobs('delayed', 0, -1, { excludeData: true });
+      expect(jobs.length).toBe(1);
+      expect(jobs[0].data).toBeUndefined();
+      expect(jobs[0].name).toBe('delayed-work');
+      expect(jobs[0].timestamp).toBeGreaterThan(0);
+
+      await q.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
     it('works for completed state with excludeData', async () => {
       const qName = Q + '-getjobs-completed';
       const q = new Queue(qName, { connection: CONNECTION });
@@ -147,25 +203,66 @@ describeEachMode('excludeData option', (CONNECTION) => {
       await flushQueue(cleanupClient, qName);
     });
 
-    it('with excludeData and data filter fetches data for filtering', async () => {
+    it('with excludeData and data filter strips data after filtering', async () => {
       const qName = Q + '-search-filter';
       const q = new Queue(qName, { connection: CONNECTION });
 
       await q.add('task', { userId: '123', size: 'big' });
       await q.add('task', { userId: '456', size: 'small' });
 
-      // data filter requires data to be fetched, so excludeData is effectively ignored
+      // data filter requires fetching data for filtering, but results still honor excludeData
       const results = await q.searchJobs({
         state: 'waiting',
         data: { userId: '123' },
         excludeData: true,
       });
       expect(results.length).toBe(1);
-      // data is present because it was needed for the filter
-      expect((results[0].data as any).userId).toBe('123');
+      // data is stripped after filtering since excludeData was requested
+      expect(results[0].data).toBeUndefined();
+      expect(results[0].returnvalue).toBeUndefined();
 
       await q.close();
       await flushQueue(cleanupClient, qName);
+    });
+  });
+
+  describe('getDeadLetterJobs', () => {
+    it('with excludeData omits data from DLQ jobs', async () => {
+      const qName = Q + '-dlq-exc';
+      const dlqName = qName + '-dlq';
+      const q = new Queue(qName, {
+        connection: CONNECTION,
+        deadLetterQueue: { name: dlqName },
+      });
+
+      await q.add('dlq-task', { bigPayload: 'x'.repeat(1000) }, { attempts: 1 });
+
+      const w = new Worker(qName, async () => { throw new Error('dlq test'); }, {
+        connection: CONNECTION,
+        deadLetterQueue: { name: dlqName },
+        stalledInterval: 60000,
+      });
+
+      await waitFor(async () => {
+        const jobs = await q.getDeadLetterJobs();
+        return jobs.length >= 1;
+      });
+
+      const dlqJobs = await q.getDeadLetterJobs(0, -1, { excludeData: true });
+      expect(dlqJobs.length).toBe(1);
+      expect(dlqJobs[0].data).toBeUndefined();
+      expect(dlqJobs[0].returnvalue).toBeUndefined();
+      expect(dlqJobs[0].name).toBe('dlq-task');
+
+      // Verify full fetch returns data
+      const fullDlqJobs = await q.getDeadLetterJobs();
+      expect(fullDlqJobs.length).toBe(1);
+      expect(fullDlqJobs[0].data).toBeDefined();
+
+      await w.close();
+      await q.close();
+      await flushQueue(cleanupClient, qName);
+      await flushQueue(cleanupClient, dlqName);
     });
   });
 });

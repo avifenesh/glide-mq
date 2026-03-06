@@ -252,17 +252,17 @@ describe('TestQueue', () => {
       }
     });
 
-    it('searchJobs with excludeData and data filter still filters correctly', async () => {
+    it('searchJobs with excludeData and data filter strips data after filtering', async () => {
       queue = new TestQueue('test-q');
       await queue.add('j1', { color: 'red' });
       await queue.add('j2', { color: 'blue' });
 
-      // When both excludeData and data filter are provided, data filter takes precedence
+      // Data filter is applied first, then data is stripped since excludeData was requested
       const results = await queue.searchJobs({ data: { color: 'red' }, excludeData: true });
       expect(results).toHaveLength(1);
       expect(results[0].name).toBe('j1');
-      // data filter needed data to work, so data is present
-      expect(results[0].data).toEqual({ color: 'red' });
+      expect(results[0].data).toBeUndefined();
+      expect(results[0].returnvalue).toBeUndefined();
     });
   });
 });
