@@ -23,8 +23,8 @@ export interface ProxyOptions {
 export interface AddJobRequest {
   /** Job name (required). */
   name: string;
-  /** Job data payload. */
-  data: unknown;
+  /** Job data payload. Defaults to null if omitted. */
+  data?: unknown;
   /** Job options (delay, priority, etc.). */
   opts?: Pick<
     JobOptions,
