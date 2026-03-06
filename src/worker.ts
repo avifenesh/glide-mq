@@ -21,7 +21,7 @@ import {
   ensureFunctionLibraryOnce,
   createConsumerGroup,
 } from './connection';
-import { GlideMQError, ConnectionError, UnrecoverableError } from './errors';
+import { GlideMQError, ConnectionError, DelayedError, UnrecoverableError } from './errors';
 import {
   CONSUMER_GROUP,
   completeJob,
@@ -31,6 +31,7 @@ import {
   rateLimit as rateLimitFn,
   checkConcurrency,
   moveToActive,
+  moveActiveToDelayed,
   deferActive,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
@@ -569,6 +570,38 @@ export class Worker<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Move an active job back into delayed state after the processor requests a pause.
+   */
+  private async handleMoveToDelayed(
+    job: Job<D, R>,
+    jobId: string,
+    entryId: string,
+    request: { delayedUntil: number; serializedData?: string; nextData?: D },
+  ): Promise<void> {
+    if (!this.commandClient) return;
+
+    const result = await moveActiveToDelayed(
+      this.commandClient,
+      this.queueKeys,
+      jobId,
+      entryId,
+      request.delayedUntil,
+      request.serializedData,
+      Date.now(),
+      CONSUMER_GROUP,
+    );
+    if (result.startsWith('error:')) {
+      const reason = result.slice(6);
+      throw new Error(`Cannot move to delayed: ${reason}`);
+    }
+
+    if (request.nextData !== undefined) {
+      job.data = request.nextData;
+    }
+    job.opts.delay = Math.max(0, request.delayedUntil - Date.now());
+  }
+
+  /**
    * Build parent dependency info for complete/completeAndFetchNext calls.
    */
   private buildParentInfo(
@@ -661,6 +694,22 @@ export class Worker<D = any, R = any> extends EventEmitter {
       this.emit('active', job, currentJobId);
 
       const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
+
+      const delayedRequest = job.consumeMoveToDelayedRequest();
+      const delayedError = processError instanceof DelayedError ? processError : undefined;
+      if (delayedError) {
+        try {
+          await this.handleMoveToDelayed(job, currentJobId, currentEntryId, {
+            delayedUntil: delayedRequest?.delayedUntil ?? delayedError.delayedUntil,
+            serializedData: delayedRequest?.serializedData,
+            nextData: delayedRequest?.nextData,
+          });
+        } catch (delayErr) {
+          const err = delayErr instanceof Error ? delayErr : new Error(String(delayErr));
+          await this.handleJobFailure(job, currentJobId, currentEntryId, err);
+        }
+        return;
+      }
 
       if (processError || aborted) {
         await this.handleJobFailure(job, currentJobId, currentEntryId, aborted ? new Error('revoked') : processError!);

@@ -3,7 +3,7 @@ import { GlideClient } from '@glidemq/speedkey';
 import { Queue } from '../src/queue';
 import { Worker } from '../src/worker';
 import { Job } from '../src/job';
-import { LIBRARY_VERSION, CONSUMER_GROUP } from '../src/functions/index';
+import { LIBRARY_VERSION } from '../src/functions/index';
 
 // Mock speedkey module
 vi.mock('@glidemq/speedkey', () => {
@@ -182,6 +182,20 @@ describe('Job state check methods', () => {
     const job = makeJob('42');
     await job.getState();
     expect(mockClient.hget).toHaveBeenCalledWith('glide:{q}:job:42', 'state');
+  });
+
+  it('moveToDelayed rejects jobs that are not active in a worker', async () => {
+    const job = makeJob('43') as any;
+    await expect(job.moveToDelayed(Date.now() + 100)).rejects.toThrow('active in a Worker');
+    expect(job.moveToDelayedRequest).toBeUndefined();
+  });
+
+  it('moveToDelayed(nextStep) rejects non-plain payloads', async () => {
+    const keys = buildQueueKeys('q');
+    const job = new (Job as any)(mockClient, keys, '44', 'test-job', Object.create(null), {}) as any;
+    job.entryId = '1-0';
+    await expect(job.moveToDelayed(Date.now() + 100, 'next')).rejects.toThrow('plain-object job data');
+    expect(job.moveToDelayedRequest).toBeUndefined();
   });
 });
 
@@ -423,7 +437,7 @@ describe('Queue.getJobs', () => {
     ]);
 
     const queue = new Queue('getjobs-test', connOpts);
-    const jobs = await queue.getJobs('delayed', 2, 5);
+    await queue.getJobs('delayed', 2, 5);
 
     expect(mockClient.zrange).toHaveBeenCalledWith('glide:{getjobs-test}:scheduled', { start: 2, end: 5 });
 

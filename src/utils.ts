@@ -6,6 +6,11 @@ const DEFAULT_PREFIX = 'glide';
 // 1MB max payload size to prevent DoS
 export const MAX_JOB_DATA_SIZE = 1048576;
 
+export function isPlainStepPayload(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.getPrototypeOf(value) === Object.prototype;
+}
+
 // ---- Compression helpers ----
 
 const COMPRESSED_PREFIX = 'gz:';

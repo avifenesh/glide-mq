@@ -2,13 +2,13 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '33';
+export const LIBRARY_VERSION = '36';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
 
-// Embedded Lua library source (from glidemq.lua)
-// Loaded once via FUNCTION LOAD, persistent across Valkey restarts.
+// Embedded Lua library source loaded via FUNCTION LOAD.
+// This string is the runtime source of truth for Valkey function loading.
 export const LIBRARY_SOURCE = `#!lua name=glidemq
 
 local PRIORITY_SHIFT = 4398046511104
@@ -2033,6 +2033,48 @@ redis.register_function('glidemq_promoteJob', function(keys, args)
   return 'ok'
 end)
 
+redis.register_function('glidemq_moveActiveToDelayed', function(keys, args)
+  local jobKey = keys[1]
+  local streamKey = keys[2]
+  local scheduledKey = keys[3]
+  local eventsKey = keys[4]
+  local jobId = args[1]
+  local entryId = args[2]
+  local now = tonumber(args[3]) or 0
+  local delayedUntil = tonumber(args[4]) or now
+  local group = args[5]
+  local nextData = args[6]
+
+  if redis.call('EXISTS', jobKey) == 0 then
+    return 'error:not_found'
+  end
+
+  local state = redis.call('HGET', jobKey, 'state')
+  if state ~= 'active' then
+    return 'error:not_active'
+  end
+
+  if delayedUntil < now then
+    delayedUntil = now
+  end
+
+  local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
+  local delay = delayedUntil - now
+  local score = priority * PRIORITY_SHIFT + delayedUntil
+
+  pcall(redis.call, 'XACK', streamKey, group, entryId)
+  redis.call('XDEL', streamKey, entryId)
+  redis.call('ZADD', scheduledKey, string.format('%.0f', score), jobId)
+  if nextData and nextData ~= '' then
+    redis.call('HSET', jobKey, 'data', nextData, 'state', 'delayed', 'delay', tostring(delay))
+  else
+    redis.call('HSET', jobKey, 'state', 'delayed', 'delay', tostring(delay))
+  end
+  releaseGroupSlotAndPromote(jobKey, jobId, now, nil)
+  emitEvent(eventsKey, 'delay-changed', jobId, {'delay', tostring(delay)})
+  return 'ok'
+end)
+
 redis.register_function('glidemq_searchByName', function(keys, args)
   local stateKey = keys[1]
   local stateType = args[1]
@@ -2908,6 +2950,28 @@ export async function changeDelay(
  */
 export async function promoteJob(client: Client, k: QueueKeys, jobId: string): Promise<string> {
   const result = await client.fcall('glidemq_promoteJob', [k.job(jobId), k.stream, k.scheduled, k.events], [jobId]);
+  return result as string;
+}
+
+/**
+ * Move an active job back into the delayed/scheduled set.
+ * Acknowledges the current stream entry and releases the active slot.
+ */
+export async function moveActiveToDelayed(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  entryId: string,
+  delayedUntil: number,
+  serializedData?: string,
+  timestamp: number = Date.now(),
+  group: string = CONSUMER_GROUP,
+): Promise<string> {
+  const result = await client.fcall(
+    'glidemq_moveActiveToDelayed',
+    [k.job(jobId), k.stream, k.scheduled, k.events],
+    [jobId, entryId, timestamp.toString(), delayedUntil.toString(), group, serializedData ?? ''],
+  );
   return result as string;
 }
 

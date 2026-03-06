@@ -1,6 +1,7 @@
 import type { JobOptions } from '../types';
 import type { SerializedJob, ChildToMain, MainToChild } from './types';
-import { GlideMQError } from '../errors';
+import { DelayedError, GlideMQError } from '../errors';
+import { isPlainStepPayload } from '../utils';
 
 /**
  * Job-like object used inside sandboxed processors (worker threads / child processes).
@@ -82,6 +83,27 @@ export class SandboxJob<D = any, R = any> {
     this.proxyCall('discard', []).catch(() => {});
   }
 
+  /** Pause an active job and resume it after the given UNIX timestamp in ms. */
+  async moveToDelayed(timestamp: number, nextStep?: string): Promise<never> {
+    if (!Number.isFinite(timestamp) || timestamp < 0) {
+      throw new Error('Timestamp must be a finite Unix millisecond value >= 0');
+    }
+    let nextData: D | undefined;
+    if (nextStep !== undefined) {
+      if (!isPlainStepPayload(this.data)) {
+        throw new Error('moveToDelayed(nextStep) requires plain-object job data');
+      }
+      nextData = { ...this.data, step: nextStep } as D;
+    }
+    const delayedUntil = Math.trunc(timestamp);
+    const args = nextStep !== undefined ? [delayedUntil, nextStep] : [delayedUntil];
+    await this.proxyCall('moveToDelayed', args);
+    if (nextData !== undefined) {
+      this.data = nextData;
+    }
+    throw new DelayedError(delayedUntil);
+  }
+
   /** @internal Trigger the abort signal. Called when main thread sends 'abort'. */
   _abort(): void {
     this.abortController.abort();
@@ -136,7 +158,10 @@ export class SandboxJob<D = any, R = any> {
     throw new GlideMQError('Method not available in sandboxed processor');
   }
 
-  private proxyCall(method: 'log' | 'updateProgress' | 'updateData' | 'discard', args: unknown[]): Promise<unknown> {
+  private proxyCall(
+    method: 'log' | 'updateProgress' | 'updateData' | 'discard' | 'moveToDelayed',
+    args: unknown[],
+  ): Promise<unknown> {
     const id = `${this.invocationId}:${++this.proxySeq}`;
     return new Promise<unknown>((resolve, reject) => {
       this.pendingProxies.set(id, { resolve, reject });

@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `job.moveToDelayed(timestampMs, nextStep?)` - pause an active job mid-processor and resume it later from the scheduled set. Supports step-job workflows and updates `job.data.step` atomically for plain object payloads.
+- `DelayedError` - exported error type for advanced/manual step-job control.
+
 ---
 
 ## [0.8.1] - 2026-02-27
