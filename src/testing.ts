@@ -558,8 +558,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
           this.schedulers.delete(name);
           continue;
         }
-        const job = await this.add(jobName, jobData, template.opts as JobOptions | undefined);
-        if (!job) continue;
+        await this.add(jobName, jobData, template.opts as JobOptions | undefined);
 
         entry.lastRun = now;
         entry.iterationCount = currentIterationCount + 1;

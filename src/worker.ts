@@ -631,8 +631,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
     let parentQueue = job.parentQueue;
 
     if ((!parentId || !parentQueue) && this.commandClient) {
-      const refreshedParentId = await this.commandClient.hget(this.queueKeys.job(jobId), 'parentId');
-      const refreshedParentQueue = await this.commandClient.hget(this.queueKeys.job(jobId), 'parentQueue');
+      const [refreshedParentId, refreshedParentQueue] = await this.commandClient.hmget(this.queueKeys.job(jobId), [
+        'parentId',
+        'parentQueue',
+      ]);
       parentId = refreshedParentId ? String(refreshedParentId) : parentId;
       parentQueue = refreshedParentQueue ? String(refreshedParentQueue) : parentQueue;
     }

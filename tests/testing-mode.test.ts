@@ -1085,4 +1085,24 @@ describe('TestQueue scheduler runtime', () => {
 
     expect(await queue.getJobScheduler('oversized')).toBeNull();
   });
+
+  it('consumes testing-mode scheduler iterations even when the templated add is deduplicated', async () => {
+    queue = new TestQueue('sched-runtime-dedup', { dedup: true });
+    worker = new TestWorker(queue, async () => 'ok');
+
+    await queue.add('seed', { ok: true }, { deduplication: { id: 'dup-key', mode: 'simple' } });
+    await queue.upsertJobScheduler(
+      'dedup-scheduler',
+      { every: 20, limit: 1 },
+      { name: 'dedup-job', data: { ok: true }, opts: { deduplication: { id: 'dup-key', mode: 'simple' } } },
+    );
+
+    const deadline = Date.now() + 500;
+    while ((await queue.getJobScheduler('dedup-scheduler')) && Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, 20));
+    }
+
+    expect(await queue.getJobScheduler('dedup-scheduler')).toBeNull();
+    expect(queue.jobs.size).toBe(1);
+  });
 });
