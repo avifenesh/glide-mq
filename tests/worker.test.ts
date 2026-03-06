@@ -395,6 +395,72 @@ describe('Worker', () => {
     await worker.close(true);
   });
 
+  it('should fail the job when moving active to delayed returns an error', async () => {
+    const delayedUntil = 1700000000500;
+    vi.setSystemTime(1700000000000);
+
+    const processor = vi.fn().mockImplementation(async (job: any) => {
+      await job.moveToDelayed(delayedUntil, 'check');
+    });
+
+    let xreadCalls = 0;
+    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(() => {
+      xreadCalls++;
+      if (xreadCalls === 1) {
+        return Promise.resolve([
+          {
+            key: keys.stream,
+            value: {
+              '4234567890-0': [['jobId', '6']],
+            },
+          },
+        ]);
+      }
+      return new Promise(() => {});
+    });
+
+    const jobHash = JSON.stringify([
+      'id',
+      '6',
+      'name',
+      'step-job',
+      'data',
+      '{"step":"send"}',
+      'opts',
+      '{}',
+      'timestamp',
+      '1000',
+      'attemptsMade',
+      '0',
+      'state',
+      'active',
+    ]);
+
+    mockCommandClient.fcall = vi.fn().mockImplementation((func: string) => {
+      if (func === 'glidemq_version') return Promise.resolve(LIBRARY_VERSION);
+      if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
+      if (func === 'glidemq_promote') return Promise.resolve(0);
+      if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
+      if (func === 'glidemq_moveToActive') return Promise.resolve(jobHash);
+      if (func === 'glidemq_moveActiveToDelayed') return Promise.resolve('error:not_active');
+      if (func === 'glidemq_fail') return Promise.resolve('failed');
+      return Promise.resolve(LIBRARY_VERSION);
+    });
+
+    const worker = new Worker('test-queue', processor, defaultWorkerOpts);
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(mockCommandClient.fcall).toHaveBeenCalledWith(
+      'glidemq_moveActiveToDelayed',
+      [keys.job('6'), keys.stream, keys.scheduled, keys.events],
+      ['6', '4234567890-0', '1700000000000', delayedUntil.toString(), CONSUMER_GROUP, '{"step":"check"}'],
+    );
+    expect((mockCommandClient.fcall as any).mock.calls.some((call: any[]) => call[0] === 'glidemq_fail')).toBe(true);
+
+    await worker.close(true);
+  });
+
   it('should move an active job back to delayed when the processor throws DelayedError directly', async () => {
     const delayedUntil = 1700000000600;
     vi.setSystemTime(1700000000000);

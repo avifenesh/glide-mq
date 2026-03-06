@@ -5,14 +5,8 @@ import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
 import { DelayedError } from './errors';
-import { calculateBackoff, decompress, MAX_JOB_DATA_SIZE } from './utils';
+import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
-
-function isPlainStepPayload(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype;
-}
 
 export class Job<D = any, R = any> {
   readonly id: string;

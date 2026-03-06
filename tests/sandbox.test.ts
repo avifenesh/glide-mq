@@ -161,6 +161,23 @@ describe('SandboxJob', () => {
     expect(job.data).toEqual({ step: 'next' });
   });
 
+  it('should omit nextStep from moveToDelayed proxy args when not provided', async () => {
+    const sendMessage = vi.fn();
+    const job = new SandboxJob(
+      { id: '1', name: 'j', data: { step: 'send' }, opts: {}, attemptsMade: 0, timestamp: 0, progress: 0 },
+      sendMessage,
+    );
+
+    const delayPromise = job.moveToDelayed(123456);
+    const msg = sendMessage.mock.calls[0][0];
+
+    expect(msg.method).toBe('moveToDelayed');
+    expect(msg.args).toEqual([123456]);
+
+    job.handleProxyResponse({ type: 'proxy-response', id: msg.id });
+    await expect(delayPromise).rejects.toBeInstanceOf(DelayedError);
+  });
+
   it('should reject proxy call on error response', async () => {
     const sendMessage = vi.fn();
     const job = new SandboxJob(

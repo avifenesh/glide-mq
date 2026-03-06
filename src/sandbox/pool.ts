@@ -4,12 +4,7 @@ import type { MainToChild, ChildToMain } from './types';
 import { toSerializedJob } from './types';
 import type { Job } from '../job';
 import { DelayedError, GlideMQError, UnrecoverableError } from '../errors';
-
-function isPlainStepPayload(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype;
-}
+import { isPlainStepPayload } from '../utils';
 
 interface PoolWorker {
   thread: WorkerThread | ChildProcess;
@@ -276,7 +271,7 @@ export class SandboxPool {
             throw new Error('moveToDelayed() can only be used while the job is active in a Worker');
           }
           const nextStep = msg.args[1];
-          if (nextStep !== undefined) {
+          if (nextStep != null) {
             if (!isPlainStepPayload(job.data)) {
               throw new Error('moveToDelayed(nextStep) requires plain-object job data');
             }

@@ -1,12 +1,7 @@
 import type { JobOptions } from '../types';
 import type { SerializedJob, ChildToMain, MainToChild } from './types';
 import { DelayedError, GlideMQError } from '../errors';
-
-function isPlainStepPayload(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype;
-}
+import { isPlainStepPayload } from '../utils';
 
 /**
  * Job-like object used inside sandboxed processors (worker threads / child processes).
@@ -101,7 +96,8 @@ export class SandboxJob<D = any, R = any> {
       nextData = { ...this.data, step: nextStep } as D;
     }
     const delayedUntil = Math.trunc(timestamp);
-    await this.proxyCall('moveToDelayed', [delayedUntil, nextStep]);
+    const args = nextStep !== undefined ? [delayedUntil, nextStep] : [delayedUntil];
+    await this.proxyCall('moveToDelayed', args);
     if (nextData !== undefined) {
       this.data = nextData;
     }
