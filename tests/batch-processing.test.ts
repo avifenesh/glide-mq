@@ -12,9 +12,8 @@ import { it, expect, beforeAll, afterAll } from 'vitest';
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { BatchError } = require('../dist/errors') as typeof import('../src/errors');
-const { GlideMQError } = require('../dist/errors') as typeof import('../src/errors');
 
-import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
 describeEachMode('Worker batch processing', (CONNECTION) => {
   const Q = 'test-batch-proc-' + Date.now();
@@ -244,7 +243,7 @@ describeEachMode('Worker batch processing', (CONNECTION) => {
 
       const worker = new Worker(
         qName,
-        async (jobs: any[]) => {
+        async (_jobs: any[]) => {
           // First job succeeds, second fails, third succeeds
           throw new BatchError([
             'success-1',
