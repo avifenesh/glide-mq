@@ -26,6 +26,8 @@ export interface SchedulerOptions {
   queuePrefix?: string;
   /** Called at the end of each promotion tick to refresh cached meta flags. */
   onPromotionTick?: () => void;
+  /** Surface scheduler errors through the parent worker instead of swallowing them silently. */
+  onError?: (err: Error) => void;
   /** Serializer for job template data. Inherited from the parent Worker/Queue. */
   serializer?: Serializer;
 }
@@ -46,6 +48,7 @@ export class Scheduler {
   private maxStalledCount: number;
   private consumerId: string;
   private onPromotionTick?: () => void;
+  private onError?: (err: Error) => void;
   private serializer: Serializer;
   private promotionTimer: ReturnType<typeof setInterval> | null = null;
   private promotionWakeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -63,7 +66,12 @@ export class Scheduler {
     this.maxStalledCount = opts.maxStalledCount ?? 1;
     this.consumerId = opts.consumerId ?? 'scheduler';
     this.onPromotionTick = opts.onPromotionTick;
+    this.onError = opts.onError;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
+  }
+
+  private reportError(err: unknown): void {
+    this.onError?.(err instanceof Error ? err : new Error(String(err)));
   }
 
   start(): void {
@@ -116,9 +124,10 @@ export class Scheduler {
         this.onPromotionTick?.();
       })
       .then(() => this.scheduleNextPromotionWake())
-      .catch(() => {
+      .catch((err) => {
         // Scheduler has no EventEmitter - errors are transient connection issues
         // that self-heal on the next interval tick. Worker reconnect handles the rest.
+        this.reportError(err);
       })
       .finally(() => {
         this.promotionInFlight = false;
@@ -175,9 +184,10 @@ export class Scheduler {
   }
 
   private runStalledRecovery(): void {
-    this.reclaimStalledJobs().catch(() => {
+    this.reclaimStalledJobs().catch((err) => {
       // Scheduler has no EventEmitter - errors are transient connection issues
       // that self-heal on the next interval tick. Worker reconnect handles the rest.
+      this.reportError(err);
     });
   }
 
@@ -248,7 +258,9 @@ export class Scheduler {
     if (!tickLock) return 0;
     const renewEveryMs = Math.max(250, Math.floor(this.schedulerLockTtlMs() / 3));
     const renewTimer = setInterval(() => {
-      void renewLock(this.client, tickLock.key, tickLock.token, this.schedulerLockTtlMs()).catch(() => {});
+      void renewLock(this.client, tickLock.key, tickLock.token, this.schedulerLockTtlMs()).catch((err) => {
+        this.reportError(err);
+      });
     }, renewEveryMs);
 
     let fired = 0;

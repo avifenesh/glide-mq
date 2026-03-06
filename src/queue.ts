@@ -61,6 +61,9 @@ import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
 
 const MAX_ORDERING_KEY_LENGTH = 256;
+const SCHEDULER_LOCK_MAX_ATTEMPTS = 40;
+const SCHEDULER_LOCK_TTL_MS = 5000;
+const SCHEDULER_LOCK_RETRY_DELAY_MS = 25;
 
 function validateOrderingKey(orderingKey: string): void {
   if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
@@ -124,11 +127,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   private async acquireSchedulerMutationLock(client: Client): Promise<{ key: string; token: string }> {
     const key = this.schedulerLockKey();
-    for (let attempt = 0; attempt < 40; attempt++) {
+    for (let attempt = 0; attempt < SCHEDULER_LOCK_MAX_ATTEMPTS; attempt++) {
       const token = randomBytes(8).toString('hex');
-      const acquired = await tryLock(client, key, token, 5000);
+      const acquired = await tryLock(client, key, token, SCHEDULER_LOCK_TTL_MS);
       if (acquired) return { key, token };
-      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      await new Promise<void>((resolve) => setTimeout(resolve, SCHEDULER_LOCK_RETRY_DELAY_MS));
     }
     throw new GlideMQError('Scheduler is busy; try again');
   }

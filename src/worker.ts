@@ -163,11 +163,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
       promotionInterval: this.opts.promotionInterval,
       stalledInterval: this.stalledInterval,
       maxStalledCount: this.maxStalledCount,
-      consumerId: this.consumerId,
-      queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
-      onPromotionTick: () => this.refreshMetaFlags(),
-      serializer: this.serializer,
-    });
+        consumerId: this.consumerId,
+        queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
+        onPromotionTick: () => this.refreshMetaFlags(),
+        onError: (err) => this.emit('error', err),
+        serializer: this.serializer,
+      });
     this.scheduler.start();
 
     // Register this worker and start periodic heartbeat
@@ -274,6 +275,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
           consumerId: this.consumerId,
           queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
           onPromotionTick: () => this.refreshMetaFlags(),
+          onError: (err) => this.emit('error', err),
           serializer: this.serializer,
         });
         this.scheduler.start();
