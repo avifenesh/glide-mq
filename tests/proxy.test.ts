@@ -8,7 +8,6 @@ import { it, expect, describe, beforeAll, afterAll } from 'vitest';
 import type { Server } from 'http';
 
 const { createProxyServer } = require('../dist/proxy/index') as typeof import('../src/proxy/index');
-const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 import { createCleanupClient, flushQueue, STANDALONE } from './helpers/fixture';
