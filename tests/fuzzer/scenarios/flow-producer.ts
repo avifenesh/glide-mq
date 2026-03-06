@@ -135,7 +135,11 @@ export async function flowProducer(ctx: ScenarioContext): Promise<ScenarioResult
       violations.push('getChildrenValues() returned empty but there were children');
     }
   } else if (parentIdx !== -1) {
-    violations.push(parentCaptureError ? `getChildrenValues() failed on parent: ${parentCaptureError}` : 'getChildrenValues() was not captured on parent');
+    violations.push(
+      parentCaptureError
+        ? `getChildrenValues() failed on parent: ${parentCaptureError}`
+        : 'getChildrenValues() was not captured on parent',
+    );
   }
 
   return {
