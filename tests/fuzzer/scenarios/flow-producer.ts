@@ -9,13 +9,20 @@
 import type { ScenarioContext, ScenarioResult } from '../types';
 
 // Keep per-scenario waiting below the global round timeout (30s).
-function waitForCompletion(processOrder: string[], targetCount: number, timeoutMs = 25000): Promise<void> {
+function waitForCompletion(
+  processOrder: string[],
+  targetCount: number,
+  isParentCaptureSettled: () => boolean,
+  timeoutMs = 25000,
+): Promise<void> {
   return new Promise((resolve) => {
     const start = Date.now();
     const check = () => {
       // Resolve if parent has been processed, or if we have at least targetCount unique jobs
       const uniqueProcessed = new Set(processOrder);
-      if (processOrder.includes('parent') || uniqueProcessed.size >= targetCount) return resolve();
+      if ((processOrder.includes('parent') || uniqueProcessed.size >= targetCount) && isParentCaptureSettled()) {
+        return resolve();
+      }
       if (Date.now() - start > timeoutMs) return resolve();
       setTimeout(check, 50);
     };
@@ -26,12 +33,14 @@ function waitForCompletion(processOrder: string[], targetCount: number, timeoutM
 export async function flowProducer(ctx: ScenarioContext): Promise<ScenarioResult> {
   const { rng } = ctx;
   const queueName = ctx.uid();
-  const queue = ctx.createQueue(queueName);
+  ctx.createQueue(queueName);
 
   const violations: string[] = [];
   const processOrder: string[] = [];
   const counter = { value: 0 };
   let parentChildrenValues: Record<string, any> | undefined;
+  let parentCaptureSettled = false;
+  let parentCaptureError: string | undefined;
 
   // Create worker - processes all jobs including parent and children
   ctx.createWorker(
@@ -44,8 +53,10 @@ export async function flowProducer(ctx: ScenarioContext): Promise<ScenarioResult
       if (job.name === 'parent') {
         try {
           parentChildrenValues = await job.getChildrenValues();
-        } catch {
-          // May fail if children not set up properly
+        } catch (err) {
+          parentCaptureError = err instanceof Error ? err.message : String(err);
+        } finally {
+          parentCaptureSettled = true;
         }
       }
 
@@ -99,7 +110,7 @@ export async function flowProducer(ctx: ScenarioContext): Promise<ScenarioResult
   });
 
   // Wait for all jobs to complete
-  await waitForCompletion(processOrder, expectedTotal);
+  await waitForCompletion(processOrder, expectedTotal, () => !processOrder.includes('parent') || parentCaptureSettled);
 
   // Verify parent processed last (after all children)
   const parentIdx = processOrder.indexOf('parent');
@@ -124,7 +135,7 @@ export async function flowProducer(ctx: ScenarioContext): Promise<ScenarioResult
       violations.push('getChildrenValues() returned empty but there were children');
     }
   } else if (parentIdx !== -1) {
-    violations.push('getChildrenValues() was not captured on parent');
+    violations.push(parentCaptureError ? `getChildrenValues() failed on parent: ${parentCaptureError}` : 'getChildrenValues() was not captured on parent');
   }
 
   return {

@@ -4,13 +4,16 @@ import { Job } from './job';
 import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE } from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
-import { LIBRARY_SOURCE, addFlow, addJob } from './functions/index';
+import { LIBRARY_SOURCE, addFlow, addJob, completeChild } from './functions/index';
 import { withSpan } from './telemetry';
 
 export interface JobNode {
   job: Job;
   children?: JobNode[];
 }
+
+const LATE_PARENT_RECONCILE_ATTEMPTS = 5;
+const LATE_PARENT_RECONCILE_DELAY_MS = 10;
 
 export class FlowProducer {
   private opts: FlowProducerOptions;
@@ -213,10 +216,23 @@ export class FlowProducer {
     for (const [i, subNode] of childNodeMap.entries()) {
       const child = flow.children[i];
       const childKeys = buildKeys(child.queueName, prefix);
+      const depsMember = `${keyPrefix(prefix, child.queueName)}:${subNode.job.id}`;
       await client.hset(childKeys.job(subNode.job.id), {
         parentId: parentId,
         parentQueue: parentQueueName,
       });
+      let state = await client.hget(childKeys.job(subNode.job.id), 'state');
+      for (
+        let attempt = 0;
+        state && String(state) !== 'completed' && attempt < LATE_PARENT_RECONCILE_ATTEMPTS;
+        attempt++
+      ) {
+        await new Promise<void>((resolve) => setTimeout(resolve, LATE_PARENT_RECONCILE_DELAY_MS));
+        state = await client.hget(childKeys.job(subNode.job.id), 'state');
+      }
+      if (state && String(state) === 'completed') {
+        await completeChild(client, parentKeys, parentId, depsMember);
+      }
       subNode.job.parentId = parentId;
       subNode.job.parentQueue = parentQueueName;
     }

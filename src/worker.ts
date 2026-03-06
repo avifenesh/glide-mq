@@ -615,15 +615,25 @@ export class Worker<D = any, R = any> extends EventEmitter {
   /**
    * Build parent dependency info for complete/completeAndFetchNext calls.
    */
-  private buildParentInfo(
+  private async buildParentInfo(
     job: Job<D, R>,
     jobId: string,
-  ): { depsMember: string; parentId: string; parentKeys: QueueKeys } | undefined {
-    if (!job.parentId || !job.parentQueue) return undefined;
+  ): Promise<{ depsMember: string; parentId: string; parentKeys: QueueKeys } | undefined> {
+    let parentId = job.parentId;
+    let parentQueue = job.parentQueue;
+
+    if ((!parentId || !parentQueue) && this.commandClient) {
+      const refreshedParentId = await this.commandClient.hget(this.queueKeys.job(jobId), 'parentId');
+      const refreshedParentQueue = await this.commandClient.hget(this.queueKeys.job(jobId), 'parentQueue');
+      parentId = refreshedParentId ? String(refreshedParentId) : parentId;
+      parentQueue = refreshedParentQueue ? String(refreshedParentQueue) : parentQueue;
+    }
+
+    if (!parentId || !parentQueue) return undefined;
     return {
       depsMember: `${keyPrefix(this.opts.prefix ?? 'glide', this.name)}:${jobId}`,
-      parentId: job.parentId,
-      parentKeys: buildKeys(job.parentQueue, this.opts.prefix),
+      parentId,
+      parentKeys: buildKeys(parentQueue, this.opts.prefix),
     };
   }
 
@@ -754,7 +764,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
         );
         return;
       }
-      const parentInfo = this.buildParentInfo(job, currentJobId);
+      const parentInfo = await this.buildParentInfo(job, currentJobId);
 
       const fetchResult = await completeAndFetchNext(
         this.commandClient,

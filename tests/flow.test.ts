@@ -2,10 +2,9 @@
  * Flow (parent-child job trees) integration tests.
  * Runs against both standalone (:6379) and cluster (:7000).
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
+import { it, expect, beforeAll, afterAll } from 'vitest';
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
-const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
@@ -198,6 +197,53 @@ describeEachMode('FlowProducer', (CONNECTION) => {
     await flushQueue(cleanupClient, qName);
   }, 25000);
 
+  it('nested flows still complete when workers are already running', async () => {
+    const qName = Q + '-nested-live';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        return { level: job.data.level, round: job.data.round ?? -1 };
+      },
+      { connection: CONNECTION, concurrency: 5, blockTimeout: 1000, stalledInterval: 60000 },
+    );
+    worker.on('error', () => {});
+
+    await worker.waitUntilReady();
+
+    const k = buildKeys(qName);
+    for (let round = 0; round < 8; round++) {
+      const node = await flow.add({
+        name: `grandparent-${round}`,
+        queueName: qName,
+        data: { level: 0, round },
+        children: [
+          {
+            name: `parent-child-${round}`,
+            queueName: qName,
+            data: { level: 1, round },
+            children: [{ name: `grandchild-${round}`, queueName: qName, data: { level: 2, round } }],
+          },
+        ],
+      });
+
+      const deadline = Date.now() + 10000;
+      let state = '';
+      while (Date.now() < deadline) {
+        const rawState = await cleanupClient.hget(k.job(node.job.id), 'state');
+        state = rawState ? String(rawState) : '';
+        if (state === 'completed') break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      expect(state).toBe('completed');
+    }
+
+    await worker.close(true);
+    await flow.close();
+    await flushQueue(cleanupClient, qName);
+  }, 60000);
+
   it('parent getChildrenValues returns all child results', async () => {
     const qName = Q + '-values';
     const flow = new FlowProducer({ connection: CONNECTION });
@@ -213,15 +259,12 @@ describeEachMode('FlowProducer', (CONNECTION) => {
     });
 
     const parentId = node.job.id;
-    let parentJobRef: any = null;
-
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
       const worker = new Worker(
         qName,
         async (job: any) => {
           if (job.name === 'parent') {
-            parentJobRef = job;
             const childValues = await job.getChildrenValues();
             return { childValues };
           }
