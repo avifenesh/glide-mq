@@ -85,6 +85,7 @@ Gzip compression: **98% payload reduction** on 15 KB payloads.
 |---------|-------------|
 | **glide-mq** | Core queue library (you are here) |
 | [`@glidemq/hono`](https://github.com/avifenesh/glidemq-hono) | Hono middleware - REST API + SSE events for queue management |
+| [`@glidemq/fastify`](https://github.com/avifenesh/glidemq-fastify) | Fastify plugin - REST API + SSE events for queue management |
 | [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) | Express middleware - web UI for monitoring and managing queues |
 | [`@glidemq/nestjs`](https://github.com/avifenesh/glidemq-nestjs) | NestJS module - decorators, DI, lifecycle management |
 | [`@glidemq/speedkey`](https://github.com/avifenesh/speedkey) | Valkey GLIDE client with native NAPI bindings |
@@ -127,7 +128,52 @@ app.use(glideMQ({
 app.route('/api/queues', glideMQApi());
 ```
 
-11 REST endpoints + SSE events, type-safe RPC client, optional Zod validation, in-memory testing mode.
+11 REST endpoints + SSE events, optional Zod validation, in-memory testing mode.
+
+### Fastify
+
+```bash
+npm install @glidemq/fastify glide-mq fastify
+```
+
+```typescript
+import Fastify from 'fastify';
+import { glideMQPlugin, glideMQRoutes } from '@glidemq/fastify';
+
+const app = Fastify();
+
+await app.register(glideMQPlugin, {
+  connection: { addresses: [{ host: 'localhost', port: 6379 }] },
+  queues: { emails: { processor: processEmail, concurrency: 5 } },
+});
+
+await app.register(glideMQRoutes, { prefix: '/api/queues' });
+await app.listen({ port: 3000 });
+```
+
+11 REST endpoints + SSE events, prefix support, optional Zod validation, in-memory testing mode.
+
+### NestJS
+
+```bash
+npm install @glidemq/nestjs glide-mq
+```
+
+```typescript
+import { GlideMQModule } from '@glidemq/nestjs';
+
+@Module({
+  imports: [
+    GlideMQModule.forRoot({
+      connection: { addresses: [{ host: 'localhost', port: 6379 }] },
+      queues: { emails: { processor: processEmail } },
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+Decorators, dependency injection, lifecycle management, in-memory testing mode.
 
 ## Documentation
 
