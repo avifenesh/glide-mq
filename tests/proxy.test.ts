@@ -46,11 +46,11 @@ describe('HTTP Proxy', () => {
 
   afterAll(async () => {
     await proxyClose();
-    server.close();
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
     for (const name of queueNames) {
       await flushQueue(cleanupClient, name);
     }
-    cleanupClient.close();
+    await cleanupClient.close();
   });
 
   it('POST /queues/:name/jobs - adds a job and returns 201', async () => {
@@ -314,9 +314,9 @@ describe('HTTP Proxy - Queue Allowlist', () => {
 
   afterAll(async () => {
     await proxyClose();
-    server.close();
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
     await flushQueue(cleanupClient, allowedQueue);
-    cleanupClient.close();
+    await cleanupClient.close();
   });
 
   it('allowed queue returns 201', async () => {
@@ -382,11 +382,11 @@ describe('HTTP Proxy - Payload Limits', () => {
 
   afterAll(async () => {
     await proxyClose();
-    server.close();
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
     for (const name of queueNames) {
       await flushQueue(cleanupClient, name);
     }
-    cleanupClient.close();
+    await cleanupClient.close();
   });
 
   it('rejects payloads exceeding 1MB', async () => {

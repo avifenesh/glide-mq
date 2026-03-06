@@ -29,7 +29,11 @@ export function createRoutes(
   let closed = false;
 
   function getQueue(name: string): Queue {
-    if (closed) throw new Error('Proxy is shutting down');
+    if (closed) {
+      const err = new Error('Proxy is shutting down');
+      (err as any).status = 503;
+      throw err;
+    }
     let q = queueCache.get(name);
     if (!q) {
       q = new Queue(name, {

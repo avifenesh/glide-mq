@@ -64,7 +64,15 @@ export function createProxyServer(opts: ProxyOptions): {
   // Consistent JSON error responses for Express-level errors (malformed JSON, payload too large)
   app.use((err: any, _req: any, res: any, _next: any) => {
     const status = err.status || err.statusCode || 500;
-    res.status(status).json({ error: err.type === 'entity.too.large' ? 'Payload too large' : 'Bad request' });
+    const message =
+      err.type === 'entity.too.large'
+        ? 'Payload too large'
+        : status === 503
+          ? 'Service unavailable'
+          : status >= 500
+            ? 'Internal server error'
+            : 'Bad request';
+    res.status(status).json({ error: message });
   });
 
   return {

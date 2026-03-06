@@ -194,6 +194,8 @@ const proxy = createProxyServer({
   queues: ['emails', 'reports'],  // optional allowlist
 });
 
+// Add your own auth middleware before exposing to the network
+// proxy.app.use(yourAuthMiddleware);
 proxy.app.listen(3000, () => console.log('Proxy on :3000'));
 ```
 
