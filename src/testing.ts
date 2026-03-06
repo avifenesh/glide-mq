@@ -632,7 +632,11 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private readonly batchProcessor: ((jobs: TestJob<D, R>[]) => Promise<R[]>) | null;
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(queue: TestQueue<D, R>, processor: Processor<D, R> | ((jobs: TestJob<D, R>[]) => Promise<R[]>) | string, opts?: TestWorkerOptions) {
+  constructor(
+    queue: TestQueue<D, R>,
+    processor: Processor<D, R> | ((jobs: TestJob<D, R>[]) => Promise<R[]>) | string,
+    opts?: TestWorkerOptions,
+  ) {
     super();
     this.queue = queue;
 
@@ -944,8 +948,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
             const job = jobs[i];
             record.attemptsMade++;
             const maxAttempts = record.opts.attempts ?? 0;
-            const skipRetry =
-              job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
+            const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
             if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
               record.state = 'waiting';
               queueMicrotask(() => this.processAvailable());

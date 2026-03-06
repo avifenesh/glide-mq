@@ -245,11 +245,7 @@ describeEachMode('Worker batch processing', (CONNECTION) => {
         qName,
         async (_jobs: any[]) => {
           // First job succeeds, second fails, third succeeds
-          throw new BatchError([
-            'success-1',
-            new Error('job 2 failed'),
-            'success-3',
-          ]);
+          throw new BatchError(['success-1', new Error('job 2 failed'), 'success-3']);
         },
         {
           connection: CONNECTION,
@@ -405,51 +401,31 @@ describeEachMode('Worker batch processing', (CONNECTION) => {
 describeEachMode('Worker batch validation', (CONNECTION) => {
   it('throws on batch.size < 1', () => {
     expect(() => {
-      new Worker(
-        'test-batch-val-1',
-        async () => [],
-        { connection: CONNECTION, batch: { size: 0 } },
-      );
+      new Worker('test-batch-val-1', async () => [], { connection: CONNECTION, batch: { size: 0 } });
     }).toThrow('batch.size must be an integer between 1 and 1000');
   });
 
   it('throws on batch.size > 1000', () => {
     expect(() => {
-      new Worker(
-        'test-batch-val-2',
-        async () => [],
-        { connection: CONNECTION, batch: { size: 1001 } },
-      );
+      new Worker('test-batch-val-2', async () => [], { connection: CONNECTION, batch: { size: 1001 } });
     }).toThrow('batch.size must be an integer between 1 and 1000');
   });
 
   it('throws on non-integer batch.size', () => {
     expect(() => {
-      new Worker(
-        'test-batch-val-3',
-        async () => [],
-        { connection: CONNECTION, batch: { size: 2.5 } },
-      );
+      new Worker('test-batch-val-3', async () => [], { connection: CONNECTION, batch: { size: 2.5 } });
     }).toThrow('batch.size must be an integer between 1 and 1000');
   });
 
   it('throws on batch + sandbox processor', () => {
     expect(() => {
-      new Worker(
-        'test-batch-val-4',
-        '/some/path.js',
-        { connection: CONNECTION, batch: { size: 5 } },
-      );
+      new Worker('test-batch-val-4', '/some/path.js', { connection: CONNECTION, batch: { size: 5 } });
     }).toThrow('Batch mode does not support sandbox (file path) processors');
   });
 
   it('throws on negative batch.timeout', () => {
     expect(() => {
-      new Worker(
-        'test-batch-val-5',
-        async () => [],
-        { connection: CONNECTION, batch: { size: 5, timeout: -1 } },
-      );
+      new Worker('test-batch-val-5', async () => [], { connection: CONNECTION, batch: { size: 5, timeout: -1 } });
     }).toThrow('batch.timeout must be a non-negative finite number');
   });
 });

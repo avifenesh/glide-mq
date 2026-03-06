@@ -509,12 +509,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
         if (remaining <= 0) break;
 
         const blockMs = Math.min(remaining, this.blockTimeout);
-        const moreResult = await this.blockingClient.xreadgroup(
-          CONSUMER_GROUP,
-          this.consumerId,
-          this.xreadStreams,
-          { count: this.batchSize - collected.length, block: blockMs },
-        );
+        const moreResult = await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
+          count: this.batchSize - collected.length,
+          block: blockMs,
+        });
 
         if (!moreResult) continue;
         for (const streamEntry of moreResult) {
@@ -685,9 +683,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     if (results) {
       // Success path: validate results length, complete each job
       if (results.length !== batch.length) {
-        const err = new Error(
-          `Batch processor returned ${results.length} results but batch had ${batch.length} jobs`,
-        );
+        const err = new Error(`Batch processor returned ${results.length} results but batch had ${batch.length} jobs`);
         for (const entry of batch) {
           await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
         }
@@ -717,9 +713,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
             entry.job,
             entry.jobId,
             entry.entryId,
-            new Error(
-              `Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes).`,
-            ),
+            new Error(`Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes).`),
           );
           continue;
         }
@@ -793,7 +787,6 @@ export class Worker<D = any, R = any> extends EventEmitter {
         await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
       }
     }
-
   }
 
   // ---- Job processing helpers ----

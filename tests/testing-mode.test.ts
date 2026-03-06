@@ -1207,11 +1207,7 @@ describe('TestWorker batch mode', () => {
     worker = new TestWorker(
       queue,
       async (_jobs: TestJob[]) => {
-        throw new BatchError([
-          'success-result',
-          new Error('this one failed'),
-          'another-success',
-        ]);
+        throw new BatchError(['success-result', new Error('this one failed'), 'another-success']);
       },
       { batch: { size: 3 } },
     );
