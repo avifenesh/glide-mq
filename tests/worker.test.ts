@@ -370,7 +370,8 @@ describe('Worker', () => {
       if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
       if (func === 'glidemq_moveToActive') return Promise.resolve(jobHash);
       if (func === 'glidemq_moveActiveToDelayed') return Promise.resolve('ok');
-      if (func === 'glidemq_completeAndFetchNext') return Promise.resolve(JSON.stringify({ completed: '3', next: false }));
+      if (func === 'glidemq_completeAndFetchNext')
+        return Promise.resolve(JSON.stringify({ completed: '3', next: false }));
       if (func === 'glidemq_fail') return Promise.resolve('failed');
       return Promise.resolve(LIBRARY_VERSION);
     });
@@ -386,9 +387,9 @@ describe('Worker', () => {
       [keys.job('3'), keys.stream, keys.scheduled, keys.events],
       ['3', '1234567890-0', '1700000000000', delayedUntil.toString(), CONSUMER_GROUP, '{"step":"check"}'],
     );
-    expect((mockCommandClient.fcall as any).mock.calls.some((call: any[]) => call[0] === 'glidemq_completeAndFetchNext')).toBe(
-      false,
-    );
+    expect(
+      (mockCommandClient.fcall as any).mock.calls.some((call: any[]) => call[0] === 'glidemq_completeAndFetchNext'),
+    ).toBe(false);
     expect((mockCommandClient.fcall as any).mock.calls.some((call: any[]) => call[0] === 'glidemq_fail')).toBe(false);
 
     await worker.close(true);
@@ -513,9 +514,9 @@ describe('Worker', () => {
     await worker.waitUntilReady();
     await vi.advanceTimersByTimeAsync(100);
 
-    expect((mockCommandClient.fcall as any).mock.calls.some((call: any[]) => call[0] === 'glidemq_moveActiveToDelayed')).toBe(
-      false,
-    );
+    expect(
+      (mockCommandClient.fcall as any).mock.calls.some((call: any[]) => call[0] === 'glidemq_moveActiveToDelayed'),
+    ).toBe(false);
     expect((mockCommandClient.fcall as any).mock.calls.some((call: any[]) => call[0] === 'glidemq_fail')).toBe(true);
 
     await worker.close(true);
