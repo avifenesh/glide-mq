@@ -109,12 +109,18 @@ describeEachMode('Custom Job IDs', (CONNECTION) => {
   });
 
   it('throws for jobId containing curly braces', async () => {
-    await expect(queue.add('task', {}, { jobId: 'bad{id}' })).rejects.toThrow('control characters or curly braces');
+    await expect(queue.add('task', {}, { jobId: 'bad{id}' })).rejects.toThrow(
+      'control characters, curly braces, or colons',
+    );
   });
 
   it('throws for jobId containing control characters', async () => {
-    await expect(queue.add('task', {}, { jobId: 'bad\x00id' })).rejects.toThrow('control characters or curly braces');
-    await expect(queue.add('task', {}, { jobId: 'bad\nid' })).rejects.toThrow('control characters or curly braces');
+    await expect(queue.add('task', {}, { jobId: 'bad\x00id' })).rejects.toThrow(
+      'control characters, curly braces, or colons',
+    );
+    await expect(queue.add('task', {}, { jobId: 'bad\nid' })).rejects.toThrow(
+      'control characters, curly braces, or colons',
+    );
   });
 
   it('accepts jobId of exactly 256 characters', async () => {
@@ -375,8 +381,12 @@ describe('Custom Job IDs - Testing Mode', () => {
 
   it('TestQueue throws for invalid jobId characters', async () => {
     const queue = new TestQueue('test-q6');
-    await expect(queue.add('task', {}, { jobId: 'bad{id}' })).rejects.toThrow('control characters or curly braces');
-    await expect(queue.add('task', {}, { jobId: 'bad\nid' })).rejects.toThrow('control characters or curly braces');
+    await expect(queue.add('task', {}, { jobId: 'bad{id}' })).rejects.toThrow(
+      'control characters, curly braces, or colons',
+    );
+    await expect(queue.add('task', {}, { jobId: 'bad\nid' })).rejects.toThrow(
+      'control characters, curly braces, or colons',
+    );
   });
 
   it('TestQueue auto-increment skips custom ID collisions', async () => {

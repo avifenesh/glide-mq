@@ -668,7 +668,7 @@ const state = await job.waitUntilFinished(500, 30000);
 // args: pollIntervalMs (default 500), timeoutMs (default 30000)
 ```
 
-**Custom `jobId`** - glide-mq supports custom job IDs, matching BullMQ's `opts.jobId`. Max 256 characters, must not contain control characters or curly braces (`{`, `}`). Adding a job with a duplicate custom ID returns `null` (silent skip) from `Queue.add`; `FlowProducer.add` throws on duplicates since flows cannot be partially created:
+**Custom `jobId`** - glide-mq supports custom job IDs, matching BullMQ's `opts.jobId`. Max 256 characters, must not contain control characters, curly braces (`{`, `}`), or colons (`:`). Adding a job with a duplicate custom ID returns `null` (silent skip) from `Queue.add`; `FlowProducer.add` throws on duplicates since flows cannot be partially created:
 
 ```ts
 // BullMQ

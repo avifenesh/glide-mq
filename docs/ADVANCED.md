@@ -295,7 +295,7 @@ const job = await queue.add('send-email', { to: 'user@example.com' }, {
 **Constraints**
 
 - Max 256 characters.
-- Must not contain control characters (U+0000-U+001F, U+007F) or curly braces (`{`, `}`).
+- Must not contain control characters (U+0000-U+001F, U+007F), curly braces (`{`, `}`), or colons (`:`).
 - Violating either constraint throws synchronously before the network call.
 
 **Duplicate behaviour by surface**

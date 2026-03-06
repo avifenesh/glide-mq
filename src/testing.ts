@@ -145,11 +145,11 @@ export interface TestQueueOptions {
   serializer?: Serializer;
 }
 
-const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}]/;
+const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
 function validateJobId(jobId: string): void {
   if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
   if (INVALID_JOB_ID_CHARS.test(jobId)) {
-    throw new Error('jobId must not contain control characters or curly braces');
+    throw new Error('jobId must not contain control characters, curly braces, or colons');
   }
 }
 
@@ -183,7 +183,6 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       if (this.dedupSet.has(dedupId)) {
         return null;
       }
-      this.dedupSet.add(dedupId);
     }
 
     const customJobId = opts?.jobId ?? '';
@@ -200,6 +199,10 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       while (this.jobs.has(id)) {
         id = String(++this.idCounter);
       }
+    }
+    // Record dedup key only after all checks pass (custom ID, etc.)
+    if (opts?.deduplication && this.opts.dedup) {
+      this.dedupSet.add(opts.deduplication.id);
     }
     const now = Date.now();
     const ttl = opts?.ttl ?? 0;

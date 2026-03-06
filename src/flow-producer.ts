@@ -12,11 +12,11 @@ export interface JobNode {
   children?: JobNode[];
 }
 
-const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}]/;
+const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
 function validateJobId(jobId: string): void {
   if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
   if (INVALID_JOB_ID_CHARS.test(jobId)) {
-    throw new Error('jobId must not contain control characters or curly braces');
+    throw new Error('jobId must not contain control characters, curly braces, or colons');
   }
 }
 
@@ -162,6 +162,17 @@ export class FlowProducer {
       return { job };
     }
 
+    // Early check: if parent has a custom ID, verify it doesn't already exist
+    // before recursing into children (to avoid orphaning sub-flow children).
+    const parentCustomId = (flow.opts ?? {}).jobId ?? '';
+    if (parentCustomId !== '') {
+      validateJobId(parentCustomId);
+      const exists = await client.exists([parentKeys.job(parentCustomId)]);
+      if (exists > 0) {
+        throw new Error('Duplicate job ID in flow');
+      }
+    }
+
     // Recursively process children that themselves have children (bottom-up).
     const childNodeMap: Map<number, JobNode> = new Map();
     for (let i = 0; i < flow.children.length; i++) {
@@ -216,8 +227,6 @@ export class FlowProducer {
         `Job data exceeds maximum size (${parentByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
       );
     }
-    const parentCustomId = parentOpts.jobId ?? '';
-    if (parentCustomId !== '') validateJobId(parentCustomId);
     const ids = await addFlow(
       client,
       parentKeys,
