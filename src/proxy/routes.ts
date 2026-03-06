@@ -1,4 +1,4 @@
-import type { Router, Request, Response, NextFunction } from 'express';
+import type { Router, Request, Response } from 'express';
 import { Queue } from '../queue';
 import type { ProxyOptions, AddJobRequest, AddJobResponse, AddJobSkippedResponse } from './types';
 
@@ -77,7 +77,7 @@ export function createRoutes(
         timestamp: job.timestamp,
       };
       res.status(201).json(response);
-    } catch (err) {
+    } catch {
       res.status(500).json({ error: 'Internal server error' });
     }
   });
@@ -113,7 +113,7 @@ export function createRoutes(
 
       const anyCreated = results.some((j) => j !== null);
       res.status(anyCreated ? 201 : 200).json({ jobs: responseJobs });
-    } catch (err) {
+    } catch {
       res.status(500).json({ error: 'Internal server error' });
     }
   });
@@ -145,7 +145,7 @@ export function createRoutes(
         processedOn: job.processedOn,
         parentId: job.parentId,
       });
-    } catch (err) {
+    } catch {
       res.status(500).json({ error: 'Internal server error' });
     }
   });
@@ -156,7 +156,7 @@ export function createRoutes(
       const queue = getQueue(param(req, 'name'));
       await queue.pause();
       res.status(204).send();
-    } catch (err) {
+    } catch {
       res.status(500).json({ error: 'Internal server error' });
     }
   });
@@ -167,7 +167,7 @@ export function createRoutes(
       const queue = getQueue(param(req, 'name'));
       await queue.resume();
       res.status(204).send();
-    } catch (err) {
+    } catch {
       res.status(500).json({ error: 'Internal server error' });
     }
   });
@@ -178,7 +178,7 @@ export function createRoutes(
       const queue = getQueue(param(req, 'name'));
       const counts = await queue.getJobCounts();
       res.status(200).json(counts);
-    } catch (err) {
+    } catch {
       res.status(500).json({ error: 'Internal server error' });
     }
   });
