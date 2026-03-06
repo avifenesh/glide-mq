@@ -497,8 +497,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
             break;
           }
         }
-        if (jobId) collected.push({ jobId, entryId: String(entryId) });
+        if (jobId) {
+          collected.push({ jobId, entryId: String(entryId) });
+          if (collected.length >= this.batchSize) break;
+        }
       }
+      if (collected.length >= this.batchSize) break;
     }
 
     // If timeout is set and batch is not full, fetch more
@@ -655,7 +659,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
           results = await Promise.race([
             this.batchProcessor(jobs),
             new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new Error('Batch timeout exceeded')), maxTimeout);
+              timer = setTimeout(() => {
+                batchAc.abort();
+                reject(new Error('Batch timeout exceeded'));
+              }, maxTimeout);
             }),
           ]);
         } finally {
@@ -681,9 +688,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
     if (!this.commandClient) return;
 
     if (results) {
-      // Success path: validate results length, complete each job
-      if (results.length !== batch.length) {
-        const err = new Error(`Batch processor returned ${results.length} results but batch had ${batch.length} jobs`);
+      // Success path: validate results is array with correct length
+      if (!Array.isArray(results) || results.length !== batch.length) {
+        const len = Array.isArray(results) ? results.length : 'non-array';
+        const err = new Error(`Batch processor returned ${len} results but batch had ${batch.length} jobs`);
         for (const entry of batch) {
           await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
         }
@@ -756,6 +764,16 @@ export class Worker<D = any, R = any> extends EventEmitter {
               entry.jobId,
               entry.entryId,
               new Error(`Serializer failed on return value: ${err.message}`),
+            );
+            continue;
+          }
+          const byteLen = Buffer.byteLength(returnvalue, 'utf8');
+          if (byteLen > MAX_JOB_DATA_SIZE) {
+            await this.handleJobFailure(
+              entry.job,
+              entry.jobId,
+              entry.entryId,
+              new Error(`Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes).`),
             );
             continue;
           }
