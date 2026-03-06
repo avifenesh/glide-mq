@@ -300,11 +300,18 @@ export interface JobCounts {
   failed: number;
 }
 
+export interface GetJobsOptions {
+  /** When true, excludes `data` and `returnvalue` fields from returned jobs. */
+  excludeData?: boolean;
+}
+
 export interface SearchJobsOptions {
   state?: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed';
   name?: string;
   data?: Record<string, unknown>;
   limit?: number;
+  /** When true, excludes `data` and `returnvalue` fields from returned jobs. */
+  excludeData?: boolean;
 }
 
 export interface WorkerInfo {
