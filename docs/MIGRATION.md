@@ -438,6 +438,7 @@ The processor function signature is identical. The only change is the connection
 | `queue.clean(grace, limit, type)` | `queue.clean(grace, limit, type)` | Full |
 | `queue.retryJobs(opts)` | `queue.retryJobs(opts?)` | Full |
 | `queue.close()` | `queue.close()` | Full |
+| BullMQ request-reply pattern | `queue.addAndWait(name, data, { waitTimeout })` | glide-mq extension |
 | - | `queue.revoke(jobId)` | glide-mq only |
 | - | `queue.getDeadLetterJobs(start, end)` | glide-mq only |
 | - | `queue.searchJobs(opts)` | glide-mq only |
@@ -486,6 +487,7 @@ The processor function signature is identical. The only change is the connection
 | `job.changeDelay(delay)` | `job.changeDelay(newDelay)` | Full [#12](https://github.com/avifenesh/glide-mq/issues/12) |
 | `job.changePriority(opts)` | `job.changePriority(newPriority)` | Full [#13](https://github.com/avifenesh/glide-mq/issues/13) |
 | `job.discard()` | `job.discard()` | Full [#14](https://github.com/avifenesh/glide-mq/issues/14) |
+| BullMQ process-step pattern | `job.moveToDelayed(timestampMs, nextStep?)` | glide-mq extension |
 | `job.toJSON()` | - | Use `job.data`, `job.opts`, etc. directly |
 | - | `job.abortSignal` | glide-mq only |
 | - | `job.isRevoked()` | glide-mq only |

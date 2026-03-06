@@ -9,9 +9,19 @@
 import { EventEmitter } from 'events';
 import path from 'path';
 import os from 'os';
-import type { JobOptions, JobCounts, Processor, WorkerInfo, SchedulerEntry, ScheduleOpts, JobTemplate } from './types';
+import type {
+  JobOptions,
+  JobCounts,
+  Processor,
+  WorkerInfo,
+  SchedulerEntry,
+  ScheduleOpts,
+  JobTemplate,
+  Serializer,
+} from './types';
+import { JSON_SERIALIZER } from './types';
 import { GlideMQError, UnrecoverableError } from './errors';
-import { nextCronOccurrence } from './utils';
+import { nextCronOccurrence, validateTimezone } from './utils';
 
 // ---- Lightweight in-memory Job representation ----
 
@@ -121,6 +131,8 @@ function matchesData(data: Record<string, unknown>, filter: Record<string, unkno
 export interface TestQueueOptions {
   /** Enable deduplication in 'simple' mode. */
   dedup?: boolean;
+  /** Custom serializer for job data and return values. When provided, values are roundtripped through serialize/deserialize to match production behavior. */
+  serializer?: Serializer;
 }
 
 export class TestQueue<D = any, R = any> extends EventEmitter {
@@ -130,6 +142,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private idCounter = 0;
   private paused = false;
   private opts: TestQueueOptions;
+  /** @internal */ readonly serializer: Serializer;
 
   /** Workers register themselves here so we can notify on add. */
   /** @internal */ readonly workers: Set<TestWorker<D, R>> = new Set();
@@ -139,6 +152,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     super();
     this.name = name;
     this.opts = opts ?? {};
+    this.serializer = this.opts.serializer ?? JSON_SERIALIZER;
   }
 
   /** Add a single job. Returns null if deduplicated. */
@@ -154,10 +168,12 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     const id = String(++this.idCounter);
     const now = Date.now();
     const ttl = opts?.ttl ?? 0;
+    // Roundtrip data through serializer to match production behavior
+    const roundtrippedData = this.serializer.deserialize(this.serializer.serialize(data)) as D;
     const record: TestJobRecord<D, R> = {
       id,
       name,
-      data,
+      data: roundtrippedData,
       opts: opts ?? {},
       state: 'waiting',
       attemptsMade: 0,
@@ -348,11 +364,15 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     if (!schedule.pattern && !schedule.every) {
       throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
     }
+    if (schedule.tz) {
+      validateTimezone(schedule.tz);
+    }
     const now = Date.now();
-    const nextRun = schedule.pattern ? nextCronOccurrence(schedule.pattern, now) : now + schedule.every!;
+    const nextRun = schedule.pattern ? nextCronOccurrence(schedule.pattern, now, schedule.tz) : now + schedule.every!;
     const entry: SchedulerEntry = {
       pattern: schedule.pattern,
       every: schedule.every,
+      tz: schedule.tz,
       template,
       nextRun,
     };
@@ -499,13 +519,16 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
     this.processor(job as any)
       .then((result) => {
+        // Roundtrip returnvalue through serializer to match production behavior
+        const s = this.queue.serializer;
+        const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
         record.state = 'completed';
-        record.returnvalue = result;
+        record.returnvalue = roundtripped;
         record.finishedOn = Date.now();
-        job.returnvalue = result;
+        job.returnvalue = roundtripped;
         job.finishedOn = record.finishedOn;
-        this.emit('completed', job, result);
-        this.queue.emit('completed', job, result);
+        this.emit('completed', job, roundtripped);
+        this.queue.emit('completed', job, roundtripped);
       })
       .catch((err: Error) => {
         record.attemptsMade++;

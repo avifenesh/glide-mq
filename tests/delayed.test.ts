@@ -157,6 +157,99 @@ describeEachMode('Delayed jobs', (CONNECTION) => {
     await flushQueue(cleanupClient, qName);
   }, 20000);
 
+  it('processor can pause an active job and resume it later with the next step', async () => {
+    const qName = Q + '-step-job';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const k = buildKeys(qName);
+    const processedSteps: string[] = [];
+    let completedCount = 0;
+
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        processedSteps.push(job.data.step);
+        if (job.data.step === 'send') {
+          await job.moveToDelayed(Date.now() + 200, 'check');
+        }
+        completedCount++;
+        return 'done';
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 100, promotionInterval: 50 },
+    );
+    worker.on('error', () => {});
+
+    const job = await localQueue.add('campaign', { step: 'send' });
+
+    const delayedDeadline = Date.now() + 5000;
+    while (Date.now() < delayedDeadline) {
+      const state = String(await cleanupClient.hget(k.job(job.id), 'state'));
+      const rawData = await cleanupClient.hget(k.job(job.id), 'data');
+      if (state === 'delayed' && String(rawData).includes('"check"')) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('delayed');
+    expect(await cleanupClient.zscore(k.scheduled, job.id)).not.toBeNull();
+    expect(JSON.parse(String(await cleanupClient.hget(k.job(job.id), 'data')))).toEqual({ step: 'check' });
+
+    await expect(job.waitUntilFinished(50, 10000)).resolves.toBe('completed');
+    expect(processedSteps).toEqual(['send', 'check']);
+    expect(completedCount).toBe(1);
+
+    await worker.close(true);
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
+  it('releasing a grouped step-job slot does not break per-key ordering', async () => {
+    const qName = Q + '-ordered-step-job';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const k = buildKeys(qName);
+    const processed: string[] = [];
+
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        processed.push(`${job.name}:${job.data.step}`);
+        if (job.name === 'first' && job.data.step === 'send') {
+          await job.moveToDelayed(Date.now() + 250, 'finish');
+        }
+        return job.name;
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 100, promotionInterval: 50 },
+    );
+    worker.on('error', () => {});
+
+    const first = await localQueue.add('first', { step: 'send' }, { ordering: { key: 'tenant-a' } });
+    const second = await localQueue.add('second', { step: 'only' }, { ordering: { key: 'tenant-a' } });
+
+    const delayedDeadline = Date.now() + 5000;
+    while (Date.now() < delayedDeadline) {
+      const firstState = String(await cleanupClient.hget(k.job(first.id), 'state'));
+      const waitLen = Number(await cleanupClient.llen(`glide:{${qName}}:groupq:tenant-a`));
+      if (firstState === 'delayed' && waitLen === 0) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    expect(String(await cleanupClient.hget(k.job(first.id), 'state'))).toBe('delayed');
+    expect(Number(await cleanupClient.llen(`glide:{${qName}}:groupq:tenant-a`))).toBe(0);
+
+    await new Promise((resolve) => setTimeout(resolve, 125));
+    expect(processed).toEqual(['first:send']);
+
+    await expect(first.waitUntilFinished(50, 10000)).resolves.toBe('completed');
+    await expect(second.waitUntilFinished(50, 10000)).resolves.toBe('completed');
+    expect(processed).toEqual(['first:send', 'first:finish', 'second:only']);
+
+    await worker.close(true);
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
   describe('changeDelay', () => {
     const PRIORITY_SHIFT = 2 ** 42;
 

@@ -1,6 +1,7 @@
-import type { FlowProducerOptions, FlowJob, Client } from './types';
+import type { FlowProducerOptions, FlowJob, Client, Serializer } from './types';
+import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
-import { buildKeys, keyPrefix } from './utils';
+import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE } from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
 import { LIBRARY_SOURCE, addFlow, addJob } from './functions/index';
@@ -16,12 +17,14 @@ export class FlowProducer {
   private client: Client | null = null;
   private clientOwned = true;
   private closing = false;
+  private serializer: Serializer;
 
   constructor(opts: FlowProducerOptions) {
     if (!opts.connection && !opts.client) {
       throw new GlideMQError('Either `connection` or `client` must be provided.');
     }
     this.opts = opts;
+    this.serializer = opts.serializer ?? JSON_SERIALIZER;
   }
 
   /** @internal */
@@ -104,11 +107,18 @@ export class FlowProducer {
       if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
         groupConcurrency = 1;
       }
+      const serializedData = this.serializer.serialize(flow.data);
+      const dataByteLen = Buffer.byteLength(serializedData, 'utf8');
+      if (dataByteLen > MAX_JOB_DATA_SIZE) {
+        throw new Error(
+          `Job data exceeds maximum size (${dataByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
+        );
+      }
       const jobId = await addJob(
         client,
         parentKeys,
         flow.name,
-        JSON.stringify(flow.data),
+        serializedData,
         JSON.stringify(opts),
         timestamp,
         opts.delay ?? 0,
@@ -127,7 +137,7 @@ export class FlowProducer {
       if (String(jobId) === 'ERR:COST_EXCEEDS_CAPACITY') {
         throw new Error('Job cost exceeds token bucket capacity');
       }
-      const job = new Job(client, parentKeys, String(jobId), flow.name, flow.data, opts);
+      const job = new Job(client, parentKeys, String(jobId), flow.name, flow.data, opts, this.serializer);
       job.timestamp = timestamp;
       return { job };
     }
@@ -146,9 +156,16 @@ export class FlowProducer {
       .filter((_, i) => !childNodeMap.has(i))
       .map((child) => {
         const childOpts = child.opts ?? {};
+        const childData = this.serializer.serialize(child.data);
+        const childByteLen = Buffer.byteLength(childData, 'utf8');
+        if (childByteLen > MAX_JOB_DATA_SIZE) {
+          throw new Error(
+            `Job data exceeds maximum size (${childByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
+          );
+        }
         return {
           name: child.name,
-          data: JSON.stringify(child.data),
+          data: childData,
           opts: JSON.stringify(childOpts),
           delay: childOpts.delay ?? 0,
           priority: childOpts.priority ?? 0,
@@ -169,11 +186,18 @@ export class FlowProducer {
     const timestamp = Date.now();
     const parentOpts = flow.opts ?? {};
 
+    const parentData = this.serializer.serialize(flow.data);
+    const parentByteLen = Buffer.byteLength(parentData, 'utf8');
+    if (parentByteLen > MAX_JOB_DATA_SIZE) {
+      throw new Error(
+        `Job data exceeds maximum size (${parentByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
+      );
+    }
     const ids = await addFlow(
       client,
       parentKeys,
       flow.name,
-      JSON.stringify(flow.data),
+      parentData,
       JSON.stringify(parentOpts),
       timestamp,
       parentOpts.delay ?? 0,
@@ -213,6 +237,7 @@ export class FlowProducer {
           child.name,
           child.data,
           child.opts ?? {},
+          this.serializer,
         );
         childJob.timestamp = timestamp;
         childJob.parentId = parentId;
@@ -222,7 +247,7 @@ export class FlowProducer {
       }
     }
 
-    const parentJob = new Job(client, parentKeys, parentId, flow.name, flow.data, parentOpts);
+    const parentJob = new Job(client, parentKeys, parentId, flow.name, flow.data, parentOpts, this.serializer);
     parentJob.timestamp = timestamp;
 
     return { job: parentJob, children: childNodes };

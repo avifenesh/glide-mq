@@ -83,6 +83,7 @@ async function handleProcess(id: string, serialized: SerializedJob): Promise<voi
       stack: getSanitizedStack(err),
       errorName: err?.name,
       discarded: job.discarded,
+      delayedUntil: typeof err?.delayedUntil === 'number' ? err.delayedUntil : undefined,
     });
   }
 }
@@ -130,6 +131,7 @@ function handleMessage(msg: MainToChild): void {
           error: sanitizePath(err?.message ?? String(err)) ?? 'Unknown error',
           stack: getSanitizedStack(err),
           errorName: err?.name,
+          delayedUntil: typeof err?.delayedUntil === 'number' ? err.delayedUntil : undefined,
         });
       });
       break;

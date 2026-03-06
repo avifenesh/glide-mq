@@ -11,6 +11,7 @@ export type {
   QueueOptions,
   WorkerOptions,
   JobOptions,
+  AddAndWaitOptions,
   JobData,
   Processor,
   FlowJob,
@@ -31,9 +32,12 @@ export type {
   SandboxOptions,
   SearchJobsOptions,
   WorkerInfo,
+  Serializer,
 } from './types';
 
-export { GlideMQError, ConnectionError, UnrecoverableError } from './errors';
+export { JSON_SERIALIZER } from './types';
+
+export { GlideMQError, ConnectionError, UnrecoverableError, DelayedError } from './errors';
 export { isClusterClient } from './connection';
 export { gracefulShutdown } from './graceful-shutdown';
 export type { GracefulShutdownHandle } from './graceful-shutdown';

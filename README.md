@@ -21,16 +21,19 @@ npm install glide-mq
 ### Core queueing
 - **Queues & Workers** — producer/consumer with configurable concurrency ([Usage](docs/USAGE.md#queue), [Demo](demo/README.md#demo-scenarios))
 - **Delayed, priority, and batch jobs** — schedule jobs, prioritize critical work, and ingest at high throughput with `addBulk` ([Usage](docs/USAGE.md#queue), [Demo](demo/README.md#demo-scenarios))
+- **Request-reply** — enqueue and await a single job result with `queue.addAndWait(...)` ([Usage](docs/USAGE.md#request-reply-with-addandwait))
 - **Job search & progress tracking** — query by state/name/data and stream progress updates ([Usage](docs/USAGE.md#worker), [Search tests](tests/search.test.ts))
 
 ### Reliability & control
 - **Retries, backoff, and DLQ** — exponential/fixed/custom retries with dead-letter queues ([Advanced](docs/ADVANCED.md#retries-and-backoff), [Demo](demo/README.md#demo-scenarios))
 - **Stalled recovery, pause/resume, and drain** — auto-reclaim stuck jobs, pause processing, and server-side drain waiting/delayed jobs ([Usage](docs/USAGE.md#worker), [Demo](demo/README.md#api-endpoints-dashboard-server))
+- **Durability & recovery guide** — persistence modes, crash windows, worker recovery, and failover caveats ([Durability](docs/DURABILITY.md))
 - **Job revocation + sandboxed processors** — cooperative cancellation and isolated file-based processors in worker threads/child processes ([Advanced](docs/ADVANCED.md#job-revocation), [Architecture](docs/ARCHITECTURE.md#typescript-api), [Sandbox example](tests/sandbox-integration.test.ts))
 
 ### Orchestration & scheduling
 - **Workflows** — `FlowProducer` parent-child trees and `chain`/`group`/`chord` helpers ([Workflows](docs/WORKFLOWS.md), [Demo](demo/README.md#demo-scenarios))
 - **Schedulers** — cron and interval repeatable jobs persisted across restarts ([Advanced](docs/ADVANCED.md#job-schedulers), [Demo](demo/README.md#demo-scenarios))
+- **Step jobs** — pause an active job and resume it later with `job.moveToDelayed(...)` for multi-step workflows ([Usage](docs/USAGE.md#pause-and-resume-a-job-later-step-jobs))
 - **Per-key ordering, global concurrency, and rate limiting** — deterministic ordering with queue-wide and token-bucket controls ([Advanced](docs/ADVANCED.md#ordering-and-group-concurrency), [Advanced](docs/ADVANCED.md#global-concurrency), [Advanced](docs/ADVANCED.md#global-rate-limiting))
 - **Deduplication** — simple, throttle, and debounce modes with TTL ([Advanced](docs/ADVANCED.md#deduplication), [Demo](demo/README.md#demo-scenarios))
 

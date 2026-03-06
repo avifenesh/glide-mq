@@ -3,7 +3,8 @@ import { fork, ChildProcess } from 'child_process';
 import type { MainToChild, ChildToMain } from './types';
 import { toSerializedJob } from './types';
 import type { Job } from '../job';
-import { GlideMQError, UnrecoverableError } from '../errors';
+import { DelayedError, GlideMQError, UnrecoverableError } from '../errors';
+import { isPlainStepPayload } from '../utils';
 
 interface PoolWorker {
   thread: WorkerThread | ChildProcess;
@@ -192,8 +193,14 @@ export class SandboxPool {
               if (msg.id === invocationId) {
                 cleanup();
                 this.release(pw);
+                const hasValidDelayedUntil =
+                  typeof msg.delayedUntil === 'number' && Number.isFinite(msg.delayedUntil) && msg.delayedUntil >= 0;
                 const err =
-                  msg.errorName === 'UnrecoverableError' ? new UnrecoverableError(msg.error) : new Error(msg.error);
+                  msg.errorName === 'UnrecoverableError'
+                    ? new UnrecoverableError(msg.error)
+                    : msg.errorName === 'DelayedError' && hasValidDelayedUntil
+                      ? new DelayedError(msg.delayedUntil!, msg.error)
+                      : new Error(msg.error);
                 if (msg.stack) err.stack = msg.stack;
                 if (msg.discarded) job.discarded = true;
                 reject(err);
@@ -255,6 +262,25 @@ export class SandboxPool {
         case 'discard':
           job.discarded = true;
           break;
+        case 'moveToDelayed': {
+          const timestamp = Number(msg.args[0]);
+          if (!Number.isFinite(timestamp) || timestamp < 0) {
+            throw new Error('Timestamp must be a finite Unix millisecond value >= 0');
+          }
+          if (!job.entryId) {
+            throw new Error('moveToDelayed() can only be used while the job is active in a Worker');
+          }
+          const nextStep = msg.args[1];
+          if (nextStep != null) {
+            if (!isPlainStepPayload(job.data)) {
+              throw new Error('moveToDelayed(nextStep) requires plain-object job data');
+            }
+            job.requestMoveToDelayed(timestamp, { ...job.data, step: nextStep as string });
+          } else {
+            job.requestMoveToDelayed(timestamp);
+          }
+          break;
+        }
         default:
           throw new Error(`Unknown proxy method: ${msg.method}`);
       }

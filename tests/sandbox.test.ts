@@ -6,6 +6,7 @@ import { SandboxPool } from '../src/sandbox/pool';
 import { SandboxJob } from '../src/sandbox/sandbox-job';
 import { createSandboxedProcessor } from '../src/sandbox/index';
 import { Job } from '../src/job';
+import { DelayedError } from '../src/errors';
 import { LIBRARY_VERSION } from '../src/functions/index';
 
 vi.mock('@glidemq/speedkey', () => {
@@ -32,6 +33,9 @@ const PROGRESS_PROCESSOR = path.join(PROCESSORS, 'progress.js');
 const FLOOD_PROGRESS_PROCESSOR = path.join(PROCESSORS, 'flood-progress.js');
 const CONDITIONAL_CRASH_PROCESSOR = path.join(PROCESSORS, 'conditional-crash.js');
 const CONDITIONAL_PROXY_CRASH_PROCESSOR = path.join(PROCESSORS, 'conditional-proxy-crash.js');
+const MOVE_TO_DELAYED_PROCESSOR = path.join(PROCESSORS, 'move-to-delayed.js');
+const THROW_DELAYED_ERROR_PROCESSOR = path.join(PROCESSORS, 'throw-delayed-error.js');
+const THROW_SPOOFED_DELAYED_ERROR_PROCESSOR = path.join(PROCESSORS, 'throw-spoofed-delayed-error.js');
 
 // The compiled runner.js lives in dist/sandbox/
 const RUNNER_PATH = path.resolve(__dirname, '..', 'dist', 'sandbox', 'runner.js');
@@ -138,6 +142,42 @@ describe('SandboxJob', () => {
     expect(job.data).toEqual({ new: true });
   });
 
+  it('should send proxy-request for moveToDelayed()', async () => {
+    const sendMessage = vi.fn();
+    const job = new SandboxJob(
+      { id: '1', name: 'j', data: { step: 'send' }, opts: {}, attemptsMade: 0, timestamp: 0, progress: 0 },
+      sendMessage,
+    );
+
+    const delayPromise = job.moveToDelayed(123456, 'next');
+    const msg = sendMessage.mock.calls[0][0];
+
+    expect(msg.method).toBe('moveToDelayed');
+    expect(msg.args).toEqual([123456, 'next']);
+    expect(job.data).toEqual({ step: 'send' });
+
+    job.handleProxyResponse({ type: 'proxy-response', id: msg.id });
+    await expect(delayPromise).rejects.toBeInstanceOf(DelayedError);
+    expect(job.data).toEqual({ step: 'next' });
+  });
+
+  it('should omit nextStep from moveToDelayed proxy args when not provided', async () => {
+    const sendMessage = vi.fn();
+    const job = new SandboxJob(
+      { id: '1', name: 'j', data: { step: 'send' }, opts: {}, attemptsMade: 0, timestamp: 0, progress: 0 },
+      sendMessage,
+    );
+
+    const delayPromise = job.moveToDelayed(123456);
+    const msg = sendMessage.mock.calls[0][0];
+
+    expect(msg.method).toBe('moveToDelayed');
+    expect(msg.args).toEqual([123456]);
+
+    job.handleProxyResponse({ type: 'proxy-response', id: msg.id });
+    await expect(delayPromise).rejects.toBeInstanceOf(DelayedError);
+  });
+
   it('should reject proxy call on error response', async () => {
     const sendMessage = vi.fn();
     const job = new SandboxJob(
@@ -150,6 +190,17 @@ describe('SandboxJob', () => {
 
     job.handleProxyResponse({ type: 'proxy-response', id: msg.id, error: 'connection lost' });
     await expect(logPromise).rejects.toThrow('connection lost');
+  });
+
+  it('should reject moveToDelayed(nextStep) for non-plain payloads before proxying', async () => {
+    const sendMessage = vi.fn();
+    const job = new SandboxJob(
+      { id: '1', name: 'j', data: Object.create(null), opts: {}, attemptsMade: 0, timestamp: 0, progress: 0 },
+      sendMessage,
+    );
+
+    await expect(job.moveToDelayed(123456, 'next')).rejects.toThrow('plain-object job data');
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it('should trigger abort signal on _abort()', () => {
@@ -233,6 +284,87 @@ describe('SandboxPool', () => {
     } as unknown as Job;
 
     await expect(pool.run(fakeJob)).rejects.toThrow('processor error');
+
+    await pool.close();
+  });
+
+  it('should proxy moveToDelayed requests back to the main job', async () => {
+    const pool = new SandboxPool(MOVE_TO_DELAYED_PROCESSOR, true, 1, RUNNER_PATH);
+
+    const fakeJob: any = {
+      id: 'job-delay',
+      name: 'test',
+      data: { step: 'send' },
+      opts: {},
+      attemptsMade: 0,
+      timestamp: Date.now(),
+      progress: 0,
+      entryId: '1-0',
+      log: vi.fn(),
+      updateProgress: vi.fn(),
+      requestMoveToDelayed: vi.fn(),
+    };
+    fakeJob.updateData = vi.fn().mockImplementation(async (data: any) => {
+      fakeJob.data = data;
+    });
+
+    await expect(pool.run(fakeJob as Job)).rejects.toBeInstanceOf(DelayedError);
+    expect(fakeJob.updateData).not.toHaveBeenCalled();
+    expect(fakeJob.requestMoveToDelayed).toHaveBeenCalledWith(123456, { step: 'next' });
+
+    await pool.close();
+  });
+
+  it('should preserve DelayedError metadata from sandboxed processors', async () => {
+    const pool = new SandboxPool(THROW_DELAYED_ERROR_PROCESSOR, true, 1, RUNNER_PATH);
+
+    const fakeJob: any = {
+      id: 'job-delay-error',
+      name: 'test',
+      data: { step: 'send' },
+      opts: {},
+      attemptsMade: 0,
+      timestamp: Date.now(),
+      progress: 0,
+      entryId: '1-0',
+      log: vi.fn(),
+      updateProgress: vi.fn(),
+      updateData: vi.fn(),
+      requestMoveToDelayed: vi.fn(),
+    };
+
+    await expect(pool.run(fakeJob as Job)).rejects.toMatchObject({
+      name: 'DelayedError',
+      delayedUntil: 654321,
+    });
+    expect(fakeJob.requestMoveToDelayed).not.toHaveBeenCalled();
+
+    await pool.close();
+  });
+
+  it('should not treat spoofed DelayedError names as real delayed requests', async () => {
+    const pool = new SandboxPool(THROW_SPOOFED_DELAYED_ERROR_PROCESSOR, true, 1, RUNNER_PATH);
+
+    const fakeJob: any = {
+      id: 'job-spoofed-delay-error',
+      name: 'test',
+      data: { step: 'send' },
+      opts: {},
+      attemptsMade: 0,
+      timestamp: Date.now(),
+      progress: 0,
+      entryId: '1-0',
+      log: vi.fn(),
+      updateProgress: vi.fn(),
+      updateData: vi.fn(),
+      requestMoveToDelayed: vi.fn(),
+    };
+
+    const error = await pool.run(fakeJob as Job).catch((err) => err);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(DelayedError);
+    expect(error.message).toContain('not really delayed');
+    expect(fakeJob.requestMoveToDelayed).not.toHaveBeenCalled();
 
     await pool.close();
   });

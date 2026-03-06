@@ -1,9 +1,11 @@
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
-import type { JobOptions, Client } from './types';
+import type { JobOptions, Client, Serializer } from './types';
+import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
-import { calculateBackoff, decompress, MAX_JOB_DATA_SIZE } from './utils';
+import { DelayedError } from './errors';
+import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
 export class Job<D = any, R = any> {
@@ -39,6 +41,16 @@ export class Job<D = any, R = any> {
    */
   discarded = false;
 
+  /** @internal Request captured by moveToDelayed() while inside the worker. */
+  moveToDelayedRequest?: { delayedUntil: number; serializedData?: string; nextData?: D };
+
+  /**
+   * Set to true when data or returnvalue could not be deserialized from Valkey.
+   * This typically indicates a serializer mismatch between the producer and consumer.
+   * When true, `data` is set to `{} as D` and `returnvalue` to `undefined`.
+   */
+  deserializationFailed = false;
+
   /**
    * Stream entry ID assigned when the job was added to the stream.
    * Used by Worker to XACK after processing.
@@ -50,11 +62,22 @@ export class Job<D = any, R = any> {
   private client: Client;
   /** @internal */
   private queueKeys: QueueKeys;
+  /** @internal */
+  private serializer: Serializer;
 
   /** @internal */
-  constructor(client: Client, queueKeys: QueueKeys, id: string, name: string, data: D, opts: JobOptions) {
+  constructor(
+    client: Client,
+    queueKeys: QueueKeys,
+    id: string,
+    name: string,
+    data: D,
+    opts: JobOptions,
+    serializer?: Serializer,
+  ) {
     this.client = client;
     this.queueKeys = queueKeys;
+    this.serializer = serializer ?? JSON_SERIALIZER;
     this.id = id;
     this.name = name;
     this.data = data;
@@ -109,11 +132,7 @@ export class Job<D = any, R = any> {
    * Replace the data payload of this job.
    */
   async updateData(data: D): Promise<void> {
-    const serialized = JSON.stringify(data);
-    const byteLen = Buffer.byteLength(serialized, 'utf8');
-    if (byteLen > MAX_JOB_DATA_SIZE) {
-      throw new Error(`Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE})`);
-    }
+    const serialized = this.serializeData(data);
     await this.client.hset(this.queueKeys.job(this.id), {
       data: serialized,
     });
@@ -126,6 +145,30 @@ export class Job<D = any, R = any> {
    */
   discard(): void {
     this.discarded = true;
+  }
+
+  /** @internal */
+  requestMoveToDelayed(timestamp: number, nextData?: D): void {
+    this.moveToDelayedRequest = {
+      delayedUntil: Math.trunc(timestamp),
+      ...(nextData !== undefined ? { serializedData: this.serializeData(nextData), nextData } : {}),
+    };
+    if (nextData !== undefined) {
+      this.data = nextData;
+    }
+  }
+
+  /** @internal */
+  consumeMoveToDelayedRequest():
+    | {
+        delayedUntil: number;
+        serializedData?: string;
+        nextData?: D;
+      }
+    | undefined {
+    const requested = this.moveToDelayedRequest;
+    this.moveToDelayedRequest = undefined;
+    return requested;
   }
 
   /**
@@ -165,7 +208,7 @@ export class Job<D = any, R = any> {
       for (let i = 0; i < results.length; i++) {
         const val = results[i];
         if (val != null) {
-          result[memberKeys[i]] = JSON.parse(String(val));
+          result[memberKeys[i]] = this.serializer.deserialize(String(val)) as R;
         }
       }
     }
@@ -265,6 +308,32 @@ export class Job<D = any, R = any> {
     if (result === 'ok') {
       this.opts.delay = 0;
     }
+  }
+
+  /**
+   * Pause an active job and resume it after the given UNIX timestamp in ms.
+   * Optionally updates `job.data.step` before yielding back to the worker.
+   *
+   * This method must be called from inside a Worker processor.
+   */
+  async moveToDelayed(timestamp: number, nextStep?: string): Promise<never> {
+    if (!Number.isFinite(timestamp) || timestamp < 0) {
+      throw new Error('Timestamp must be a finite Unix millisecond value >= 0');
+    }
+    if (!this.entryId) {
+      throw new Error('moveToDelayed() can only be used while the job is active in a Worker');
+    }
+
+    const delayedUntil = Math.trunc(timestamp);
+    if (nextStep !== undefined) {
+      if (!isPlainStepPayload(this.data)) {
+        throw new Error('moveToDelayed(nextStep) requires plain-object job data');
+      }
+      this.requestMoveToDelayed(delayedUntil, { ...this.data, step: nextStep } as D);
+    } else {
+      this.requestMoveToDelayed(delayedUntil);
+    }
+    throw new DelayedError(delayedUntil);
   }
 
   /**
@@ -373,14 +442,23 @@ export class Job<D = any, R = any> {
    * Construct a Job instance from a hash returned by HGETALL.
    * @internal
    */
-  static fromHash<D, R>(client: Client, queueKeys: QueueKeys, id: string, hash: Record<string, string>): Job<D, R> {
+  static fromHash<D, R>(
+    client: Client,
+    queueKeys: QueueKeys,
+    id: string,
+    hash: Record<string, string>,
+    serializer?: Serializer,
+  ): Job<D, R> {
+    const s = serializer ?? JSON_SERIALIZER;
     let data: D;
     let opts: JobOptions;
     let returnvalue: R | undefined;
+    let deserializationFailed = false;
     try {
-      data = JSON.parse(decompress(hash.data || '{}'));
+      data = hash.data ? (s.deserialize(decompress(hash.data)) as D) : ({} as D);
     } catch {
       data = {} as D;
+      deserializationFailed = true;
     }
     try {
       opts = JSON.parse(hash.opts || '{}');
@@ -388,12 +466,14 @@ export class Job<D = any, R = any> {
       opts = {};
     }
     try {
-      returnvalue = hash.returnvalue ? JSON.parse(hash.returnvalue) : undefined;
+      returnvalue = hash.returnvalue ? (s.deserialize(hash.returnvalue) as R) : undefined;
     } catch {
       returnvalue = undefined;
+      deserializationFailed = true;
     }
 
-    const job = new Job<D, R>(client, queueKeys, id, hash.name || '', data, opts);
+    const job = new Job<D, R>(client, queueKeys, id, hash.name || '', data, opts, s);
+    job.deserializationFailed = deserializationFailed;
     job.attemptsMade = parseInt(hash.attemptsMade || '0', 10);
     job.timestamp = parseInt(hash.timestamp || '0', 10);
     job.processedOn = hash.processedOn ? parseInt(hash.processedOn, 10) : undefined;
@@ -415,5 +495,14 @@ export class Job<D = any, R = any> {
       }
     }
     return job;
+  }
+
+  private serializeData(data: D): string {
+    const serialized = this.serializer.serialize(data);
+    const byteLen = Buffer.byteLength(serialized, 'utf8');
+    if (byteLen > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE})`);
+    }
+    return serialized;
   }
 }

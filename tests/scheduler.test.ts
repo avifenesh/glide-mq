@@ -157,4 +157,67 @@ describeEachMode('Job schedulers', (CONNECTION) => {
 
     await cleanupClient.hdel(k.schedulers, ['corrupt']);
   });
+
+  // --- Timezone support (#74) ---
+
+  it('upsertJobScheduler stores tz in scheduler entry', async () => {
+    await queue.upsertJobScheduler('tz-cron', { pattern: '0 9 * * *', tz: 'America/New_York' });
+
+    const k = buildKeys(Q);
+    const raw = await cleanupClient.hget(k.schedulers, 'tz-cron');
+    expect(raw).not.toBeNull();
+
+    const config = JSON.parse(String(raw));
+    expect(config.pattern).toBe('0 9 * * *');
+    expect(config.tz).toBe('America/New_York');
+    expect(config.nextRun).toBeGreaterThan(0);
+
+    await queue.removeJobScheduler('tz-cron');
+  });
+
+  it('upsertJobScheduler without tz does not store tz field', async () => {
+    await queue.upsertJobScheduler('no-tz-cron', { pattern: '0 9 * * *' });
+
+    const k = buildKeys(Q);
+    const raw = await cleanupClient.hget(k.schedulers, 'no-tz-cron');
+    expect(raw).not.toBeNull();
+
+    const config = JSON.parse(String(raw));
+    expect(config.tz).toBeUndefined();
+
+    await queue.removeJobScheduler('no-tz-cron');
+  });
+
+  it('upsertJobScheduler rejects invalid timezone', async () => {
+    await expect(queue.upsertJobScheduler('bad-tz', { pattern: '0 9 * * *', tz: 'Fake/Zone' })).rejects.toThrow(
+      'Invalid timezone',
+    );
+  });
+
+  it('getJobScheduler returns tz for timezone-aware scheduler', async () => {
+    await queue.upsertJobScheduler('tz-lookup', { pattern: '30 14 * * *', tz: 'Asia/Tokyo' });
+
+    const result = await queue.getJobScheduler('tz-lookup');
+    expect(result).not.toBeNull();
+    expect(result!.pattern).toBe('30 14 * * *');
+    expect(result!.tz).toBe('Asia/Tokyo');
+
+    await queue.removeJobScheduler('tz-lookup');
+  });
+
+  it('tz is ignored for every-based schedulers (no effect on interval)', async () => {
+    // tz should be stored but has no effect on interval-based schedulers
+    const before = Date.now();
+    await queue.upsertJobScheduler('tz-every', { every: 5000, tz: 'America/New_York' });
+
+    const k = buildKeys(Q);
+    const raw = await cleanupClient.hget(k.schedulers, 'tz-every');
+    const config = JSON.parse(String(raw));
+    // nextRun should be roughly now + 5000ms (interval), not affected by tz
+    expect(config.nextRun).toBeGreaterThanOrEqual(before + 4000);
+    expect(config.nextRun).toBeLessThanOrEqual(before + 7000);
+    expect(config.tz).toBe('America/New_York');
+
+    await queue.removeJobScheduler('tz-every');
+  });
 });

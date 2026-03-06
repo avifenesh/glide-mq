@@ -2,9 +2,17 @@ import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
 import { TimeUnit } from '@glidemq/speedkey';
-import type { WorkerOptions, Processor, Client } from './types';
+import type { WorkerOptions, Processor, Client, Serializer } from './types';
+import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
-import { buildKeys, calculateBackoff, keyPrefix, nextReconnectDelay, reconnectWithBackoff } from './utils';
+import {
+  buildKeys,
+  calculateBackoff,
+  keyPrefix,
+  nextReconnectDelay,
+  reconnectWithBackoff,
+  MAX_JOB_DATA_SIZE,
+} from './utils';
 import { createSandboxedProcessor } from './sandbox';
 import {
   createClient,
@@ -13,7 +21,7 @@ import {
   ensureFunctionLibraryOnce,
   createConsumerGroup,
 } from './connection';
-import { GlideMQError, ConnectionError, UnrecoverableError } from './errors';
+import { GlideMQError, ConnectionError, DelayedError, UnrecoverableError } from './errors';
 import {
   CONSUMER_GROUP,
   completeJob,
@@ -23,6 +31,7 @@ import {
   rateLimit as rateLimitFn,
   checkConcurrency,
   moveToActive,
+  moveActiveToDelayed,
   deferActive,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
@@ -69,6 +78,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private workerHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private readonly startedAt = Date.now();
   private readonly hostname = os.hostname();
+  private serializer: Serializer;
 
   constructor(name: string, processor: Processor<D, R> | string, opts: WorkerOptions) {
     super();
@@ -98,6 +108,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       this.processor = processor;
     }
     this.opts = opts;
+    this.serializer = opts.serializer ?? JSON_SERIALIZER;
     this.queueKeys = buildKeys(name, opts.prefix);
     this.consumerId = `worker-${Date.now()}-${randomBytes(4).toString('hex')}`;
 
@@ -150,6 +161,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
       consumerId: this.consumerId,
       queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
       onPromotionTick: () => this.refreshMetaFlags(),
+      serializer: this.serializer,
     });
     this.scheduler.start();
 
@@ -257,6 +269,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
           consumerId: this.consumerId,
           queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
           onPromotionTick: () => this.refreshMetaFlags(),
+          serializer: this.serializer,
         });
         this.scheduler.start();
 
@@ -557,6 +570,38 @@ export class Worker<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Move an active job back into delayed state after the processor requests a pause.
+   */
+  private async handleMoveToDelayed(
+    job: Job<D, R>,
+    jobId: string,
+    entryId: string,
+    request: { delayedUntil: number; serializedData?: string; nextData?: D },
+  ): Promise<void> {
+    if (!this.commandClient) return;
+
+    const result = await moveActiveToDelayed(
+      this.commandClient,
+      this.queueKeys,
+      jobId,
+      entryId,
+      request.delayedUntil,
+      request.serializedData,
+      Date.now(),
+      CONSUMER_GROUP,
+    );
+    if (result.startsWith('error:')) {
+      const reason = result.slice(6);
+      throw new Error(`Cannot move to delayed: ${reason}`);
+    }
+
+    if (request.nextData !== undefined) {
+      job.data = request.nextData;
+    }
+    job.opts.delay = Math.max(0, request.delayedUntil - Date.now());
+  }
+
+  /**
    * Build parent dependency info for complete/completeAndFetchNext calls.
    */
   private buildParentInfo(
@@ -631,7 +676,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
         currentHash = moveResult as Record<string, string>;
       }
 
-      const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash);
+      const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash, this.serializer);
       job.entryId = currentEntryId;
 
       const orderingReady = await this.isOrderingTurn(job);
@@ -639,11 +684,32 @@ export class Worker<D = any, R = any> extends EventEmitter {
         await this.deferOutOfOrderJob(currentJobId, currentEntryId);
         return;
       }
+      const completionHints = {
+        orderingKey: job.orderingKey,
+        orderingSeq: job.orderingSeq,
+        groupKey: job.groupKey,
+      };
 
       this.isDrained = false;
       this.emit('active', job, currentJobId);
 
       const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
+
+      const delayedRequest = job.consumeMoveToDelayedRequest();
+      const delayedError = processError instanceof DelayedError ? processError : undefined;
+      if (delayedError) {
+        try {
+          await this.handleMoveToDelayed(job, currentJobId, currentEntryId, {
+            delayedUntil: delayedRequest?.delayedUntil ?? delayedError.delayedUntil,
+            serializedData: delayedRequest?.serializedData,
+            nextData: delayedRequest?.nextData,
+          });
+        } catch (delayErr) {
+          const err = delayErr instanceof Error ? delayErr : new Error(String(delayErr));
+          await this.handleJobFailure(job, currentJobId, currentEntryId, err);
+        }
+        return;
+      }
 
       if (processError || aborted) {
         await this.handleJobFailure(job, currentJobId, currentEntryId, aborted ? new Error('revoked') : processError!);
@@ -652,7 +718,31 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
       if (!this.commandClient) return;
 
-      const returnvalue = processResult !== undefined ? JSON.stringify(processResult) : 'null';
+      let returnvalue: string;
+      try {
+        returnvalue = processResult !== undefined ? this.serializer.serialize(processResult) : 'null';
+      } catch (serializeErr) {
+        const err = serializeErr instanceof Error ? serializeErr : new Error(String(serializeErr));
+        await this.handleJobFailure(
+          job,
+          currentJobId,
+          currentEntryId,
+          new Error(`Serializer failed on return value: ${err.message}`),
+        );
+        return;
+      }
+      const byteLen = Buffer.byteLength(returnvalue, 'utf8');
+      if (byteLen > MAX_JOB_DATA_SIZE) {
+        await this.handleJobFailure(
+          job,
+          currentJobId,
+          currentEntryId,
+          new Error(
+            `Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller return values or store large data externally.`,
+          ),
+        );
+        return;
+      }
       const parentInfo = this.buildParentInfo(job, currentJobId);
 
       const fetchResult = await completeAndFetchNext(
@@ -666,6 +756,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
         this.consumerId,
         job.opts.removeOnComplete,
         parentInfo,
+        completionHints,
       );
 
       job.returnvalue = processResult;
@@ -752,6 +843,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
     const dlqName = this.opts.deadLetterQueue.name;
     const dlqKeys = buildKeys(dlqName, this.opts.prefix);
     try {
+      // DLQ envelope is always JSON. The data field is the already-deserialized
+      // job.data embedded directly - this means non-JSON types (Date, Map, Set)
+      // undergo lossy JSON conversion. BigInt will throw, caught by outer catch.
+      // A future major version could change this to use the queue's serializer.
       const dlqData = JSON.stringify({
         originalQueue: this.name,
         originalJobId: job.id,

@@ -1,8 +1,9 @@
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
-import type { Client, SchedulerEntry } from './types';
-import { CONSUMER_GROUP, promote, promoteRateLimited, reclaimStalled, addJobArgs } from './functions/index';
+import type { Client, SchedulerEntry, Serializer } from './types';
+import { JSON_SERIALIZER } from './types';
+import { CONSUMER_GROUP, promote, promoteRateLimited, reclaimStalled, addJobArgs, nextDueAt } from './functions/index';
 import type { buildKeys } from './utils';
-import { nextCronOccurrence } from './utils';
+import { nextCronOccurrence, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
 export interface SchedulerOptions {
@@ -14,6 +15,8 @@ export interface SchedulerOptions {
   queuePrefix?: string;
   /** Called at the end of each promotion tick to refresh cached meta flags. */
   onPromotionTick?: () => void;
+  /** Serializer for job template data. Inherited from the parent Worker/Queue. */
+  serializer?: Serializer;
 }
 
 /**
@@ -32,9 +35,14 @@ export class Scheduler {
   private maxStalledCount: number;
   private consumerId: string;
   private onPromotionTick?: () => void;
+  private serializer: Serializer;
   private promotionTimer: ReturnType<typeof setInterval> | null = null;
+  private promotionWakeTimer: ReturnType<typeof setTimeout> | null = null;
+  private nextPromotionWakeAt = 0;
   private stalledTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private promotionInFlight = false;
+  private promotionQueued = false;
 
   constructor(client: Client, queueKeys: ReturnType<typeof buildKeys>, opts: SchedulerOptions = {}) {
     this.client = client;
@@ -44,6 +52,7 @@ export class Scheduler {
     this.maxStalledCount = opts.maxStalledCount ?? 1;
     this.consumerId = opts.consumerId ?? 'scheduler';
     this.onPromotionTick = opts.onPromotionTick;
+    this.serializer = opts.serializer ?? JSON_SERIALIZER;
   }
 
   start(): void {
@@ -65,9 +74,15 @@ export class Scheduler {
 
   stop(): void {
     this.running = false;
+    this.promotionQueued = false;
     if (this.promotionTimer) {
       clearInterval(this.promotionTimer);
       this.promotionTimer = null;
+    }
+    if (this.promotionWakeTimer) {
+      clearTimeout(this.promotionWakeTimer);
+      this.promotionWakeTimer = null;
+      this.nextPromotionWakeAt = 0;
     }
     if (this.stalledTimer) {
       clearInterval(this.stalledTimer);
@@ -76,16 +91,76 @@ export class Scheduler {
   }
 
   private runPromotion(): void {
+    if (!this.running) return;
+    if (this.promotionInFlight) {
+      this.promotionQueued = true;
+      return;
+    }
+
+    this.promotionInFlight = true;
     this.promoteDelayed()
       .then(() => this.promoteRateLimitedGroups())
       .then(() => this.runSchedulers())
       .then(() => {
         this.onPromotionTick?.();
       })
+      .then(() => this.scheduleNextPromotionWake())
       .catch(() => {
         // Scheduler has no EventEmitter - errors are transient connection issues
         // that self-heal on the next interval tick. Worker reconnect handles the rest.
+      })
+      .finally(() => {
+        this.promotionInFlight = false;
+        if (this.running && this.promotionQueued) {
+          this.promotionQueued = false;
+          this.runPromotion();
+        }
       });
+  }
+
+  private async scheduleNextPromotionWake(): Promise<void> {
+    if (!this.running) return;
+
+    const dueAt = await nextDueAt(this.client, this.queueKeys);
+    if (dueAt == null) {
+      if (this.promotionWakeTimer) {
+        clearTimeout(this.promotionWakeTimer);
+        this.promotionWakeTimer = null;
+      }
+      this.nextPromotionWakeAt = 0;
+      return;
+    }
+
+    const now = Date.now();
+    const delay = dueAt <= now ? 1 : dueAt - now;
+
+    // Keep promotionInterval as the coarse polling ceiling; only schedule
+    // an early wakeup when the next due job should fire sooner.
+    if (delay >= this.promotionInterval) {
+      if (this.promotionWakeTimer) {
+        clearTimeout(this.promotionWakeTimer);
+        this.promotionWakeTimer = null;
+      }
+      this.nextPromotionWakeAt = 0;
+      return;
+    }
+
+    const target = now + delay;
+    if (this.promotionWakeTimer && this.nextPromotionWakeAt > 0 && this.nextPromotionWakeAt <= target) {
+      return;
+    }
+
+    if (this.promotionWakeTimer) {
+      clearTimeout(this.promotionWakeTimer);
+      this.promotionWakeTimer = null;
+    }
+
+    this.nextPromotionWakeAt = target;
+    this.promotionWakeTimer = setTimeout(() => {
+      this.promotionWakeTimer = null;
+      this.nextPromotionWakeAt = 0;
+      this.runPromotion();
+    }, delay);
   }
 
   private runStalledRecovery(): void {
@@ -158,7 +233,16 @@ export class Scheduler {
       // Compute the job name and data from the template
       const template = config.template ?? {};
       const jobName = template.name ?? schedulerName;
-      const jobData = template.data !== undefined ? JSON.stringify(template.data) : '{}';
+      let jobData: string;
+      try {
+        jobData = template.data !== undefined ? this.serializer.serialize(template.data) : '{}';
+      } catch {
+        continue; // Skip entry if serializer fails
+      }
+      const byteLen = Buffer.byteLength(jobData, 'utf8');
+      if (byteLen > MAX_JOB_DATA_SIZE) {
+        continue; // Skip oversized entries
+      }
       const jobOpts = template.opts ? JSON.stringify(template.opts) : '{}';
       const priority = template.opts?.priority ?? 0;
       const maxAttempts = template.opts?.attempts ?? 0;
@@ -189,7 +273,7 @@ export class Scheduler {
       // Compute next run
       let nextRun: number;
       if (config.pattern) {
-        nextRun = nextCronOccurrence(config.pattern, now);
+        nextRun = nextCronOccurrence(config.pattern, now, config.tz);
       } else if (config.every) {
         nextRun = now + config.every;
       } else {

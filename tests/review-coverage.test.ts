@@ -120,6 +120,50 @@ describeEachMode('processJobFastPath (c=1)', (CONNECTION) => {
   }, 20000);
 });
 
+describeEachMode('moveToActive hash reuse', (CONNECTION) => {
+  const Q = 'review-move-active-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('returns updated activation fields without duplicate stale entries', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const job = await queue.add('activate', { ok: true });
+    const k = buildKeys(Q);
+    const timestamp = 1234567890;
+    const entryId = '0-1';
+    const group = 'review-moveToActive-group';
+
+    const raw = await cleanupClient.fcall(
+      'glidemq_moveToActive',
+      [k.job(job.id), k.stream],
+      [timestamp.toString(), entryId, group, job.id],
+    );
+    expect(Array.isArray(raw)).toBe(true);
+
+    const valuesByField = new Map<string, string[]>();
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+      const field = String(raw[i]);
+      const value = String(raw[i + 1]);
+      valuesByField.set(field, [...(valuesByField.get(field) ?? []), value]);
+    }
+
+    expect(valuesByField.get('state')).toEqual(['active']);
+    expect(valuesByField.get('processedOn')).toEqual([timestamp.toString()]);
+    expect(valuesByField.get('lastActive')).toEqual([timestamp.toString()]);
+    expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('active');
+
+    await queue.close();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 2. globalConcurrencyEnabled optimization
 // ---------------------------------------------------------------------------

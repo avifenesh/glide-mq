@@ -6,6 +6,11 @@ const DEFAULT_PREFIX = 'glide';
 // 1MB max payload size to prevent DoS
 export const MAX_JOB_DATA_SIZE = 1048576;
 
+export function isPlainStepPayload(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.getPrototypeOf(value) === Object.prototype;
+}
+
 // ---- Compression helpers ----
 
 const COMPRESSED_PREFIX = 'gz:';
@@ -263,11 +268,121 @@ function parseCronField(field: string, min: number, max: number): number[] {
 const MAX_SEARCH_YEARS = 10;
 
 /**
+ * Validate an IANA timezone string. Throws if invalid.
+ */
+export function validateTimezone(tz: string): void {
+  try {
+    Intl.DateTimeFormat('en-US', { timeZone: tz });
+  } catch {
+    throw new Error(`Invalid timezone: ${tz}`);
+  }
+}
+
+// Cache DateTimeFormat instances per timezone for performance
+const dtfCache = new Map<string, Intl.DateTimeFormat>();
+
+function getFormatter(tz: string): Intl.DateTimeFormat {
+  let f = dtfCache.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: 'numeric',
+      second: 'numeric',
+      hour12: false,
+    });
+    dtfCache.set(tz, f);
+  }
+  return f;
+}
+
+interface TzParts {
+  year: number;
+  month: number; // 1-12
+  day: number;
+  hour: number;
+  minute: number;
+  dayOfWeek: number; // 0=Sunday
+}
+
+/**
+ * Get wall-clock parts for a UTC epoch in the given timezone.
+ */
+function utcToTzParts(epochMs: number, tz: string): TzParts {
+  const f = getFormatter(tz);
+  const parts = f.formatToParts(new Date(epochMs));
+  const p: Record<string, string> = {};
+  for (const part of parts) {
+    p[part.type] = part.value;
+  }
+  const year = parseInt(p.year, 10);
+  const month = parseInt(p.month, 10);
+  const day = parseInt(p.day, 10);
+  // hour12:false can return '24' for midnight in some locales; normalize to 0
+  let hour = parseInt(p.hour, 10);
+  if (hour === 24) hour = 0;
+  const minute = parseInt(p.minute, 10);
+  // Compute day of week from a UTC date constructed from these parts
+  const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  return { year, month, day, hour, minute, dayOfWeek: dow };
+}
+
+/**
+ * Convert wall-clock parts in a timezone to a UTC epoch.
+ * For spring-forward gaps (wall-clock time doesn't exist), returns -1.
+ * For fall-back overlaps (ambiguous), returns the first (earlier) UTC instant.
+ */
+function tzPartsToUtc(year: number, month: number, day: number, hour: number, minute: number, tz: string): number {
+  // Start with a naive UTC estimate using the same wall-clock components
+  const naive = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  // Get the actual wall-clock time at our naive estimate to compute the offset
+  const naiveParts = utcToTzParts(naive, tz);
+  // Compute the offset in ms: how much the timezone differs from UTC at this point
+  const naiveWall = Date.UTC(
+    naiveParts.year,
+    naiveParts.month - 1,
+    naiveParts.day,
+    naiveParts.hour,
+    naiveParts.minute,
+    0,
+    0,
+  );
+  const offsetMs = naiveWall - naive;
+  // Apply offset to get a candidate
+  const candidate = naive - offsetMs;
+  const cp = utcToTzParts(candidate, tz);
+  if (cp.year === year && cp.month === month && cp.day === day && cp.hour === hour && cp.minute === minute) {
+    return candidate;
+  }
+  // Offset might be wrong near DST transitions - try +/- 1 hour
+  for (const delta of [-3600000, 3600000, -7200000, 7200000]) {
+    const alt = candidate + delta;
+    const ap = utcToTzParts(alt, tz);
+    if (ap.year === year && ap.month === month && ap.day === day && ap.hour === hour && ap.minute === minute) {
+      return alt;
+    }
+  }
+  // Wall-clock time doesn't exist (spring-forward gap)
+  return -1;
+}
+
+/**
  * Compute the next occurrence of a cron pattern after `afterMs` (epoch ms).
  * Supports standard 5-field cron: minute hour dayOfMonth month dayOfWeek.
- * Returns epoch ms of the next matching time.
+ * When `tz` is provided, the cron expression is evaluated in that IANA timezone.
+ * Returns epoch ms of the next matching time (always in UTC).
  */
-export function nextCronOccurrence(pattern: string, afterMs: number): number {
+export function nextCronOccurrence(pattern: string, afterMs: number, tz?: string): number {
+  if (tz) {
+    return nextCronOccurrenceTz(pattern, afterMs, tz);
+  }
+  return nextCronOccurrenceUtc(pattern, afterMs);
+}
+
+function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
   const fields = pattern.trim().split(/\s+/);
   if (fields.length !== 5) {
     throw new Error(`Invalid cron pattern: expected 5 fields, got ${fields.length}`);
@@ -337,6 +452,152 @@ export function nextCronOccurrence(pattern: string, afterMs: number): number {
     }
 
     return d.getTime();
+  }
+
+  throw new Error(`No cron match found within ${MAX_SEARCH_YEARS} years for pattern: ${pattern}`);
+}
+
+/**
+ * Timezone-aware cron search. Evaluates the cron expression in wall-clock time
+ * of the specified timezone, then converts the result to UTC epoch.
+ *
+ * DST handling:
+ * - Spring-forward: if a candidate wall-clock time doesn't exist (gap), skip to next candidate
+ * - Fall-back: if a wall-clock time is ambiguous (overlap), pick the first (earlier) UTC instant
+ */
+function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): number {
+  const fields = pattern.trim().split(/\s+/);
+  if (fields.length !== 5) {
+    throw new Error(`Invalid cron pattern: expected 5 fields, got ${fields.length}`);
+  }
+
+  const minutes = parseCronField(fields[0], 0, 59);
+  const hours = parseCronField(fields[1], 0, 23);
+  const daysOfMonth = parseCronField(fields[2], 1, 31);
+  const months = parseCronField(fields[3], 1, 12);
+  const daysOfWeek = parseCronField(fields[4], 0, 6);
+
+  // Get the wall-clock time in the target timezone for "afterMs + 1 minute"
+  const startParts = utcToTzParts(afterMs, tz);
+  // Advance by 1 minute in wall-clock time
+  let year = startParts.year;
+  let month = startParts.month;
+  let day = startParts.day;
+  let hour = startParts.hour;
+  let minute = startParts.minute + 1;
+
+  // Normalize overflow
+  if (minute >= 60) {
+    minute = 0;
+    hour++;
+    if (hour >= 24) {
+      hour = 0;
+      // Advance day via UTC date arithmetic for correctness
+      const tmp = new Date(Date.UTC(year, month - 1, day + 1));
+      year = tmp.getUTCFullYear();
+      month = tmp.getUTCMonth() + 1;
+      day = tmp.getUTCDate();
+    }
+  }
+
+  const endYear = year + MAX_SEARCH_YEARS;
+
+  while (year <= endYear) {
+    // 1. Month check
+    if (!months.includes(month)) {
+      const nextMonth = months.find((m) => m > month);
+      if (nextMonth != null) {
+        month = nextMonth;
+        day = 1;
+        hour = 0;
+        minute = 0;
+      } else {
+        year++;
+        month = months[0];
+        day = 1;
+        hour = 0;
+        minute = 0;
+      }
+      continue;
+    }
+
+    // 2. Day check - use UTC Date for day-of-week and month-length
+    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    if (day > daysInMonth) {
+      // Overflowed month
+      month++;
+      day = 1;
+      hour = 0;
+      minute = 0;
+      if (month > 12) {
+        month = 1;
+        year++;
+      }
+      continue;
+    }
+    const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+    if (!daysOfMonth.includes(day) || !daysOfWeek.includes(dow)) {
+      day++;
+      hour = 0;
+      minute = 0;
+      continue;
+    }
+
+    // 3. Hour check
+    if (!hours.includes(hour)) {
+      const nextHour = hours.find((h) => h > hour);
+      if (nextHour != null) {
+        hour = nextHour;
+        minute = 0;
+      } else {
+        day++;
+        hour = 0;
+        minute = 0;
+      }
+      continue;
+    }
+
+    // 4. Minute check
+    if (!minutes.includes(minute)) {
+      const nextMinute = minutes.find((m) => m > minute);
+      if (nextMinute != null) {
+        minute = nextMinute;
+      } else {
+        hour++;
+        minute = 0;
+        continue;
+      }
+    }
+
+    // Found a candidate wall-clock time - convert to UTC
+    const utcMs = tzPartsToUtc(year, month, day, hour, minute, tz);
+    if (utcMs === -1) {
+      // Spring-forward gap: this wall-clock time doesn't exist, advance 1 minute
+      minute++;
+      if (minute >= 60) {
+        minute = 0;
+        hour++;
+        if (hour >= 24) {
+          hour = 0;
+          day++;
+        }
+      }
+      continue;
+    }
+    // Ensure the result is strictly after afterMs
+    if (utcMs > afterMs) {
+      return utcMs;
+    }
+    // Edge case: the UTC result is not after afterMs (possible during fall-back overlap)
+    minute++;
+    if (minute >= 60) {
+      minute = 0;
+      hour++;
+      if (hour >= 24) {
+        hour = 0;
+        day++;
+      }
+    }
   }
 
   throw new Error(`No cron match found within ${MAX_SEARCH_YEARS} years for pattern: ${pattern}`);
