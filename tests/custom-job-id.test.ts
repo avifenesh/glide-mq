@@ -104,6 +104,13 @@ describeEachMode('Custom Job IDs', (CONNECTION) => {
     await expect(queue.add('task', {}, { jobId: longId })).rejects.toThrow('jobId must be at most 256 characters');
   });
 
+  it('accepts jobId of exactly 256 characters', async () => {
+    const id256 = 'b'.repeat(256);
+    const job = await queue.add('task', { boundary: true }, { jobId: id256 });
+    expect(job).not.toBeNull();
+    expect(job!.id).toBe(id256);
+  });
+
   it('custom ID with deduplication', async () => {
     const job = await queue.add('dedup-task', { v: 1 }, {
       jobId: 'custom-with-dedup',
@@ -161,6 +168,13 @@ describeEachMode('Custom Job IDs - addBulk', (CONNECTION) => {
     expect(jobs.length).toBe(2);
     expect(jobs[0].id).toBe('bulk-dup-1');
     expect(jobs[1].id).toBe('bulk-dup-2');
+  });
+
+  it('addBulk throws for jobId exceeding 256 characters', async () => {
+    const longId = 'z'.repeat(257);
+    await expect(
+      queue.addBulk([{ name: 'task', data: {}, opts: { jobId: longId } }]),
+    ).rejects.toThrow('jobId must be at most 256 characters');
   });
 });
 
@@ -220,6 +234,39 @@ describeEachMode('Custom Job IDs - FlowProducer', (CONNECTION) => {
         children: [
           { name: 'child', queueName: Q_CHILD, data: {} },
         ],
+      }),
+    ).rejects.toThrow('Duplicate job ID');
+  });
+
+  it('flow with duplicate child ID throws', async () => {
+    await expect(
+      flow.add({
+        name: 'parent-new',
+        queueName: Q_PARENT,
+        data: {},
+        children: [
+          { name: 'child-dup', queueName: Q_CHILD, data: {}, opts: { jobId: 'flow-child-1' } }, // already exists
+        ],
+      }),
+    ).rejects.toThrow('Duplicate job ID');
+  });
+
+  it('flow leaf (no children) with duplicate ID throws', async () => {
+    // First add a leaf flow job
+    await flow.add({
+      name: 'leaf',
+      queueName: Q_PARENT,
+      data: {},
+      opts: { jobId: 'leaf-custom-1' },
+    });
+
+    // Duplicate leaf should throw
+    await expect(
+      flow.add({
+        name: 'leaf-dup',
+        queueName: Q_PARENT,
+        data: {},
+        opts: { jobId: 'leaf-custom-1' },
       }),
     ).rejects.toThrow('Duplicate job ID');
   });
