@@ -787,13 +787,24 @@ await queue.add('daily-report', data, {
 // glide-mq (and BullMQ v5+) - upsertJobScheduler
 await queue.upsertJobScheduler(
   'daily-report',                             // scheduler name
+  { pattern: '0 9 * * *', tz: 'America/New_York' }, // direct replacement for repeat
+  { name: 'daily-report', data: { v: 1 } },  // job template
+);
+```
+
+You can then layer on glide-mq-only scheduler bounds when needed:
+
+```ts
+await queue.upsertJobScheduler(
+  'black-friday-report',
   {
     pattern: '0 9 * * *',
+    tz: 'America/New_York',
     startDate: new Date('2026-11-28T00:00:00Z'),
     endDate: new Date('2026-12-01T00:00:00Z'),
-    limit: 36,
-  },                                          // schedule (cron or every ms)
-  { name: 'daily-report', data: { v: 1 } },  // job template
+    limit: 4,
+  },
+  { name: 'daily-report', data: { campaign: 'black-friday' } },
 );
 ```
 

@@ -61,9 +61,9 @@ import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
 
 const MAX_ORDERING_KEY_LENGTH = 256;
-const SCHEDULER_LOCK_MAX_ATTEMPTS = 40;
 const SCHEDULER_LOCK_TTL_MS = 5000;
 const SCHEDULER_LOCK_RETRY_DELAY_MS = 25;
+const SCHEDULER_LOCK_MAX_ATTEMPTS = Math.ceil(SCHEDULER_LOCK_TTL_MS / SCHEDULER_LOCK_RETRY_DELAY_MS);
 
 function validateOrderingKey(orderingKey: string): void {
   if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
@@ -832,6 +832,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void> {
     const client = await this.getClient();
 
+    if (!schedule.pattern && !schedule.every) {
+      throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
+    }
     if (schedule.tz) {
       validateTimezone(schedule.tz);
     }
