@@ -76,6 +76,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private cachedRateLimitDuration = 0;
   private sandboxClose?: (force?: boolean) => Promise<void>;
   private workerHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private pollLoopPromise: Promise<void> | null = null;
   private readonly startedAt = Date.now();
   private readonly hostname = os.hostname();
   private serializer: Serializer;
@@ -121,6 +122,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     // Auto-init: start the worker immediately
     this.initPromise = this.init();
+    this.initPromise.catch((err) => {
+      if (!this.closing && !this.closed) {
+        this.emit('error', err);
+      }
+    });
   }
 
   /**
@@ -161,6 +167,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
       consumerId: this.consumerId,
       queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
       onPromotionTick: () => this.refreshMetaFlags(),
+      onError: (err) => {
+        if (!this.closing) {
+          this.emit('error', err);
+        }
+      },
       serializer: this.serializer,
     });
     this.scheduler.start();
@@ -173,7 +184,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }, heartbeatMs);
 
     this.running = true;
-    this.pollLoop();
+    this.pollLoopPromise = this.pollLoop();
   }
 
   /**
@@ -269,6 +280,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
           consumerId: this.consumerId,
           queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
           onPromotionTick: () => this.refreshMetaFlags(),
+          onError: (err) => {
+            if (!this.closing) {
+              this.emit('error', err);
+            }
+          },
           serializer: this.serializer,
         });
         this.scheduler.start();
@@ -283,7 +299,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
           void this.registerWorker();
         }, hbMs);
       },
-      () => this.pollLoop(),
+      () => {
+        this.pollLoopPromise = this.pollLoop();
+        return this.pollLoopPromise;
+      },
     );
   }
 
@@ -604,15 +623,27 @@ export class Worker<D = any, R = any> extends EventEmitter {
   /**
    * Build parent dependency info for complete/completeAndFetchNext calls.
    */
-  private buildParentInfo(
+  private async buildParentInfo(
     job: Job<D, R>,
     jobId: string,
-  ): { depsMember: string; parentId: string; parentKeys: QueueKeys } | undefined {
-    if (!job.parentId || !job.parentQueue) return undefined;
+  ): Promise<{ depsMember: string; parentId: string; parentKeys: QueueKeys } | undefined> {
+    let parentId = job.parentId;
+    let parentQueue = job.parentQueue;
+
+    if ((!parentId || !parentQueue) && this.commandClient) {
+      const [refreshedParentId, refreshedParentQueue] = await this.commandClient.hmget(this.queueKeys.job(jobId), [
+        'parentId',
+        'parentQueue',
+      ]);
+      parentId = refreshedParentId ? String(refreshedParentId) : parentId;
+      parentQueue = refreshedParentQueue ? String(refreshedParentQueue) : parentQueue;
+    }
+
+    if (!parentId || !parentQueue) return undefined;
     return {
       depsMember: `${keyPrefix(this.opts.prefix ?? 'glide', this.name)}:${jobId}`,
-      parentId: job.parentId,
-      parentKeys: buildKeys(job.parentQueue, this.opts.prefix),
+      parentId,
+      parentKeys: buildKeys(parentQueue, this.opts.prefix),
     };
   }
 
@@ -743,7 +774,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
         );
         return;
       }
-      const parentInfo = this.buildParentInfo(job, currentJobId);
+      const parentInfo = await this.buildParentInfo(job, currentJobId);
 
       const fetchResult = await completeAndFetchNext(
         this.commandClient,
@@ -1037,6 +1068,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     if (this.scheduler) {
       this.scheduler.stop();
+      if (!force) {
+        await this.scheduler.waitForIdle();
+      }
       this.scheduler = null;
     }
 
@@ -1069,15 +1103,19 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
     this.heartbeatIntervals.clear();
 
-    if (this.commandClient) {
-      if (this.commandClientOwned) {
-        this.commandClient.close();
-      }
-      this.commandClient = null;
-    }
     if (this.blockingClient) {
       this.blockingClient.close();
       this.blockingClient = null;
+    }
+    void this.pollLoopPromise?.catch(() => {});
+    this.pollLoopPromise = null;
+
+    if (this.commandClient) {
+      const commandClient = this.commandClient;
+      this.commandClient = null;
+      if (this.commandClientOwned) {
+        commandClient.close();
+      }
     }
 
     this.closed = true;

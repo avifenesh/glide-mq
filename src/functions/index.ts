@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '36';
+export const LIBRARY_VERSION = '38';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -544,6 +544,40 @@ redis.register_function('glidemq_nextDue', function(keys, args)
   return math.floor(nextDue)
 end)
 
+redis.register_function('glidemq_tryLock', function(keys, args)
+  local lockKey = keys[1]
+  local token = args[1]
+  local ttl = tonumber(args[2]) or 1000
+  local result = redis.call('SET', lockKey, token, 'PX', tostring(ttl), 'NX')
+  if result then
+    return 1
+  end
+  return 0
+end)
+
+redis.register_function('glidemq_unlock', function(keys, args)
+  local lockKey = keys[1]
+  local token = args[1]
+  local current = redis.call('GET', lockKey)
+  if current == token then
+    redis.call('DEL', lockKey)
+    return 1
+  end
+  return 0
+end)
+
+redis.register_function('glidemq_renewLock', function(keys, args)
+  local lockKey = keys[1]
+  local token = args[1]
+  local ttl = tonumber(args[2]) or 1000
+  local current = redis.call('GET', lockKey)
+  if current == token then
+    redis.call('PEXPIRE', lockKey, ttl)
+    return 1
+  end
+  return 0
+end)
+
 redis.register_function('glidemq_complete', function(keys, args)
   local streamKey = keys[1]
   local completedKey = keys[2]
@@ -599,13 +633,16 @@ redis.register_function('glidemq_complete', function(keys, args)
     local parentJobKey = keys[6]
     local parentStreamKey = keys[7]
     local parentEventsKey = keys[8]
-    local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-    local totalDeps = redis.call('SCARD', parentDepsKey)
-    local remaining = totalDeps - doneCount
-    if remaining <= 0 then
-      redis.call('HSET', parentJobKey, 'state', 'waiting')
-      redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
-      emitEvent(parentEventsKey, 'active', parentId, nil)
+    local depMarker = 'depdone:' .. depsMember
+    if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
+      local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+      local totalDeps = redis.call('SCARD', parentDepsKey)
+      local remaining = totalDeps - doneCount
+      if remaining <= 0 then
+        redis.call('HSET', parentJobKey, 'state', 'waiting')
+        redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
+        emitEvent(parentEventsKey, 'active', parentId, nil)
+      end
     end
   end
   return 1
@@ -676,12 +713,15 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local parentJobKey = keys[6]
     local parentStreamKey = keys[7]
     local parentEventsKey = keys[8]
-    local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-    local totalDeps = redis.call('SCARD', parentDepsKey)
-    if totalDeps - doneCount <= 0 then
-      redis.call('HSET', parentJobKey, 'state', 'waiting')
-      redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
-      emitEvent(parentEventsKey, 'active', parentId, nil)
+    local depMarker = 'depdone:' .. depsMember
+    if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
+      local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+      local totalDeps = redis.call('SCARD', parentDepsKey)
+      if totalDeps - doneCount <= 0 then
+        redis.call('HSET', parentJobKey, 'state', 'waiting')
+        redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
+        emitEvent(parentEventsKey, 'active', parentId, nil)
+      end
     end
   end
 
@@ -1705,6 +1745,12 @@ redis.register_function('glidemq_completeChild', function(keys, args)
   local parentEventsKey = keys[4]
   local depsMember = args[1]
   local parentId = args[2]
+  local depMarker = 'depdone:' .. depsMember
+  if redis.call('HSETNX', parentJobKey, depMarker, '1') == 0 then
+    local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
+    local totalDeps = redis.call('SCARD', depsKey)
+    return totalDeps - doneCount
+  end
   local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
   local totalDeps = redis.call('SCARD', depsKey)
   local remaining = totalDeps - doneCount
@@ -2432,6 +2478,21 @@ export async function nextDueAt(client: Client, k: QueueKeys): Promise<number | 
     return null;
   }
   return ts;
+}
+
+export async function tryLock(client: Client, lockKey: string, token: string, ttlMs: number): Promise<boolean> {
+  const result = await client.fcall('glidemq_tryLock', [lockKey], [token, ttlMs.toString()]);
+  return Number(result) === 1;
+}
+
+export async function unlock(client: Client, lockKey: string, token: string): Promise<boolean> {
+  const result = await client.fcall('glidemq_unlock', [lockKey], [token]);
+  return Number(result) === 1;
+}
+
+export async function renewLock(client: Client, lockKey: string, token: string, ttlMs: number): Promise<boolean> {
+  const result = await client.fcall('glidemq_renewLock', [lockKey], [token, ttlMs.toString()]);
+  return Number(result) === 1;
 }
 
 /**

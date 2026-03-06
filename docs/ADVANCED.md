@@ -133,6 +133,18 @@ await queue.upsertJobScheduler(
   { name: 'generate-report', data: { type: 'daily' } },
 );
 
+// Bound a scheduler to a campaign window and stop after 36 runs
+await queue.upsertJobScheduler(
+  'black-friday-deals',
+  {
+    pattern: '0 */2 * * *',
+    startDate: new Date('2026-11-28T00:00:00Z'),
+    endDate: new Date('2026-12-01T00:00:00Z'),
+    limit: 36,
+  },
+  { name: 'promote-deal', data: { campaign: 'black-friday' } },
+);
+
 // Interval: run "cleanup" every 5 minutes
 await queue.upsertJobScheduler(
   'cleanup',
@@ -146,6 +158,8 @@ const schedulers = await queue.getRepeatableJobs();
 // Remove a scheduler (does not cancel jobs already in flight)
 await queue.removeJobScheduler('cleanup');
 ```
+
+`startDate` defers the first eligible run, `endDate` prevents any future run whose scheduled time would fall outside the window, and `limit` auto-removes the scheduler after creating that many jobs. `getJobScheduler()` / `getRepeatableJobs()` expose the stored bounds together with `iterationCount` so you can inspect how many runs have already fired.
 
 The internal `Scheduler` class fires a promotion loop that converts due scheduler entries into real jobs, then re-registers the next occurrence.
 

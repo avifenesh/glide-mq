@@ -241,6 +241,12 @@ export interface ScheduleOpts {
   every?: number;
   /** IANA timezone for cron patterns (e.g. 'America/New_York'). Defaults to UTC. */
   tz?: string;
+  /** Earliest time the scheduler may create a job. Accepts a Date or epoch milliseconds. */
+  startDate?: Date | number;
+  /** Latest scheduled run time allowed before the scheduler auto-removes itself. */
+  endDate?: Date | number;
+  /** Maximum number of jobs to create before the scheduler auto-removes itself. */
+  limit?: number;
 }
 
 export interface JobTemplate {
@@ -254,6 +260,10 @@ export interface SchedulerEntry {
   every?: number;
   /** IANA timezone for cron patterns (e.g. 'America/New_York'). Defaults to UTC. */
   tz?: string;
+  startDate?: number;
+  endDate?: number;
+  limit?: number;
+  iterationCount?: number;
   template?: JobTemplate;
   lastRun?: number;
   nextRun: number;

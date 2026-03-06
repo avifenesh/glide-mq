@@ -1,9 +1,20 @@
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
+import { randomBytes } from 'crypto';
 import type { Client, SchedulerEntry, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
-import { CONSUMER_GROUP, promote, promoteRateLimited, reclaimStalled, addJobArgs, nextDueAt } from './functions/index';
+import {
+  CONSUMER_GROUP,
+  promote,
+  promoteRateLimited,
+  reclaimStalled,
+  addJobArgs,
+  nextDueAt,
+  tryLock,
+  renewLock,
+  unlock,
+} from './functions/index';
 import type { buildKeys } from './utils';
-import { nextCronOccurrence, MAX_JOB_DATA_SIZE } from './utils';
+import { computeFollowingSchedulerNextRun, isValidSchedulerEvery, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
 export interface SchedulerOptions {
@@ -15,6 +26,8 @@ export interface SchedulerOptions {
   queuePrefix?: string;
   /** Called at the end of each promotion tick to refresh cached meta flags. */
   onPromotionTick?: () => void;
+  /** Surface scheduler errors through the parent worker instead of swallowing them silently. */
+  onError?: (err: Error) => void;
   /** Serializer for job template data. Inherited from the parent Worker/Queue. */
   serializer?: Serializer;
 }
@@ -35,6 +48,7 @@ export class Scheduler {
   private maxStalledCount: number;
   private consumerId: string;
   private onPromotionTick?: () => void;
+  private onError?: (err: Error) => void;
   private serializer: Serializer;
   private promotionTimer: ReturnType<typeof setInterval> | null = null;
   private promotionWakeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -43,6 +57,7 @@ export class Scheduler {
   private running = false;
   private promotionInFlight = false;
   private promotionQueued = false;
+  private pendingRuns = new Set<Promise<unknown>>();
 
   constructor(client: Client, queueKeys: ReturnType<typeof buildKeys>, opts: SchedulerOptions = {}) {
     this.client = client;
@@ -52,7 +67,12 @@ export class Scheduler {
     this.maxStalledCount = opts.maxStalledCount ?? 1;
     this.consumerId = opts.consumerId ?? 'scheduler';
     this.onPromotionTick = opts.onPromotionTick;
+    this.onError = opts.onError;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
+  }
+
+  private reportError(err: unknown): void {
+    this.onError?.(err instanceof Error ? err : new Error(String(err)));
   }
 
   start(): void {
@@ -90,6 +110,19 @@ export class Scheduler {
     }
   }
 
+  async waitForIdle(): Promise<void> {
+    while (this.pendingRuns.size > 0) {
+      await Promise.allSettled(Array.from(this.pendingRuns));
+    }
+  }
+
+  private trackRun(run: Promise<unknown>): void {
+    this.pendingRuns.add(run);
+    void run.finally(() => {
+      this.pendingRuns.delete(run);
+    });
+  }
+
   private runPromotion(): void {
     if (!this.running) return;
     if (this.promotionInFlight) {
@@ -98,24 +131,27 @@ export class Scheduler {
     }
 
     this.promotionInFlight = true;
-    this.promoteDelayed()
-      .then(() => this.promoteRateLimitedGroups())
-      .then(() => this.runSchedulers())
-      .then(() => {
-        this.onPromotionTick?.();
-      })
-      .then(() => this.scheduleNextPromotionWake())
-      .catch(() => {
-        // Scheduler has no EventEmitter - errors are transient connection issues
-        // that self-heal on the next interval tick. Worker reconnect handles the rest.
-      })
-      .finally(() => {
-        this.promotionInFlight = false;
-        if (this.running && this.promotionQueued) {
-          this.promotionQueued = false;
-          this.runPromotion();
-        }
-      });
+    this.trackRun(
+      this.promoteDelayed()
+        .then(() => this.promoteRateLimitedGroups())
+        .then(() => this.runSchedulers())
+        .then(() => {
+          this.onPromotionTick?.();
+        })
+        .then(() => this.scheduleNextPromotionWake())
+        .catch((err) => {
+          // Scheduler has no EventEmitter - errors are transient connection issues
+          // that self-heal on the next interval tick. Worker reconnect handles the rest.
+          this.reportError(err);
+        })
+        .finally(() => {
+          this.promotionInFlight = false;
+          if (this.running && this.promotionQueued) {
+            this.promotionQueued = false;
+            this.runPromotion();
+          }
+        }),
+    );
   }
 
   private async scheduleNextPromotionWake(): Promise<void> {
@@ -164,10 +200,13 @@ export class Scheduler {
   }
 
   private runStalledRecovery(): void {
-    this.reclaimStalledJobs().catch(() => {
-      // Scheduler has no EventEmitter - errors are transient connection issues
-      // that self-heal on the next interval tick. Worker reconnect handles the rest.
-    });
+    this.trackRun(
+      this.reclaimStalledJobs().catch((err) => {
+        // Scheduler has no EventEmitter - errors are transient connection issues
+        // that self-heal on the next interval tick. Worker reconnect handles the rest.
+        this.reportError(err);
+      }),
+    );
   }
 
   /**
@@ -202,120 +241,204 @@ export class Scheduler {
     );
   }
 
+  private schedulerLockKey(name: string): string {
+    return `${this.queueKeys.schedulers}:lock:${name}`;
+  }
+
+  private schedulerLockTtlMs(): number {
+    return Math.max(1000, Math.min(this.promotionInterval * 2, 5000));
+  }
+
+  private async acquireSchedulerLock(name: string): Promise<{ key: string; token: string } | null> {
+    const key = this.schedulerLockKey(name);
+    const token = randomBytes(8).toString('hex');
+    const ttlMs = this.schedulerLockTtlMs();
+    const acquired = await tryLock(this.client, key, token, ttlMs);
+    if (!acquired) return null;
+    return { key, token };
+  }
+
+  private async releaseSchedulerLock(lock: { key: string; token: string }): Promise<void> {
+    try {
+      await unlock(this.client, lock.key, lock.token);
+    } catch {
+      // Best effort - the TTL is a fallback if release fails.
+    }
+  }
+
   /**
    * Check all scheduler entries in the schedulers hash. For any whose nextRun <= now,
    * create a job from the template and update lastRun/nextRun.
    */
   async runSchedulers(): Promise<number> {
     const now = Date.now();
-    const allEntries = await this.client.hgetall(this.queueKeys.schedulers);
+    const tickLock = await this.acquireSchedulerLock('__tick__');
+    if (!tickLock) return 0;
+    const renewEveryMs = Math.max(250, Math.floor(this.schedulerLockTtlMs() / 3));
+    let lockLost = false;
+    const markTickLockLost = () => {
+      if (lockLost) return;
+      lockLost = true;
+      this.reportError(new Error('Lost scheduler tick lock while processing schedulers'));
+    };
+    const renewTimer = setInterval(() => {
+      void renewLock(this.client, tickLock.key, tickLock.token, this.schedulerLockTtlMs())
+        .then((renewed) => {
+          if (!renewed) {
+            markTickLockLost();
+          }
+        })
+        .catch((err) => {
+          this.reportError(err);
+        });
+    }, renewEveryMs);
 
-    // hgetall returns { field, value }[] — empty array means no schedulers
-    if (!allEntries || allEntries.length === 0) return 0;
-
-    // Collect operations to batch into a single pipeline
+    let fired = 0;
     const pendingJobs: { keys: string[]; args: string[] }[] = [];
     const pendingUpdates: Record<string, string> = Object.create(null);
     const pendingDeletions: string[] = [];
+    let pendingUpdateCount = 0;
 
-    let fired = 0;
-    for (const entry of allEntries) {
-      const schedulerName = String(entry.field);
-      let config: SchedulerEntry;
-      try {
-        config = JSON.parse(String(entry.value));
-      } catch {
-        continue; // Skip malformed entries
+    try {
+      const allEntries = await this.client.hgetall(this.queueKeys.schedulers);
+
+      // hgetall returns { field, value }[] — empty array means no schedulers
+      if (!allEntries || allEntries.length === 0) {
+        return 0;
       }
 
-      if (!config.nextRun || config.nextRun > now) continue;
+      for (const entry of allEntries) {
+        if (lockLost) {
+          break;
+        }
 
-      // Compute the job name and data from the template
-      const template = config.template ?? {};
-      const jobName = template.name ?? schedulerName;
-      let jobData: string;
-      try {
-        jobData = template.data !== undefined ? this.serializer.serialize(template.data) : '{}';
-      } catch {
-        continue; // Skip entry if serializer fails
-      }
-      const byteLen = Buffer.byteLength(jobData, 'utf8');
-      if (byteLen > MAX_JOB_DATA_SIZE) {
-        continue; // Skip oversized entries
-      }
-      const jobOpts = template.opts ? JSON.stringify(template.opts) : '{}';
-      const priority = template.opts?.priority ?? 0;
-      const maxAttempts = template.opts?.attempts ?? 0;
+        const schedulerName = String(entry.field);
+        let config: SchedulerEntry;
+        try {
+          config = JSON.parse(String(entry.value));
+        } catch {
+          continue;
+        }
 
-      const jobTtl = template.opts?.ttl ?? 0;
-      pendingJobs.push(
-        addJobArgs(
-          this.queueKeys,
-          jobName,
-          jobData,
-          jobOpts,
-          now,
-          0,
-          priority,
-          '',
-          maxAttempts,
-          '',
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          jobTtl,
-        ),
-      );
+        const invalid = !config.pattern && !isValidSchedulerEvery(config.every);
+        if (invalid) {
+          pendingDeletions.push(schedulerName);
+          continue;
+        }
 
-      // Compute next run
-      let nextRun: number;
-      if (config.pattern) {
-        nextRun = nextCronOccurrence(config.pattern, now, config.tz);
-      } else if (config.every) {
-        nextRun = now + config.every;
-      } else {
-        // No repeat config - remove the scheduler entry
-        pendingDeletions.push(schedulerName);
+        if (!config.nextRun || config.nextRun > now) {
+          continue;
+        }
+
+        const currentIterationCount = config.iterationCount ?? 0;
+        if (
+          (config.limit != null && currentIterationCount >= config.limit) ||
+          (config.endDate != null && config.nextRun > config.endDate)
+        ) {
+          pendingDeletions.push(schedulerName);
+          continue;
+        }
+
+        let preparedNextRun: number | null | undefined;
+        if (config.pattern) {
+          try {
+            preparedNextRun = computeFollowingSchedulerNextRun(config, now);
+          } catch {
+            pendingDeletions.push(schedulerName);
+            continue;
+          }
+        }
+
+        const template = config.template ?? {};
+        const jobName = template.name ?? schedulerName;
+        let jobData: string;
+        try {
+          jobData = template.data !== undefined ? this.serializer.serialize(template.data) : '{}';
+        } catch {
+          continue;
+        }
+        const byteLen = Buffer.byteLength(jobData, 'utf8');
+        if (byteLen > MAX_JOB_DATA_SIZE) {
+          continue;
+        }
+
+        const jobOpts = template.opts ? JSON.stringify(template.opts) : '{}';
+        const priority = template.opts?.priority ?? 0;
+        const maxAttempts = template.opts?.attempts ?? 0;
+        const jobTtl = template.opts?.ttl ?? 0;
+
+        pendingJobs.push(
+          addJobArgs(
+            this.queueKeys,
+            jobName,
+            jobData,
+            jobOpts,
+            now,
+            0,
+            priority,
+            '',
+            maxAttempts,
+            '',
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            jobTtl,
+          ),
+        );
+
+        config.lastRun = now;
+        config.iterationCount = currentIterationCount + 1;
+        if (config.limit != null && config.iterationCount >= config.limit) {
+          pendingDeletions.push(schedulerName);
+        } else {
+          const nextRun = preparedNextRun ?? computeFollowingSchedulerNextRun(config, now);
+          if (nextRun == null) {
+            pendingDeletions.push(schedulerName);
+          } else {
+            config.nextRun = nextRun;
+            pendingUpdates[schedulerName] = JSON.stringify(config);
+            pendingUpdateCount++;
+          }
+        }
         fired++;
-        continue;
       }
 
-      config.lastRun = now;
-      config.nextRun = nextRun;
-      pendingUpdates[schedulerName] = JSON.stringify(config);
-      fired++;
-    }
-
-    if (fired === 0) return 0;
-
-    // Single-job fast path: avoid Batch overhead
-    if (pendingJobs.length === 1 && pendingDeletions.length === 0 && Object.keys(pendingUpdates).length <= 1) {
-      const { keys, args } = pendingJobs[0];
-      await this.client.fcall('glidemq_addJob', keys, args);
-      if (Object.keys(pendingUpdates).length === 1) {
-        await this.client.hset(this.queueKeys.schedulers, pendingUpdates);
+      if (pendingJobs.length === 0 && pendingDeletions.length === 0 && pendingUpdateCount === 0) {
+        return 0;
       }
+
+      if (lockLost) {
+        return 0;
+      }
+
+      const lockStillHeld = await renewLock(this.client, tickLock.key, tickLock.token, this.schedulerLockTtlMs());
+      if (!lockStillHeld) {
+        markTickLockLost();
+        return 0;
+      }
+
+      // This batch intentionally uses MULTI/EXEC so job creation and scheduler
+      // state updates stay in one transaction. All queue keys share the same hash
+      // tag, so the transactional batch remains single-slot in cluster mode.
+      const batch = isClusterClient(this.client) ? new ClusterBatch(true) : new Batch(true);
+
+      for (const { keys, args } of pendingJobs) {
+        batch.fcall('glidemq_addJob', keys, args);
+      }
+      if (pendingUpdateCount > 0) {
+        batch.hset(this.queueKeys.schedulers, pendingUpdates);
+      }
+      if (pendingDeletions.length > 0) {
+        batch.hdel(this.queueKeys.schedulers, pendingDeletions);
+      }
+      await this.client.exec(batch as any, false);
       return fired;
+    } finally {
+      clearInterval(renewTimer);
+      await this.releaseSchedulerLock(tickLock);
     }
-
-    // Batch all operations into a single pipeline RTT
-    const batch = isClusterClient(this.client) ? new ClusterBatch(false) : new Batch(false);
-
-    for (const { keys, args } of pendingJobs) {
-      batch.fcall('glidemq_addJob', keys, args);
-    }
-    if (Object.keys(pendingUpdates).length > 0) {
-      batch.hset(this.queueKeys.schedulers, pendingUpdates);
-    }
-    if (pendingDeletions.length > 0) {
-      batch.hdel(this.queueKeys.schedulers, pendingDeletions);
-    }
-
-    await this.client.exec(batch as any, false);
-
-    return fired;
   }
 }

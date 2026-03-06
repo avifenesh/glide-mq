@@ -126,6 +126,22 @@ describe('nextCronOccurrence', () => {
     const next = nextCronOccurrence('30 * * * *', now);
     expect(new Date(next).toISOString()).toBe('2024-01-01T10:30:00.000Z');
   });
+
+  it('aligns interval schedulers from a past startDate instead of delaying by a full extra interval', async () => {
+    const { computeInitialSchedulerNextRun } = await import('../src/utils');
+    const startDate = 1_000;
+    const now = 1_550;
+    const next = computeInitialSchedulerNextRun({ every: 250, startDate }, now);
+    expect(next).toBe(1_750);
+  });
+
+  it('keeps an interval scheduler immediately eligible when now is exactly on a startDate-aligned slot', async () => {
+    const { computeInitialSchedulerNextRun } = await import('../src/utils');
+    const startDate = 1_000;
+    const now = 1_500;
+    const next = computeInitialSchedulerNextRun({ every: 250, startDate, endDate: 1_500 }, now);
+    expect(next).toBe(1_500);
+  });
 });
 
 describe('validateTimezone', () => {

@@ -232,6 +232,25 @@ describe('Worker.close()', () => {
     await vi.advanceTimersByTimeAsync(50);
   });
 
+  it('should skip waiting for scheduler idle on force close', async () => {
+    const processor = vi.fn().mockResolvedValue('done');
+    const worker = new Worker('test-queue', processor, defaultWorkerOpts);
+    await worker.waitUntilReady();
+
+    const originalScheduler = (worker as any).scheduler;
+    originalScheduler?.stop();
+    const fakeScheduler = {
+      stop: vi.fn(),
+      waitForIdle: vi.fn(() => new Promise(() => {})),
+    };
+    (worker as any).scheduler = fakeScheduler;
+
+    await worker.close(true);
+
+    expect(fakeScheduler.stop).toHaveBeenCalledTimes(1);
+    expect(fakeScheduler.waitForIdle).not.toHaveBeenCalled();
+  });
+
   it('should stop the scheduler on close', async () => {
     const processor = vi.fn().mockResolvedValue('done');
     const worker = new Worker('test-queue', processor, defaultWorkerOpts);
