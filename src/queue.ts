@@ -250,6 +250,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
         }
         validateOrderingKey(orderingKey);
 
+        const customJobId = opts?.jobId ?? '';
+        if (customJobId !== '') {
+          if (customJobId.length > 256) throw new Error('jobId must be at most 256 characters');
+        }
+
         if (opts?.ttl != null) {
           if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
         }
@@ -295,8 +300,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
             tbRefillRate,
             jobCost,
             ttl,
+            customJobId,
           );
-          if (result === 'skipped') {
+          if (result === 'skipped' || result === 'duplicate') {
             return null;
           }
           if (result === 'ERR:COST_EXCEEDS_CAPACITY') {
@@ -323,7 +329,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
             tbRefillRate,
             jobCost,
             ttl,
+            customJobId,
           );
+          if (result === 'duplicate') {
+            return null;
+          }
           if (result === 'ERR:COST_EXCEEDS_CAPACITY') {
             throw new Error('Job cost exceeds token bucket capacity');
           }
@@ -414,6 +424,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
         if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
       }
       const deduplication = opts.deduplication;
+      const customJobId = opts.jobId ?? '';
+      if (customJobId !== '' && customJobId.length > 256) {
+        throw new Error('jobId must be at most 256 characters');
+      }
 
       let serializedData = this.serializer.serialize(entry.data);
       const byteLen = Buffer.byteLength(serializedData, 'utf8');
@@ -465,6 +479,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         ttl: opts.ttl ?? 0,
         deduplication,
         serializedData,
+        customJobId,
       };
     });
 
@@ -495,6 +510,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.tbRefillRate.toString(),
           p.jobCost.toString(),
           p.ttl.toString(),
+          p.customJobId,
         ]);
       } else {
         batch.fcall('glidemq_addJob', keys, [
@@ -514,6 +530,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.tbRefillRate.toString(),
           p.jobCost.toString(),
           p.ttl.toString(),
+          p.customJobId,
         ]);
       }
     }
@@ -681,7 +698,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     }
     return prepared.flatMap((p, i) => {
       const raw = String(rawResults[i]);
-      if (raw === 'skipped') return [];
+      if (raw === 'skipped' || raw === 'duplicate') return [];
       if (raw === 'ERR:COST_EXCEEDS_CAPACITY') {
         throw new Error('Job cost exceeds token bucket capacity');
       }

@@ -168,7 +168,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     this.serializer = this.opts.serializer ?? JSON_SERIALIZER;
   }
 
-  /** Add a single job. Returns null if deduplicated. */
+  /** Add a single job. Returns null if deduplicated or duplicate custom ID. */
   async add(name: string, data: D, opts?: JobOptions): Promise<TestJob<D, R> | null> {
     if (opts?.deduplication && this.opts.dedup) {
       const dedupId = opts.deduplication.id;
@@ -178,7 +178,20 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       this.dedupSet.add(dedupId);
     }
 
-    const id = String(++this.idCounter);
+    const customJobId = opts?.jobId ?? '';
+    if (customJobId !== '' && customJobId.length > 256) {
+      throw new Error('jobId must be at most 256 characters');
+    }
+
+    let id: string;
+    if (customJobId !== '') {
+      if (this.jobs.has(customJobId)) {
+        return null;
+      }
+      id = customJobId;
+    } else {
+      id = String(++this.idCounter);
+    }
     const now = Date.now();
     const ttl = opts?.ttl ?? 0;
     // Roundtrip data through serializer to match production behavior

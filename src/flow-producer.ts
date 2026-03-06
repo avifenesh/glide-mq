@@ -117,6 +117,10 @@ export class FlowProducer {
           `Job data exceeds maximum size (${dataByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
         );
       }
+      const customJobId = opts.jobId ?? '';
+      if (customJobId !== '' && customJobId.length > 256) {
+        throw new Error('jobId must be at most 256 characters');
+      }
       const jobId = await addJob(
         client,
         parentKeys,
@@ -136,7 +140,11 @@ export class FlowProducer {
         tbRefillRate,
         jobCost,
         opts.ttl ?? 0,
+        customJobId,
       );
+      if (String(jobId) === 'duplicate') {
+        throw new Error(`Duplicate job ID: ${customJobId}`);
+      }
       if (String(jobId) === 'ERR:COST_EXCEEDS_CAPACITY') {
         throw new Error('Job cost exceeds token bucket capacity');
       }
@@ -166,6 +174,10 @@ export class FlowProducer {
             `Job data exceeds maximum size (${childByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
           );
         }
+        const childCustomId = childOpts.jobId ?? '';
+        if (childCustomId !== '' && childCustomId.length > 256) {
+          throw new Error('jobId must be at most 256 characters');
+        }
         return {
           name: child.name,
           data: childData,
@@ -176,6 +188,7 @@ export class FlowProducer {
           keys: buildKeys(child.queueName, prefix),
           queuePrefix: keyPrefix(prefix, child.queueName),
           parentQueueName: parentQueueName,
+          customId: childCustomId,
         };
       });
 
@@ -196,6 +209,10 @@ export class FlowProducer {
         `Job data exceeds maximum size (${parentByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
       );
     }
+    const parentCustomId = parentOpts.jobId ?? '';
+    if (parentCustomId !== '' && parentCustomId.length > 256) {
+      throw new Error('jobId must be at most 256 characters');
+    }
     const ids = await addFlow(
       client,
       parentKeys,
@@ -208,8 +225,12 @@ export class FlowProducer {
       parentOpts.attempts ?? 0,
       childrenForLua,
       extraDeps,
+      parentCustomId,
     );
 
+    if (ids[0] === 'duplicate') {
+      throw new Error(`Duplicate job ID in flow`);
+    }
     const parentId = ids[0];
 
     // Set parentId and parentQueue on pre-existing sub-flow children

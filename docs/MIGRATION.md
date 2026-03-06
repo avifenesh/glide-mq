@@ -505,7 +505,7 @@ The processor function signature is identical. The only change is the connection
 | `removeOnFail` | `removeOnFail` | Full |
 | `deduplication` | `deduplication` | Changed (see [Deduplication](#deduplication)) |
 | `parent` | `parent` | Full |
-| `jobId` (custom ID) | - | Gap - IDs are auto-generated |
+| `jobId` (custom ID) | `jobId` | Full |
 | `lifo` | - | Gap - not supported |
 | `repeat` | - | Gap - use `queue.upsertJobScheduler()` |
 | `sizeLimit` | - | 1 MB hard limit enforced internally (JSON string character length) |
@@ -668,18 +668,15 @@ const state = await job.waitUntilFinished(500, 30000);
 // args: pollIntervalMs (default 500), timeoutMs (default 30000)
 ```
 
-**No custom `jobId`** - BullMQ allows setting a deterministic job ID via `opts.jobId`. glide-mq auto-generates sequential numeric IDs. If you need idempotent job creation, use deduplication instead:
+**Custom `jobId`** - glide-mq supports custom job IDs, matching BullMQ's `opts.jobId`. Adding a job with a duplicate custom ID returns `null` (silent skip):
 
 ```ts
 // BullMQ
 await queue.add('job', data, { jobId: 'my-deterministic-id' });
-```
 
-```ts
-// glide-mq - use deduplication for idempotency
-await queue.add('job', data, {
-  deduplication: { id: 'my-deterministic-id', ttl: 60000 },
-});
+// glide-mq - direct equivalent
+const job = await queue.add('job', data, { jobId: 'my-deterministic-id' });
+// job is null if a job with that ID already exists
 ```
 
 **No `lifo`** - Last-in-first-out ordering is not supported. Use `priority` (lower number = higher priority) to approximate LIFO behavior if needed.
@@ -1123,7 +1120,7 @@ These BullMQ features are not yet implemented.
 
 | Missing feature | Workaround |
 |---|---|
-| Custom `jobId` | Use `deduplication.id` for idempotent creation |
+| ~~Custom `jobId`~~ | Supported via `opts.jobId` |
 | `lifo` | Use `priority` values in reverse insertion order |
 | QueueEvents `'waiting'`, `'active'`, `'delayed'`, `'drained'`, `'deduplicated'` events | Use worker-level events or poll `getJobCounts()` |
 | `@nestjs/bullmq` integration | Not yet supported - use glide-mq directly |
@@ -1264,7 +1261,7 @@ Work through this after completing your migration:
 - [ ] Update all imports from `'bullmq'` to `'glide-mq'`
 - [ ] Convert all connection configs from `{ host, port }` to `{ addresses: [{ host, port }] }`
 - [ ] Replace `opts.repeat` with `queue.upsertJobScheduler()`
-- [ ] Replace `opts.jobId` with `opts.deduplication.id` where idempotency is needed
+- [ ] `opts.jobId` works directly - duplicate custom IDs return `null` instead of the existing job
 - [ ] Replace `settings.backoffStrategy` with `backoffStrategies` map in `WorkerOptions`
 - [ ] Remove `QueueScheduler` instantiation (not needed)
 - [ ] Remove `defaultJobOptions` from `QueueOptions`; apply options per job or via a wrapper

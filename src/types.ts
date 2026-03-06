@@ -118,6 +118,7 @@ export interface WorkerOptions extends QueueOptions {
 }
 
 export interface JobOptions {
+  jobId?: string;
   delay?: number;
   priority?: number;
   /**

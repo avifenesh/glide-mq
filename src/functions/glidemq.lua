@@ -95,7 +95,8 @@ end)
 -- ARGS[7] = parentId (empty string = no parent)
 -- ARGS[8] = maxAttempts (0 = no retry)
 -- ARGS[9] = orderingKey (empty string = no per-key ordering)
--- Returns: job ID (string)
+-- ARGS[17] = customJobId (empty string = auto-generate via INCR)
+-- Returns: job ID (string), or 'duplicate' if custom ID already exists
 redis.register_function('glidemq_addJob', function(keys, args)
   local idKey = keys[1]
   local streamKey = keys[2]
@@ -111,15 +112,32 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local parentId = args[7] or ''
   local maxAttempts = tonumber(args[8]) or 0
   local orderingKey = args[9] or ''
-
-  -- Generate job ID via atomic increment
-  local jobId = redis.call('INCR', idKey)
-  local jobIdStr = tostring(jobId)
+  local customJobId = args[17] or ''
 
   -- Derive the job hash key from the id key prefix
   -- idKey is like "glide:{q}:id", job key is "glide:{q}:job:{id}"
   local prefix = string.sub(idKey, 1, #idKey - 2) -- strip ":id"
-  local jobKey = prefix .. 'job:' .. jobIdStr
+
+  local jobIdStr
+  local jobKey
+  if customJobId ~= '' then
+    -- Custom job ID: check for duplicate
+    jobKey = prefix .. 'job:' .. customJobId
+    if redis.call('EXISTS', jobKey) == 1 then
+      return 'duplicate'
+    end
+    jobIdStr = customJobId
+  else
+    -- Auto-generate via INCR, skip over IDs that collide with custom-ID jobs
+    local jobId = redis.call('INCR', idKey)
+    jobIdStr = tostring(jobId)
+    jobKey = prefix .. 'job:' .. jobIdStr
+    while redis.call('EXISTS', jobKey) == 1 do
+      jobId = redis.call('INCR', idKey)
+      jobIdStr = tostring(jobId)
+      jobKey = prefix .. 'job:' .. jobIdStr
+    end
+  end
   local orderingSeq = 0
   if orderingKey ~= '' then
     local orderingMetaKey = prefix .. 'ordering'
@@ -618,7 +636,8 @@ end)
 -- ARGS[10] = parentId (empty string = no parent)
 -- ARGS[11] = maxAttempts (0 = no retry)
 -- ARGS[12] = orderingKey (empty string = no per-key ordering)
--- Returns: "skipped" if deduplicated, otherwise the new job ID (string)
+-- ARGS[20] = customJobId (empty string = auto-generate via INCR)
+-- Returns: "skipped" if deduplicated, "duplicate" if custom ID exists, otherwise the new job ID (string)
 redis.register_function('glidemq_dedup', function(keys, args)
   local dedupKey = keys[1]
   local idKey = keys[2]
@@ -638,6 +657,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local parentId = args[10] or ''
   local maxAttempts = tonumber(args[11]) or 0
   local orderingKey = args[12] or ''
+  local customJobId = args[20] or ''
 
   local prefix = string.sub(idKey, 1, #idKey - 2) -- strip ":id"
 
@@ -691,9 +711,24 @@ redis.register_function('glidemq_dedup', function(keys, args)
   end
 
   -- Add the new job (same logic as glidemq_addJob)
-  local jobId = redis.call('INCR', idKey)
-  local jobIdStr = tostring(jobId)
-  local jobKey = prefix .. 'job:' .. jobIdStr
+  local jobIdStr
+  local jobKey
+  if customJobId ~= '' then
+    jobKey = prefix .. 'job:' .. customJobId
+    if redis.call('EXISTS', jobKey) == 1 then
+      return 'duplicate'
+    end
+    jobIdStr = customJobId
+  else
+    local jobId = redis.call('INCR', idKey)
+    jobIdStr = tostring(jobId)
+    jobKey = prefix .. 'job:' .. jobIdStr
+    while redis.call('EXISTS', jobKey) == 1 do
+      jobId = redis.call('INCR', idKey)
+      jobIdStr = tostring(jobId)
+      jobKey = prefix .. 'job:' .. jobIdStr
+    end
+  end
   local orderingSeq = 0
   if orderingKey ~= '' then
     local orderingMetaKey = prefix .. 'ordering'
@@ -893,14 +928,30 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   local parentPriority = tonumber(args[6]) or 0
   local parentMaxAttempts = tonumber(args[7]) or 0
   local numChildren = tonumber(args[8])
-
-  -- Create parent job ID
-  local parentJobId = redis.call('INCR', parentIdKey)
-  local parentJobIdStr = tostring(parentJobId)
+  local parentCustomId = args[9] or ''
 
   -- Derive parent prefix from id key: "glide:{q}:id" -> "glide:{q}:"
   local parentPrefix = string.sub(parentIdKey, 1, #parentIdKey - 2)
-  local parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
+
+  -- Create parent job ID
+  local parentJobIdStr
+  local parentJobKey
+  if parentCustomId ~= '' then
+    parentJobKey = parentPrefix .. 'job:' .. parentCustomId
+    if redis.call('EXISTS', parentJobKey) == 1 then
+      return cjson.encode({'duplicate'})
+    end
+    parentJobIdStr = parentCustomId
+  else
+    local parentJobId = redis.call('INCR', parentIdKey)
+    parentJobIdStr = tostring(parentJobId)
+    parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
+    while redis.call('EXISTS', parentJobKey) == 1 do
+      parentJobId = redis.call('INCR', parentIdKey)
+      parentJobIdStr = tostring(parentJobId)
+      parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
+    end
+  end
   local depsKey = parentPrefix .. 'deps:' .. parentJobIdStr
   local parentOrderingKey = extractOrderingKeyFromOpts(parentOpts)
   local parentOrderingSeq = 0
@@ -934,10 +985,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   local childIds = {}
 
   -- Process each child
-  local childArgOffset = 8
+  local childArgOffset = 9
   local childKeyOffset = 4
   for i = 1, numChildren do
-    local base = childArgOffset + (i - 1) * 8
+    local base = childArgOffset + (i - 1) * 9
     local childName = args[base + 1]
     local childData = args[base + 2]
     local childOpts = args[base + 3]
@@ -946,6 +997,7 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     local childMaxAttempts = tonumber(args[base + 6]) or 0
     local childQueuePrefix = args[base + 7]
     local childParentQueue = args[base + 8]
+    local childCustomId = args[base + 9] or ''
 
     -- Child keys: use child-specific keys from KEYS array
     local ckBase = childKeyOffset + (i - 1) * 4
@@ -954,13 +1006,28 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     local childScheduledKey = keys[ckBase + 3]
     local childEventsKey = keys[ckBase + 4]
 
-    -- Create child job ID
-    local childJobId = redis.call('INCR', childIdKey)
-    local childJobIdStr = tostring(childJobId)
-
     -- Derive child prefix from child id key
     local childPrefix = string.sub(childIdKey, 1, #childIdKey - 2)
-    local childJobKey = childPrefix .. 'job:' .. childJobIdStr
+
+    -- Create child job ID
+    local childJobIdStr
+    local childJobKey
+    if childCustomId ~= '' then
+      childJobKey = childPrefix .. 'job:' .. childCustomId
+      if redis.call('EXISTS', childJobKey) == 1 then
+        return cjson.encode({'duplicate'})
+      end
+      childJobIdStr = childCustomId
+    else
+      local childJobId = redis.call('INCR', childIdKey)
+      childJobIdStr = tostring(childJobId)
+      childJobKey = childPrefix .. 'job:' .. childJobIdStr
+      while redis.call('EXISTS', childJobKey) == 1 do
+        childJobId = redis.call('INCR', childIdKey)
+        childJobIdStr = tostring(childJobId)
+        childJobKey = childPrefix .. 'job:' .. childJobIdStr
+      end
+    end
     local childOrderingKey = extractOrderingKeyFromOpts(childOpts)
     local childOrderingSeq = 0
     if childOrderingKey ~= '' then
@@ -1019,7 +1086,7 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   end
 
   -- Process extra deps members (pre-existing sub-flow children)
-  local extraDepsOffset = childArgOffset + numChildren * 8
+  local extraDepsOffset = childArgOffset + numChildren * 9
   local numExtraDeps = tonumber(args[extraDepsOffset + 1]) or 0
   for i = 1, numExtraDeps do
     local extraMember = args[extraDepsOffset + 1 + i]
