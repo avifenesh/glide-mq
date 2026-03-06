@@ -382,6 +382,10 @@ glide-mq/
 │   ├── connection.ts           # Client factory (blocking vs non-blocking)
 │   ├── functions/
 │   │   └── index.ts            # Lua library source (embedded as string) + FCALL wrappers
+│   ├── proxy/
+│   │   ├── index.ts            # createProxyServer factory (glide-mq/proxy)
+│   │   ├── routes.ts           # Express route handlers for all endpoints
+│   │   └── types.ts            # Proxy request/response type definitions
 │   ├── sandbox/
 │   │   ├── index.ts            # Sandbox factory
 │   │   ├── pool.ts             # Worker pool manager
@@ -409,6 +413,7 @@ glide-mq/
 │   ├── OBSERVABILITY.md        # OpenTelemetry, job logs
 │   ├── TESTING.md              # TestQueue & TestWorker
 │   ├── MIGRATION.md            # BullMQ migration guide
+│   ├── WIRE_PROTOCOL.md        # Cross-language wire protocol (FCALL specs, Python/Go examples)
 │   └── ARCHITECTURE.md         # This file
 ├── package.json
 ├── tsconfig.json
