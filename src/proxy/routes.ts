@@ -48,7 +48,6 @@ export function createRoutes(opts: ProxyOptions): {
     return false;
   }
 
-  // POST /queues/:name/jobs
   router.post('/queues/:name/jobs', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
@@ -80,7 +79,6 @@ export function createRoutes(opts: ProxyOptions): {
     }
   });
 
-  // POST /queues/:name/jobs/bulk
   router.post('/queues/:name/jobs/bulk', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
@@ -129,7 +127,6 @@ export function createRoutes(opts: ProxyOptions): {
     }
   });
 
-  // GET /queues/:name/jobs/:id
   router.get('/queues/:name/jobs/:id', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
@@ -163,7 +160,6 @@ export function createRoutes(opts: ProxyOptions): {
     }
   });
 
-  // POST /queues/:name/pause
   router.post('/queues/:name/pause', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
@@ -176,7 +172,6 @@ export function createRoutes(opts: ProxyOptions): {
     }
   });
 
-  // POST /queues/:name/resume
   router.post('/queues/:name/resume', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
@@ -189,7 +184,6 @@ export function createRoutes(opts: ProxyOptions): {
     }
   });
 
-  // GET /queues/:name/counts
   router.get('/queues/:name/counts', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
@@ -202,7 +196,6 @@ export function createRoutes(opts: ProxyOptions): {
     }
   });
 
-  // GET /health
   router.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({
       status: 'ok',

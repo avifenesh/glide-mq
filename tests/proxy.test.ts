@@ -251,6 +251,23 @@ describe('HTTP Proxy', () => {
     expect(body.error).toContain('name');
   });
 
+  it('POST /queues/:name/jobs/bulk - invalid job in array returns 400', async () => {
+    const queueName = uniqueQueue('bulkinvalid');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jobs: [
+          { name: 'valid', data: {} },
+          { data: { no_name: true } },
+        ],
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('jobs[1]');
+  });
+
   it('POST /queues/:name/jobs/bulk - missing jobs array returns 400', async () => {
     const queueName = uniqueQueue('bulk400');
 
@@ -262,6 +279,12 @@ describe('HTTP Proxy', () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain('jobs');
+  });
+});
+
+describe('HTTP Proxy - createProxyServer validation', () => {
+  it('throws when neither connection nor client provided', () => {
+    expect(() => createProxyServer({} as any)).toThrow('connection');
   });
 });
 
