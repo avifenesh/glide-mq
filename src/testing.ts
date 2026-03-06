@@ -550,10 +550,12 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
           const serialized = this.serializer.serialize(jobData);
           const byteLen = Buffer.byteLength(serialized, 'utf8');
           if (byteLen > MAX_JOB_DATA_SIZE) {
+            this.schedulers.delete(name);
             continue;
           }
           jobData = this.serializer.deserialize(serialized) as D;
         } catch {
+          this.schedulers.delete(name);
           continue;
         }
         const job = await this.add(jobName, jobData, template.opts as JobOptions | undefined);

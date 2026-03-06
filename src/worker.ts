@@ -167,7 +167,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
       consumerId: this.consumerId,
       queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
       onPromotionTick: () => this.refreshMetaFlags(),
-      onError: (err) => this.emit('error', err),
+      onError: (err) => {
+        if (!this.closing) {
+          this.emit('error', err);
+        }
+      },
       serializer: this.serializer,
     });
     this.scheduler.start();
@@ -276,7 +280,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
           consumerId: this.consumerId,
           queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
           onPromotionTick: () => this.refreshMetaFlags(),
-          onError: (err) => this.emit('error', err),
+          onError: (err) => {
+            if (!this.closing) {
+              this.emit('error', err);
+            }
+          },
           serializer: this.serializer,
         });
         this.scheduler.start();
@@ -1058,7 +1066,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     if (this.scheduler) {
       this.scheduler.stop();
-      await this.scheduler.waitForIdle();
+      if (!force) {
+        await this.scheduler.waitForIdle();
+      }
       this.scheduler = null;
     }
 

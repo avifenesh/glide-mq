@@ -7,6 +7,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import path from 'path';
 import { TestQueue, TestWorker, TestJob } from '../src/testing';
+import { MAX_JOB_DATA_SIZE } from '../src/utils';
 
 const ECHO_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/echo.js');
 
@@ -1065,5 +1066,23 @@ describe('TestQueue scheduler runtime', () => {
     expect(nextWakeAt).not.toBeNull();
     expect(nextWakeAt! - Date.now()).toBeLessThanOrEqual(maxTimerDelayMs);
     expect((queue as any).schedulerTimer).not.toBeNull();
+  });
+
+  it('removes oversized testing-mode schedulers instead of leaving them perpetually due', async () => {
+    queue = new TestQueue('sched-runtime-oversized');
+    worker = new TestWorker(queue, async () => 'ok');
+
+    await queue.upsertJobScheduler(
+      'oversized',
+      { every: 20, limit: 1 },
+      { name: 'oversized-job', data: 'x'.repeat(MAX_JOB_DATA_SIZE + 1) },
+    );
+
+    const deadline = Date.now() + 500;
+    while ((await queue.getJobScheduler('oversized')) && Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, 20));
+    }
+
+    expect(await queue.getJobScheduler('oversized')).toBeNull();
   });
 });
