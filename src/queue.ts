@@ -1232,11 +1232,13 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * @param type - The job state to query
    * @param start - Start index for pagination (default 0)
    * @param end - End index for pagination (default -1, meaning all)
+   * @param opts - Options; set `excludeData: true` to omit `data` and `returnvalue` fields
    */
   async getJobs(
     type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed',
     start = 0,
     end = -1,
+    opts?: GetJobsOptions,
   ): Promise<Job<D, R>[]> {
     const client = await this.getClient();
     let jobIds: string[];
@@ -1278,16 +1280,23 @@ export class Queue<D = any, R = any> extends EventEmitter {
     }
 
     if (jobIds.length === 0) return [];
+    const excludeData = opts?.excludeData === true;
     const jobs: Job<D, R>[] = [];
     for (let offset = 0; offset < jobIds.length; offset += PIPELINE_CHUNK_SIZE) {
       const chunk = jobIds.slice(offset, offset + PIPELINE_CHUNK_SIZE);
       const batch = this.newBatch();
-      for (const id of chunk) (batch as any).hgetall(this.keys.job(id));
+      if (excludeData) {
+        for (const id of chunk) (batch as any).hmget(this.keys.job(id), JOB_METADATA_FIELDS);
+      } else {
+        for (const id of chunk) (batch as any).hgetall(this.keys.job(id));
+      }
       const batchResults = await client.exec(batch as any, false);
       if (batchResults) {
         for (let i = 0; i < batchResults.length; i++) {
-          const hash = hashDataToRecord(batchResults[i] as any);
-          if (hash) jobs.push(Job.fromHash<D, R>(client, this.keys, chunk[i], hash, this.serializer));
+          const hash = excludeData
+            ? hmgetArrayToRecord(batchResults[i] as (unknown | null)[], JOB_METADATA_FIELDS)
+            : hashDataToRecord(batchResults[i] as any);
+          if (hash) jobs.push(Job.fromHash<D, R>(client, this.keys, chunk[i], hash, this.serializer, excludeData));
         }
       }
     }
