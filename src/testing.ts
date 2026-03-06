@@ -20,7 +20,7 @@ import type {
   Serializer,
 } from './types';
 import { JSON_SERIALIZER } from './types';
-import { GlideMQError, UnrecoverableError } from './errors';
+import { GlideMQError, UnrecoverableError, BatchError } from './errors';
 import {
   MAX_JOB_DATA_SIZE,
   computeFollowingSchedulerNextRun,
@@ -612,6 +612,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
 export interface TestWorkerOptions {
   concurrency?: number;
+  batch?: { size: number; timeout?: number };
 }
 
 export class TestWorker<D = any, R = any> extends EventEmitter {
@@ -625,26 +626,60 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private running = true;
   private processing = false;
   private isDrained = true;
+  private readonly batchMode: boolean;
+  private readonly batchSize: number;
+  private readonly batchTimeout: number;
+  private readonly batchProcessor: ((jobs: TestJob<D, R>[]) => Promise<R[]>) | null;
+  private batchTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(queue: TestQueue<D, R>, processor: Processor<D, R> | string, opts?: TestWorkerOptions) {
+  constructor(
+    queue: TestQueue<D, R>,
+    processor: Processor<D, R> | ((jobs: TestJob<D, R>[]) => Promise<R[]>) | string,
+    opts?: TestWorkerOptions,
+  ) {
     super();
     this.queue = queue;
-    if (typeof processor === 'string') {
-      const filePath = path.resolve(processor);
-      if (filePath.endsWith('.mjs')) {
-        throw new GlideMQError(
-          'TestWorker does not support ESM (.mjs) processors. Use a .js (CJS) file or an inline function.',
-        );
+
+    // Batch mode validation
+    this.batchMode = !!opts?.batch;
+    if (opts?.batch) {
+      if (!Number.isInteger(opts.batch.size) || opts.batch.size < 1 || opts.batch.size > 1000) {
+        throw new GlideMQError('batch.size must be an integer between 1 and 1000');
       }
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const mod = require(filePath);
-      const fn = mod.default || mod;
-      if (typeof fn !== 'function') {
-        throw new GlideMQError(`Processor file ${filePath} does not export a function`);
+      if (opts.batch.timeout !== undefined && (opts.batch.timeout < 0 || !Number.isFinite(opts.batch.timeout))) {
+        throw new GlideMQError('batch.timeout must be a non-negative finite number');
       }
-      this.processor = fn;
+      if (typeof processor === 'string') {
+        throw new GlideMQError('Batch mode does not support sandbox (file path) processors');
+      }
+      this.batchSize = opts.batch.size;
+      this.batchTimeout = opts.batch.timeout ?? 0;
+      this.batchProcessor = processor as (jobs: TestJob<D, R>[]) => Promise<R[]>;
+      this.processor = (() => {
+        throw new Error('Single-job processor called in batch mode');
+      }) as unknown as Processor<D, R>;
     } else {
-      this.processor = processor;
+      this.batchSize = 0;
+      this.batchTimeout = 0;
+      this.batchProcessor = null;
+
+      if (typeof processor === 'string') {
+        const filePath = path.resolve(processor);
+        if (filePath.endsWith('.mjs')) {
+          throw new GlideMQError(
+            'TestWorker does not support ESM (.mjs) processors. Use a .js (CJS) file or an inline function.',
+          );
+        }
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const mod = require(filePath);
+        const fn = mod.default || mod;
+        if (typeof fn !== 'function') {
+          throw new GlideMQError(`Processor file ${filePath} does not export a function`);
+        }
+        this.processor = fn;
+      } else {
+        this.processor = processor as Processor<D, R>;
+      }
     }
     this.concurrency = opts?.concurrency ?? 1;
     this.id = `test-worker-${++TestWorker.idCounter}`;
@@ -678,6 +713,11 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
   private processAvailable(): void {
     if (!this.running || this.queue.isPaused()) return;
+
+    if (this.batchMode) {
+      this.processAvailableBatch();
+      return;
+    }
 
     while (this.activeCount < this.concurrency) {
       const record = this.findNextWaiting();
@@ -764,6 +804,174 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       });
   }
 
+  // ---- Batch processing ----
+
+  private processAvailableBatch(): void {
+    // Respect concurrency: don't start a new batch if at capacity
+    if (this.activeCount >= this.concurrency * this.batchSize) return;
+
+    // Collect up to batchSize waiting jobs
+    const records: TestJobRecord<D, R>[] = [];
+    for (const record of this.queue.jobs.values()) {
+      if (record.state === 'waiting') {
+        records.push(record);
+        if (records.length >= this.batchSize) break;
+      }
+    }
+
+    if (records.length === 0) {
+      if (this.activeCount === 0 && !this.isDrained) {
+        this.isDrained = true;
+        this.emit('drained');
+      }
+      return;
+    }
+
+    // Batch is full - process immediately even if timer is running
+    if (records.length >= this.batchSize) {
+      if (this.batchTimer) {
+        clearTimeout(this.batchTimer);
+        this.batchTimer = null;
+      }
+      this.executeBatch(records);
+      return;
+    }
+
+    if (this.batchTimeout > 0) {
+      // Start a timer to flush the partial batch after timeout
+      if (!this.batchTimer) {
+        this.batchTimer = setTimeout(() => {
+          this.batchTimer = null;
+          this.flushBatch();
+        }, this.batchTimeout);
+      }
+      return;
+    }
+
+    // No timeout - process partial batch immediately
+    this.executeBatch(records);
+  }
+
+  private flushBatch(): void {
+    if (!this.running) return;
+    // Re-collect - some jobs may have been claimed or state changed
+    const records: TestJobRecord<D, R>[] = [];
+    for (const record of this.queue.jobs.values()) {
+      if (record.state === 'waiting') {
+        records.push(record);
+        if (records.length >= this.batchSize) break;
+      }
+    }
+    if (records.length > 0) {
+      this.executeBatch(records);
+    }
+  }
+
+  private executeBatch(records: TestJobRecord<D, R>[]): void {
+    if (!this.batchProcessor) return;
+
+    // Mark all as active
+    for (const record of records) {
+      record.state = 'active';
+      record.processedOn = Date.now();
+    }
+    this.activeCount += records.length;
+    this.isDrained = false;
+
+    const jobs = records.map((r) => new TestJob<D, R>(r));
+    for (const job of jobs) {
+      this.emit('active', job, job.id);
+    }
+
+    this.batchProcessor(jobs)
+      .then((results) => {
+        if (results.length !== records.length) {
+          throw new Error(`Batch processor returned ${results.length} results but batch had ${records.length} jobs`);
+        }
+        const s = this.queue.serializer;
+        for (let i = 0; i < records.length; i++) {
+          const record = records[i];
+          const job = jobs[i];
+          const result = results[i];
+          const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
+          record.state = 'completed';
+          record.returnvalue = roundtripped;
+          record.finishedOn = Date.now();
+          job.returnvalue = roundtripped;
+          job.finishedOn = record.finishedOn;
+          this.emit('completed', job, roundtripped);
+          this.queue.emit('completed', job, roundtripped);
+        }
+      })
+      .catch((err: Error) => {
+        if (err instanceof BatchError || err.name === 'BatchError') {
+          const batchErr = err as BatchError;
+          for (let i = 0; i < records.length; i++) {
+            const record = records[i];
+            const job = jobs[i];
+            const result = i < batchErr.results.length ? batchErr.results[i] : new Error('No result in BatchError');
+
+            if (result instanceof Error) {
+              record.attemptsMade++;
+              const maxAttempts = record.opts.attempts ?? 0;
+              const skipRetry =
+                job.discarded || result instanceof UnrecoverableError || result.name === 'UnrecoverableError';
+              if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
+                record.state = 'waiting';
+                queueMicrotask(() => this.processAvailable());
+              } else {
+                record.state = 'failed';
+                record.failedReason = result.message;
+                record.finishedOn = Date.now();
+                job.failedReason = result.message;
+                job.finishedOn = record.finishedOn;
+                this.emit('failed', job, result);
+                this.queue.emit('failed', job, result);
+              }
+            } else {
+              const s = this.queue.serializer;
+              const roundtripped =
+                result !== undefined ? (s.deserialize(s.serialize(result as R)) as R) : (result as R);
+              record.state = 'completed';
+              record.returnvalue = roundtripped;
+              record.finishedOn = Date.now();
+              job.returnvalue = roundtripped;
+              job.finishedOn = record.finishedOn;
+              this.emit('completed', job, roundtripped);
+              this.queue.emit('completed', job, roundtripped);
+            }
+          }
+        } else {
+          // All jobs fail
+          for (let i = 0; i < records.length; i++) {
+            const record = records[i];
+            const job = jobs[i];
+            record.attemptsMade++;
+            const maxAttempts = record.opts.attempts ?? 0;
+            const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
+            if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
+              record.state = 'waiting';
+              queueMicrotask(() => this.processAvailable());
+            } else {
+              record.state = 'failed';
+              record.failedReason = err.message;
+              record.finishedOn = Date.now();
+              job.failedReason = err.message;
+              job.finishedOn = record.finishedOn;
+              this.emit('failed', job, err);
+              this.queue.emit('failed', job, err);
+            }
+          }
+        }
+      })
+      .finally(() => {
+        this.activeCount -= records.length;
+        if (this.running && !this.queue.isPaused()) {
+          this.processAvailable();
+        }
+      });
+  }
+
   /** Return the number of jobs currently being processed. */
   getActiveCount(): number {
     return this.activeCount;
@@ -772,6 +980,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   /** Stop processing and detach from the queue. */
   async close(): Promise<void> {
     this.running = false;
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer);
+      this.batchTimer = null;
+    }
     this.queue.workers.delete(this);
     this.queue.onWorkerDetached();
     this.removeAllListeners();

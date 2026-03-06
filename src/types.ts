@@ -115,6 +115,8 @@ export interface WorkerOptions extends QueueOptions {
   lockDuration?: number;
   /** Sandbox options for file-path processors. Only used when processor is a string. */
   sandbox?: SandboxOptions;
+  /** Enable batch processing. When set, the processor receives an array of jobs. */
+  batch?: BatchOptions;
 }
 
 export interface JobOptions {
@@ -203,6 +205,15 @@ export interface JobData {
 }
 
 export type Processor<D = any, R = any> = (job: import('./job').Job<D, R>) => Promise<R>;
+
+export interface BatchOptions {
+  /** Maximum number of jobs to collect before invoking the batch processor. */
+  size: number;
+  /** Maximum time in ms to wait for a full batch. If not set, processes whatever is available immediately. */
+  timeout?: number;
+}
+
+export type BatchProcessor<D = any, R = any> = (jobs: import('./job').Job<D, R>[]) => Promise<R[]>;
 
 export interface FlowJob {
   name: string;

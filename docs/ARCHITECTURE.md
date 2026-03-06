@@ -256,6 +256,7 @@ class Worker<D = any, R = any> extends EventEmitter {
 }
 
 type Processor<D, R> = (job: Job<D, R>) => Promise<R>
+type BatchProcessor<D, R> = (jobs: Job<D, R>[]) => Promise<R[]>
 type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained'
 
 interface WorkerOptions {
@@ -270,6 +271,7 @@ interface WorkerOptions {
   limiter?: { max: number; duration: number }
   backoffStrategies?: Record<string, (attemptsMade: number, err: Error) => number>
   sandbox?: SandboxOptions       // run processor in child process/thread
+  batch?: { size: number; timeout?: number }  // batch processing mode
 }
 ```
 

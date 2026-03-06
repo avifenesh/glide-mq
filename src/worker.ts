@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
 import { TimeUnit } from '@glidemq/speedkey';
-import type { WorkerOptions, Processor, Client, Serializer } from './types';
+import type { WorkerOptions, Processor, BatchProcessor, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import {
@@ -21,7 +21,7 @@ import {
   ensureFunctionLibraryOnce,
   createConsumerGroup,
 } from './connection';
-import { GlideMQError, ConnectionError, DelayedError, UnrecoverableError } from './errors';
+import { GlideMQError, ConnectionError, DelayedError, UnrecoverableError, BatchError } from './errors';
 import {
   CONSUMER_GROUP,
   completeJob,
@@ -80,8 +80,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private readonly startedAt = Date.now();
   private readonly hostname = os.hostname();
   private serializer: Serializer;
+  private readonly batchMode: boolean;
+  private readonly batchSize: number;
+  private readonly batchTimeout: number;
+  private readonly batchProcessor: BatchProcessor<D, R> | null;
 
-  constructor(name: string, processor: Processor<D, R> | string, opts: WorkerOptions) {
+  constructor(name: string, processor: Processor<D, R> | BatchProcessor<D, R> | string, opts: WorkerOptions) {
     super();
 
     // Validate client injection options
@@ -100,13 +104,40 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
 
     this.name = name;
-    if (typeof processor === 'string') {
+
+    // Batch mode validation
+    this.batchMode = !!opts.batch;
+    if (opts.batch) {
+      if (!Number.isInteger(opts.batch.size) || opts.batch.size < 1 || opts.batch.size > 1000) {
+        throw new GlideMQError('batch.size must be an integer between 1 and 1000');
+      }
+      if (opts.batch.timeout !== undefined && (opts.batch.timeout < 0 || !Number.isFinite(opts.batch.timeout))) {
+        throw new GlideMQError('batch.timeout must be a non-negative finite number');
+      }
+      if (typeof processor === 'string') {
+        throw new GlideMQError('Batch mode does not support sandbox (file path) processors');
+      }
+      this.batchSize = opts.batch.size;
+      this.batchTimeout = opts.batch.timeout ?? 0;
+      this.batchProcessor = processor as BatchProcessor<D, R>;
+    } else {
+      this.batchSize = 0;
+      this.batchTimeout = 0;
+      this.batchProcessor = null;
+    }
+
+    if (this.batchMode) {
+      // In batch mode, processor is stored as batchProcessor above.
+      this.processor = (() => {
+        throw new Error('Single-job processor called in batch mode');
+      }) as unknown as Processor<D, R>;
+    } else if (typeof processor === 'string') {
       const concurrency = opts.concurrency ?? 1;
       const sandbox = createSandboxedProcessor<D, R>(processor, opts.sandbox, concurrency);
       this.processor = sandbox.processor;
       this.sandboxClose = (force?: boolean) => sandbox.close(force);
     } else {
-      this.processor = processor;
+      this.processor = processor as Processor<D, R>;
     }
     this.opts = opts;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
@@ -114,7 +145,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     this.consumerId = `worker-${Date.now()}-${randomBytes(4).toString('hex')}`;
 
     this.concurrency = opts.concurrency ?? 1;
-    this.prefetch = opts.prefetch ?? this.concurrency;
+    this.prefetch = opts.prefetch ?? (this.batchMode ? this.concurrency * this.batchSize : this.concurrency);
     this.blockTimeout = opts.blockTimeout ?? 5000;
     this.stalledInterval = opts.stalledInterval ?? 30000;
     this.maxStalledCount = opts.maxStalledCount ?? 1;
@@ -367,6 +398,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
       return;
     }
 
+    // Batch mode: collect entries and process as a batch
+    if (this.batchMode) {
+      await this.collectAndProcessBatch(result);
+      return;
+    }
+
     // result is GlideRecord<Record<string, [GlideString, GlideString][] | null>>
     // i.e. { key, value }[] where value is Record<entryId, fieldPairs | null>
     for (const streamEntry of result) {
@@ -430,6 +467,344 @@ export class Worker<D = any, R = any> extends EventEmitter {
       });
 
     this.activePromises.add(promise);
+  }
+
+  // ---- Batch processing ----
+
+  /**
+   * Collect entries from XREADGROUP result and optionally wait for more
+   * entries (if batch.timeout is set), then process the batch.
+   */
+  private async collectAndProcessBatch(
+    initialResult: NonNullable<Awaited<ReturnType<Client['xreadgroup']>>>,
+  ): Promise<void> {
+    if (!this.commandClient || !this.blockingClient) return;
+
+    // Collect {jobId, entryId} tuples from the initial XREADGROUP result
+    const collected: { jobId: string; entryId: string }[] = [];
+
+    for (const streamEntry of initialResult) {
+      const entries = streamEntry.value;
+      for (const entryId in entries) {
+        if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
+        const fieldPairs = entries[entryId];
+        if (!fieldPairs) continue;
+
+        let jobId: string | null = null;
+        for (let i = 0; i < fieldPairs.length; i++) {
+          if (String(fieldPairs[i][0]) === 'jobId') {
+            jobId = String(fieldPairs[i][1]);
+            break;
+          }
+        }
+        if (jobId) {
+          collected.push({ jobId, entryId: String(entryId) });
+          if (collected.length >= this.batchSize) break;
+        }
+      }
+      if (collected.length >= this.batchSize) break;
+    }
+
+    // If timeout is set and batch is not full, fetch more
+    if (this.batchTimeout > 0 && collected.length < this.batchSize) {
+      const deadline = Date.now() + this.batchTimeout;
+      while (collected.length < this.batchSize && this.running && !this.closing) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+
+        const blockMs = Math.min(remaining, this.blockTimeout);
+        const moreResult = await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
+          count: this.batchSize - collected.length,
+          block: blockMs,
+        });
+
+        if (!moreResult) continue;
+        for (const streamEntry of moreResult) {
+          const entries = streamEntry.value;
+          for (const entryId in entries) {
+            if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
+            const fieldPairs = entries[entryId];
+            if (!fieldPairs) continue;
+            let jobId: string | null = null;
+            for (let i = 0; i < fieldPairs.length; i++) {
+              if (String(fieldPairs[i][0]) === 'jobId') {
+                jobId = String(fieldPairs[i][1]);
+                break;
+              }
+            }
+            if (jobId) collected.push({ jobId, entryId: String(entryId) });
+          }
+        }
+      }
+    }
+
+    if (collected.length === 0) return;
+
+    // Activate jobs and build batch
+    const batch: { jobId: string; entryId: string; job: Job<D, R> }[] = [];
+    for (const entry of collected) {
+      if (!this.commandClient) break;
+      const moveResult = await moveToActive(
+        this.commandClient,
+        this.queueKeys,
+        entry.jobId,
+        Date.now(),
+        this.queueKeys.stream,
+        entry.entryId,
+        CONSUMER_GROUP,
+      );
+      if (await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId)) continue;
+      const hash = moveResult as Record<string, string>;
+      const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, entry.jobId, hash, this.serializer);
+      job.entryId = entry.entryId;
+
+      // Check ordering - if not ready, defer and skip
+      const orderingReady = await this.isOrderingTurn(job);
+      if (!orderingReady) {
+        await this.deferOutOfOrderJob(entry.jobId, entry.entryId);
+        continue;
+      }
+
+      this.startHeartbeat(entry.jobId);
+      batch.push({ jobId: entry.jobId, entryId: entry.entryId, job });
+    }
+
+    if (batch.length === 0) return;
+
+    // Process in the appropriate concurrency mode
+    if (this.concurrency === 1) {
+      // c=1: process inline (blocks poll loop)
+      this.activeCount += batch.length;
+      const promise = this.processBatch(batch);
+      this.activePromises.add(promise);
+      try {
+        await promise;
+      } finally {
+        this.activeCount -= batch.length;
+        this.activePromises.delete(promise);
+        if (!this.isDrained && this.activeCount === 0) {
+          this.isDrained = true;
+          this.emit('drained');
+        }
+      }
+    } else {
+      this.dispatchBatch(batch);
+    }
+  }
+
+  /**
+   * Dispatch a batch for processing (c>1 mode).
+   */
+  private dispatchBatch(batch: { jobId: string; entryId: string; job: Job<D, R> }[]): void {
+    this.activeCount += batch.length;
+
+    const promise = this.processBatch(batch)
+      .catch((err) => {
+        if (!this.closing && this.running) {
+          this.emit('error', err);
+        }
+      })
+      .finally(() => {
+        this.activeCount -= batch.length;
+        this.activePromises.delete(promise);
+        this.internalEvents.emit('slotFree');
+        if (!this.isDrained && this.activeCount === 0) {
+          this.isDrained = true;
+          this.emit('drained');
+        }
+      });
+
+    this.activePromises.add(promise);
+  }
+
+  /**
+   * Process a batch of jobs through the batch processor.
+   * Handles completion, failure, and partial failure (BatchError) for each job individually.
+   */
+  private async processBatch(batch: { jobId: string; entryId: string; job: Job<D, R> }[]): Promise<void> {
+    if (!this.commandClient || !this.batchProcessor) return;
+
+    // Emit 'active' for each job
+    this.isDrained = false;
+    for (const entry of batch) {
+      this.emit('active', entry.job, entry.jobId);
+    }
+
+    // Rate limit check (once per batch)
+    if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
+
+    // Set up abort controllers for all jobs
+    const batchAc = new AbortController();
+    for (const entry of batch) {
+      this.activeAbortControllers.set(entry.jobId, batchAc);
+      entry.job.abortSignal = batchAc.signal;
+    }
+
+    let results: R[] | undefined;
+    let batchError: BatchError | undefined;
+    let thrownError: Error | undefined;
+
+    try {
+      // Calculate batch timeout: max timeout across all jobs in the batch
+      let maxTimeout = 0;
+      for (const entry of batch) {
+        const t = entry.job.opts.timeout;
+        if (t && t > 0 && t > maxTimeout) maxTimeout = t;
+      }
+
+      const jobs = batch.map((e) => e.job);
+      if (maxTimeout > 0) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          results = await Promise.race([
+            this.batchProcessor(jobs),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => {
+                batchAc.abort();
+                reject(new Error('Batch timeout exceeded'));
+              }, maxTimeout);
+            }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      } else {
+        results = await this.batchProcessor(jobs);
+      }
+    } catch (err) {
+      if (err instanceof BatchError || (err instanceof Error && err.name === 'BatchError')) {
+        batchError = err as BatchError;
+      } else {
+        thrownError = err instanceof Error ? err : new Error(String(err));
+      }
+    } finally {
+      // Stop heartbeats and clean up abort controllers
+      for (const entry of batch) {
+        this.stopHeartbeat(entry.jobId);
+        this.activeAbortControllers.delete(entry.jobId);
+      }
+    }
+
+    if (!this.commandClient) return;
+
+    if (results) {
+      // Success path: validate results is array with correct length
+      if (!Array.isArray(results) || results.length !== batch.length) {
+        const len = Array.isArray(results) ? results.length : 'non-array';
+        const err = new Error(`Batch processor returned ${len} results but batch had ${batch.length} jobs`);
+        for (const entry of batch) {
+          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
+        }
+        return;
+      }
+
+      for (let i = 0; i < batch.length; i++) {
+        const entry = batch[i];
+        const result = results[i];
+
+        let returnvalue: string;
+        try {
+          returnvalue = result !== undefined ? this.serializer.serialize(result) : 'null';
+        } catch (serializeErr) {
+          const err = serializeErr instanceof Error ? serializeErr : new Error(String(serializeErr));
+          await this.handleJobFailure(
+            entry.job,
+            entry.jobId,
+            entry.entryId,
+            new Error(`Serializer failed on return value: ${err.message}`),
+          );
+          continue;
+        }
+        const byteLen = Buffer.byteLength(returnvalue, 'utf8');
+        if (byteLen > MAX_JOB_DATA_SIZE) {
+          await this.handleJobFailure(
+            entry.job,
+            entry.jobId,
+            entry.entryId,
+            new Error(`Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes).`),
+          );
+          continue;
+        }
+
+        const parentInfo = await this.buildParentInfo(entry.job, entry.jobId);
+
+        await completeJob(
+          this.commandClient!,
+          this.queueKeys,
+          entry.jobId,
+          entry.entryId,
+          returnvalue,
+          Date.now(),
+          CONSUMER_GROUP,
+          entry.job.opts.removeOnComplete,
+          parentInfo,
+        );
+
+        entry.job.returnvalue = result;
+        entry.job.finishedOn = Date.now();
+        this.emit('completed', entry.job, result);
+      }
+    } else if (batchError) {
+      // Partial failure: process each result individually
+      const batchResults = batchError.results;
+      for (let i = 0; i < batch.length; i++) {
+        const entry = batch[i];
+        const result = i < batchResults.length ? batchResults[i] : new Error('No result in BatchError');
+
+        if (result instanceof Error) {
+          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, result);
+        } else {
+          let returnvalue: string;
+          try {
+            returnvalue = result !== undefined ? this.serializer.serialize(result as R) : 'null';
+          } catch (serializeErr) {
+            const err = serializeErr instanceof Error ? serializeErr : new Error(String(serializeErr));
+            await this.handleJobFailure(
+              entry.job,
+              entry.jobId,
+              entry.entryId,
+              new Error(`Serializer failed on return value: ${err.message}`),
+            );
+            continue;
+          }
+          const byteLen = Buffer.byteLength(returnvalue, 'utf8');
+          if (byteLen > MAX_JOB_DATA_SIZE) {
+            await this.handleJobFailure(
+              entry.job,
+              entry.jobId,
+              entry.entryId,
+              new Error(`Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes).`),
+            );
+            continue;
+          }
+
+          const parentInfo = await this.buildParentInfo(entry.job, entry.jobId);
+
+          await completeJob(
+            this.commandClient!,
+            this.queueKeys,
+            entry.jobId,
+            entry.entryId,
+            returnvalue,
+            Date.now(),
+            CONSUMER_GROUP,
+            entry.job.opts.removeOnComplete,
+            parentInfo,
+          );
+
+          entry.job.returnvalue = result as R;
+          entry.job.finishedOn = Date.now();
+          this.emit('completed', entry.job, result);
+        }
+      }
+    } else if (thrownError) {
+      // All jobs fail
+      const aborted = batchAc.signal.aborted;
+      const err = aborted ? new Error('revoked') : thrownError;
+      for (const entry of batch) {
+        await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
+      }
+    }
   }
 
   // ---- Job processing helpers ----

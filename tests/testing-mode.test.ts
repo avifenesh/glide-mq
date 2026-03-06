@@ -7,6 +7,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import path from 'path';
 import { TestQueue, TestWorker, TestJob } from '../src/testing';
+import { BatchError } from '../src/errors';
 import { MAX_JOB_DATA_SIZE } from '../src/utils';
 
 const ECHO_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/echo.js');
@@ -1104,5 +1105,286 @@ describe('TestQueue scheduler runtime', () => {
 
     expect(await queue.getJobScheduler('dedup-scheduler')).toBeNull();
     expect(queue.jobs.size).toBe(1);
+  });
+});
+
+// ---- TestWorker batch mode ----
+
+describe('TestWorker batch mode', () => {
+  let queue: TestQueue;
+  let worker: TestWorker;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    if (queue) await queue.close();
+  });
+
+  it('processes jobs as a batch', async () => {
+    queue = new TestQueue('batch-test');
+    const batchSizes: number[] = [];
+
+    // Add jobs first so they are all available before worker starts
+    await queue.addBulk([
+      { name: 'a', data: { i: 1 } },
+      { name: 'b', data: { i: 2 } },
+      { name: 'c', data: { i: 3 } },
+    ]);
+
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        batchSizes.push(jobs.length);
+        return jobs.map((j: any) => j.data.i * 2);
+      },
+      { batch: { size: 3 } },
+    );
+
+    // Wait for processing
+    await new Promise<void>((resolve) => {
+      const check = setInterval(async () => {
+        const counts = await queue.getJobCounts();
+        if (counts.completed === 3) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 10);
+    });
+
+    // All 3 should be processed in a single batch since they were waiting before worker started
+    expect(batchSizes).toEqual([3]);
+    const completed = await queue.getJobs('completed');
+    expect(completed).toHaveLength(3);
+    const returnValues = completed.map((j) => j.returnvalue).sort();
+    expect(returnValues).toEqual([2, 4, 6]);
+  });
+
+  it('emits active and completed events per job', async () => {
+    queue = new TestQueue('batch-events');
+    const activeIds: string[] = [];
+    const completedIds: string[] = [];
+
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        return jobs.map(() => 'done');
+      },
+      { batch: { size: 2 } },
+    );
+
+    worker.on('active', (_job: any, jobId: string) => {
+      activeIds.push(jobId);
+    });
+    worker.on('completed', (job: any) => {
+      completedIds.push(job.id);
+    });
+
+    const jobs = await queue.addBulk([
+      { name: 'x', data: {} },
+      { name: 'y', data: {} },
+    ]);
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(async () => {
+        const counts = await queue.getJobCounts();
+        if (counts.completed === 2) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 10);
+    });
+
+    for (const job of jobs) {
+      expect(activeIds).toContain(job!.id);
+      expect(completedIds).toContain(job!.id);
+    }
+  });
+
+  it('handles BatchError partial failure', async () => {
+    queue = new TestQueue('batch-partial-fail');
+    const failedIds: string[] = [];
+    const completedIds: string[] = [];
+
+    worker = new TestWorker(
+      queue,
+      async (_jobs: TestJob[]) => {
+        throw new BatchError(['success-result', new Error('this one failed'), 'another-success']);
+      },
+      { batch: { size: 3 } },
+    );
+
+    worker.on('completed', (job: any) => {
+      completedIds.push(job.id);
+    });
+    worker.on('failed', (job: any) => {
+      failedIds.push(job.id);
+    });
+
+    const jobs = await queue.addBulk([
+      { name: 'a', data: {} },
+      { name: 'b', data: {} },
+      { name: 'c', data: {} },
+    ]);
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(async () => {
+        const counts = await queue.getJobCounts();
+        if (counts.completed + counts.failed === 3) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 10);
+    });
+
+    expect(completedIds).toHaveLength(2);
+    expect(failedIds).toHaveLength(1);
+    // The second job (index 1) should be the one that failed
+    expect(failedIds[0]).toBe(jobs[1]!.id);
+  });
+
+  it('processor throw fails all jobs in batch', async () => {
+    queue = new TestQueue('batch-all-fail');
+    const failedIds: string[] = [];
+
+    worker = new TestWorker(
+      queue,
+      async (_jobs: TestJob[]) => {
+        throw new Error('everything broke');
+      },
+      { batch: { size: 3 } },
+    );
+
+    worker.on('failed', (job: any) => {
+      failedIds.push(job.id);
+    });
+
+    await queue.addBulk([
+      { name: 'a', data: {} },
+      { name: 'b', data: {} },
+      { name: 'c', data: {} },
+    ]);
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(async () => {
+        const counts = await queue.getJobCounts();
+        if (counts.failed === 3) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 10);
+    });
+
+    expect(failedIds).toHaveLength(3);
+  });
+
+  it('partial batch processes immediately without timeout', async () => {
+    queue = new TestQueue('batch-partial-no-timeout');
+    const batchSizes: number[] = [];
+
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        batchSizes.push(jobs.length);
+        return jobs.map(() => 'ok');
+      },
+      { batch: { size: 10 } },
+    );
+
+    // Add only 2 jobs (less than batch size of 10)
+    await queue.addBulk([
+      { name: 'a', data: {} },
+      { name: 'b', data: {} },
+    ]);
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(async () => {
+        const counts = await queue.getJobCounts();
+        if (counts.completed === 2) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 10);
+    });
+
+    // Without timeout, should process immediately with 2 jobs
+    expect(batchSizes).toContain(2);
+  });
+
+  it('fails all jobs when processor returns wrong number of results', async () => {
+    queue = new TestQueue('batch-mismatch');
+    const failedIds: string[] = [];
+    const failReasons: string[] = [];
+
+    // Add jobs BEFORE creating worker so all 3 are waiting
+    await queue.addBulk([
+      { name: 'a', data: {} },
+      { name: 'b', data: {} },
+      { name: 'c', data: {} },
+    ]);
+
+    worker = new TestWorker(
+      queue,
+      async (_jobs: TestJob[]) => {
+        // Return 1 result for 3 jobs - mismatch
+        return ['only-one'] as any;
+      },
+      { batch: { size: 3 } },
+    );
+
+    worker.on('failed', (job: any, err: Error) => {
+      failedIds.push(job.id);
+      failReasons.push(err.message);
+    });
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(async () => {
+        const counts = await queue.getJobCounts();
+        if (counts.failed === 3) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 10);
+    });
+
+    expect(failedIds).toHaveLength(3);
+    for (const reason of failReasons) {
+      expect(reason).toContain('returned 1 results but batch had 3 jobs');
+    }
+  });
+
+  it('retries failed jobs from batch', async () => {
+    queue = new TestQueue('batch-retry');
+    let callCount = 0;
+
+    worker = new TestWorker(
+      queue,
+      async (_jobs: TestJob[]) => {
+        callCount++;
+        if (callCount === 1) {
+          throw new Error('first attempt fails');
+        }
+        return _jobs.map(() => 'ok');
+      },
+      { batch: { size: 2 } },
+    );
+
+    await queue.addBulk([
+      { name: 'a', data: {}, opts: { attempts: 2 } },
+      { name: 'b', data: {}, opts: { attempts: 2 } },
+    ]);
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(async () => {
+        const counts = await queue.getJobCounts();
+        if (counts.completed === 2) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 10);
+    });
+
+    // First call failed, then retried and succeeded
+    expect(callCount).toBeGreaterThanOrEqual(2);
+    const completed = await queue.getJobs('completed');
+    expect(completed).toHaveLength(2);
   });
 });

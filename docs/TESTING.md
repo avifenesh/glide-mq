@@ -43,6 +43,14 @@ await worker.close();
 await queue.close();
 ```
 
+Batch processing is also supported in test mode:
+
+```typescript
+const batchWorker = new TestWorker(queue, async (jobs) => {
+  return jobs.map(j => ({ processed: j.data }));
+}, { batch: { size: 10 } });
+```
+
 ### Using with a test framework (Vitest / Jest)
 
 ```typescript
