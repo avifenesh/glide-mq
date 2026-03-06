@@ -631,7 +631,6 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private readonly batchTimeout: number;
   private readonly batchProcessor: ((jobs: TestJob<D, R>[]) => Promise<R[]>) | null;
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
-  private pendingBatch: TestJobRecord<D, R>[] = [];
 
   constructor(queue: TestQueue<D, R>, processor: Processor<D, R> | ((jobs: TestJob<D, R>[]) => Promise<R[]>) | string, opts?: TestWorkerOptions) {
     super();
@@ -640,6 +639,12 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     // Batch mode validation
     this.batchMode = !!opts?.batch;
     if (opts?.batch) {
+      if (!Number.isInteger(opts.batch.size) || opts.batch.size < 1 || opts.batch.size > 1000) {
+        throw new GlideMQError('batch.size must be an integer between 1 and 1000');
+      }
+      if (opts.batch.timeout !== undefined && (opts.batch.timeout < 0 || !Number.isFinite(opts.batch.timeout))) {
+        throw new GlideMQError('batch.timeout must be a non-negative finite number');
+      }
       if (typeof processor === 'string') {
         throw new GlideMQError('Batch mode does not support sandbox (file path) processors');
       }
@@ -798,6 +803,9 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   // ---- Batch processing ----
 
   private processAvailableBatch(): void {
+    // Respect concurrency: don't start a new batch if at capacity
+    if (this.activeCount >= this.concurrency * this.batchSize) return;
+
     // Collect up to batchSize waiting jobs
     const records: TestJobRecord<D, R>[] = [];
     for (const record of this.queue.jobs.values()) {
@@ -815,9 +823,18 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       return;
     }
 
-    if (this.batchTimeout > 0 && records.length < this.batchSize) {
-      // Start/extend a timer to wait for more jobs
-      this.pendingBatch = records;
+    // Batch is full - process immediately even if timer is running
+    if (records.length >= this.batchSize) {
+      if (this.batchTimer) {
+        clearTimeout(this.batchTimer);
+        this.batchTimer = null;
+      }
+      this.executeBatch(records);
+      return;
+    }
+
+    if (this.batchTimeout > 0) {
+      // Start a timer to flush the partial batch after timeout
       if (!this.batchTimer) {
         this.batchTimer = setTimeout(() => {
           this.batchTimer = null;
@@ -827,15 +844,12 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       return;
     }
 
-    // Process immediately (no timeout or batch is full)
+    // No timeout - process partial batch immediately
     this.executeBatch(records);
   }
 
   private flushBatch(): void {
-    if (!this.running || this.pendingBatch.length === 0) {
-      this.pendingBatch = [];
-      return;
-    }
+    if (!this.running) return;
     // Re-collect - some jobs may have been claimed or state changed
     const records: TestJobRecord<D, R>[] = [];
     for (const record of this.queue.jobs.values()) {
@@ -844,7 +858,6 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         if (records.length >= this.batchSize) break;
       }
     }
-    this.pendingBatch = [];
     if (records.length > 0) {
       this.executeBatch(records);
     }
@@ -892,7 +905,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           for (let i = 0; i < records.length; i++) {
             const record = records[i];
             const job = jobs[i];
-            const result = i < batchErr.results.length ? batchErr.results[i] : new Error('No result');
+            const result = i < batchErr.results.length ? batchErr.results[i] : new Error('No result in BatchError');
 
             if (result instanceof Error) {
               record.attemptsMade++;
@@ -968,7 +981,6 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       clearTimeout(this.batchTimer);
       this.batchTimer = null;
     }
-    this.pendingBatch = [];
     this.queue.workers.delete(this);
     this.queue.onWorkerDetached();
     this.removeAllListeners();

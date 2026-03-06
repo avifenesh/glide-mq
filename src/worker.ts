@@ -580,6 +580,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
       } finally {
         this.activeCount -= batch.length;
         this.activePromises.delete(promise);
+        if (!this.isDrained && this.activeCount === 0) {
+          this.isDrained = true;
+          this.emit('drained');
+        }
       }
     } else {
       this.dispatchBatch(batch);
@@ -602,6 +606,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
         this.activeCount -= batch.length;
         this.activePromises.delete(promise);
         this.internalEvents.emit('slotFree');
+        if (!this.isDrained && this.activeCount === 0) {
+          this.isDrained = true;
+          this.emit('drained');
+        }
       });
 
     this.activePromises.add(promise);
@@ -644,12 +652,17 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
       const jobs = batch.map((e) => e.job);
       if (maxTimeout > 0) {
-        results = await Promise.race([
-          this.batchProcessor(jobs),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('Batch timeout exceeded')), maxTimeout),
-          ),
-        ]);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          results = await Promise.race([
+            this.batchProcessor(jobs),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error('Batch timeout exceeded')), maxTimeout);
+            }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
       } else {
         results = await this.batchProcessor(jobs);
       }
@@ -781,11 +794,6 @@ export class Worker<D = any, R = any> extends EventEmitter {
       }
     }
 
-    // Check drained
-    if (!this.isDrained && this.activeCount <= batch.length) {
-      this.isDrained = true;
-      this.emit('drained');
-    }
   }
 
   // ---- Job processing helpers ----
