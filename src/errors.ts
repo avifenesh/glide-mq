@@ -26,6 +26,16 @@ export class UnrecoverableError extends GlideMQError {
   }
 }
 
+export class BatchError extends GlideMQError {
+  readonly results: (unknown | Error)[];
+
+  constructor(results: (unknown | Error)[]) {
+    super('Batch processor reported per-job results');
+    this.name = 'BatchError';
+    this.results = results;
+  }
+}
+
 export class DelayedError extends GlideMQError {
   readonly delayedUntil: number;
 
