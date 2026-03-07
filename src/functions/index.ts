@@ -9,7 +9,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 47: Priority-promoted jobs routed to dedicated priority list (priority > LIFO > FIFO ordering).
 // Version 48: Use LPUSH for priority list so RPOP returns highest-priority (lowest score) job first.
 // Version 49: Fix Phase 1.0/1.5 in completeAndFetchNext - HSET before HGETALL, add lastActive.
-export const LIBRARY_VERSION = '49';
+// Version 50: glidemq_drain cleans LIFO and priority list keys and their job hashes.
+export const LIBRARY_VERSION = '50';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -2612,6 +2613,8 @@ redis.register_function('glidemq_drain', function(keys, args)
   local scheduledKey = keys[2]
   local eventsKey = keys[3]
   local idKey = keys[4]
+  local lifoKey = keys[5]
+  local priorityKey = keys[6]
   local drainDelayed = args[1] == '1'
   local group = args[2]
   local prefix = string.sub(idKey, 1, #idKey - 2)
@@ -2694,6 +2697,28 @@ redis.register_function('glidemq_drain', function(keys, args)
       offset = offset + 1000
     end
     redis.call('DEL', scheduledKey)
+  end
+
+  -- Drain LIFO list: get all waiting job IDs, delete their hashes, then delete the list
+  if lifoKey and lifoKey ~= '' then
+    local lifoIds = redis.call('LRANGE', lifoKey, 0, -1)
+    for i = 1, #lifoIds do
+      local jobId = lifoIds[i]
+      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+      removed = removed + 1
+    end
+    redis.call('DEL', lifoKey)
+  end
+
+  -- Drain priority list: get all waiting job IDs, delete their hashes, then delete the list
+  if priorityKey and priorityKey ~= '' then
+    local priorityIds = redis.call('LRANGE', priorityKey, 0, -1)
+    for i = 1, #priorityIds do
+      local jobId = priorityIds[i]
+      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+      removed = removed + 1
+    end
+    redis.call('DEL', priorityKey)
   end
 
   if removed > 0 then
@@ -3393,7 +3418,7 @@ export async function drainQueue(
 ): Promise<number> {
   const result = await client.fcall(
     'glidemq_drain',
-    [k.stream, k.scheduled, k.events, k.id],
+    [k.stream, k.scheduled, k.events, k.id, k.lifo, k.priority],
     [delayed ? '1' : '0', group],
   );
   return Number(result) || 0;

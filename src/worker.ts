@@ -417,7 +417,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
           return;
         }
       } catch (err) {
-        this.emit('error', new Error(`${label} fetch error: ${err}`));
+        this.emit('error', new Error(`${label} fetch error`, { cause: err }));
       }
     }
 
@@ -455,7 +455,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
               return;
             }
           } catch (err) {
-            this.emit('error', new Error(`${label} fetch error: ${err}`));
+            this.emit('error', new Error(`${label} fetch error`, { cause: err }));
           }
         }
       }
