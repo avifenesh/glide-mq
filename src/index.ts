@@ -6,6 +6,9 @@ export { Job } from './job';
 export { QueueEvents } from './queue-events';
 export { FlowProducer } from './flow-producer';
 export type { JobNode } from './flow-producer';
+export { Producer } from './producer';
+export type { ProducerOptions } from './producer';
+export { ServerlessPool, serverlessPool } from './serverless-pool';
 
 export type {
   QueueOptions,
