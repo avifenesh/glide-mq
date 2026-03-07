@@ -465,6 +465,66 @@ describeEachMode('LIFO: FlowProducer child jobs', (CONNECTION) => {
   }, 10000);
 });
 
+describeEachMode('LIFO: Global concurrency enforcement for priority jobs', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('globalConcurrency=1 prevents concurrent priority job processing across workers', async () => {
+    const Q = 'priority-gc-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+    await queue.setGlobalConcurrency(1);
+
+    // Add 4 priority jobs
+    for (let i = 0; i < 4; i++) {
+      await queue.add('job', { i }, { priority: 1 });
+    }
+
+    let maxConcurrent = 0;
+    let concurrent = 0;
+    const processed: number[] = [];
+
+    const makeWorker = () =>
+      new Worker(
+        Q,
+        async (job: any) => {
+          concurrent++;
+          maxConcurrent = Math.max(maxConcurrent, concurrent);
+          await new Promise((r) => setTimeout(r, 50));
+          concurrent--;
+          processed.push(job.data.i);
+          return 'ok';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+      );
+
+    const w1 = makeWorker();
+    const w2 = makeWorker();
+    w1.on('error', () => {});
+    w2.on('error', () => {});
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (processed.length >= 4) { clearInterval(check); resolve(); }
+      }, 100);
+    });
+
+    await w1.close(true);
+    await w2.close(true);
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+
+    expect(maxConcurrent).toBe(1);
+    expect(processed).toHaveLength(4);
+  }, 20000);
+});
+
 describeEachMode('LIFO: Batch pop throughput', (CONNECTION) => {
   let cleanupClient: any;
 
@@ -476,24 +536,27 @@ describeEachMode('LIFO: Batch pop throughput', (CONNECTION) => {
     cleanupClient.close();
   });
 
-  it('worker with concurrency=5 processes LIFO batch faster than 5 sequential polls', async () => {
+  it('worker with concurrency=5 dispatches multiple LIFO jobs concurrently via rpopCount', async () => {
     const Q = 'lifo-batch-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
-    // Add 10 LIFO jobs
+    // Add 10 LIFO jobs with a fixed delay to confirm concurrency
     for (let i = 0; i < 10; i++) {
       await queue.add('job', { i }, { lifo: true });
     }
 
-    let processed = 0;
-    const start = Date.now();
-    let endTime = 0;
+    let maxConcurrent = 0;
+    let concurrent = 0;
+    const processedIds: number[] = [];
 
     const worker = new Worker(
       Q,
-      async () => {
-        processed++;
-        if (processed === 10) endTime = Date.now();
+      async (job: any) => {
+        concurrent++;
+        maxConcurrent = Math.max(maxConcurrent, concurrent);
+        await new Promise((r) => setTimeout(r, 30));
+        concurrent--;
+        processedIds.push(job.data.i);
         return 'ok';
       },
       { connection: CONNECTION, concurrency: 5, blockTimeout: 500 },
@@ -502,7 +565,7 @@ describeEachMode('LIFO: Batch pop throughput', (CONNECTION) => {
 
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
-        if (processed >= 10) { clearInterval(check); resolve(); }
+        if (processedIds.length >= 10) { clearInterval(check); resolve(); }
       }, 50);
     });
 
@@ -510,10 +573,11 @@ describeEachMode('LIFO: Batch pop throughput', (CONNECTION) => {
     await queue.close();
     await flushQueue(cleanupClient, Q);
 
-    // With concurrency=5 and batch pop, 10 jobs should complete
-    expect(processed).toBe(10);
-    // Batch pop should keep the worker busy (all 10 processed)
-    expect(endTime - start).toBeLessThan(5000);
+    expect(processedIds).toHaveLength(10);
+    // With concurrency=5 and 30ms processing time, multiple jobs must run in parallel
+    // If sequential: 10 × 30ms = 300ms minimum. True concurrency should allow ≥2 concurrent.
+    expect(maxConcurrent).toBeGreaterThanOrEqual(2);
+    // Note: LIFO ordering under concurrency>1 is non-deterministic; we only verify throughput.
   }, 15000);
 });
 

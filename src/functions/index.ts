@@ -294,7 +294,7 @@ local function extractLifoFromOpts(optsJson)
   if not optsJson or optsJson == '' then return 0 end
   local ok, decoded = pcall(cjson.decode, optsJson)
   if not ok or type(decoded) ~= 'table' then return 0 end
-  return decoded['lifo'] == true and 1 or 0
+  return (decoded['lifo'] == true or decoded['lifo'] == 1) and 1 or 0
 end
 
 local function extractGroupConcurrencyFromOpts(optsJson)
@@ -1640,8 +1640,8 @@ redis.register_function('glidemq_checkConcurrency', function(keys, args)
   if gc <= 0 then
     return -1
   end
-  local pending = redis.call('XPENDING', streamKey, group)
-  local pendingCount = tonumber(pending[1]) or 0
+  local ok_cc, pending = pcall(redis.call, 'XPENDING', streamKey, group)
+  local pendingCount = (ok_cc and pending and tonumber(pending[1])) or 0
   local listActive = tonumber(redis.call('GET', listActiveKey)) or 0
   local remaining = gc - pendingCount - listActive
   if remaining <= 0 then
@@ -1662,8 +1662,8 @@ redis.register_function('glidemq_rpopAndReserve', function(keys, args)
   local group = args[1]
   local gc = tonumber(redis.call('HGET', metaKey, 'globalConcurrency')) or 0
   if gc > 0 then
-    local pending = redis.call('XPENDING', streamKey, group)
-    local pendingCount = tonumber(pending[1]) or 0
+    local ok_ra, pending = pcall(redis.call, 'XPENDING', streamKey, group)
+    local pendingCount = (ok_ra and pending and tonumber(pending[1])) or 0
     local listActive = tonumber(redis.call('GET', listActiveKey)) or 0
     if pendingCount + listActive >= gc then
       return false
