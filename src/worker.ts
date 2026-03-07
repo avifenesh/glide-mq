@@ -1013,6 +1013,15 @@ export class Worker<D = any, R = any> extends EventEmitter {
   /**
    * After a repeatAfterComplete job completes or terminally fails,
    * update the scheduler entry so the next job is scheduled.
+   *
+   * KNOWN LIMITATION: This update happens after the job completion transaction,
+   * so a worker crash between completion and this call will leave the scheduler
+   * stuck at nextRun=0 (awaiting completion sentinel) indefinitely. Run multiple
+   * workers for redundancy, or manually remove/re-add the scheduler to recover.
+   * The idempotency check (nextRun === 0) prevents duplicate updates from stalled
+   * reclaim, but doesn't prevent races with upsertJobScheduler/removeJobScheduler
+   * (those are serialized via scheduler lock but this update is not). Future work:
+   * move scheduler update into Lua completeAndFetchNext/fail functions.
    */
   private async updateSchedulerAfterComplete(schedulerName: string, now: number): Promise<void> {
     if (!this.commandClient) return;
@@ -1029,12 +1038,16 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
       if (!config.repeatAfterComplete) return;
 
+      // Idempotency: only update if nextRun is 0 (awaiting completion sentinel).
+      // This prevents duplicate updates from stalled reclaim or double-processing.
+      if (config.nextRun !== 0) return;
+
       const nextRun = computeFollowingSchedulerNextRun(config, now);
       if (nextRun == null || (config.limit != null && (config.iterationCount ?? 0) >= config.limit)) {
         await this.commandClient.hdel(this.queueKeys.schedulers, [schedulerName]);
       } else {
-        config.lastRun = now;
         config.nextRun = nextRun;
+        // Don't overwrite lastRun - it was set by runSchedulers when the job was enqueued
         await this.commandClient.hset(this.queueKeys.schedulers, { [schedulerName]: JSON.stringify(config) });
       }
     } catch (err) {

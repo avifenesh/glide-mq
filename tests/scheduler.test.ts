@@ -725,11 +725,14 @@ describeEachMode('Job schedulers', (CONNECTION) => {
 
     expect(timestamps.length).toBeGreaterThanOrEqual(2);
 
-    // Verify non-overlapping: each job starts after (previous end + ~500ms delay)
+    // Verify non-overlapping: each job starts after previous completes
     for (let i = 1; i < timestamps.length; i++) {
+      // Assert true non-overlap: next starts after previous ends
+      expect(timestamps[i].start).toBeGreaterThanOrEqual(timestamps[i - 1].end);
+
+      // Assert repeatAfterComplete delay is honored (500ms with tolerance for jitter)
       const gap = timestamps[i].start - timestamps[i - 1].end;
-      // Allow some tolerance (scheduler promotion interval + timing jitter)
-      expect(gap).toBeGreaterThanOrEqual(300);
+      expect(gap).toBeGreaterThanOrEqual(400); // 500ms - 100ms jitter tolerance
     }
 
     await localQueue.close();
