@@ -55,17 +55,26 @@ const counts = await queue.getJobCounts();
 // }
 ```
 
-### `getMetrics(type)`
+### `getMetrics(type, opts?)`
 
-Returns the aggregate count for completed or failed jobs:
+Returns aggregate count plus per-minute time-series data for completed or failed jobs:
 
 ```typescript
-const completedMetrics = await queue.getMetrics('completed');
-// { count: 842 }
+const metrics = await queue.getMetrics('completed');
+// {
+//   count: 15234,
+//   data: [
+//     { timestamp: 1709654400000, count: 142, avgDuration: 234 },
+//     { timestamp: 1709654460000, count: 156, avgDuration: 218 },
+//   ],
+//   meta: { resolution: 'minute' }
+// }
 
-const failedMetrics = await queue.getMetrics('failed');
-// { count: 7 }
+// Slice data points (e.g. last 10 data points):
+const recent = await queue.getMetrics('completed', { start: -10 });
 ```
+
+Data points are recorded server-side with zero extra RTTs. Minute-resolution buckets are retained for 24 hours and trimmed automatically.
 
 ### `count()`
 

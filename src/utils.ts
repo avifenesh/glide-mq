@@ -73,8 +73,11 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     log: (id: string) => `${p}:log:${id}`,
     deps: (id: string) => `${p}:deps:${id}`,
     ratelimited: `${p}:ratelimited`,
+    metricsCompleted: `${p}:metrics:completed`,
+    metricsFailed: `${p}:metrics:failed`,
     group: (key: string) => `${p}:group:${key}`,
     groupq: (key: string) => `${p}:groupq:${key}`,
+    parents: (id: string) => `${p}:parents:${id}`,
     worker: (id: string) => `${p}:w:${id}`,
   };
 }
@@ -176,6 +179,8 @@ export const JOB_METADATA_FIELDS: readonly string[] = Object.freeze([
   'revoked',
   'lastActive',
   'schedulerName',
+  'parentIds',
+  'parentQueues',
 ]);
 
 /**

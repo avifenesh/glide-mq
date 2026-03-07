@@ -17,6 +17,9 @@ import os from 'os';
 import type {
   JobOptions,
   JobCounts,
+  Metrics,
+  MetricsOptions,
+  MetricsDataPoint,
   GetJobsOptions,
   Processor,
   WorkerInfo,
@@ -170,6 +173,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private opts: TestQueueOptions;
   /** @internal */ readonly serializer: Serializer;
 
+  /** @internal */ readonly metricsData: Map<string, Map<number, { count: number; totalDuration: number }>> = new Map([
+    ['completed', new Map()],
+    ['failed', new Map()],
+  ]);
+
   /** Workers register themselves here so we can notify on add. */
   /** @internal */ readonly workers: Set<TestWorker<D, R>> = new Set();
   private schedulers: Map<string, SchedulerEntry> = new Map();
@@ -300,6 +308,48 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       counts[record.state]++;
     }
     return counts;
+  }
+
+  /** Get metrics for completed or failed jobs with per-minute data points. */
+  async getMetrics(type: 'completed' | 'failed', opts?: MetricsOptions): Promise<Metrics> {
+    let count = 0;
+    for (const record of this.jobs.values()) {
+      if (record.state === type) count++;
+    }
+    const buckets = this.metricsData.get(type)!;
+    const data: MetricsDataPoint[] = Array.from(buckets.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([timestamp, b]) => ({
+        timestamp,
+        count: b.count,
+        avgDuration: b.count > 0 ? Math.round(b.totalDuration / b.count) : 0,
+      }));
+
+    const start = opts?.start ?? 0;
+    const end = opts?.end ?? -1;
+
+    if (!Number.isInteger(start)) throw new TypeError('start must be an integer');
+    if (!Number.isInteger(end)) throw new TypeError('end must be an integer');
+    if (start >= 0 && end >= 0 && end < start) {
+      throw new RangeError('end must be >= start when both are non-negative');
+    }
+
+    const sliced = end === -1 ? data.slice(start) : data.slice(start, end + 1);
+    return { count, data: sliced, meta: { resolution: 'minute' } };
+  }
+
+  /** @internal */
+  recordMetric(type: 'completed' | 'failed', processedOn: number | undefined, finishedOn: number): void {
+    const minuteTs = finishedOn - (finishedOn % 60000);
+    const buckets = this.metricsData.get(type)!;
+    let bucket = buckets.get(minuteTs);
+    if (!bucket) {
+      bucket = { count: 0, totalDuration: 0 };
+      buckets.set(minuteTs, bucket);
+    }
+    bucket.count++;
+    const duration = processedOn !== undefined ? finishedOn - processedOn : 0;
+    if (duration > 0) bucket.totalDuration += duration;
   }
 
   /** Pause the queue - workers stop picking up new jobs. */
@@ -792,6 +842,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       record.finishedOn = Date.now();
       job.failedReason = 'expired';
       job.finishedOn = record.finishedOn;
+      this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
       const err = new Error('expired');
       this.emit('failed', job, err);
       this.queue.emit('failed', job, err);
@@ -811,6 +862,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         record.finishedOn = Date.now();
         job.returnvalue = roundtripped;
         job.finishedOn = record.finishedOn;
+        this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
         this.emit('completed', job, roundtripped);
         this.queue.emit('completed', job, roundtripped);
       })
@@ -830,6 +882,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           record.finishedOn = Date.now();
           job.failedReason = err.message;
           job.finishedOn = record.finishedOn;
+          this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
           this.emit('failed', job, err);
           this.queue.emit('failed', job, err);
         }
@@ -938,6 +991,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           record.finishedOn = Date.now();
           job.returnvalue = roundtripped;
           job.finishedOn = record.finishedOn;
+          this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
           this.emit('completed', job, roundtripped);
           this.queue.emit('completed', job, roundtripped);
         }
@@ -964,6 +1018,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
                 record.finishedOn = Date.now();
                 job.failedReason = result.message;
                 job.finishedOn = record.finishedOn;
+                this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
                 this.emit('failed', job, result);
                 this.queue.emit('failed', job, result);
               }
@@ -976,6 +1031,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
               record.finishedOn = Date.now();
               job.returnvalue = roundtripped;
               job.finishedOn = record.finishedOn;
+              this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
               this.emit('completed', job, roundtripped);
               this.queue.emit('completed', job, roundtripped);
             }
@@ -997,6 +1053,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
               record.finishedOn = Date.now();
               job.failedReason = err.message;
               job.finishedOn = record.finishedOn;
+              this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
               this.emit('failed', job, err);
               this.queue.emit('failed', job, err);
             }

@@ -32,7 +32,7 @@ npm install glide-mq
 - **Job revocation + sandboxed processors** — cooperative cancellation and isolated file-based processors in worker threads/child processes ([Advanced](docs/ADVANCED.md#job-revocation), [Architecture](docs/ARCHITECTURE.md#typescript-api), [Sandbox example](tests/sandbox-integration.test.ts))
 
 ### Orchestration & scheduling
-- **Workflows** — `FlowProducer` parent-child trees and `chain`/`group`/`chord` helpers ([Workflows](docs/WORKFLOWS.md), [Demo](demo/README.md#demo-scenarios))
+- **Workflows** — `FlowProducer` parent-child trees, arbitrary DAG topologies, and `chain`/`group`/`chord` helpers ([Workflows](docs/WORKFLOWS.md), [Demo](demo/README.md#demo-scenarios))
 - **Schedulers** — cron and interval repeatable jobs with optional start/end bounds and run limits, persisted across restarts ([Advanced](docs/ADVANCED.md#job-schedulers), [Demo](demo/README.md#demo-scenarios))
 - **Step jobs** — pause an active job and resume it later with `job.moveToDelayed(...)` for multi-step workflows ([Usage](docs/USAGE.md#pause-and-resume-a-job-later-step-jobs))
 - **Per-key ordering, global concurrency, and rate limiting** — deterministic ordering with queue-wide and token-bucket controls ([Advanced](docs/ADVANCED.md#ordering-and-group-concurrency), [Advanced](docs/ADVANCED.md#global-concurrency), [Advanced](docs/ADVANCED.md#global-rate-limiting))
