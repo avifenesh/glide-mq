@@ -75,6 +75,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     xpendingWithOptions: vi.fn().mockResolvedValue([]),
     xgroupCreate: vi.fn(),
     xreadgroup: vi.fn().mockResolvedValue(null),
+    rpop: vi.fn().mockResolvedValue(null),
     zadd: vi.fn(),
     zcard: vi.fn().mockResolvedValue(0),
     zrange: vi.fn().mockResolvedValue([]),

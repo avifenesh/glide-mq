@@ -392,6 +392,35 @@ export class Worker<D = any, R = any> extends EventEmitter {
       }
     }
 
+    // Check priority list first (priority > LIFO > FIFO), then LIFO, before blocking on stream
+    for (const [listKey, label] of [
+      [this.queueKeys.priority, 'priority'],
+      [this.queueKeys.lifo, 'LIFO'],
+    ] as [string, string][]) {
+      try {
+        const nextJobId = await this.commandClient.rpop(listKey);
+        if (nextJobId) {
+          const jobId = String(nextJobId);
+          if (this.concurrency === 1) {
+            this.activeCount++;
+            const promise = this.processJob(jobId, '');
+            this.activePromises.add(promise);
+            try {
+              await promise;
+            } finally {
+              this.activeCount--;
+              this.activePromises.delete(promise);
+            }
+          } else {
+            this.dispatchJob(jobId, '');
+          }
+          return;
+        }
+      } catch (err) {
+        this.emit('error', new Error(`${label} fetch error`, { cause: err }));
+      }
+    }
+
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
     // STREAMS {streamKey} >
     const result = await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
@@ -400,6 +429,37 @@ export class Worker<D = any, R = any> extends EventEmitter {
     });
 
     if (!result) {
+      // Stream empty - check priority and LIFO lists for jobs added while we were blocking
+      if (this.commandClient) {
+        for (const [listKey, label] of [
+          [this.queueKeys.priority, 'priority'],
+          [this.queueKeys.lifo, 'LIFO'],
+        ] as [string, string][]) {
+          try {
+            const nextJobId = await this.commandClient.rpop(listKey);
+            if (nextJobId) {
+              const jobId = String(nextJobId);
+              if (this.concurrency === 1) {
+                this.activeCount++;
+                const promise = this.processJob(jobId, '');
+                this.activePromises.add(promise);
+                try {
+                  await promise;
+                } finally {
+                  this.activeCount--;
+                  this.activePromises.delete(promise);
+                }
+              } else {
+                this.dispatchJob(jobId, '');
+              }
+              return;
+            }
+          } catch (err) {
+            this.emit('error', new Error(`${label} fetch error`, { cause: err }));
+          }
+        }
+      }
+
       if (!this.isDrained && this.activeCount === 0) {
         this.isDrained = true;
         this.emit('drained');

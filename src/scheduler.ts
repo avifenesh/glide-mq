@@ -390,6 +390,7 @@ export class Scheduler {
             0,
             jobTtl,
             '',
+            0,
             '',
             '',
             isRepeatAfterComplete ? schedulerName : '',
