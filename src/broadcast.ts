@@ -56,12 +56,14 @@ export class Broadcast<D = any> extends EventEmitter {
    * Publish a message to all subscribers.
    * Each subscriber (consumer group) receives a copy.
    *
+   * @param subject - Message subject/topic for routing (e.g., 'projects.1.issues.2').
+   *   BroadcastWorker `subjects` patterns match against this value.
    * @param data - Message data
    * @param opts - Job options (delay, priority, dedup, etc.)
    * @returns Message ID or null if skipped (e.g., due to dedup)
    */
-  async publish(data: D, opts?: JobOptions): Promise<string | null> {
-    const job = await this.queue.add('message', data, opts);
+  async publish(subject: string, data: D, opts?: JobOptions): Promise<string | null> {
+    const job = await this.queue.add(subject, data, opts);
 
     // Trim stream to maxMessages if configured (exact trim for a reliable hard limit)
     if (job && this.opts.maxMessages) {
