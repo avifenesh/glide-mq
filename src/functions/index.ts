@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '42';
+export const LIBRARY_VERSION = '43';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -157,6 +157,8 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
         local headCost = tonumber(redis.call('HGET', headJobKey, 'cost')) or 1000
         -- DLQ guard: cost > capacity - pop, fail, check next
         if headCost > tbCap then
+          local metricsKey = prefix .. 'metrics:failed'
+          local processedOn = tonumber(redis.call('HGET', headJobKey, 'processedOn')) or ts
           redis.call('LPOP', waitListKey)
           redis.call('ZADD', prefix .. 'failed', ts, headJobId)
           redis.call('HSET', headJobKey,
@@ -164,6 +166,7 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
             'failedReason', 'cost exceeds token bucket capacity',
             'finishedOn', tostring(ts))
           emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
+          recordMetrics(metricsKey, ts, ts - processedOn)
         elseif tbTokensCur < headCost then
           -- Not enough tokens: register delay and skip promotion
           local tbRateVal = tonumber(g.tbRefillRate) or 0
@@ -206,6 +209,8 @@ local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, 
   local wasActive = (curState == 'active')
   local failedKey = prefix .. 'failed'
   local eventsKey = prefix .. 'events'
+  local metricsKey = prefix .. 'metrics:failed'
+  local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or now
   redis.call('ZADD', failedKey, now, jobId)
   redis.call('HSET', jobKey,
     'state', 'failed',
@@ -217,6 +222,7 @@ local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, 
     releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   end
   emitEvent(eventsKey, 'expired', jobId, nil)
+  recordMetrics(metricsKey, now, now - processedOn)
   return true
 end
 
@@ -329,11 +335,11 @@ end
 
 local function recordMetrics(metricsKey, timestamp, duration)
   local minuteTs = timestamp - (timestamp % 60000)
-  redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':c', 1)
+  local newCount = tonumber(redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':c', 1))
   if duration > 0 then
     redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':d', duration)
   end
-  if timestamp % 100 == 0 then
+  if newCount and (newCount % 100 == 0) then
     local cutoff = minuteTs - 86400000
     local fields = redis.call('HKEYS', metricsKey)
     local toDelete = {}
@@ -876,6 +882,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       nextJobCostVal = tonumber(redis.call('HGET', nextJobKey, 'cost')) or 1000
       -- DLQ guard: cost > capacity
       if nextJobCostVal > nextTbCapacity then
+        local nextProcessedOn = tonumber(redis.call('HGET', nextJobKey, 'processedOn')) or tonumber(timestamp)
         redis.call('XACK', streamKey, group, nextEntryId)
         redis.call('XDEL', streamKey, nextEntryId)
         redis.call('ZADD', prefix .. 'failed', tonumber(timestamp), nextJobId)
@@ -884,6 +891,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
           'failedReason', 'cost exceeds token bucket capacity',
           'finishedOn', tostring(timestamp))
         emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'})
+        recordMetrics(metricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn)
         return {'NEXT_NONE', jobId}
       end
       if nextTbTokens < nextJobCostVal then
@@ -1063,6 +1071,8 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       else
       local stalledCount = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
       if stalledCount > maxStalledCount then
+        local metricsKey = prefix .. 'metrics:failed'
+        local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
         redis.call('XACK', streamKey, group, entryId)
         redis.call('XDEL', streamKey, entryId)
         redis.call('ZADD', failedKey, timestamp, jobId)
@@ -1076,6 +1086,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
         emitEvent(eventsKey, 'failed', jobId, {
           'failedReason', 'job stalled more than maxStalledCount'
         })
+        recordMetrics(metricsKey, timestamp, timestamp - processedOn)
       else
         redis.call('HSET', jobKey, 'state', 'active')
         emitEvent(eventsKey, 'stalled', jobId, nil)
