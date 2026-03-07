@@ -5,9 +5,11 @@
 - [FlowProducer — Parent-Child Job Trees](#flowproducer)
 - [Reading Child Results](#reading-child-results)
 - [DAG Workflows — Multiple Parents](#dag-workflows--multiple-parents)
+- [moveToWaitingChildren — Dynamic Children](#movetowaitingchildren--dynamic-children)
 - [`chain` — Sequential Pipeline](#chain)
 - [`group` — Parallel Execution](#group)
 - [`chord` — Parallel + Callback](#chord)
+- [Broadcast](#broadcast)
 
 ---
 
@@ -200,6 +202,63 @@ const resultC = parentC?.returnvalue;
 
 ---
 
+## moveToWaitingChildren — Dynamic Children
+
+`FlowProducer` and `addDAG()` define the job graph **up front** before any processing begins. Sometimes a parent processor needs to **spawn children dynamically** based on runtime data — for example, splitting a file into N chunks where N is unknown until the file is read.
+
+`job.moveToWaitingChildren()` handles this. It pauses the parent job (transitions it back to `waiting-children`) until all dynamically-added children complete. When the last child finishes, the parent processor **re-executes from the top**.
+
+### How it works
+
+1. The parent processor runs and decides it needs child jobs.
+2. It creates children via `queue.add()` (or `FlowProducer`) with a `parent` option pointing back to the current job.
+3. It calls `await job.moveToWaitingChildren()`.
+4. This throws a `WaitingChildrenError` internally — the worker framework catches it and moves the parent to `waiting-children` state.
+5. When all children complete, the parent processor is invoked again from the top.
+6. On re-entry, call `job.getChildrenValues()` to collect results and return the final value.
+
+### Example: dynamic fan-out
+
+```typescript
+import { Queue, Worker, FlowProducer } from 'glide-mq';
+
+const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
+const queue = new Queue('processing', { connection });
+
+const worker = new Worker('processing', async (job) => {
+  // Check if children have already completed (re-entry after waiting)
+  const existing = await job.getChildrenValues();
+  if (Object.keys(existing).length > 0) {
+    // All children done — aggregate and return
+    const results = Object.values(existing);
+    return { total: results.reduce((sum, r) => sum + r.count, 0) };
+  }
+
+  // First execution: inspect data and spawn children dynamically
+  const { urls } = job.data;
+
+  const flow = new FlowProducer({ connection });
+  for (const url of urls) {
+    await queue.add('fetch-url', { url }, {
+      parent: { id: job.id!, queue: job.queueQualifiedName },
+    });
+  }
+  await flow.close();
+
+  // Pause until all children complete — throws WaitingChildrenError
+  await job.moveToWaitingChildren();
+}, { connection });
+```
+
+### Key points
+
+- `moveToWaitingChildren()` always throws (`WaitingChildrenError`). Do not put code after it — it will not execute.
+- The processor re-runs **from the top** when children complete. Use `getChildrenValues()` or `job.data` to detect re-entry.
+- You can call `moveToWaitingChildren()` multiple times across re-entries to create multi-round fan-out patterns.
+- Children must reference the parent via `opts.parent: { id, queue }` so the dependency tracking works.
+
+---
+
 ## `chain`
 
 Execute a list of jobs **sequentially**, specified in **reverse execution order** (the last element in the array runs first). Each step can read the previous step's result via `getChildrenValues()`.
@@ -285,3 +344,13 @@ const worker = new Worker('tasks', async (job) => {
   // ... other processors
 }, { connection });
 ```
+
+---
+
+## Broadcast
+
+The workflow patterns above (`FlowProducer`, DAG, `chain`, `group`, `chord`, `moveToWaitingChildren`) all model **dependency graphs** — jobs wait for other jobs to complete before running.
+
+glide-mq also supports a **Broadcast / BroadcastWorker** pub/sub pattern for real-time fan-out where every subscriber receives every message. This is a fundamentally different paradigm: no job state, no retries, no dependencies — just fire-and-forget delivery to all connected workers.
+
+See [USAGE.md](./USAGE.md) for the `Broadcast` and `BroadcastWorker` API.

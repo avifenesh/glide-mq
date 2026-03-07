@@ -6,6 +6,8 @@
 - [Worker](#worker)
 - [Graceful Shutdown](#graceful-shutdown)
 - [Cluster Mode](#cluster-mode)
+- [Pluggable Serializers](#pluggable-serializers)
+- [Broadcast / BroadcastWorker](#broadcast--broadcastworker)
 - [Event Listeners](#event-listeners)
 
 ---
@@ -43,6 +45,25 @@ await queue.addBulk([
   { name: 'job1', data: { a: 1 } },
   { name: 'job2', data: { a: 2 } },
 ]);
+```
+
+#### LIFO mode
+
+Add `lifo: true` so the newest jobs are processed first. LIFO jobs are stored in a dedicated Valkey LIST (RPUSH/RPOP) separate from the default FIFO stream.
+
+```typescript
+await queue.add('urgent-report', data, { lifo: true });
+```
+
+Processing order: **priority > LIFO > FIFO**. Priority jobs are always consumed first, then LIFO, then the normal FIFO stream. `lifo` cannot be combined with `ordering` keys — they are mutually exclusive.
+
+#### Job TTL
+
+`ttl` (milliseconds) sets a time-to-live on a job. If the job is not processed within this window, it is automatically failed as `'expired'`.
+
+```typescript
+// Expire if not processed within 5 minutes
+await queue.add('temp', data, { ttl: 300_000 });
 ```
 
 ### Inspecting jobs
@@ -291,6 +312,89 @@ const connection = {
 
 ---
 
+## Pluggable Serializers
+
+By default, job data and return values are serialized with `JSON.stringify`/`JSON.parse`. You can replace this with any serializer that implements the `Serializer` interface.
+
+```typescript
+import { Queue, Worker, JSON_SERIALIZER } from 'glide-mq';
+import type { Serializer } from 'glide-mq';
+
+const base64Serializer: Serializer = {
+  serialize(data: unknown): string {
+    return Buffer.from(JSON.stringify(data)).toString('base64');
+  },
+  deserialize(raw: string): unknown {
+    return JSON.parse(Buffer.from(raw, 'base64').toString('utf8'));
+  },
+};
+
+const queue = new Queue('tasks', { connection, serializer: base64Serializer });
+const worker = new Worker('tasks', processor, { connection, serializer: base64Serializer });
+```
+
+Both `Queue` and `Worker` (and `FlowProducer`, if used) **must use the same serializer**. A mismatch causes silent data corruption — the consumer sees `{}` and the job's `deserializationFailed` flag is set to `true`.
+
+`JSON_SERIALIZER` is the default and is exported for convenience (e.g., when you only need a custom serializer on a subset of queues).
+
+---
+
+## Broadcast / BroadcastWorker
+
+`Broadcast` is a pub/sub fan-out primitive. Unlike `Queue` (point-to-point, each job processed by exactly one worker), `Broadcast` delivers every message to **all** subscribers.
+
+```typescript
+import { Broadcast, BroadcastWorker } from 'glide-mq';
+
+const broadcast = new Broadcast('events', {
+  connection,
+  maxMessages: 1000,  // retain at most 1000 messages in the stream
+});
+
+// Each subscriber is identified by a unique subscription name (becomes a consumer group)
+const inventoryWorker = new BroadcastWorker('events', async (job) => {
+  console.log('Inventory update:', job.data);
+}, { connection, subscription: 'inventory-service' });
+
+const emailWorker = new BroadcastWorker('events', async (job) => {
+  console.log('Send notification:', job.data);
+}, { connection, subscription: 'email-service' });
+
+// Publish — every subscriber receives this message
+await broadcast.publish({ event: 'order.placed', orderId: 42 });
+```
+
+### BroadcastWorker options
+
+Each `BroadcastWorker` supports the same options as `Worker` (concurrency, limiter, backoff, etc.) plus:
+
+- `subscription` (required) — unique name for this subscriber. Becomes the consumer group.
+- `startFrom` — stream ID to start reading from when the subscription is first created:
+  - `'$'` (default) — only new messages published after subscription creation.
+  - `'0-0'` — replay all retained history (backfill).
+
+```typescript
+const replayWorker = new BroadcastWorker('events', processor, {
+  connection,
+  subscription: 'analytics',
+  startFrom: '0-0',     // backfill all existing messages
+  concurrency: 5,
+});
+```
+
+### Queue vs Broadcast
+
+| | Queue | Broadcast |
+|---|---|---|
+| Delivery | Point-to-point (one consumer) | Fan-out (all subscribers) |
+| Use case | Task processing, job queues | Event distribution, notifications |
+| Add / Publish | `queue.add(name, data, opts)` | `broadcast.publish(data, opts?)` |
+| Consumer | `Worker` | `BroadcastWorker` |
+| Retry / backoff | Per job | Per subscriber, per message |
+| Stream trimming | Auto (completion/removal) | `maxMessages` option |
+
+---
+
 ## Event Listeners
 
 ### `QueueEvents` — stream-based lifecycle events
@@ -409,3 +513,50 @@ Notes:
 - `moveToDelayed()` must be called from an active worker processor.
 - `nextStep` is a convenience for plain object payloads; it updates `job.data.step` atomically with the delayed transition.
 - `DelayedError` is exported for advanced/manual control, but `job.moveToDelayed()` is the normal API.
+
+### Dynamic Children (moveToWaitingChildren)
+
+A parent processor can spawn child jobs at runtime, then call `job.moveToWaitingChildren()` to pause until all children complete. When the last child finishes, the parent resumes and the processor is invoked again.
+
+```typescript
+import { Queue, Worker, FlowProducer, WaitingChildrenError } from 'glide-mq';
+
+const parentWorker = new Worker('orchestrator', async (job) => {
+  const step = job.data.step ?? 'spawn';
+
+  if (step === 'spawn') {
+    // Dynamically add child jobs
+    const childQueue = new Queue('subtasks', { connection });
+    await childQueue.add('chunk-1', { chunk: 1 }, { parent: { queue: 'orchestrator', id: job.id } });
+    await childQueue.add('chunk-2', { chunk: 2 }, { parent: { queue: 'orchestrator', id: job.id } });
+    await childQueue.close();
+
+    // Pause — throws WaitingChildrenError internally
+    await job.moveToWaitingChildren();
+  }
+
+  // Resumed after all children completed
+  const childResults = await job.getChildrenValues();
+  return { merged: Object.values(childResults) };
+}, { connection });
+```
+
+`moveToWaitingChildren()` throws `WaitingChildrenError` to signal the worker. If all children have already completed by the time the call is made, the job transitions directly back to active.
+
+### UnrecoverableError
+
+Throw `UnrecoverableError` in a processor to skip all remaining retries and move the job directly to the failed state. Useful for validation errors, bad input, or any condition where retrying is pointless.
+
+```typescript
+import { Worker, UnrecoverableError } from 'glide-mq';
+
+const worker = new Worker('tasks', async (job) => {
+  if (!job.data.requiredField) {
+    throw new UnrecoverableError('missing requiredField - will not retry');
+  }
+
+  // ... normal processing
+}, { connection, concurrency: 5 });
+```
+
+The job is marked as permanently failed regardless of the `attempts` configuration. This is equivalent to calling `job.discard()` and then throwing, but more explicit.

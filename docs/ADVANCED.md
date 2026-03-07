@@ -4,7 +4,10 @@
 
 - [Shared Client (Connection Reuse)](#shared-client)
 - [Job Schedulers (Repeatable / Cron Jobs)](#job-schedulers)
-- [Sequential Processing (Per-Key Ordering)](#sequential-processing)
+- [LIFO Mode](#lifo-mode)
+- [Job TTL](#job-ttl)
+- [Pluggable Serializers](#pluggable-serializers)
+- [Ordering and Group Concurrency](#ordering-and-group-concurrency)
 - [Custom Job IDs](#custom-job-ids)
 - [Deduplication](#deduplication)
 - [Token Bucket Rate Limiting](#token-bucket-rate-limiting)
@@ -184,9 +187,193 @@ const schedulers = await queue.getRepeatableJobs();
 await queue.removeJobScheduler('cleanup');
 ```
 
-`startDate` defers the first eligible run, `endDate` prevents any future run whose scheduled time would fall outside the window, and `limit` auto-removes the scheduler after creating that many jobs. `getJobScheduler()` / `getRepeatableJobs()` expose the stored bounds together with `iterationCount` so you can inspect how many runs have already fired.
+### Repeat-after-complete mode
+
+`repeatAfterComplete` schedules the next job only after the current one completes (or terminally fails). Unlike `every`, which fires at fixed intervals regardless of processing time, `repeatAfterComplete` ensures no overlap between successive runs.
+
+```typescript
+// Poll a sensor every 5 seconds after the previous poll finishes
+await queue.upsertJobScheduler('sensor-poll', {
+  repeatAfterComplete: 5000, // 5s after previous job completes
+}, { name: 'poll', data: { sensor: 'temp-1' } });
+```
+
+This mode is useful for:
+
+- **Polling** — avoid stacking requests when the upstream is slow.
+- **Sequential pipelines** — each step must finish before the next begins.
+- **Adaptive intervals** — combine with a custom processor that adjusts `repeatAfterComplete` via `upsertJobScheduler` based on results.
+
+`repeatAfterComplete` is mutually exclusive with `pattern` and `every`. Bounded options (`startDate`, `endDate`, `limit`) work normally with this mode.
+
+### Bounded schedulers
+
+All three scheduler modes (`pattern`, `every`, `repeatAfterComplete`) support bounding via `startDate`, `endDate`, and `limit`:
+
+| Option | Type | Effect |
+|--------|------|--------|
+| `startDate` | `Date \| number` | Defer the first eligible run until this time. |
+| `endDate` | `Date \| number` | Auto-remove the scheduler when the next scheduled time would exceed this date. |
+| `limit` | `number` | Auto-remove the scheduler after creating this many jobs. |
+
+```typescript
+// Run a cron job during a specific campaign window, max 36 runs
+await queue.upsertJobScheduler(
+  'black-friday-deals',
+  {
+    pattern: '0 */2 * * *',
+    startDate: new Date('2026-11-28T00:00:00Z'),
+    endDate: new Date('2026-12-01T00:00:00Z'),
+    limit: 36,
+  },
+  { name: 'promote-deal', data: { campaign: 'black-friday' } },
+);
+
+// Interval with a delayed start and a hard stop after 100 iterations
+await queue.upsertJobScheduler(
+  'warmup-cache',
+  {
+    every: 30_000,
+    startDate: Date.now() + 60_000,  // first run delayed 1 minute
+    endDate: new Date('2026-12-31'), // stop scheduling after this date
+    limit: 100,                       // auto-remove after 100 runs
+  },
+  { name: 'warmup', data: { region: 'us-east' } },
+);
+```
+
+`getJobScheduler()` / `getRepeatableJobs()` expose the stored bounds together with `iterationCount` so you can inspect how many runs have already fired.
 
 The internal `Scheduler` class fires a promotion loop that converts due scheduler entries into real jobs, then re-registers the next occurrence.
+
+---
+
+## LIFO Mode
+
+Set `lifo: true` in `JobOptions` to process jobs in last-in-first-out order. The most recently added job is picked up first.
+
+```typescript
+await queue.add('render', { frame: 100 }, { lifo: true });
+await queue.add('render', { frame: 101 }, { lifo: true });
+await queue.add('render', { frame: 102 }, { lifo: true });
+// Processing order: 102, 101, 100
+```
+
+### Ordering precedence
+
+Workers check sources in this order: **priority > LIFO > FIFO**. Priority jobs (those with `priority > 0`) are always fetched first. Among non-priority jobs, LIFO jobs are fetched before FIFO jobs sitting in the stream.
+
+### Constraints
+
+- **Cannot combine with `ordering.key`.** Throws at enqueue time:
+  ```
+  Error: lifo and ordering.key cannot be used together
+  ```
+- LIFO jobs are stored in a dedicated Valkey LIST (`glide:{queueName}:lifo`), separate from the main stream. This means LIFO and FIFO jobs in the same queue coexist — LIFO jobs are drained first.
+- Under `concurrency > 1`, multiple LIFO jobs may run in parallel; strict reverse ordering is only guaranteed with `concurrency: 1`.
+- Works with all job types: delayed jobs return to the LIFO list after their delay expires, and schedulers can produce LIFO jobs via the template `opts`.
+
+See also: [Adding jobs](USAGE.md#adding-jobs) for the full `JobOptions` reference.
+
+---
+
+## Job TTL
+
+Set `ttl` in `JobOptions` to auto-expire jobs that are not processed within a time window. The value is in milliseconds.
+
+```typescript
+// Expire if not processed within 30 seconds
+await queue.add('time-sensitive', { alert: 'server-down' }, {
+  ttl: 30_000,
+});
+
+// TTL works with delayed jobs — the clock starts at creation time
+await queue.add('offer', { code: 'FLASH50' }, {
+  delay: 5_000,
+  ttl: 60_000, // must be processed within 60s of creation, not of becoming active
+});
+
+// TTL works with priority jobs
+await queue.add('urgent', data, {
+  priority: 1,
+  ttl: 10_000,
+});
+```
+
+When a job's TTL elapses, it is failed with the reason `'expired'` during the next activation check. Jobs that are already active are not interrupted — TTL is checked at fetch time, not mid-processing. Use `timeout` in `JobOptions` to limit active processing time.
+
+See also: [Adding jobs](USAGE.md#adding-jobs) for other per-job options.
+
+---
+
+## Pluggable Serializers
+
+By default, glide-mq uses `JSON.stringify` / `JSON.parse` for job data, return values, and progress payloads. You can replace this with any synchronous serializer.
+
+### The `Serializer` interface
+
+```typescript
+import type { Serializer } from 'glide-mq';
+
+interface Serializer {
+  /** Serialize a value to a string for storage in Valkey. */
+  serialize(data: unknown): string;
+  /** Deserialize a string from Valkey back to a value. */
+  deserialize(raw: string): unknown;
+}
+```
+
+Both methods must be synchronous. If `serialize` throws, the job is treated as a processor failure (in Worker) or skipped (in Scheduler).
+
+### Example: MessagePack serializer
+
+```typescript
+import { Queue, Worker } from 'glide-mq';
+import { encode, decode } from '@msgpack/msgpack';
+
+const msgpackSerializer: Serializer = {
+  serialize: (data) => Buffer.from(encode(data)).toString('base64'),
+  deserialize: (raw) => decode(Buffer.from(raw, 'base64')),
+};
+
+const queue = new Queue('tasks', {
+  connection,
+  serializer: msgpackSerializer,
+});
+
+const worker = new Worker('tasks', processor, {
+  connection,
+  serializer: msgpackSerializer, // must match the Queue
+});
+```
+
+### What is serialized
+
+The serializer is applied to:
+
+- **`data`** — the job payload passed to `queue.add()`.
+- **`returnvalue`** — the value returned by the processor.
+- **`progress`** — the value passed to `job.updateProgress()`.
+
+### Consistency requirement
+
+The same serializer must be configured on every Queue, Worker, and FlowProducer instance that operates on the same queue. A mismatch causes silent data corruption — the consumer will see `{}` and the job's `deserializationFailed` flag will be `true`.
+
+### Default export
+
+The built-in JSON serializer is exported for use in conditional logic or testing:
+
+```typescript
+import { JSON_SERIALIZER } from 'glide-mq';
+
+const serializer = process.env.USE_MSGPACK === '1'
+  ? msgpackSerializer
+  : JSON_SERIALIZER;
+
+const queue = new Queue('tasks', { connection, serializer });
+```
+
+See also: [Worker](USAGE.md#worker) and [Queue](USAGE.md#queue) for where `serializer` appears in options.
 
 ---
 

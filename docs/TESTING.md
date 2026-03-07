@@ -8,6 +8,10 @@ glide-mq ships a built-in in-memory backend so you can unit-test job processors 
 - [API Surface](#api-surface)
 - [Searching Jobs](#searching-jobs)
 - [Retry Behaviour in Tests](#retry-behaviour-in-tests)
+- [Custom Job IDs in Tests](#custom-job-ids-in-tests)
+- [Batch Testing](#batch-testing)
+- [Deduplication Testing](#deduplication-testing)
+- [Step Jobs in Tests](#step-jobs-in-tests)
 - [Tips](#tips)
 
 ---
@@ -170,6 +174,132 @@ await queue.add('flaky', {}, { attempts: 3, backoff: { type: 'fixed', delay: 0 }
 const done = await queue.searchJobs({ state: 'completed', name: 'flaky' });
 expect(done[0]?.attemptsMade).toBe(2);
 ```
+
+---
+
+## Custom Job IDs in Tests
+
+`TestQueue.add()` honours the `jobId` option and enforces uniqueness, just like the real `Queue`. If you add a job with a `jobId` that already exists, the call returns `null` instead of creating a duplicate:
+
+```typescript
+const first  = await queue.add('task', { v: 1 }, { jobId: 'unique-1' });
+const second = await queue.add('task', { v: 2 }, { jobId: 'unique-1' });
+
+expect(first).not.toBeNull();
+expect(second).toBeNull(); // duplicate — same behaviour as production
+```
+
+This makes it straightforward to test idempotent-add patterns without a running Valkey instance.
+
+---
+
+## Batch Testing
+
+`TestWorker` supports the `batch` option with `size` and optional `timeout`, matching the real `Worker` interface. When batch mode is enabled, the processor receives an array of jobs:
+
+```typescript
+const worker = new TestWorker(queue, async (jobs) => {
+  return jobs.map(j => ({ doubled: j.data.n * 2 }));
+}, { batch: { size: 5, timeout: 100 } });
+
+await queue.addBulk([
+  { name: 'calc', data: { n: 1 } },
+  { name: 'calc', data: { n: 2 } },
+  { name: 'calc', data: { n: 3 } },
+]);
+
+const completed = await queue.getJobs('completed');
+expect(completed).toHaveLength(3);
+```
+
+To test `BatchError` handling (partial failures), throw a `BatchError` from the processor with a map of failed indices:
+
+```typescript
+import { BatchError } from 'glide-mq';
+
+const worker = new TestWorker(queue, async (jobs) => {
+  const results = [];
+  const failedIndexes = new Map<number, Error>();
+
+  for (let i = 0; i < jobs.length; i++) {
+    if (jobs[i].data.bad) {
+      failedIndexes.set(i, new Error('bad input'));
+    } else {
+      results[i] = { ok: true };
+    }
+  }
+
+  if (failedIndexes.size > 0) {
+    throw new BatchError(results, failedIndexes);
+  }
+  return results;
+}, { batch: { size: 10 } });
+
+await queue.add('item', { bad: false });
+await queue.add('item', { bad: true });
+
+const failed = await queue.getJobs('failed');
+expect(failed).toHaveLength(1);
+expect(failed[0]?.failedReason).toMatch('bad input');
+```
+
+---
+
+## Deduplication Testing
+
+`TestQueue` honours all three deduplication modes — `simple`, `throttle`, and `debounce` — so you can verify dedup logic without Valkey:
+
+```typescript
+// Simple mode: second add with the same dedup id is rejected
+const a = await queue.add('task', { v: 1 }, {
+  deduplication: { id: 'dedup-1', mode: 'simple' },
+});
+const b = await queue.add('task', { v: 2 }, {
+  deduplication: { id: 'dedup-1', mode: 'simple' },
+});
+
+expect(a).not.toBeNull();
+expect(b).toBeNull(); // deduplicated
+
+// Throttle mode with TTL: after the TTL window expires the same id is accepted again
+const c = await queue.add('task', { v: 3 }, {
+  deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 },
+});
+expect(c).not.toBeNull();
+
+// Wait for TTL to expire
+await new Promise(r => setTimeout(r, 60));
+
+const d = await queue.add('task', { v: 4 }, {
+  deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 },
+});
+expect(d).not.toBeNull(); // accepted — window expired
+```
+
+---
+
+## Step Jobs in Tests
+
+`moveToDelayed` is **not supported** in test mode. Because delayed jobs become waiting immediately in `TestQueue`, calling `job.moveToDelayed()` inside a processor will not pause the job on a future timestamp the way it does in production.
+
+If your processor relies on `moveToDelayed` for step-job orchestration, use integration tests with a real Valkey instance instead:
+
+```typescript
+// Integration test (requires Valkey)
+import { Queue, Worker, DelayedError } from 'glide-mq';
+
+const queue  = new Queue('steps', { connection });
+const worker = new Worker('steps', async (job) => {
+  const step = job.data.step ?? 'start';
+  if (step === 'start') {
+    await job.updateData({ ...job.data, step: 'finish' });
+    await job.moveToDelayed(Date.now() + 1000, 'finish');
+  }
+  return { done: true };
+}, { connection });
+```
+
+For unit-testing the logic *around* steps (data transformations, branching decisions), you can still use `TestQueue` and `TestWorker` — just skip the `moveToDelayed` call in test mode or guard it behind an environment check.
 
 ---
 

@@ -1127,9 +1127,7 @@ These BullMQ features are not yet implemented.
 
 | Missing feature | Workaround |
 |---|---|
-| `lifo` | Use `priority` values in reverse insertion order |
 | QueueEvents `'waiting'`, `'active'`, `'delayed'`, `'drained'`, `'deduplicated'` events | Use worker-level events or poll `getJobCounts()` |
-| `@nestjs/bullmq` integration | Not yet supported - use glide-mq directly |
 | `failParentOnFailure` in FlowJob | Implement manually in the worker's `failed` handler |
 
 ---
@@ -1168,6 +1166,24 @@ const connection = {
 **Global rate limiting** - `queue.setGlobalRateLimit()` caps queue-wide throughput across all workers. Stored in Valkey and picked up dynamically.
 
 **`addBulk` via GLIDE Batch API** - 12.7x faster than serial `add()` calls for bulk enqueue operations.
+
+**LIFO mode** - `lifo: true` job option for last-in-first-out processing. BullMQ has LIFO via a separate setting; glide-mq uses the same `JobOptions.lifo` flag inline.
+
+**Broadcast / BroadcastWorker** - Pub/sub fan-out pattern where every connected `BroadcastWorker` receives every message. A different paradigm from job queues — no state, no retries, just real-time delivery. BullMQ has no equivalent.
+
+**DAG workflows** - `FlowProducer.addDAG()` and the `dag()` helper define arbitrary directed acyclic graphs where a job can depend on **multiple** parents. BullMQ only supports trees (one parent per job).
+
+**Batch processing** - `batch: { size, timeout }` worker option to receive multiple jobs in a single processor invocation. The processor receives an array of jobs and can return per-job results. BullMQ has no native batch mode.
+
+**Step jobs** - `job.moveToDelayed(timestampMs, nextStep?)` accepts an optional `nextStep` token so a processor can implement multi-step state machines. On re-entry, check `job.data.__step` (or your own field) to resume at the right step. BullMQ's `moveToDelayed` has no step parameter.
+
+**repeatAfterComplete** - Scheduler mode where the next job is enqueued only after the previous one completes, guaranteeing no overlap. Set via `upsertJobScheduler('name', { repeatAfterComplete: true, every: 60000 }, template)`. BullMQ has no equivalent.
+
+**Pluggable serializers** - Pass a custom `{ serialize, deserialize }` object to `QueueOptions` and `WorkerOptions` to use MessagePack, Protobuf, or any format instead of JSON. BullMQ only supports JSON.
+
+**Job TTL** - `opts.ttl` auto-expires a job after the given number of milliseconds. If the job has not completed before the TTL elapses, it is moved to failed. BullMQ has no built-in TTL.
+
+**excludeData** - `queue.getJobs(type, start, end, { excludeData: true })` returns jobs without their `data` field, useful for lightweight dashboard listings of large-payload queues.
 
 ---
 
@@ -1229,9 +1245,9 @@ await chord('tasks', [
 
 ## NestJS
 
-`@nestjs/bullmq` is not yet supported. There is no official glide-mq NestJS package.
+`@glidemq/nestjs` provides a drop-in NestJS integration. If you are migrating from `@nestjs/bullmq`, see the `@glidemq/nestjs` package README for the decorator-based API (`@Processor`, `@OnWorkerEvent`, `InjectQueue`).
 
-In the meantime, use glide-mq directly with NestJS by creating queue and worker instances in providers:
+You can also use glide-mq directly with NestJS by creating queue and worker instances in providers:
 
 ```ts
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';

@@ -65,6 +65,10 @@ added --> stream (ready) --> PEL (active) --> completed (ZSet)
 
 `moveToActive` may return `GROUP_RATE_LIMITED` when a job's ordering-key sliding window rate limit is exceeded, or `GROUP_TOKEN_LIMITED` when the token bucket has insufficient tokens. In both cases, the job is parked in the `glide:{queueName}:ratelimited` ZSet with a score equal to the earliest eligible timestamp. The scheduler's promotion loop picks it up once capacity is available. If a job's `cost` exceeds the bucket's `tbCapacity`, `moveToActive` moves the job to the DLQ instead.
 
+### LIFO Mode
+
+Jobs with `lifo: true` are placed onto a dedicated Valkey LIST key `glide:{queueName}:list` via RPUSH, and consumed via RPOP. When the worker's `moveToActive` function checks for the next job, priority jobs in the scheduled ZSet are checked first, then the LIFO list, then the FIFO stream. A `list-active` counter in the queue metadata hash enforces global concurrency across both the LIFO list and the main stream.
+
 States map to Valkey structures:
 - **waiting**: In stream, not yet claimed by consumer group
 - **active**: In PEL (Pending Entries List) - claimed via XREADGROUP
@@ -423,6 +427,20 @@ glide-mq/
 ├── HANDOVER.md
 └── README.md
 ```
+
+## Broadcast Architecture
+
+`Broadcast` is a thin wrapper that delegates to an internal `Queue` for job submission. The key difference is on the consumer side: `BroadcastWorker` is a separate class (it does not extend `Worker`) that creates its own consumer group per `subscription` name. This means multiple subscribers each receive every message independently.
+
+Key differences from the standard `Worker`:
+
+- **No XDEL after processing.** Stream entries are intentionally retained so that all consumer groups can read them. Trimming is handled by `maxMessages` via XTRIM.
+- **Per-subscription retry tracking.** Each subscription tracks its own retry state via `{jobKey}:sub:{group}` keys, so one subscriber's failure does not affect another's delivery.
+- **broadcastMode flag.** All Lua function calls from `BroadcastWorker` pass a `broadcastMode` flag, which alters completion and failure logic to skip stream entry deletion and use group-scoped state instead.
+
+## DAG Dependency Resolution
+
+Complex workflows with arbitrary dependency graphs are submitted via `FlowProducer` using a DAG representation. Nodes are submitted in topological order using Kahn's algorithm. Nodes that have dependents are created in `waiting-children` state. The `deps` array on each node establishes parent-child relationships, and multi-parent support is achieved via `registerParent` calls that add the job to each parent's dependency set. If the dependency graph contains a cycle, a `CycleError` is thrown during validation before any jobs are submitted.
 
 ## Differentiators vs BullMQ
 
