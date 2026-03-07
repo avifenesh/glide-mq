@@ -472,14 +472,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const delay = opts.delay ?? 0;
       const priority = opts.priority ?? 0;
       const parentId = opts.parent ? opts.parent.id : '';
-
-      if (opts.lifo && orderingKey) {
-        throw new Error('lifo and ordering.key cannot be used together');
-      }
       const parentQueue = opts.parent ? opts.parent.queue : '';
       const maxAttempts = opts.attempts ?? 0;
       const orderingKey = opts.ordering?.key ?? '';
       validateOrderingKey(orderingKey);
+
+      if (opts.lifo && orderingKey) {
+        throw new Error('lifo and ordering.key cannot be used together');
+      }
       if (opts.ttl != null) {
         if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
       }
