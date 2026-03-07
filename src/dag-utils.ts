@@ -153,6 +153,12 @@ function findCyclePath(remaining: string[], adjacency: Map<string, string[]>): s
   const visited = new Set<string>();
   const path: string[] = [];
 
+  // DFS cycle path reconstruction:
+  // - path tracks the current exploration stack (nodes entered but not yet exited).
+  // - When we encounter a node already in path, we have found the cycle entry point.
+  // - We push it again so the path array reads "A -> B -> C -> A" (closed loop),
+  //   then splice off any prefix before the cycle start so only the cycle is returned.
+  // - visited is reset per root to allow fresh DFS from each candidate root.
   function dfs(node: string): boolean {
     if (path.includes(node)) {
       const cycleStart = path.indexOf(node);
