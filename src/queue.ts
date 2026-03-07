@@ -11,6 +11,8 @@ import type {
   JobTemplate,
   SchedulerEntry,
   Metrics,
+  MetricsOptions,
+  MetricsDataPoint,
   JobCounts,
   SearchJobsOptions,
   RateLimitConfig,
@@ -1008,13 +1010,49 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   /**
    * Get metrics for completed or failed jobs.
-   * Returns the count of entries in the corresponding ZSet.
+   * Returns total count and per-minute time-series data points with throughput and avg duration.
    */
-  async getMetrics(type: 'completed' | 'failed'): Promise<Metrics> {
+  async getMetrics(type: 'completed' | 'failed', opts?: MetricsOptions): Promise<Metrics> {
     const client = await this.getClient();
     const key = type === 'completed' ? this.keys.completed : this.keys.failed;
-    const count = await client.zcard(key);
-    return { count };
+    const metricsKey = type === 'completed' ? this.keys.metricsCompleted : this.keys.metricsFailed;
+
+    const [count, rawHash] = await Promise.all([
+      client.zcard(key),
+      client.hgetall(metricsKey),
+    ]);
+
+    const buckets = new Map<number, { count: number; totalDuration: number }>();
+    const hashRecord = hashDataToRecord(rawHash);
+    if (hashRecord) {
+      for (const [field, value] of Object.entries(hashRecord)) {
+        const match = field.match(/^m:(\d+):([cd])$/);
+        if (!match) continue;
+        const ts = parseInt(match[1], 10);
+        const kind = match[2];
+        let bucket = buckets.get(ts);
+        if (!bucket) {
+          bucket = { count: 0, totalDuration: 0 };
+          buckets.set(ts, bucket);
+        }
+        if (kind === 'c') bucket.count = parseInt(value, 10);
+        else bucket.totalDuration = parseInt(value, 10);
+      }
+    }
+
+    const data: MetricsDataPoint[] = Array.from(buckets.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([timestamp, b]) => ({
+        timestamp,
+        count: b.count,
+        avgDuration: b.count > 0 ? Math.round(b.totalDuration / b.count) : 0,
+      }));
+
+    const start = opts?.start ?? 0;
+    const end = opts?.end ?? -1;
+    const sliced = end === -1 ? data.slice(start) : data.slice(start, end + 1);
+
+    return { count, data: sliced, meta: { resolution: 'minute' } };
   }
 
   /**

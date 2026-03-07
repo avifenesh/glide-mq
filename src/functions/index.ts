@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '41';
+export const LIBRARY_VERSION = '42';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -327,6 +327,28 @@ local function removeExcessJobs(setKey, prefix, ids)
   end
 end
 
+local function recordMetrics(metricsKey, timestamp, duration)
+  local minuteTs = timestamp - (timestamp % 60000)
+  redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':c', 1)
+  if duration > 0 then
+    redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':d', duration)
+  end
+  if math.random(100) == 1 then
+    local cutoff = minuteTs - 86400000
+    local fields = redis.call('HKEYS', metricsKey)
+    local toDelete = {}
+    for _, f in ipairs(fields) do
+      local ts = tonumber(string.match(f, '^m:(%d+):'))
+      if ts and ts < cutoff then
+        toDelete[#toDelete + 1] = f
+      end
+    end
+    if #toDelete > 0 then
+      redis.call('HDEL', metricsKey, unpack(toDelete))
+    end
+  end
+end
+
 redis.register_function('glidemq_version', function(keys, args)
   return '${LIBRARY_VERSION}'
 end)
@@ -615,6 +637,7 @@ redis.register_function('glidemq_complete', function(keys, args)
   local completedKey = keys[2]
   local eventsKey = keys[3]
   local jobKey = keys[4]
+  local metricsKey = keys[5]
   local jobId = args[1]
   local entryId = args[2]
   local returnvalue = args[3]
@@ -625,6 +648,7 @@ redis.register_function('glidemq_complete', function(keys, args)
   local removeAge = tonumber(args[8]) or 0
   local depsMember = args[9] or ''
   local parentId = args[10] or ''
+  local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
   redis.call('XACK', streamKey, group, entryId)
   redis.call('XDEL', streamKey, entryId)
   redis.call('ZADD', completedKey, timestamp, jobId)
@@ -636,6 +660,7 @@ redis.register_function('glidemq_complete', function(keys, args)
   markOrderingDone(jobKey, jobId)
   releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
+  recordMetrics(metricsKey, timestamp, timestamp - processedOn)
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   if removeMode == 'true' then
     redis.call('ZREM', completedKey, jobId)
@@ -660,11 +685,11 @@ redis.register_function('glidemq_complete', function(keys, args)
       end
     end
   end
-  if depsMember ~= '' and parentId ~= '' and #keys >= 8 then
-    local parentDepsKey = keys[5]
-    local parentJobKey = keys[6]
-    local parentStreamKey = keys[7]
-    local parentEventsKey = keys[8]
+  if depsMember ~= '' and parentId ~= '' and #keys >= 9 then
+    local parentDepsKey = keys[6]
+    local parentJobKey = keys[7]
+    local parentStreamKey = keys[8]
+    local parentEventsKey = keys[9]
     local depMarker = 'depdone:' .. depsMember
     if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
       local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
@@ -688,6 +713,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local completedKey = keys[2]
   local eventsKey = keys[3]
   local jobKey = keys[4]
+  local metricsKey = keys[5]
   local jobId = args[1]
   local entryId = args[2]
   local returnvalue = args[3]
@@ -704,6 +730,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local currentGroupKey = args[14] or ''
 
   -- Phase 1: Complete current job (same as glidemq_complete)
+  local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
   redis.call('XACK', streamKey, group, entryId)
   redis.call('XDEL', streamKey, entryId)
   redis.call('ZADD', completedKey, timestamp, jobId)
@@ -715,6 +742,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   markOrderingDone(jobKey, jobId, currentOrderingKey, currentOrderingSeq)
   releaseGroupSlotAndPromote(jobKey, jobId, timestamp, currentGroupKey)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
+  recordMetrics(metricsKey, timestamp, timestamp - processedOn)
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
 
   -- Retention cleanup
@@ -743,11 +771,11 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   end
 
   -- Parent deps
-  if depsMember ~= '' and parentId ~= '' and #keys >= 8 then
-    local parentDepsKey = keys[5]
-    local parentJobKey = keys[6]
-    local parentStreamKey = keys[7]
-    local parentEventsKey = keys[8]
+  if depsMember ~= '' and parentId ~= '' and #keys >= 9 then
+    local parentDepsKey = keys[6]
+    local parentJobKey = keys[7]
+    local parentStreamKey = keys[8]
+    local parentEventsKey = keys[9]
     local depMarker = 'depdone:' .. depsMember
     if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
       local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
@@ -917,6 +945,7 @@ redis.register_function('glidemq_fail', function(keys, args)
   local scheduledKey = keys[3]
   local eventsKey = keys[4]
   local jobKey = keys[5]
+  local metricsKey = keys[6]
   local jobId = args[1]
   local entryId = args[2]
   local failedReason = args[3]
@@ -927,6 +956,7 @@ redis.register_function('glidemq_fail', function(keys, args)
   local removeMode = args[8] or '0'
   local removeCount = tonumber(args[9]) or 0
   local removeAge = tonumber(args[10]) or 0
+  local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
   redis.call('XACK', streamKey, group, entryId)
   redis.call('XDEL', streamKey, entryId)
   local attemptsMade = redis.call('HINCRBY', jobKey, 'attemptsMade', 1)
@@ -958,6 +988,7 @@ redis.register_function('glidemq_fail', function(keys, args)
     markOrderingDone(jobKey, jobId)
     releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
+    recordMetrics(metricsKey, timestamp, timestamp - processedOn)
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     if removeMode == 'true' then
       redis.call('ZREM', failedKey, jobId)
@@ -2721,7 +2752,7 @@ export async function completeJob(
 ): Promise<GlideReturnType> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
-  const keys: string[] = [k.stream, k.completed, k.events, k.job(jobId)];
+  const keys: string[] = [k.stream, k.completed, k.events, k.job(jobId), k.metricsCompleted];
   const args: string[] = [
     jobId,
     entryId,
@@ -2781,7 +2812,7 @@ export async function completeAndFetchNext(
 ): Promise<CompleteAndFetchResult> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
-  const keys: string[] = [k.stream, k.completed, k.events, k.job(jobId)];
+  const keys: string[] = [k.stream, k.completed, k.events, k.job(jobId), k.metricsCompleted];
   const args: string[] = [
     jobId,
     entryId,
@@ -2884,7 +2915,7 @@ export async function failJob(
   const { mode, count, age } = encodeRetention(removeOnFail);
   const result = await client.fcall(
     'glidemq_fail',
-    [k.stream, k.failed, k.scheduled, k.events, k.job(jobId)],
+    [k.stream, k.failed, k.scheduled, k.events, k.job(jobId), k.metricsFailed],
     [
       jobId,
       entryId,
