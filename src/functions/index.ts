@@ -4,7 +4,8 @@ import type { GlideReturnType } from '@glidemq/speedkey';
 export const LIBRARY_NAME = 'glidemq';
 // Version 43: Added schedulerName to glidemq_addJob (arg 19) for repeatAfterComplete feature.
 // Version 44: Added metrics recording (time-series data for getMetrics).
-export const LIBRARY_VERSION = '44';
+// Version 45: Added lifo parameter to glidemq_addJob (arg 18) and glidemq_dedup (arg 21) for LIFO mode.
+export const LIBRARY_VERSION = '45';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
