@@ -431,11 +431,7 @@ describeEachMode('Worker batch validation', (CONNECTION) => {
         qName,
         async (jobs: any[]) => {
           // Throw BatchError: job at index 1 fails, others succeed
-          throw new BatchError(
-            jobs.map((j: any) =>
-              j.data.idx === 1 ? new Error('index-1-failed') : j.data.idx
-            )
-          );
+          throw new BatchError(jobs.map((j: any) => (j.data.idx === 1 ? new Error('index-1-failed') : j.data.idx)));
         },
         { connection: CONNECTION, batch: { size: 3 } },
       );
@@ -447,7 +443,9 @@ describeEachMode('Worker batch validation', (CONNECTION) => {
           clearTimeout(timeout);
           worker.close(true).then(async () => {
             await queue.close();
-            await cleanupClient.del([...Object.values(require('../dist/utils').buildKeys(qName))].filter((k: any) => typeof k === 'string'));
+            await cleanupClient.del(
+              [...Object.values(require('../dist/utils').buildKeys(qName))].filter((k: any) => typeof k === 'string'),
+            );
             try {
               expect(successes).toHaveLength(2);
               expect(failures).toHaveLength(1);
@@ -479,7 +477,9 @@ describeEachMode('Worker batch validation', (CONNECTION) => {
         }
       });
 
-      worker.on('error', (err: Error) => { if (!err.message.includes('drain')) reject(err); });
+      worker.on('error', (err: Error) => {
+        if (!err.message.includes('drain')) reject(err);
+      });
     });
   }, 20000);
 
@@ -522,7 +522,9 @@ describeEachMode('Worker batch validation', (CONNECTION) => {
         }
       });
 
-      worker.on('error', (err: Error) => { if (!err.message.includes('drain')) reject(err); });
+      worker.on('error', (err: Error) => {
+        if (!err.message.includes('drain')) reject(err);
+      });
     });
   }, 20000);
 

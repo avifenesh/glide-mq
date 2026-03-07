@@ -1576,10 +1576,14 @@ describe('TestWorker - event payloads (T2)', () => {
     const queue = new TestQueue('perf-test');
     const results: string[] = [];
 
-    const worker = new TestWorker(queue, async (job) => {
-      results.push(job.id);
-      return 'ok';
-    }, { concurrency: 10 });
+    const worker = new TestWorker(
+      queue,
+      async (job) => {
+        results.push(job.id);
+        return 'ok';
+      },
+      { concurrency: 10 },
+    );
 
     const start = Date.now();
     for (let i = 0; i < 1000; i++) {

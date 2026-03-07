@@ -81,51 +81,51 @@ describe('validateDAG', () => {
   });
 });
 
-  it('detects 5-node cycle A->B->C->D->E->B', () => {
-    expect(() =>
-      validateDAG([
-        { name: 'A', queueName: 'q', data: {} },
-        { name: 'B', queueName: 'q', data: {}, deps: ['A'] },
-        { name: 'C', queueName: 'q', data: {}, deps: ['B'] },
-        { name: 'D', queueName: 'q', data: {}, deps: ['C'] },
-        { name: 'E', queueName: 'q', data: {}, deps: ['D'] },
-        { name: 'F', queueName: 'q', data: {}, deps: ['E', 'B'] }, // E->F and B->F form a valid path, but E->D->C->B->A and B is a dep of F with D->E->F path creating no cycle
-      ]),
-    ).not.toThrow();
+it('detects 5-node cycle A->B->C->D->E->B', () => {
+  expect(() =>
+    validateDAG([
+      { name: 'A', queueName: 'q', data: {} },
+      { name: 'B', queueName: 'q', data: {}, deps: ['A'] },
+      { name: 'C', queueName: 'q', data: {}, deps: ['B'] },
+      { name: 'D', queueName: 'q', data: {}, deps: ['C'] },
+      { name: 'E', queueName: 'q', data: {}, deps: ['D'] },
+      { name: 'F', queueName: 'q', data: {}, deps: ['E', 'B'] }, // E->F and B->F form a valid path, but E->D->C->B->A and B is a dep of F with D->E->F path creating no cycle
+    ]),
+  ).not.toThrow();
 
-    // Now add the actual cycle: B depends on E (back edge)
-    expect(() =>
-      validateDAG([
-        { name: 'A', queueName: 'q', data: {} },
-        { name: 'B', queueName: 'q', data: {}, deps: ['A', 'E'] },
-        { name: 'C', queueName: 'q', data: {}, deps: ['B'] },
-        { name: 'D', queueName: 'q', data: {}, deps: ['C'] },
-        { name: 'E', queueName: 'q', data: {}, deps: ['D'] },
-      ]),
-    ).toThrow(CycleError);
-  });
+  // Now add the actual cycle: B depends on E (back edge)
+  expect(() =>
+    validateDAG([
+      { name: 'A', queueName: 'q', data: {} },
+      { name: 'B', queueName: 'q', data: {}, deps: ['A', 'E'] },
+      { name: 'C', queueName: 'q', data: {}, deps: ['B'] },
+      { name: 'D', queueName: 'q', data: {}, deps: ['C'] },
+      { name: 'E', queueName: 'q', data: {}, deps: ['D'] },
+    ]),
+  ).toThrow(CycleError);
+});
 
-  it('detects cycle within a diamond: extra back-edge creates cycle', () => {
-    // Diamond A->B, A->C, B->D, C->D is valid
-    // Adding D->A creates a cycle
-    expect(() =>
-      validateDAG([
-        { name: 'A', queueName: 'q', data: {} },
-        { name: 'B', queueName: 'q', data: {}, deps: ['A'] },
-        { name: 'C', queueName: 'q', data: {}, deps: ['A'] },
-        { name: 'D', queueName: 'q', data: {}, deps: ['B', 'C', 'A'] }, // A->D is fine (no cycle yet)
-      ]),
-    ).not.toThrow();
+it('detects cycle within a diamond: extra back-edge creates cycle', () => {
+  // Diamond A->B, A->C, B->D, C->D is valid
+  // Adding D->A creates a cycle
+  expect(() =>
+    validateDAG([
+      { name: 'A', queueName: 'q', data: {} },
+      { name: 'B', queueName: 'q', data: {}, deps: ['A'] },
+      { name: 'C', queueName: 'q', data: {}, deps: ['A'] },
+      { name: 'D', queueName: 'q', data: {}, deps: ['B', 'C', 'A'] }, // A->D is fine (no cycle yet)
+    ]),
+  ).not.toThrow();
 
-    expect(() =>
-      validateDAG([
-        { name: 'A', queueName: 'q', data: {}, deps: ['D'] }, // back edge: creates cycle
-        { name: 'B', queueName: 'q', data: {}, deps: ['A'] },
-        { name: 'C', queueName: 'q', data: {}, deps: ['A'] },
-        { name: 'D', queueName: 'q', data: {}, deps: ['B', 'C'] },
-      ]),
-    ).toThrow(CycleError);
-  });
+  expect(() =>
+    validateDAG([
+      { name: 'A', queueName: 'q', data: {}, deps: ['D'] }, // back edge: creates cycle
+      { name: 'B', queueName: 'q', data: {}, deps: ['A'] },
+      { name: 'C', queueName: 'q', data: {}, deps: ['A'] },
+      { name: 'D', queueName: 'q', data: {}, deps: ['B', 'C'] },
+    ]),
+  ).toThrow(CycleError);
+});
 
 describe('topoSort', () => {
   it('returns nodes in topological order (leaves first)', () => {
