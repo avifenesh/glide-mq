@@ -162,11 +162,7 @@ export async function chord(
  * ], connection);
  * ```
  */
-export async function dag(
-  nodes: DAGNode[],
-  connection: ConnectionOptions,
-  prefix?: string,
-): Promise<Map<string, Job>> {
+export async function dag(nodes: DAGNode[], connection: ConnectionOptions, prefix?: string): Promise<Map<string, Job>> {
   if (nodes.length === 0) {
     throw new Error('dag() requires at least one node');
   }

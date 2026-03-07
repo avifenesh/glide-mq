@@ -55,9 +55,7 @@ describe('validateDAG', () => {
   });
 
   it('throws Error for missing dependency reference', () => {
-    expect(() =>
-      validateDAG([{ name: 'A', queueName: 'q', data: {}, deps: ['nonexistent'] }]),
-    ).toThrow(/unknown node/);
+    expect(() => validateDAG([{ name: 'A', queueName: 'q', data: {}, deps: ['nonexistent'] }])).toThrow(/unknown node/);
   });
 
   it('throws Error for duplicate node names', () => {

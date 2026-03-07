@@ -366,15 +366,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
       // Register parent to the already-completed child (race condition simulation)
       const { registerParent } = require('../dist/functions/index') as typeof import('../src/functions/index');
       const depsMember = `${keyPrefix('glide', qName)}:${childId}`;
-      const result = await registerParent(
-        cleanupClient,
-        k,
-        childId,
-        parentId,
-        qName,
-        k,
-        depsMember,
-      );
+      const result = await registerParent(cleanupClient, k, childId, parentId, qName, k, depsMember);
 
       // Should return 'already_completed' since child is done
       expect(result).toBe('already_completed');
