@@ -463,7 +463,7 @@ export class Job<D = any, R = any> {
   }
 
   /**
-   * Construct a Job instance from a hash returned by HGETALL.
+   * Construct a Job instance from a hash returned by HGETALL or HMGET.
    * @internal
    */
   static fromHash<D, R>(
@@ -472,28 +472,36 @@ export class Job<D = any, R = any> {
     id: string,
     hash: Record<string, string>,
     serializer?: Serializer,
+    excludeData?: boolean,
   ): Job<D, R> {
     const s = serializer ?? JSON_SERIALIZER;
     let data: D;
     let opts: JobOptions;
     let returnvalue: R | undefined;
     let deserializationFailed = false;
-    try {
-      data = hash.data ? (s.deserialize(decompress(hash.data)) as D) : ({} as D);
-    } catch {
-      data = {} as D;
-      deserializationFailed = true;
+
+    if (excludeData) {
+      data = undefined as unknown as D;
+      returnvalue = undefined;
+    } else {
+      try {
+        data = hash.data ? (s.deserialize(decompress(hash.data)) as D) : ({} as D);
+      } catch {
+        data = {} as D;
+        deserializationFailed = true;
+      }
+      try {
+        returnvalue = hash.returnvalue ? (s.deserialize(hash.returnvalue) as R) : undefined;
+      } catch {
+        returnvalue = undefined;
+        deserializationFailed = true;
+      }
     }
+
     try {
       opts = JSON.parse(hash.opts || '{}');
     } catch {
       opts = {};
-    }
-    try {
-      returnvalue = hash.returnvalue ? (s.deserialize(hash.returnvalue) as R) : undefined;
-    } catch {
-      returnvalue = undefined;
-      deserializationFailed = true;
     }
 
     const job = new Job<D, R>(client, queueKeys, id, hash.name || '', data, opts, s);

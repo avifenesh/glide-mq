@@ -56,6 +56,11 @@ const active   = await queue.getJobs('active',    0, 49);
 const delayed  = await queue.getJobs('delayed',   0, 49);
 const done     = await queue.getJobs('completed', 0, 49);
 const failed   = await queue.getJobs('failed',    0, 49);
+
+// Fetch metadata only (omit data and returnvalue) - useful for dashboards
+const lite = await queue.getJobs('waiting', 0, 99, { excludeData: true });
+const meta = await queue.getJob('42', { excludeData: true });
+// lite[0].data === undefined, lite[0].name / .timestamp / .id still present
 ```
 
 ### Queue counts
