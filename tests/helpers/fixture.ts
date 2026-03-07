@@ -126,6 +126,7 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
     `${pfx}:deps:*`,
     `${pfx}:group:*`,
     `${pfx}:groupq:*`,
+    `${pfx}:parents:*`,
     `${pfx}:w:*`,
   ]) {
     try {

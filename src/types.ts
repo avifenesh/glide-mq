@@ -156,6 +156,13 @@ export interface JobOptions {
   removeOnFail?: boolean | number | { age: number; count: number };
   deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
   parent?: { queue: string; id: string };
+  /**
+   * Multiple parent dependencies for DAG flows.
+   * When set, this job waits for ALL parents to complete before it can run.
+   * Each parent tracks this job as a child in its deps SET.
+   * Mutually exclusive with `parent` - use one or the other.
+   */
+  parents?: Array<{ queue: string; id: string }>;
   /** Time-to-live in milliseconds. Jobs not processed within this window are failed as 'expired'. */
   ttl?: number;
 }
@@ -350,4 +357,29 @@ export interface WorkerInfo {
   startedAt: number;
   age: number;
   activeJobs: number;
+}
+
+/**
+ * A node in a DAG flow. Each node is a job with optional dependencies on other nodes.
+ * The `deps` array lists the names of nodes that must complete before this node can run.
+ */
+export interface DAGNode {
+  /** Unique name within this DAG submission. Used as reference in `deps` arrays. */
+  name: string;
+  /** Queue to add this job to. */
+  queueName: string;
+  /** Job data payload. */
+  data: any;
+  /** Job options (delay, priority, etc.). `parent` and `parents` are managed automatically. */
+  opts?: Omit<JobOptions, 'parent' | 'parents'>;
+  /** Names of other nodes in this DAG that must complete before this node runs. */
+  deps?: string[];
+}
+
+/**
+ * A complete DAG flow definition for submission via FlowProducer.addDAG().
+ */
+export interface DAGFlow {
+  /** The nodes of the DAG. Order does not matter - topological sort is applied. */
+  nodes: DAGNode[];
 }
