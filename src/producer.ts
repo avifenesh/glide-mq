@@ -20,14 +20,14 @@ const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
 
 function validateOrderingKey(orderingKey: string): void {
   if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
-    throw new Error(`Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`);
+    throw new GlideMQError(`Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`);
   }
 }
 
 function validateJobId(jobId: string): void {
-  if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
+  if (jobId.length > 256) throw new GlideMQError('jobId must be at most 256 characters');
   if (INVALID_JOB_ID_CHARS.test(jobId)) {
-    throw new Error('jobId must not contain control characters, curly braces, or colons');
+    throw new GlideMQError('jobId must not contain control characters, curly braces, or colons');
   }
 }
 
@@ -151,16 +151,16 @@ export class Producer<D = any> {
     let tbRefillRate = 0;
     if (tb) {
       if (!Number.isFinite(tb.capacity) || tb.capacity <= 0)
-        throw new Error('tokenBucket.capacity must be a positive finite number');
+        throw new GlideMQError('tokenBucket.capacity must be a positive finite number');
       if (!Number.isFinite(tb.refillRate) || tb.refillRate <= 0)
-        throw new Error('tokenBucket.refillRate must be a positive finite number');
+        throw new GlideMQError('tokenBucket.refillRate must be a positive finite number');
       tbCapacity = Math.round(tb.capacity * 1000);
       tbRefillRate = Math.round(tb.refillRate * 1000);
     }
     let jobCost = 0;
     if (opts?.cost != null) {
       if (!Number.isFinite(opts.cost) || opts.cost < 0)
-        throw new Error('cost must be a non-negative finite number');
+        throw new GlideMQError('cost must be a non-negative finite number');
       jobCost = Math.round(opts.cost * 1000);
     }
     let groupConcurrency = opts?.ordering?.concurrency ?? 0;
@@ -173,13 +173,13 @@ export class Producer<D = any> {
     if (customJobId !== '') validateJobId(customJobId);
 
     if (opts?.ttl != null) {
-      if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
+      if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new GlideMQError('ttl must be a non-negative finite number');
     }
 
     let serialized = this.serializer.serialize(data);
     const byteLen = Buffer.byteLength(serialized, 'utf8');
     if (byteLen > MAX_JOB_DATA_SIZE) {
-      throw new Error(
+      throw new GlideMQError(
         `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
       );
     }
@@ -260,10 +260,10 @@ export class Producer<D = any> {
         return null;
       }
       if (result === 'ERR:COST_EXCEEDS_CAPACITY') {
-        throw new Error('Job cost exceeds token bucket capacity');
+        throw new GlideMQError('Job cost exceeds token bucket capacity');
       }
       if (result === 'ERR:ID_EXHAUSTED') {
-        throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
+        throw new GlideMQError('Failed to generate job ID: too many collisions with custom job IDs');
       }
       jobId = result;
 
@@ -299,10 +299,10 @@ export class Producer<D = any> {
         return null;
       }
       if (result === 'ERR:COST_EXCEEDS_CAPACITY') {
-        throw new Error('Job cost exceeds token bucket capacity');
+        throw new GlideMQError('Job cost exceeds token bucket capacity');
       }
       if (result === 'ERR:ID_EXHAUSTED') {
-        throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
+        throw new GlideMQError('Failed to generate job ID: too many collisions with custom job IDs');
       }
       jobId = result;
 

@@ -18,6 +18,7 @@ function fingerprint(name: string, opts: ProducerOptions): string {
     prefix: opts.prefix ?? 'glide',
     addresses: sorted,
     clusterMode: opts.connection?.clusterMode ?? false,
+    compression: opts.compression ?? 'none',
   });
 }
 
