@@ -251,3 +251,67 @@ describeEachMode('LIFO: Mixed with FIFO', (CONNECTION) => {
     expect(processed[3]).toBe(fifo2!.id);
   }, 15000);
 });
+
+describeEachMode('LIFO: Global concurrency enforcement', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('globalConcurrency=1 prevents concurrent LIFO job processing across workers', async () => {
+    const Q = 'lifo-gc-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+    await queue.setGlobalConcurrency(1);
+
+    // Add 4 LIFO jobs
+    for (let i = 0; i < 4; i++) {
+      await queue.add('job', { i }, { lifo: true });
+    }
+
+    let maxConcurrent = 0;
+    let concurrent = 0;
+    const processed: number[] = [];
+
+    const makeWorker = () =>
+      new Worker(
+        Q,
+        async (job: any) => {
+          concurrent++;
+          maxConcurrent = Math.max(maxConcurrent, concurrent);
+          await new Promise((r) => setTimeout(r, 50));
+          concurrent--;
+          processed.push(job.data.i);
+          return 'ok';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+      );
+
+    const w1 = makeWorker();
+    const w2 = makeWorker();
+    w1.on('error', () => {});
+    w2.on('error', () => {});
+
+    // Wait for all 4 jobs to complete
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (processed.length >= 4) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 100);
+    });
+
+    await w1.close(true);
+    await w2.close(true);
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+
+    expect(maxConcurrent).toBe(1);
+    expect(processed).toHaveLength(4);
+  }, 20000);
+});

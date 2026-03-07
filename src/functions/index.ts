@@ -10,7 +10,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 48: Use LPUSH for priority list so RPOP returns highest-priority (lowest score) job first.
 // Version 49: Fix Phase 1.0/1.5 in completeAndFetchNext - HSET before HGETALL, add lastActive.
 // Version 50: glidemq_drain cleans LIFO and priority list keys and their job hashes.
-export const LIBRARY_VERSION = '50';
+// Version 51: glidemq_checkConcurrency includes list-active counter; complete/fail DECR on list jobs.
+export const LIBRARY_VERSION = '51';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -794,6 +795,7 @@ redis.register_function('glidemq_complete', function(keys, args)
       end
     end
   end
+  if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
   return 1
 end)
 
@@ -833,6 +835,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   recordMetrics(metricsKey, timestamp, timestamp - processedOn)
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
 
   -- Retention cleanup
   if removeMode == 'true' then
@@ -947,6 +950,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
         emitEvent(eventsKey, 'active', priJobId, nil)
         local priJobFields = redis.call('HGETALL', priJobKey)
+        redis.call('INCR', prefix .. 'list-active')
         return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
       end
     end
@@ -968,6 +972,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
         emitEvent(eventsKey, 'active', lifoJobId, nil)
         local lifoJobFields = redis.call('HGETALL', lifoJobKey)
+        redis.call('INCR', prefix .. 'list-active')
         -- Return LIFO job (no entryId for LIFO jobs, use empty string)
         return {'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}
       end
@@ -1156,6 +1161,7 @@ redis.register_function('glidemq_fail', function(keys, args)
       'attemptsMade', tostring(attemptsMade),
       'delay', tostring(backoffDelay)
     })
+    if entryId == '' then redis.call('DECR', string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
     return 'retrying'
   else
     redis.call('ZADD', failedKey, timestamp, jobId)
@@ -1193,6 +1199,7 @@ redis.register_function('glidemq_fail', function(keys, args)
         end
       end
     end
+    if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
     return 'failed'
   end
 end)
@@ -1619,6 +1626,7 @@ end)
 redis.register_function('glidemq_checkConcurrency', function(keys, args)
   local metaKey = keys[1]
   local streamKey = keys[2]
+  local listActiveKey = keys[3]
   local group = args[1]
   local gc = tonumber(redis.call('HGET', metaKey, 'globalConcurrency')) or 0
   if gc <= 0 then
@@ -1626,11 +1634,37 @@ redis.register_function('glidemq_checkConcurrency', function(keys, args)
   end
   local pending = redis.call('XPENDING', streamKey, group)
   local pendingCount = tonumber(pending[1]) or 0
-  local remaining = gc - pendingCount
+  local listActive = tonumber(redis.call('GET', listActiveKey)) or 0
+  local remaining = gc - pendingCount - listActive
   if remaining <= 0 then
     return 0
   end
   return remaining
+end)
+
+-- Atomically check global concurrency capacity, then RPOP from a list and INCR list-active counter.
+-- Returns the popped jobId if a slot was available, or false/nil if at capacity or list is empty.
+-- KEYS: [metaKey, streamKey, listActiveKey, listKey]
+-- ARGS: [group]
+redis.register_function('glidemq_rpopAndReserve', function(keys, args)
+  local metaKey = keys[1]
+  local streamKey = keys[2]
+  local listActiveKey = keys[3]
+  local listKey = keys[4]
+  local group = args[1]
+  local gc = tonumber(redis.call('HGET', metaKey, 'globalConcurrency')) or 0
+  if gc > 0 then
+    local pending = redis.call('XPENDING', streamKey, group)
+    local pendingCount = tonumber(pending[1]) or 0
+    local listActive = tonumber(redis.call('GET', listActiveKey)) or 0
+    if pendingCount + listActive >= gc then
+      return false
+    end
+  end
+  local jobId = redis.call('RPOP', listKey)
+  if not jobId then return false end
+  redis.call('INCR', listActiveKey)
+  return jobId
 end)
 
 redis.register_function('glidemq_moveToActive', function(keys, args)
@@ -3273,8 +3307,23 @@ export async function rateLimit(
  * capacity (globalConcurrency - pending).
  */
 export async function checkConcurrency(client: Client, k: QueueKeys, group: string = CONSUMER_GROUP): Promise<number> {
-  const result = await client.fcall('glidemq_checkConcurrency', [k.meta, k.stream], [group]);
+  const result = await client.fcall('glidemq_checkConcurrency', [k.meta, k.stream, k.listActive], [group]);
   return result as number;
+}
+
+/**
+ * Atomically check global concurrency capacity, RPOP from a list, and INCR list-active counter.
+ * Returns the jobId if a slot was available and the list was non-empty, or null otherwise.
+ */
+export async function rpopAndReserve(
+  client: Client,
+  k: QueueKeys,
+  listKey: string,
+  group: string = CONSUMER_GROUP,
+): Promise<string | null> {
+  const result = await client.fcall('glidemq_rpopAndReserve', [k.meta, k.stream, k.listActive, listKey], [group]);
+  if (!result) return null;
+  return String(result);
 }
 
 /**

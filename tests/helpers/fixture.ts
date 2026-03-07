@@ -112,6 +112,7 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
     k.metricsFailed,
     k.lifo,
     k.priority,
+    k.listActive,
   ];
   for (const key of staticKeys) {
     try {
