@@ -39,7 +39,6 @@ import {
   MAX_JOB_DATA_SIZE,
   JOB_METADATA_FIELDS,
   validateQueueName,
-  INVALID_JOB_ID_CHARS,
   MAX_ORDERING_KEY_LENGTH,
   validateJobId,
 } from './utils';
