@@ -423,7 +423,7 @@ export class FlowProducer {
               const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
               const depsMember = `${keyPrefix(prefix, node.queueName)}:${jobId}`;
 
-              await registerParent(
+              const registerResult = await registerParent(
                 client,
                 queueKeys,
                 jobId,
@@ -432,6 +432,10 @@ export class FlowProducer {
                 parentQueueKeys,
                 depsMember,
               );
+
+              if (registerResult.startsWith('error:')) {
+                throw new Error(`Failed to register parent ${depName} for node ${node.name}: ${registerResult}`);
+              }
             }
 
             // Store parent info on the job
@@ -535,7 +539,7 @@ export class FlowProducer {
                 const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
                 const depsMember = `${queuePrefix}:${jid}`;
 
-                await registerParent(
+                const registerResult = await registerParent(
                   client,
                   queueKeys,
                   jid,
@@ -544,6 +548,10 @@ export class FlowProducer {
                   parentQueueKeys,
                   depsMember,
                 );
+
+                if (registerResult.startsWith('error:')) {
+                  throw new Error(`Failed to register parent ${depName} for node ${node.name}: ${registerResult}`);
+                }
               }
             }
           }
