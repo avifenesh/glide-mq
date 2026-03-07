@@ -17,6 +17,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Batch processing - workers can process multiple jobs at once via `batch: { size, timeout? }` option. Processor receives `Job[]` and returns `R[]`. Use `BatchError` for per-job partial failure reporting. Supported in both Worker and TestWorker (#81).
 - `glide-mq/proxy` subpath export - HTTP proxy for cross-language job enqueue. Seven REST endpoints (add, bulk add, get job, pause, resume, counts, health) with queue allowlist, 1MB payload limit, and lazy Queue caching. Requires `express` as an optional peer dependency (#83).
 - Wire protocol documentation (`docs/WIRE_PROTOCOL.md`) - complete reference for enqueuing and managing jobs from any language using raw FCALL commands. Covers all key layouts, FCALL signatures, priority encoding, compression format, and examples in Python and Go (#83).
+- `Producer` class - lightweight job enqueuing for serverless/edge environments without EventEmitter or Job instances. Returns plain string IDs. Use with `ServerlessPool` for automatic connection reuse across warm Lambda/Edge invocations. API: `add(name, data, opts)`, `addBulk(jobs)`, `close()`. Reuses the same battle-tested `addJob`/`dedup` FCALL functions as Queue (#89).
+- `ServerlessPool` and `serverlessPool` singleton - connection pooling for serverless environments. Caches Producer instances by queue name and connection fingerprint to reuse connections across warm invocations. API: `getProducer(name, opts)`, `closeAll()`, `size` (#89).
+- Serverless usage guide (`docs/SERVERLESS.md`) - comprehensive guide covering Producer API, ServerlessPool patterns, and examples for AWS Lambda, Cloudflare Workers, and Vercel Edge Functions. Demonstrates both ephemeral and connection-reuse patterns for serverless job enqueueing (#89).
 
 ---
 
