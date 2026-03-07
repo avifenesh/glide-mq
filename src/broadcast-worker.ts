@@ -577,6 +577,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
         this.queueKeys.stream,
         entry.entryId,
         this.subscription,
+        true,
       );
       if (await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId)) continue;
       const hash = moveResult as Record<string, string>;
@@ -983,13 +984,21 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     const maxAttempts = skipRetry ? 0 : configuredAttempts;
     let backoffDelay = 0;
     if (maxAttempts > 0 && job.opts.backoff) {
+      // In broadcast mode attemptsMade is tracked per-subscription (Lua stores it in
+      // {jobKey}:sub:{group} field 'a'), so job.attemptsMade is always 0. Read the
+      // per-sub count to compute the correct exponential backoff on each retry.
+      const subAttemptStr = await this.commandClient.hget(
+        `${this.queueKeys.job(jobId)}:sub:${this.subscription}`,
+        'a',
+      );
+      const attemptsMade = subAttemptStr !== null ? Number(subAttemptStr) : job.attemptsMade;
       const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
       backoffDelay = strategyFn
-        ? strategyFn(job.attemptsMade + 1, error)
+        ? strategyFn(attemptsMade + 1, error)
         : calculateBackoff(
             job.opts.backoff.type,
             job.opts.backoff.delay,
-            job.attemptsMade + 1,
+            attemptsMade + 1,
             job.opts.backoff.jitter,
           );
     }
@@ -1160,7 +1169,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
    */
   private async deferOutOfOrderJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
-    await deferActive(this.commandClient, this.queueKeys, jobId, entryId, this.subscription);
+    await deferActive(this.commandClient, this.queueKeys, jobId, entryId, this.subscription, true);
   }
 
   // ---- Main processing path ----
@@ -1190,6 +1199,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
           this.queueKeys.stream,
           currentEntryId,
           this.subscription,
+          true,
         );
         if (await this.handleMoveToActiveEdgeCase(moveResult, currentJobId, currentEntryId)) return;
         currentHash = moveResult as Record<string, string>;
@@ -1240,6 +1250,8 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
             currentJobId,
             currentEntryId,
             this.subscription,
+            Date.now(),
+            true,
           );
           if (typeof wtcResult === 'string' && wtcResult.startsWith('error:')) {
             const reason = wtcResult.slice(6);

@@ -6,7 +6,9 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 45: DAG multi-parent dependencies - glidemq_registerParent, multi-parent completion notification.
 // Version 46: Broadcast fan-out safety: broadcastMode flag in glidemq_complete/completeAndFetchNext/fail/reclaimStalled skips XDEL and per-subscription retry tracking.
 // Version 47: Skip removeOnFail job-hash deletion in glidemq_fail when broadcastMode=1 (matches removeOnComplete fix from v46).
-export const LIBRARY_VERSION = '47';
+// Version 48: Fix Lua scope: move recordMetrics definition before releaseGroupSlotAndPromote/expireJob which call it.
+// Version 49: Guard XDEL in glidemq_moveToActive/deferActive/moveToWaitingChildren with broadcastMode flag.
+export const LIBRARY_VERSION = '49';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -96,6 +98,32 @@ local function tbRefill(groupHashKey, g, now)
     'tbLastRefill', tostring(now),
     'tbRefillRemainder', tostring(newRemainder))
   return newTokens
+end
+
+local function recordMetrics(metricsKey, timestamp, duration)
+  local minuteTs = timestamp - (timestamp % 60000)
+  local newCount = tonumber(redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':c', 1))
+  if duration > 0 then
+    redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':d', duration)
+  end
+  if newCount and (newCount % 100 == 0) then
+    local cutoff = minuteTs - 86400000
+    local fields = redis.call('HKEYS', metricsKey)
+    local toDelete = {}
+    for _, f in ipairs(fields) do
+      local ts = tonumber(string.match(f, '^m:(%d+):'))
+      if ts and ts < cutoff then
+        toDelete[#toDelete + 1] = f
+      end
+    end
+    if #toDelete > 0 and #toDelete <= 1000 then
+      redis.call('HDEL', metricsKey, unpack(toDelete))
+    elseif #toDelete > 1000 then
+      for i = 1, #toDelete, 1000 do
+        redis.call('HDEL', metricsKey, unpack(toDelete, i, math.min(i + 999, #toDelete)))
+      end
+    end
+  end
 end
 
 local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
@@ -334,32 +362,6 @@ local function removeExcessJobs(setKey, prefix, ids)
   end
   for i = 1, #ids, 1000 do
     redis.call('ZREM', setKey, unpack(ids, i, math.min(i + 999, #ids)))
-  end
-end
-
-local function recordMetrics(metricsKey, timestamp, duration)
-  local minuteTs = timestamp - (timestamp % 60000)
-  local newCount = tonumber(redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':c', 1))
-  if duration > 0 then
-    redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':d', duration)
-  end
-  if newCount and (newCount % 100 == 0) then
-    local cutoff = minuteTs - 86400000
-    local fields = redis.call('HKEYS', metricsKey)
-    local toDelete = {}
-    for _, f in ipairs(fields) do
-      local ts = tonumber(string.match(f, '^m:(%d+):'))
-      if ts and ts < cutoff then
-        toDelete[#toDelete + 1] = f
-      end
-    end
-    if #toDelete > 0 and #toDelete <= 1000 then
-      redis.call('HDEL', metricsKey, unpack(toDelete))
-    elseif #toDelete > 1000 then
-      for i = 1, #toDelete, 1000 do
-        redis.call('HDEL', metricsKey, unpack(toDelete, i, math.min(i + 999, #toDelete)))
-      end
-    end
   end
 end
 
@@ -1600,6 +1602,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
   local entryId = args[2] or ''
   local group = args[3] or ''
   local jobId = args[4] or ''
+  local broadcastMode = args[5] or '0'
   local ts = tonumber(timestamp) or 0
   local timestampStr = tostring(ts)
   local fields = redis.call('HGETALL', jobKey)
@@ -1648,7 +1651,9 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     expireJob(jobKey, jobId, prefix, ts, curState, orderingKey, orderingSeq, groupKey)
     if streamKey ~= '' and entryId ~= '' and group ~= '' then
       redis.call('XACK', streamKey, group, entryId)
-      redis.call('XDEL', streamKey, entryId)
+      if broadcastMode ~= '1' then
+        redis.call('XDEL', streamKey, entryId)
+      end
     end
     return 'EXPIRED'
   end
@@ -1664,7 +1669,9 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     if maxConc > 0 and active >= maxConc then
       if streamKey ~= '' and entryId ~= '' and group ~= '' then
         redis.call('XACK', streamKey, group, entryId)
-        redis.call('XDEL', streamKey, entryId)
+        if broadcastMode ~= '1' then
+          redis.call('XDEL', streamKey, entryId)
+        end
       end
       local waitListKey = prefix .. 'groupq:' .. groupKey
       redis.call('RPUSH', waitListKey, jobId)
@@ -1684,7 +1691,9 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       if jobCostVal > tbCapacity then
         if streamKey ~= '' and entryId ~= '' and group ~= '' then
           redis.call('XACK', streamKey, group, entryId)
-          redis.call('XDEL', streamKey, entryId)
+          if broadcastMode ~= '1' then
+            redis.call('XDEL', streamKey, entryId)
+          end
         end
         redis.call('ZADD', prefix .. 'failed', ts, jobId)
         redis.call('HSET', jobKey,
@@ -1719,7 +1728,9 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     if tbBlocked or rlBlocked then
       if streamKey ~= '' and entryId ~= '' and group ~= '' then
         redis.call('XACK', streamKey, group, entryId)
-        redis.call('XDEL', streamKey, entryId)
+        if broadcastMode ~= '1' then
+          redis.call('XDEL', streamKey, entryId)
+        end
       end
       local waitListKey = prefix .. 'groupq:' .. groupKey
       redis.call('RPUSH', waitListKey, jobId)
@@ -1776,9 +1787,12 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   local jobId = args[1]
   local entryId = args[2]
   local group = args[3]
+  local broadcastMode = args[4] or '0'
   local exists = redis.call('EXISTS', jobKey)
   redis.call('XACK', streamKey, group, entryId)
-  redis.call('XDEL', streamKey, entryId)
+  if broadcastMode ~= '1' then
+    redis.call('XDEL', streamKey, entryId)
+  end
   if exists == 0 then
     return 0
   end
@@ -2484,6 +2498,7 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
   local entryId = args[2]
   local group = args[3]
   local now = tonumber(args[4]) or 0
+  local broadcastMode = args[5] or '0'
 
   local state = redis.call('HGET', jobKey, 'state')
   if not state then
@@ -2494,7 +2509,9 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
   end
 
   pcall(redis.call, 'XACK', streamKey, group, entryId)
-  redis.call('XDEL', streamKey, entryId)
+  if broadcastMode ~= '1' then
+    redis.call('XDEL', streamKey, entryId)
+  end
   redis.call('HSET', jobKey, 'state', 'waiting-children')
 
   releaseGroupSlotAndPromote(jobKey, jobId, now)
@@ -3237,6 +3254,7 @@ export async function moveToActive(
   streamKey: string = '',
   entryId: string = '',
   group: string = '',
+  broadcastMode?: boolean,
 ): Promise<
   | Record<string, string>
   | 'REVOKED'
@@ -3252,6 +3270,7 @@ export async function moveToActive(
   if (streamKey) {
     keys.push(streamKey);
     args.push(entryId, group, jobId);
+    if (broadcastMode) args.push('1');
   }
   const result = await client.fcall('glidemq_moveToActive', keys, args);
 
@@ -3302,8 +3321,11 @@ export async function deferActive(
   jobId: string,
   entryId: string,
   group: string = CONSUMER_GROUP,
+  broadcastMode?: boolean,
 ): Promise<void> {
-  await client.fcall('glidemq_deferActive', [k.stream, k.job(jobId)], [jobId, entryId, group]);
+  const args = [jobId, entryId, group];
+  if (broadcastMode) args.push('1');
+  await client.fcall('glidemq_deferActive', [k.stream, k.job(jobId)], args);
 }
 
 /**
@@ -3484,11 +3506,14 @@ export async function moveToWaitingChildren(
   entryId: string,
   group: string = CONSUMER_GROUP,
   timestamp: number = Date.now(),
+  broadcastMode?: boolean,
 ): Promise<string> {
+  const args = [jobId, entryId, group, timestamp.toString()];
+  if (broadcastMode) args.push('1');
   const result = await client.fcall(
     'glidemq_moveToWaitingChildren',
     [k.job(jobId), k.stream, k.events],
-    [jobId, entryId, group, timestamp.toString()],
+    args,
   );
   return result as string;
 }
