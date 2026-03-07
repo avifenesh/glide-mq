@@ -305,8 +305,16 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
         count: b.count,
         avgDuration: b.count > 0 ? Math.round(b.totalDuration / b.count) : 0,
       }));
+
     const start = opts?.start ?? 0;
     const end = opts?.end ?? -1;
+
+    if (!Number.isInteger(start)) throw new TypeError('start must be an integer');
+    if (!Number.isInteger(end)) throw new TypeError('end must be an integer');
+    if (start >= 0 && end >= 0 && end < start) {
+      throw new RangeError('end must be >= start when both are non-negative');
+    }
+
     const sliced = end === -1 ? data.slice(start) : data.slice(start, end + 1);
     return { count, data: sliced, meta: { resolution: 'minute' } };
   }
