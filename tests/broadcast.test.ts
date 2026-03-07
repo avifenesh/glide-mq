@@ -199,9 +199,9 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
       await broadcast.publish({ seq: i });
     }
 
-    // Check stream length - XTRIM with approximate (~) can leave slightly more
+    // Exact XTRIM is used; stream should be trimmed to maxMessages (5)
     const len = await cleanupClient.xlen(`glide:{${Q}-retention}:stream`);
-    expect(Number(len)).toBeLessThanOrEqual(10); // Approximate trim, should trim eventually
+    expect(Number(len)).toBeLessThanOrEqual(5);
 
     await broadcast.close();
     await flushQueue(cleanupClient, Q + '-retention');

@@ -35,6 +35,9 @@ export class Broadcast<D = any> extends EventEmitter {
 
   constructor(name: string, opts: BroadcastOptions) {
     super();
+    if (opts.maxMessages !== undefined && (typeof opts.maxMessages !== 'number' || !Number.isInteger(opts.maxMessages) || opts.maxMessages <= 0)) {
+      throw new Error('maxMessages must be a positive integer');
+    }
     this.name = name;
     this.opts = opts;
     this.keys = buildKeys(name, opts.prefix);
@@ -57,13 +60,13 @@ export class Broadcast<D = any> extends EventEmitter {
   async publish(data: D, opts?: JobOptions): Promise<string | null> {
     const job = await this.queue.add('message', data, opts);
 
-    // Trim stream to maxMessages if configured
+    // Trim stream to maxMessages if configured (exact trim for a reliable hard limit)
     if (job && this.opts.maxMessages) {
       const client = await this.queue.getClient();
       await client.xtrim(this.keys.stream, {
         method: 'maxlen',
         threshold: this.opts.maxMessages,
-        exact: false,
+        exact: true,
       });
     }
 

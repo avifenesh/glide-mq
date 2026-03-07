@@ -197,7 +197,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     }
     this.blockingClient = await createBlockingClient(this.opts.connection!);
 
-    this.xreadStreams = { [this.queueKeys.stream]: '>' };
+    this.xreadStreams = Object.assign(Object.create(null), { [this.queueKeys.stream]: '>' });
 
     // Create consumer group on the stream (idempotent)
     // Use subscription name as consumer group, with configurable startFrom
@@ -1511,7 +1511,9 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
   async resume(): Promise<void> {
     await this.initPromise;
     this.paused = false;
-    this.pollLoop();
+    if (!this.pollLoopPromise) {
+      this.pollLoopPromise = this.pollLoop();
+    }
   }
 
   /**
