@@ -766,6 +766,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
           this.subscription,
           entry.job.opts.removeOnComplete,
           parentInfo,
+          true,
         );
 
         entry.job.returnvalue = result;
@@ -818,6 +819,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
             this.subscription,
             entry.job.opts.removeOnComplete,
             parentInfo,
+            true,
           );
 
           entry.job.returnvalue = result as R;
@@ -857,7 +859,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     if (!this.commandClient) return true;
     if (moveResult === null) {
       try {
-        await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', Date.now(), this.subscription);
+        await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', Date.now(), this.subscription, undefined, undefined, true);
       } catch (err) {
         this.emit('error', err);
       }
@@ -865,7 +867,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     }
     if (moveResult === 'REVOKED') {
       try {
-        await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, this.subscription);
+        await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, this.subscription, undefined, true);
       } catch (err) {
         this.emit('error', err);
       }
@@ -946,6 +948,8 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
           job.attemptsMade + 2,
           delayMs,
           this.subscription,
+          undefined,
+          true,
         );
       } catch (e) {
         this.emit('error', e);
@@ -981,6 +985,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       backoffDelay,
       this.subscription,
       job.opts.removeOnFail,
+      true,
     );
 
     if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
@@ -1273,6 +1278,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
         job.opts.removeOnComplete,
         parentInfo,
         completionHints,
+        true,
       );
 
       job.returnvalue = processResult;
@@ -1305,6 +1311,8 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
               0,
               0,
               this.subscription,
+              undefined,
+              true,
             );
           } catch (err) {
             this.emit('error', err);

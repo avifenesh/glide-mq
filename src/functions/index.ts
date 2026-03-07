@@ -2,8 +2,8 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-// Version 43: Added schedulerName to glidemq_addJob (arg 19) for repeatAfterComplete feature.
-export const LIBRARY_VERSION = '43';
+// Version 44: Added broadcastMode flag to glidemq_complete/completeAndFetchNext/fail - skip XDEL and use per-subscription retry tracking for fan-out safety.
+export const LIBRARY_VERSION = '44';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -631,8 +631,11 @@ redis.register_function('glidemq_complete', function(keys, args)
   local removeAge = tonumber(args[8]) or 0
   local depsMember = args[9] or ''
   local parentId = args[10] or ''
+  local broadcastMode = args[11] or '0'
   redis.call('XACK', streamKey, group, entryId)
-  redis.call('XDEL', streamKey, entryId)
+  if broadcastMode ~= '1' then
+    redis.call('XDEL', streamKey, entryId)
+  end
   redis.call('ZADD', completedKey, timestamp, jobId)
   redis.call('HSET', jobKey,
     'state', 'completed',
@@ -708,10 +711,13 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local currentOrderingKey = args[12] or ''
   local currentOrderingSeq = args[13] or ''
   local currentGroupKey = args[14] or ''
+  local broadcastMode = args[15] or '0'
 
   -- Phase 1: Complete current job (same as glidemq_complete)
   redis.call('XACK', streamKey, group, entryId)
-  redis.call('XDEL', streamKey, entryId)
+  if broadcastMode ~= '1' then
+    redis.call('XDEL', streamKey, entryId)
+  end
   redis.call('ZADD', completedKey, timestamp, jobId)
   redis.call('HSET', jobKey,
     'state', 'completed',
@@ -767,6 +773,11 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         end
       end
     end
+  end
+
+  -- In broadcast mode: do not fetch next (avoids XDEL of next entry which would break other consumer groups)
+  if broadcastMode == '1' then
+    return {'NEXT_NONE', jobId}
   end
 
   -- Return protocol (array-based to avoid cjson encode/decode per job):
@@ -933,9 +944,19 @@ redis.register_function('glidemq_fail', function(keys, args)
   local removeMode = args[8] or '0'
   local removeCount = tonumber(args[9]) or 0
   local removeAge = tonumber(args[10]) or 0
+  local broadcastMode = args[11] or '0'
   redis.call('XACK', streamKey, group, entryId)
-  redis.call('XDEL', streamKey, entryId)
-  local attemptsMade = redis.call('HINCRBY', jobKey, 'attemptsMade', 1)
+  if broadcastMode ~= '1' then
+    redis.call('XDEL', streamKey, entryId)
+  end
+  local attemptsMade
+  if broadcastMode == '1' then
+    local subKey = jobKey .. ':sub:' .. group
+    attemptsMade = redis.call('HINCRBY', subKey, 'a', 1)
+    redis.call('EXPIRE', subKey, 86400)
+  else
+    attemptsMade = redis.call('HINCRBY', jobKey, 'attemptsMade', 1)
+  end
   if maxAttempts > 0 and attemptsMade < maxAttempts then
     local retryAt = timestamp + backoffDelay
     local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
@@ -2728,6 +2749,7 @@ export async function completeJob(
   group: string = CONSUMER_GROUP,
   removeOnComplete?: boolean | number | { age: number; count: number },
   parentInfo?: { depsMember: string; parentId: string; parentKeys: QueueKeys },
+  broadcastMode?: boolean,
 ): Promise<GlideReturnType> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
@@ -2750,6 +2772,8 @@ export async function completeJob(
   } else {
     args.push('', '');
   }
+
+  args.push(broadcastMode ? '1' : '0');
 
   return client.fcall('glidemq_complete', keys, args);
 }
@@ -2788,6 +2812,7 @@ export async function completeAndFetchNext(
   removeOnComplete?: boolean | number | { age: number; count: number },
   parentInfo?: { depsMember: string; parentId: string; parentKeys: QueueKeys },
   hints?: CompleteAndFetchHints,
+  broadcastMode?: boolean,
 ): Promise<CompleteAndFetchResult> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
@@ -2815,6 +2840,7 @@ export async function completeAndFetchNext(
   const orderingSeqHint =
     hints?.orderingSeq != null && Number.isFinite(hints.orderingSeq) ? Math.trunc(hints.orderingSeq).toString() : '';
   args.push(hints?.orderingKey ?? '', orderingSeqHint, hints?.groupKey ?? '');
+  args.push(broadcastMode ? '1' : '0');
 
   const raw = await client.fcall('glidemq_completeAndFetchNext', keys, args);
 
@@ -2890,6 +2916,7 @@ export async function failJob(
   backoffDelay: number,
   group: string = CONSUMER_GROUP,
   removeOnFail?: boolean | number | { age: number; count: number },
+  broadcastMode?: boolean,
 ): Promise<string> {
   const { mode, count, age } = encodeRetention(removeOnFail);
   const result = await client.fcall(
@@ -2906,6 +2933,7 @@ export async function failJob(
       mode,
       count.toString(),
       age.toString(),
+      broadcastMode ? '1' : '0',
     ],
   );
   return result as string;
