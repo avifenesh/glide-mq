@@ -50,12 +50,7 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
       { connection: CONNECTION, subscription: 'subscriber-3', blockTimeout: 500 },
     );
 
-    await waitFor(async () => {
-      const w1Ready = (worker1 as any).commandClient !== null;
-      const w2Ready = (worker2 as any).commandClient !== null;
-      const w3Ready = (worker3 as any).commandClient !== null;
-      return w1Ready && w2Ready && w3Ready;
-    });
+    await Promise.all([worker1.waitUntilReady(), worker2.waitUntilReady(), worker3.waitUntilReady()]);
 
     await broadcast.publish({ event: 'test', seq: 1 });
 
@@ -92,7 +87,7 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
       { connection: CONNECTION, subscription: 'late-sub', startFrom: '$', blockTimeout: 500 },
     );
 
-    await waitFor(async () => (lateWorker as any).commandClient !== null);
+    await lateWorker.waitUntilReady();
 
     // Publish a new message
     await broadcast.publish({ seq: 3 });
@@ -166,12 +161,7 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
       { connection: CONNECTION, subscription: 'failing', blockTimeout: 500, attempts: 1 },
     );
 
-    await waitFor(async () => {
-      const w1Ready = (successWorker1 as any).commandClient !== null;
-      const w2Ready = (successWorker2 as any).commandClient !== null;
-      const w3Ready = (failingWorker as any).commandClient !== null;
-      return w1Ready && w2Ready && w3Ready;
-    });
+    await Promise.all([successWorker1.waitUntilReady(), successWorker2.waitUntilReady(), failingWorker.waitUntilReady()]);
 
     await broadcast.publish({ event: 'test-failure' });
 
@@ -247,11 +237,7 @@ describeEachMode('Broadcast with scheduler integration', (CONNECTION) => {
       { connection: CONNECTION, subscription: 'sched-sub-2', blockTimeout: 500, promotionInterval: 500 },
     );
 
-    await waitFor(async () => {
-      const w1Ready = (worker1 as any).commandClient !== null;
-      const w2Ready = (worker2 as any).commandClient !== null;
-      return w1Ready && w2Ready;
-    });
+    await Promise.all([worker1.waitUntilReady(), worker2.waitUntilReady()]);
 
     // Schedule a message with 2 second delay
     await broadcast.publish({ event: 'scheduled' }, { delay: 2000 });
@@ -307,11 +293,7 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
       { connection: CONNECTION, subscription: 'dedup-sub-2', blockTimeout: 500 },
     );
 
-    await waitFor(async () => {
-      const w1Ready = (worker1 as any).commandClient !== null;
-      const w2Ready = (worker2 as any).commandClient !== null;
-      return w1Ready && w2Ready;
-    });
+    await Promise.all([worker1.waitUntilReady(), worker2.waitUntilReady()]);
 
     // Publish with dedup ID - dedup is configured via JobOptions
     const id1 = await broadcast.publish(
