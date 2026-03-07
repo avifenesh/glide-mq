@@ -197,8 +197,8 @@ class Queue<D = any, R = any> extends EventEmitter {
   add(name: string, data: D, opts?: JobOptions): Promise<Job<D, R> | null>
   addAndWait(name: string, data: D, opts?: AddAndWaitOptions): Promise<R>
   addBulk(jobs: { name: string; data: D; opts?: JobOptions }[]): Promise<Job<D, R>[]>
-  getJob(id: string): Promise<Job<D, R> | null>
-  getJobs(type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed', start?: number, end?: number): Promise<Job<D, R>[]>
+  getJob(id: string, opts?: GetJobsOptions): Promise<Job<D, R> | null>
+  getJobs(type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed', start?: number, end?: number, opts?: GetJobsOptions): Promise<Job<D, R>[]>
   getJobCounts(): Promise<JobCounts>
   getJobCountByTypes(): Promise<JobCounts>
   count(): Promise<number>
@@ -226,7 +226,7 @@ class Queue<D = any, R = any> extends EventEmitter {
 
   // Logs and DLQ
   getJobLogs(id: string, start?: number, end?: number): Promise<{ logs: string[]; count: number }>
-  getDeadLetterJobs(start?: number, end?: number): Promise<Job<D, R>[]>
+  getDeadLetterJobs(start?: number, end?: number, opts?: GetJobsOptions): Promise<Job<D, R>[]>
   searchJobs(opts: SearchJobsOptions): Promise<Job<D, R>[]>
 
   // Job schedulers (repeatable/cron)

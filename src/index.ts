@@ -35,6 +35,7 @@ export type {
   ReadFrom,
   SandboxOptions,
   SearchJobsOptions,
+  GetJobsOptions,
   WorkerInfo,
   Serializer,
 } from './types';
