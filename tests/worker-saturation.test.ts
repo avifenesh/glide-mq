@@ -47,6 +47,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     }),
     xgroupCreate: vi.fn().mockResolvedValue('OK'),
     xreadgroup: vi.fn().mockResolvedValue(null),
+    rpop: vi.fn().mockResolvedValue(null),
     hgetall: vi.fn().mockResolvedValue([]),
     hget: vi.fn().mockResolvedValue(null),
     hset: vi.fn().mockResolvedValue(1),

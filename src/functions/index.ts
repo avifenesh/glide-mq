@@ -4,12 +4,17 @@ import type { GlideReturnType } from '@glidemq/speedkey';
 export const LIBRARY_NAME = 'glidemq';
 // Version 44: Added metrics recording (time-series data for getMetrics).
 // Version 45: DAG multi-parent dependencies - glidemq_registerParent, multi-parent completion notification.
-// Version 46: Broadcast fan-out safety: broadcastMode flag in glidemq_complete/completeAndFetchNext/fail/reclaimStalled skips XDEL and per-subscription retry tracking.
-// Version 47: Skip removeOnFail job-hash deletion in glidemq_fail when broadcastMode=1 (matches removeOnComplete fix from v46).
-// Version 48: Fix Lua scope: move recordMetrics definition before releaseGroupSlotAndPromote/expireJob which call it.
-// Version 49: Guard XDEL in glidemq_moveToActive/deferActive/moveToWaitingChildren with broadcastMode flag.
-// Version 50: Guard XDEL in glidemq_moveActiveToDelayed with broadcastMode flag.
-export const LIBRARY_VERSION = '50';
+// Version 46: Added lifo parameter to glidemq_addJob (arg 18) and glidemq_dedup (arg 21) for LIFO mode.
+// Version 47: Priority-promoted jobs routed to dedicated priority list (priority > LIFO > FIFO ordering).
+// Version 48: Use LPUSH for priority list so RPOP returns highest-priority (lowest score) job first.
+// Version 49: Fix Phase 1.0/1.5 in completeAndFetchNext - HSET before HGETALL, add lastActive.
+// Version 50: glidemq_drain cleans LIFO and priority list keys and their job hashes.
+// Version 51: Broadcast fan-out safety: broadcastMode flag in glidemq_complete/completeAndFetchNext/fail/reclaimStalled skips XDEL and per-subscription retry tracking.
+// Version 52: Skip removeOnFail job-hash deletion in glidemq_fail when broadcastMode=1.
+// Version 53: Fix Lua scope: move recordMetrics definition before releaseGroupSlotAndPromote/expireJob.
+// Version 54: Guard XDEL in glidemq_moveToActive/deferActive/moveToWaitingChildren with broadcastMode flag.
+// Version 55: Guard XDEL in glidemq_moveActiveToDelayed with broadcastMode flag.
+export const LIBRARY_VERSION = '55';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -392,8 +397,9 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local jobCost = tonumber(args[15]) or 0
   local ttl = tonumber(args[16]) or 0
   local customJobId = args[17] or ''
-  local parentQueue = args[18] or ''
-  local schedulerName = args[19] or ''
+  local lifo = tonumber(args[18]) or 0
+  local parentQueue = args[19] or ''
+  local schedulerName = args[20] or ''
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local jobIdStr
   local jobKey
@@ -520,6 +526,10 @@ redis.register_function('glidemq_addJob', function(keys, args)
     hashFields[#hashFields + 1] = 'schedulerName'
     hashFields[#hashFields + 1] = schedulerName
   end
+  if lifo > 0 then
+    hashFields[#hashFields + 1] = 'lifo'
+    hashFields[#hashFields + 1] = '1'
+  end
   if delay > 0 or priority > 0 then
     hashFields[#hashFields + 1] = 'state'
     hashFields[#hashFields + 1] = delay > 0 and 'delayed' or 'prioritized'
@@ -542,6 +552,9 @@ redis.register_function('glidemq_addJob', function(keys, args)
   elseif priority > 0 then
     local score = priority * PRIORITY_SHIFT
     redis.call('ZADD', scheduledKey, score, jobIdStr)
+  elseif lifo > 0 then
+    local lifoKey = prefix .. 'lifo'
+    redis.call('RPUSH', lifoKey, jobIdStr)
   else
     redis.call('XADD', streamKey, '*', 'jobId', jobIdStr)
   end
@@ -582,7 +595,18 @@ redis.register_function('glidemq_promote', function(keys, args)
       local jobKey = prefix .. 'job:' .. jobId
       redis.call('ZREM', scheduledKey, jobId)
       if not checkExpired(jobKey, jobId, prefix, now) then
-        redis.call('XADD', streamKey, '*', 'jobId', jobId)
+        local jobLifo = redis.call('HGET', jobKey, 'lifo')
+        if jobLifo == '1' then
+          local lifoKey = prefix .. 'lifo'
+          redis.call('RPUSH', lifoKey, jobId)
+        elseif priority > 0 then
+          -- Priority jobs go to dedicated priority list, checked before LIFO and stream.
+          -- LPUSH so RPOP retrieves lowest-score (highest-priority) job first.
+          local priorityKey = prefix .. 'priority'
+          redis.call('LPUSH', priorityKey, jobId)
+        else
+          redis.call('XADD', streamKey, '*', 'jobId', jobId)
+        end
         redis.call('HSET', jobKey, 'state', 'waiting')
         emitEvent(eventsKey, 'promoted', jobId, nil)
         count = count + 1
@@ -672,10 +696,8 @@ redis.register_function('glidemq_complete', function(keys, args)
   local parentId = args[10] or ''
   local broadcastMode = args[11] or '0'
   local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
-  redis.call('XACK', streamKey, group, entryId)
-  if broadcastMode ~= '1' then
-    redis.call('XDEL', streamKey, entryId)
-  end
+  if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+  if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   redis.call('ZADD', completedKey, timestamp, jobId)
   redis.call('HSET', jobKey,
     'state', 'completed',
@@ -806,10 +828,8 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
 
   -- Phase 1: Complete current job (same as glidemq_complete)
   local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
-  redis.call('XACK', streamKey, group, entryId)
-  if broadcastMode ~= '1' then
-    redis.call('XDEL', streamKey, entryId)
-  end
+  if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+  if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   redis.call('ZADD', completedKey, timestamp, jobId)
   redis.call('HSET', jobKey,
     'state', 'completed',
@@ -926,6 +946,48 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   -- {'NEXT_NONE', completedJobId}
   -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId}
   -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ...}
+
+  -- Phase 1.0: Try priority list first (highest priority: priority > LIFO > FIFO)
+  local priorityKey = prefix .. 'priority'
+  for _priAttempt = 1, 3 do
+    local priJobId = redis.call('RPOP', priorityKey)
+    if not priJobId then
+      break  -- priority list is empty
+    end
+
+    local priJobKey = prefix .. 'job:' .. priJobId
+    if redis.call('EXISTS', priJobKey) == 1 then
+      local priRevoked = redis.call('HGET', priJobKey, 'revoked')
+      if priRevoked ~= '1' and not checkExpired(priJobKey, priJobId, prefix, timestamp) then
+        redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
+        emitEvent(eventsKey, 'active', priJobId, nil)
+        local priJobFields = redis.call('HGETALL', priJobKey)
+        return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
+      end
+    end
+  end
+
+  -- Phase 1.5: Try LIFO list (before stream), retry up to 3 times
+  local lifoKey = prefix .. 'lifo'
+  for _lifoAttempt = 1, 3 do
+    local lifoJobId = redis.call('RPOP', lifoKey)
+    if not lifoJobId then
+      break  -- LIFO list is empty
+    end
+
+    local lifoJobKey = prefix .. 'job:' .. lifoJobId
+    if redis.call('EXISTS', lifoJobKey) == 1 then
+      local lifoRevoked = redis.call('HGET', lifoJobKey, 'revoked')
+      if lifoRevoked ~= '1' and not checkExpired(lifoJobKey, lifoJobId, prefix, timestamp) then
+        -- Activate: set state, processedOn, lastActive before HGETALL so returned hash is current
+        redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
+        emitEvent(eventsKey, 'active', lifoJobId, nil)
+        local lifoJobFields = redis.call('HGETALL', lifoJobKey)
+        -- Return LIFO job (no entryId for LIFO jobs, use empty string)
+        return {'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}
+      end
+    end
+  end
 
   -- Phase 2: Fetch next job (non-blocking XREADGROUP), skip expired (up to 3 attempts)
   local nextJobId, nextEntryId, nextJobKey
@@ -1091,10 +1153,8 @@ redis.register_function('glidemq_fail', function(keys, args)
   local removeAge = tonumber(args[10]) or 0
   local broadcastMode = args[11] or '0'
   local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
-  redis.call('XACK', streamKey, group, entryId)
-  if broadcastMode ~= '1' then
-    redis.call('XDEL', streamKey, entryId)
-  end
+  if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+  if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   local attemptsMade
   if broadcastMode == '1' then
     local subKey = jobKey .. ':sub:' .. group
@@ -1196,10 +1256,8 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
     if jobId then
       local jobKey = prefix .. 'job:' .. jobId
       if checkExpired(jobKey, jobId, prefix, timestamp) then
-        redis.call('XACK', streamKey, group, entryId)
-        if broadcastMode ~= '1' then
-          redis.call('XDEL', streamKey, entryId)
-        end
+        if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+        if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
         count = count + 1
       else
       local lastActive = tonumber(redis.call('HGET', jobKey, 'lastActive'))
@@ -1210,10 +1268,8 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       if stalledCount > maxStalledCount then
         local metricsKey = prefix .. 'metrics:failed'
         local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
-        redis.call('XACK', streamKey, group, entryId)
-        if broadcastMode ~= '1' then
-          redis.call('XDEL', streamKey, entryId)
-        end
+        if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+        if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
         redis.call('ZADD', failedKey, timestamp, jobId)
         redis.call('HSET', jobKey,
           'state', 'failed',
@@ -1273,6 +1329,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local maxAttempts = tonumber(args[11]) or 0
   local orderingKey = args[12] or ''
   local groupConcurrency = tonumber(args[13]) or 0
+  local lifo = tonumber(args[21]) or 0
   local groupRateMax = tonumber(args[14]) or 0
   local groupRateDuration = tonumber(args[15]) or 0
   local tbCapacity = tonumber(args[16]) or 0
@@ -1280,7 +1337,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local jobCost = tonumber(args[18]) or 0
   local ttl = tonumber(args[19]) or 0
   local customJobId = args[20] or ''
-  local parentQueue = args[21] or ''
+  local parentQueue = args[22] or ''
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local existing = redis.call('HGET', dedupKey, dedupId)
   if mode == 'simple' then
@@ -1441,6 +1498,10 @@ redis.register_function('glidemq_dedup', function(keys, args)
       hashFields[#hashFields + 1] = parentQueue
     end
   end
+  if lifo > 0 then
+    hashFields[#hashFields + 1] = 'lifo'
+    hashFields[#hashFields + 1] = '1'
+  end
   if delay > 0 or priority > 0 then
     hashFields[#hashFields + 1] = 'state'
     hashFields[#hashFields + 1] = delay > 0 and 'delayed' or 'prioritized'
@@ -1462,6 +1523,9 @@ redis.register_function('glidemq_dedup', function(keys, args)
   elseif priority > 0 then
     local score = priority * PRIORITY_SHIFT
     redis.call('ZADD', scheduledKey, score, jobIdStr)
+  elseif lifo > 0 then
+    local lifoKey = prefix .. 'lifo'
+    redis.call('RPUSH', lifoKey, jobIdStr)
   else
     redis.call('XADD', streamKey, '*', 'jobId', jobIdStr)
   end
@@ -1652,9 +1716,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     expireJob(jobKey, jobId, prefix, ts, curState, orderingKey, orderingSeq, groupKey)
     if streamKey ~= '' and entryId ~= '' and group ~= '' then
       redis.call('XACK', streamKey, group, entryId)
-      if broadcastMode ~= '1' then
-        redis.call('XDEL', streamKey, entryId)
-      end
+      if broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
     end
     return 'EXPIRED'
   end
@@ -1670,9 +1732,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     if maxConc > 0 and active >= maxConc then
       if streamKey ~= '' and entryId ~= '' and group ~= '' then
         redis.call('XACK', streamKey, group, entryId)
-        if broadcastMode ~= '1' then
-          redis.call('XDEL', streamKey, entryId)
-        end
+        if broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
       end
       local waitListKey = prefix .. 'groupq:' .. groupKey
       redis.call('RPUSH', waitListKey, jobId)
@@ -1692,9 +1752,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       if jobCostVal > tbCapacity then
         if streamKey ~= '' and entryId ~= '' and group ~= '' then
           redis.call('XACK', streamKey, group, entryId)
-          if broadcastMode ~= '1' then
-            redis.call('XDEL', streamKey, entryId)
-          end
+          if broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
         end
         redis.call('ZADD', prefix .. 'failed', ts, jobId)
         redis.call('HSET', jobKey,
@@ -1729,9 +1787,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     if tbBlocked or rlBlocked then
       if streamKey ~= '' and entryId ~= '' and group ~= '' then
         redis.call('XACK', streamKey, group, entryId)
-        if broadcastMode ~= '1' then
-          redis.call('XDEL', streamKey, entryId)
-        end
+        if broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
       end
       local waitListKey = prefix .. 'groupq:' .. groupKey
       redis.call('RPUSH', waitListKey, jobId)
@@ -1790,10 +1846,8 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   local group = args[3]
   local broadcastMode = args[4] or '0'
   local exists = redis.call('EXISTS', jobKey)
-  redis.call('XACK', streamKey, group, entryId)
-  if broadcastMode ~= '1' then
-    redis.call('XDEL', streamKey, entryId)
-  end
+  if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+  if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   if exists == 0 then
     return 0
   end
@@ -2227,8 +2281,8 @@ redis.register_function('glidemq_revoke', function(keys, args)
       local fields = entries[i][2]
       for j = 1, #fields, 2 do
         if fields[j] == 'jobId' and fields[j+1] == jobId then
-          redis.call('XACK', streamKey, group, entryId)
-          redis.call('XDEL', streamKey, entryId)
+          if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+          if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
           break
         end
       end
@@ -2278,7 +2332,7 @@ redis.register_function('glidemq_changePriority', function(keys, args)
         for j = 1, #fields, 2 do
           if fields[j] == 'jobId' and fields[j+1] == jobId then
             pcall(redis.call, 'XACK', streamKey, group, entryId)
-            redis.call('XDEL', streamKey, entryId)
+            if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
             found = true
             break
           end
@@ -2389,7 +2443,7 @@ redis.register_function('glidemq_changeDelay', function(keys, args)
         for j = 1, #fields, 2 do
           if fields[j] == 'jobId' and fields[j+1] == jobId then
             pcall(redis.call, 'XACK', streamKey, group, entryId)
-            redis.call('XDEL', streamKey, entryId)
+            if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
             found = true
             break
           end
@@ -2443,7 +2497,16 @@ redis.register_function('glidemq_promoteJob', function(keys, args)
     return 'error:not_delayed'
   end
   redis.call('ZREM', scheduledKey, jobId)
-  redis.call('XADD', streamKey, '*', 'jobId', jobId)
+  local jobPriority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
+  local jobLifo = redis.call('HGET', jobKey, 'lifo')
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  if jobLifo == '1' then
+    redis.call('RPUSH', prefix .. 'lifo', jobId)
+  elseif jobPriority > 0 then
+    redis.call('LPUSH', prefix .. 'priority', jobId)
+  else
+    redis.call('XADD', streamKey, '*', 'jobId', jobId)
+  end
   redis.call('HSET', jobKey, 'state', 'waiting', 'delay', '0')
   emitEvent(eventsKey, 'promoted', jobId, nil)
   return 'ok'
@@ -2480,9 +2543,7 @@ redis.register_function('glidemq_moveActiveToDelayed', function(keys, args)
   local score = priority * PRIORITY_SHIFT + delayedUntil
 
   pcall(redis.call, 'XACK', streamKey, group, entryId)
-  if broadcastMode ~= '1' then
-    redis.call('XDEL', streamKey, entryId)
-  end
+  if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   redis.call('ZADD', scheduledKey, string.format('%.0f', score), jobId)
   if nextData and nextData ~= '' then
     redis.call('HSET', jobKey, 'data', nextData, 'state', 'delayed', 'delay', tostring(delay))
@@ -2513,9 +2574,7 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
   end
 
   pcall(redis.call, 'XACK', streamKey, group, entryId)
-  if broadcastMode ~= '1' then
-    redis.call('XDEL', streamKey, entryId)
-  end
+  if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   redis.call('HSET', jobKey, 'state', 'waiting-children')
 
   releaseGroupSlotAndPromote(jobKey, jobId, now)
@@ -2585,6 +2644,8 @@ redis.register_function('glidemq_drain', function(keys, args)
   local scheduledKey = keys[2]
   local eventsKey = keys[3]
   local idKey = keys[4]
+  local lifoKey = keys[5]
+  local priorityKey = keys[6]
   local drainDelayed = args[1] == '1'
   local group = args[2]
   local prefix = string.sub(idKey, 1, #idKey - 2)
@@ -2669,6 +2730,28 @@ redis.register_function('glidemq_drain', function(keys, args)
     redis.call('DEL', scheduledKey)
   end
 
+  -- Drain LIFO list: get all waiting job IDs, delete their hashes, then delete the list
+  if lifoKey and lifoKey ~= '' then
+    local lifoIds = redis.call('LRANGE', lifoKey, 0, -1)
+    for i = 1, #lifoIds do
+      local jobId = lifoIds[i]
+      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+      removed = removed + 1
+    end
+    redis.call('DEL', lifoKey)
+  end
+
+  -- Drain priority list: get all waiting job IDs, delete their hashes, then delete the list
+  if priorityKey and priorityKey ~= '' then
+    local priorityIds = redis.call('LRANGE', priorityKey, 0, -1)
+    for i = 1, #priorityIds do
+      local jobId = priorityIds[i]
+      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+      removed = removed + 1
+    end
+    redis.call('DEL', priorityKey)
+  end
+
   if removed > 0 then
     emitEvent(eventsKey, 'drained', tostring(removed), nil)
   end
@@ -2751,6 +2834,7 @@ export function addJobArgs(
   jobCost: number = 0,
   ttl: number = 0,
   customJobId: string = '',
+  lifo: number = 0,
   parentQueue: string = '',
   parentDepsKey: string = '',
   schedulerName: string = '',
@@ -2779,6 +2863,7 @@ export function addJobArgs(
       jobCost.toString(),
       ttl.toString(),
       customJobId,
+      lifo.toString(),
       parentQueue,
       schedulerName,
     ],
@@ -2805,6 +2890,7 @@ export async function addJob(
   jobCost: number = 0,
   ttl: number = 0,
   customJobId: string = '',
+  lifo: number = 0,
   parentQueue: string = '',
   parentDepsKey: string = '',
   schedulerName: string = '',
@@ -2828,6 +2914,7 @@ export async function addJob(
     jobCost,
     ttl,
     customJobId,
+    lifo,
     parentQueue,
     parentDepsKey,
     schedulerName,
@@ -2863,6 +2950,7 @@ export async function dedup(
   jobCost: number = 0,
   jobTtl: number = 0,
   customJobId: string = '',
+  lifo: number = 0,
   parentQueue: string = '',
   parentDepsKey: string = '',
 ): Promise<string> {
@@ -2891,6 +2979,7 @@ export async function dedup(
     jobCost.toString(),
     jobTtl.toString(),
     customJobId,
+    lifo.toString(),
     parentQueue,
   ]);
   return result as string;
@@ -3381,7 +3470,7 @@ export async function drainQueue(
 ): Promise<number> {
   const result = await client.fcall(
     'glidemq_drain',
-    [k.stream, k.scheduled, k.events, k.id],
+    [k.stream, k.scheduled, k.events, k.id, k.lifo, k.priority],
     [delayed ? '1' : '0', group],
   );
   return Number(result) || 0;

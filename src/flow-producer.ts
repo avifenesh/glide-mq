@@ -135,6 +135,9 @@ export class FlowProducer {
       }
       const customJobId = opts.jobId ?? '';
       if (customJobId !== '') validateJobId(customJobId);
+      if (opts.lifo && opts.ordering?.key) {
+        throw new Error('lifo and ordering.key cannot be used together');
+      }
       const jobId = await addJob(
         client,
         parentKeys,
@@ -155,6 +158,10 @@ export class FlowProducer {
         jobCost,
         opts.ttl ?? 0,
         customJobId,
+        opts.lifo ? 1 : 0,
+        '',
+        '',
+        '',
       );
       if (String(jobId) === 'duplicate') {
         throw new Error('Duplicate job ID in flow');
@@ -502,6 +509,10 @@ export class FlowProducer {
               jobCost,
               opts.ttl ?? 0,
               customJobId,
+              opts.lifo ? 1 : 0,
+              '',
+              '',
+              '',
             );
             if (String(jobId) === 'duplicate') throw new Error('Duplicate job ID in DAG');
             if (String(jobId) === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
@@ -539,6 +550,7 @@ export class FlowProducer {
               jobCost,
               opts.ttl ?? 0,
               customJobId,
+              0,
               firstParentNode.queueName,
               firstParentKeys.deps(firstParentJob.id),
             );

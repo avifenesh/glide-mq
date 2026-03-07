@@ -146,6 +146,8 @@ export interface JobOptions {
   jobId?: string;
   delay?: number;
   priority?: number;
+  /** Process jobs in LIFO (last-in-first-out) order. Cannot be combined with ordering keys. */
+  lifo?: boolean;
   /**
    * Per-key ordering and group concurrency control.
    * Jobs sharing the same key are constrained to run at most `concurrency`
