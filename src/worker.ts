@@ -399,23 +399,35 @@ export class Worker<D = any, R = any> extends EventEmitter {
       [this.queueKeys.lifo, 'LIFO'],
     ] as [string, string][]) {
       try {
-        const nextJobId = this.globalConcurrencyEnabled
-          ? await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP)
-          : await this.commandClient.rpop(listKey).then((v) => (v ? String(v) : null));
-        if (nextJobId) {
-          const jobId = String(nextJobId);
-          if (this.concurrency === 1) {
-            this.activeCount++;
-            const promise = this.processJob(jobId, '');
-            this.activePromises.add(promise);
-            try {
-              await promise;
-            } finally {
-              this.activeCount--;
-              this.activePromises.delete(promise);
+        // With gc enabled, use atomic rpopAndReserve (single slot).
+        // Without gc, batch pop up to fetchCount to reduce RTTs at concurrency > 1.
+        const popCount = this.concurrency === 1 ? 1 : fetchCount;
+        let jobIds: string[];
+        if (this.globalConcurrencyEnabled) {
+          const id = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP);
+          jobIds = id ? [id] : [];
+        } else if (popCount === 1) {
+          const id = await this.commandClient.rpop(listKey);
+          jobIds = id ? [String(id)] : [];
+        } else {
+          const ids = await this.commandClient.rpopCount(listKey, popCount);
+          jobIds = ids ? ids.map(String) : [];
+        }
+        if (jobIds.length > 0) {
+          for (const jobId of jobIds) {
+            if (this.concurrency === 1) {
+              this.activeCount++;
+              const promise = this.processJob(jobId, '');
+              this.activePromises.add(promise);
+              try {
+                await promise;
+              } finally {
+                this.activeCount--;
+                this.activePromises.delete(promise);
+              }
+            } else {
+              this.dispatchJob(jobId, '');
             }
-          } else {
-            this.dispatchJob(jobId, '');
           }
           return;
         }
@@ -439,23 +451,33 @@ export class Worker<D = any, R = any> extends EventEmitter {
           [this.queueKeys.lifo, 'LIFO'],
         ] as [string, string][]) {
           try {
-            const nextJobId = this.globalConcurrencyEnabled
-              ? await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP)
-              : await this.commandClient.rpop(listKey).then((v) => (v ? String(v) : null));
-            if (nextJobId) {
-              const jobId = String(nextJobId);
-              if (this.concurrency === 1) {
-                this.activeCount++;
-                const promise = this.processJob(jobId, '');
-                this.activePromises.add(promise);
-                try {
-                  await promise;
-                } finally {
-                  this.activeCount--;
-                  this.activePromises.delete(promise);
+            const popCount = this.concurrency === 1 ? 1 : fetchCount;
+            let jobIds: string[];
+            if (this.globalConcurrencyEnabled) {
+              const id = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP);
+              jobIds = id ? [id] : [];
+            } else if (popCount === 1) {
+              const id = await this.commandClient.rpop(listKey);
+              jobIds = id ? [String(id)] : [];
+            } else {
+              const ids = await this.commandClient.rpopCount(listKey, popCount);
+              jobIds = ids ? ids.map(String) : [];
+            }
+            if (jobIds.length > 0) {
+              for (const jobId of jobIds) {
+                if (this.concurrency === 1) {
+                  this.activeCount++;
+                  const promise = this.processJob(jobId, '');
+                  this.activePromises.add(promise);
+                  try {
+                    await promise;
+                  } finally {
+                    this.activeCount--;
+                    this.activePromises.delete(promise);
+                  }
+                } else {
+                  this.dispatchJob(jobId, '');
                 }
-              } else {
-                this.dispatchJob(jobId, '');
               }
               return;
             }

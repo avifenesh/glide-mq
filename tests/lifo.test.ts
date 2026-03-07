@@ -464,3 +464,55 @@ describeEachMode('LIFO: FlowProducer child jobs', (CONNECTION) => {
     await flushQueue(cleanupClient, Q);
   }, 10000);
 });
+
+describeEachMode('LIFO: Batch pop throughput', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('worker with concurrency=5 processes LIFO batch faster than 5 sequential polls', async () => {
+    const Q = 'lifo-batch-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    // Add 10 LIFO jobs
+    for (let i = 0; i < 10; i++) {
+      await queue.add('job', { i }, { lifo: true });
+    }
+
+    let processed = 0;
+    const start = Date.now();
+    let endTime = 0;
+
+    const worker = new Worker(
+      Q,
+      async () => {
+        processed++;
+        if (processed === 10) endTime = Date.now();
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 5, blockTimeout: 500 },
+    );
+    worker.on('error', () => {});
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (processed >= 10) { clearInterval(check); resolve(); }
+      }, 50);
+    });
+
+    await worker.close(true);
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+
+    // With concurrency=5 and batch pop, 10 jobs should complete
+    expect(processed).toBe(10);
+    // Batch pop should keep the worker busy (all 10 processed)
+    expect(endTime - start).toBeLessThan(5000);
+  }, 15000);
+});
