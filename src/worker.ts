@@ -416,10 +416,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
         if (jobIds.length > 0) {
           // Always INCR list-active so complete/fail Lua DECRs stay balanced.
           // rpopAndReserve already did the INCR atomically; for non-gc paths do it here.
-          if (!this.globalConcurrencyEnabled) {
-            for (let _i = 0; _i < jobIds.length; _i++) {
-              await this.commandClient.incr(this.queueKeys.listActive);
-            }
+          if (!this.globalConcurrencyEnabled && jobIds.length > 0) {
+            await this.commandClient.incrBy(this.queueKeys.listActive, jobIds.length);
           }
           for (const jobId of jobIds) {
             if (this.concurrency === 1) {
@@ -471,10 +469,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
               jobIds = ids ? ids.map(String) : [];
             }
             if (jobIds.length > 0) {
-              if (!this.globalConcurrencyEnabled) {
-                for (let _i = 0; _i < jobIds.length; _i++) {
-                  await this.commandClient.incr(this.queueKeys.listActive);
-                }
+              if (!this.globalConcurrencyEnabled && jobIds.length > 0) {
+                await this.commandClient.incrBy(this.queueKeys.listActive, jobIds.length);
               }
               for (const jobId of jobIds) {
                 if (this.concurrency === 1) {

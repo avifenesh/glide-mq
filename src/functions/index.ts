@@ -2569,6 +2569,7 @@ redis.register_function('glidemq_moveActiveToDelayed', function(keys, args)
   else
     redis.call('HSET', jobKey, 'state', 'delayed', 'delay', tostring(delay))
   end
+  if entryId == '' then redis.call('DECR', string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
   releaseGroupSlotAndPromote(jobKey, jobId, now, nil)
   emitEvent(eventsKey, 'delay-changed', jobId, {'delay', tostring(delay)})
   return 'ok'
@@ -2607,10 +2608,12 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
       redis.call('HSET', jobKey, 'state', 'waiting')
       redis.call('XADD', streamKey, '*', 'jobId', jobId)
       emitEvent(eventsKey, 'active', jobId, nil)
+      if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
       return 'completed'
     end
   end
 
+  if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
   emitEvent(eventsKey, 'waiting-children', jobId, nil)
   return 'ok'
 end)
