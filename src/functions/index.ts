@@ -6,7 +6,9 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 44: Added metrics recording (time-series data for getMetrics).
 // Version 45: DAG multi-parent dependencies - glidemq_registerParent, multi-parent completion notification.
 // Version 46: Added lifo parameter to glidemq_addJob (arg 18) and glidemq_dedup (arg 21) for LIFO mode.
-export const LIBRARY_VERSION = '46';
+// Version 47: Priority-promoted jobs routed to dedicated priority list (priority > LIFO > FIFO ordering).
+// Version 48: Use LPUSH for priority list so RPOP returns highest-priority (lowest score) job first.
+export const LIBRARY_VERSION = '48';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -96,6 +98,32 @@ local function tbRefill(groupHashKey, g, now)
     'tbLastRefill', tostring(now),
     'tbRefillRemainder', tostring(newRemainder))
   return newTokens
+end
+
+local function recordMetrics(metricsKey, timestamp, duration)
+  local minuteTs = timestamp - (timestamp % 60000)
+  local newCount = tonumber(redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':c', 1))
+  if duration > 0 then
+    redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':d', duration)
+  end
+  if newCount and (newCount % 100 == 0) then
+    local cutoff = minuteTs - 86400000
+    local fields = redis.call('HKEYS', metricsKey)
+    local toDelete = {}
+    for _, f in ipairs(fields) do
+      local ts = tonumber(string.match(f, '^m:(%d+):'))
+      if ts and ts < cutoff then
+        toDelete[#toDelete + 1] = f
+      end
+    end
+    if #toDelete > 0 and #toDelete <= 1000 then
+      redis.call('HDEL', metricsKey, unpack(toDelete))
+    elseif #toDelete > 1000 then
+      for i = 1, #toDelete, 1000 do
+        redis.call('HDEL', metricsKey, unpack(toDelete, i, math.min(i + 999, #toDelete)))
+      end
+    end
+  end
 end
 
 local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
@@ -337,32 +365,6 @@ local function removeExcessJobs(setKey, prefix, ids)
   end
 end
 
-local function recordMetrics(metricsKey, timestamp, duration)
-  local minuteTs = timestamp - (timestamp % 60000)
-  local newCount = tonumber(redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':c', 1))
-  if duration > 0 then
-    redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':d', duration)
-  end
-  if newCount and (newCount % 100 == 0) then
-    local cutoff = minuteTs - 86400000
-    local fields = redis.call('HKEYS', metricsKey)
-    local toDelete = {}
-    for _, f in ipairs(fields) do
-      local ts = tonumber(string.match(f, '^m:(%d+):'))
-      if ts and ts < cutoff then
-        toDelete[#toDelete + 1] = f
-      end
-    end
-    if #toDelete > 0 and #toDelete <= 1000 then
-      redis.call('HDEL', metricsKey, unpack(toDelete))
-    elseif #toDelete > 1000 then
-      for i = 1, #toDelete, 1000 do
-        redis.call('HDEL', metricsKey, unpack(toDelete, i, math.min(i + 999, #toDelete)))
-      end
-    end
-  end
-end
-
 redis.register_function('glidemq_version', function(keys, args)
   return '${LIBRARY_VERSION}'
 end)
@@ -591,6 +593,11 @@ redis.register_function('glidemq_promote', function(keys, args)
         if jobLifo == '1' then
           local lifoKey = prefix .. 'lifo'
           redis.call('RPUSH', lifoKey, jobId)
+        elseif priority > 0 then
+          -- Priority jobs go to dedicated priority list, checked before LIFO and stream.
+          -- LPUSH so RPOP retrieves lowest-score (highest-priority) job first.
+          local priorityKey = prefix .. 'priority'
+          redis.call('LPUSH', priorityKey, jobId)
         else
           redis.call('XADD', streamKey, '*', 'jobId', jobId)
         end
@@ -923,7 +930,27 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId}
   -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ...}
 
-  -- Phase 1.5: Try LIFO list first (before stream), retry up to 3 times
+  -- Phase 1.0: Try priority list first (highest priority: priority > LIFO > FIFO)
+  local priorityKey = prefix .. 'priority'
+  for _priAttempt = 1, 3 do
+    local priJobId = redis.call('RPOP', priorityKey)
+    if not priJobId then
+      break  -- priority list is empty
+    end
+
+    local priJobKey = prefix .. 'job:' .. priJobId
+    if redis.call('EXISTS', priJobKey) == 1 then
+      local priRevoked = redis.call('HGET', priJobKey, 'revoked')
+      if priRevoked ~= '1' and not checkExpired(priJobKey, priJobId, prefix, timestamp) then
+        local priJobFields = redis.call('HGETALL', priJobKey)
+        redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp))
+        emitEvent(eventsKey, 'active', priJobId, nil)
+        return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
+      end
+    end
+  end
+
+  -- Phase 1.5: Try LIFO list (before stream), retry up to 3 times
   local lifoKey = prefix .. 'lifo'
   for _lifoAttempt = 1, 3 do
     local lifoJobId = redis.call('RPOP', lifoKey)
@@ -2439,7 +2466,16 @@ redis.register_function('glidemq_promoteJob', function(keys, args)
     return 'error:not_delayed'
   end
   redis.call('ZREM', scheduledKey, jobId)
-  redis.call('XADD', streamKey, '*', 'jobId', jobId)
+  local jobPriority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
+  local jobLifo = redis.call('HGET', jobKey, 'lifo')
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  if jobLifo == '1' then
+    redis.call('RPUSH', prefix .. 'lifo', jobId)
+  elseif jobPriority > 0 then
+    redis.call('LPUSH', prefix .. 'priority', jobId)
+  else
+    redis.call('XADD', streamKey, '*', 'jobId', jobId)
+  end
   redis.call('HSET', jobKey, 'state', 'waiting', 'delay', '0')
   emitEvent(eventsKey, 'promoted', jobId, nil)
   return 'ok'

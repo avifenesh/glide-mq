@@ -75,6 +75,7 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     ratelimited: `${p}:ratelimited`,
     metricsCompleted: `${p}:metrics:completed`,
     lifo: `${p}:lifo`,
+    priority: `${p}:priority`,
     metricsFailed: `${p}:metrics:failed`,
     group: (key: string) => `${p}:group:${key}`,
     groupq: (key: string) => `${p}:groupq:${key}`,

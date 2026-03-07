@@ -392,6 +392,27 @@ export class Worker<D = any, R = any> extends EventEmitter {
       }
     }
 
+    // Check priority list first (priority > LIFO > FIFO), then LIFO, before blocking on stream
+    for (const [listKey, label] of [
+      [this.queueKeys.priority, 'priority'],
+      [this.queueKeys.lifo, 'LIFO'],
+    ] as [string, string][]) {
+      try {
+        const nextJobId = await this.commandClient.rpop(listKey);
+        if (nextJobId) {
+          const jobId = String(nextJobId);
+          if (this.concurrency === 1) {
+            await this.processJob(jobId, '');
+          } else {
+            this.dispatchJob(jobId, '');
+          }
+          return;
+        }
+      } catch (err) {
+        this.emit('error', new Error(`${label} fetch error: ${err}`));
+      }
+    }
+
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
     // STREAMS {streamKey} >
     const result = await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
@@ -400,21 +421,26 @@ export class Worker<D = any, R = any> extends EventEmitter {
     });
 
     if (!result) {
-      // Stream empty - check LIFO list as fallback
+      // Stream empty - check priority and LIFO lists for jobs added while we were blocking
       if (this.commandClient) {
-        try {
-          const lifoJobId = await this.commandClient.rpop(this.queueKeys.lifo);
-          if (lifoJobId) {
-            const jobId = String(lifoJobId);
-            if (this.concurrency === 1) {
-              await this.processJob(jobId, '');
-            } else {
-              this.dispatchJob(jobId, '');
+        for (const [listKey, label] of [
+          [this.queueKeys.priority, 'priority'],
+          [this.queueKeys.lifo, 'LIFO'],
+        ] as [string, string][]) {
+          try {
+            const nextJobId = await this.commandClient.rpop(listKey);
+            if (nextJobId) {
+              const jobId = String(nextJobId);
+              if (this.concurrency === 1) {
+                await this.processJob(jobId, '');
+              } else {
+                this.dispatchJob(jobId, '');
+              }
+              return;
             }
-            return;
+          } catch (err) {
+            this.emit('error', new Error(`${label} fetch error: ${err}`));
           }
-        } catch (err) {
-          this.emit('error', new Error(`LIFO fetch error: ${err}`));
         }
       }
 
