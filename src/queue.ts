@@ -1174,6 +1174,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
       this.keys.schedulers,
       this.keys.ordering,
       this.keys.ratelimited,
+      this.keys.metricsCompleted,
+      this.keys.metricsFailed,
     ];
     await client.del(staticKeys);
 
