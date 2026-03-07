@@ -427,7 +427,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   async upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void> {
     validateSchedulerEvery(schedule.every);
-    validateSchedulerEvery(schedule.repeatAfterComplete);
+    if (schedule.repeatAfterComplete != null) {
+      if (!Number.isSafeInteger(schedule.repeatAfterComplete) || schedule.repeatAfterComplete <= 0) {
+        throw new Error('repeatAfterComplete must be a positive safe integer');
+      }
+    }
     const modeCount = (schedule.pattern ? 1 : 0) + (schedule.every ? 1 : 0) + (schedule.repeatAfterComplete ? 1 : 0);
     if (modeCount === 0) {
       throw new Error('Schedule must have pattern (cron), every (ms interval), or repeatAfterComplete (ms)');

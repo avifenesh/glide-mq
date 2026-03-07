@@ -1014,14 +1014,23 @@ export class Worker<D = any, R = any> extends EventEmitter {
    * After a repeatAfterComplete job completes or terminally fails,
    * update the scheduler entry so the next job is scheduled.
    *
-   * KNOWN LIMITATION: This update happens after the job completion transaction,
-   * so a worker crash between completion and this call will leave the scheduler
-   * stuck at nextRun=0 (awaiting completion sentinel) indefinitely. Run multiple
-   * workers for redundancy, or manually remove/re-add the scheduler to recover.
-   * The idempotency check (nextRun === 0) prevents duplicate updates from stalled
-   * reclaim, but doesn't prevent races with upsertJobScheduler/removeJobScheduler
-   * (those are serialized via scheduler lock but this update is not). Future work:
-   * move scheduler update into Lua completeAndFetchNext/fail functions.
+   * KNOWN LIMITATIONS:
+   * 1. Non-atomic: This update happens after the job completion transaction,
+   *    so a worker crash between completion and this call will leave the scheduler
+   *    stuck at nextRun=0 (awaiting completion sentinel) indefinitely.
+   * 2. Non-worker failures: Jobs that reach terminal failure outside the worker
+   *    path (e.g., revoked jobs, expired jobs in moveToActive, stalled terminal
+   *    failures in glidemq_reclaimStalled) never trigger this update, leaving
+   *    the scheduler permanently stuck.
+   * 3. Race conditions: The idempotency check (nextRun === 0) prevents duplicate
+   *    updates from stalled reclaim, but doesn't prevent races with concurrent
+   *    upsertJobScheduler/removeJobScheduler (those use scheduler lock, this doesn't).
+   *
+   * MITIGATION: Run multiple workers for redundancy. Manually remove/re-add the
+   * scheduler to recover from stuck state.
+   *
+   * FUTURE WORK: Move scheduler update into Lua completion/failure functions to
+   * make it atomic and handle all terminal failure paths.
    */
   private async updateSchedulerAfterComplete(schedulerName: string, now: number): Promise<void> {
     if (!this.commandClient) return;

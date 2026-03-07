@@ -3,7 +3,6 @@ import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
 // Version 43: Added schedulerName to glidemq_addJob (arg 19) for repeatAfterComplete feature.
-// Bumped from 41→43 (skipping 42) during rebase to force library reload after conflict resolution.
 export const LIBRARY_VERSION = '43';
 
 // Consumer group name used by workers

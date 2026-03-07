@@ -175,6 +175,7 @@ export const JOB_METADATA_FIELDS: readonly string[] = Object.freeze([
   'progress',
   'revoked',
   'lastActive',
+  'schedulerName',
 ]);
 
 /**
