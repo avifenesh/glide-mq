@@ -176,6 +176,43 @@ export class AppModule {}
 
 Decorators, dependency injection, lifecycle management, in-memory testing mode.
 
+## Cross-Language Integration
+
+Non-Node.js services (Python, Go, Java, etc.) can enqueue jobs into glide-mq queues using either:
+
+### Option 1: HTTP Proxy (recommended for most use cases)
+
+```bash
+npm install express
+```
+
+```typescript
+import { createProxyServer } from 'glide-mq/proxy';
+
+const proxy = createProxyServer({
+  connection: { addresses: [{ host: 'localhost', port: 6379 }] },
+  queues: ['emails', 'reports'],  // optional allowlist
+});
+
+// Add your own auth middleware before exposing to the network
+// proxy.app.use(yourAuthMiddleware);
+proxy.app.listen(3000, () => console.log('Proxy on :3000'));
+```
+
+Then enqueue from any language via HTTP:
+
+```bash
+curl -X POST http://localhost:3000/queues/emails/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "send-email", "data": {"to": "user@example.com"}, "opts": {"priority": 1}}'
+```
+
+**Endpoints**: `POST /queues/:name/jobs`, `POST /queues/:name/jobs/bulk`, `GET /queues/:name/jobs/:id`, `POST /queues/:name/pause`, `POST /queues/:name/resume`, `GET /queues/:name/counts`, `GET /health`.
+
+### Option 2: Direct FCALL (zero overhead, any Valkey client)
+
+Call Valkey Server Functions directly from any language that has a Valkey/Redis client. See [Wire Protocol](docs/WIRE_PROTOCOL.md) for exact FCALL signatures, key layout, and examples in Python and Go.
+
 ## Documentation
 
 | Guide | What you'll learn | Related examples |
@@ -185,6 +222,7 @@ Decorators, dependency injection, lifecycle management, in-memory testing mode.
 | [Workflows](docs/WORKFLOWS.md) | FlowProducer, `chain`, `group`, `chord` pipelines | [Workflow scenarios](demo/README.md#demo-scenarios) |
 | [Observability](docs/OBSERVABILITY.md) | OpenTelemetry, job logs, `@glidemq/dashboard` | [Dashboard API server](demo/dashboard-server.ts) |
 | [Testing](docs/TESTING.md) | In-memory `TestQueue` & `TestWorker` — no Valkey needed | [Testing mode test](tests/testing-mode.test.ts) |
+| [Wire Protocol](docs/WIRE_PROTOCOL.md) | Cross-language FCALL specs, key layout, Python & Go examples | [Proxy tests](tests/proxy.test.ts) |
 | [Architecture](docs/ARCHITECTURE.md) | Key design, Valkey functions, data layout | [Architecture validation tests](tests/review-coverage.test.ts) |
 | [Migration](docs/MIGRATION.md) | Coming from BullMQ? API mapping & workarounds | [Compatibility suites](tests/compat-bull.test.ts) |
 
