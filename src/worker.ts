@@ -2,12 +2,13 @@ import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
 import { TimeUnit } from '@glidemq/speedkey';
-import type { WorkerOptions, Processor, BatchProcessor, Client, Serializer } from './types';
+import type { WorkerOptions, Processor, BatchProcessor, Client, Serializer, SchedulerEntry } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import {
   buildKeys,
   calculateBackoff,
+  computeFollowingSchedulerNextRun,
   keyPrefix,
   nextReconnectDelay,
   reconnectWithBackoff,
@@ -968,6 +969,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
     job.failedReason = error.message;
     this.emit('failed', job, error);
+
+    // Terminal failure: schedule next run for repeatAfterComplete schedulers
+    if (failResult === 'failed' && job.schedulerName) {
+      await this.updateSchedulerAfterComplete(job.schedulerName, Date.now());
+    }
+
     return failResult === 'failed';
   }
 
@@ -1001,6 +1008,38 @@ export class Worker<D = any, R = any> extends EventEmitter {
       job.data = request.nextData;
     }
     job.opts.delay = Math.max(0, request.delayedUntil - Date.now());
+  }
+
+  /**
+   * After a repeatAfterComplete job completes or terminally fails,
+   * update the scheduler entry so the next job is scheduled.
+   */
+  private async updateSchedulerAfterComplete(schedulerName: string, now: number): Promise<void> {
+    if (!this.commandClient) return;
+    try {
+      const raw = await this.commandClient.hget(this.queueKeys.schedulers, schedulerName);
+      if (raw == null) return; // scheduler was deleted while job was in flight
+
+      let config: SchedulerEntry;
+      try {
+        config = JSON.parse(String(raw));
+      } catch {
+        return;
+      }
+
+      if (!config.repeatAfterComplete) return;
+
+      const nextRun = computeFollowingSchedulerNextRun(config, now);
+      if (nextRun == null || (config.limit != null && (config.iterationCount ?? 0) >= config.limit)) {
+        await this.commandClient.hdel(this.queueKeys.schedulers, [schedulerName]);
+      } else {
+        config.lastRun = now;
+        config.nextRun = nextRun;
+        await this.commandClient.hset(this.queueKeys.schedulers, { [schedulerName]: JSON.stringify(config) });
+      }
+    } catch (err) {
+      this.emit('error', err instanceof Error ? err : new Error(String(err)));
+    }
   }
 
   /**
@@ -1198,6 +1237,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
       job.returnvalue = processResult;
       job.finishedOn = Date.now();
       this.emit('completed', job, processResult);
+
+      if (job.schedulerName) {
+        await this.updateSchedulerAfterComplete(job.schedulerName, Date.now());
+      }
 
       // No next job - return to poll loop
       if (fetchResult.next === false) {

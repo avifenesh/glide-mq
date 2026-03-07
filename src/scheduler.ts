@@ -320,7 +320,7 @@ export class Scheduler {
           continue;
         }
 
-        const invalid = !config.pattern && !isValidSchedulerEvery(config.every);
+        const invalid = !config.pattern && !isValidSchedulerEvery(config.every) && !isValidSchedulerEvery(config.repeatAfterComplete);
         if (invalid) {
           pendingDeletions.push(schedulerName);
           continue;
@@ -367,6 +367,8 @@ export class Scheduler {
         const maxAttempts = template.opts?.attempts ?? 0;
         const jobTtl = template.opts?.ttl ?? 0;
 
+        const isRepeatAfterComplete = isValidSchedulerEvery(config.repeatAfterComplete);
+
         pendingJobs.push(
           addJobArgs(
             this.queueKeys,
@@ -386,6 +388,10 @@ export class Scheduler {
             0,
             0,
             jobTtl,
+            '',
+            '',
+            '',
+            isRepeatAfterComplete ? schedulerName : '',
           ),
         );
 
@@ -393,6 +399,12 @@ export class Scheduler {
         config.iterationCount = currentIterationCount + 1;
         if (config.limit != null && config.iterationCount >= config.limit) {
           pendingDeletions.push(schedulerName);
+        } else if (isRepeatAfterComplete) {
+          // Set nextRun to 0 (sentinel: awaiting completion). The worker will
+          // update nextRun after the job completes or terminally fails.
+          config.nextRun = 0;
+          pendingUpdates[schedulerName] = JSON.stringify(config);
+          pendingUpdateCount++;
         } else {
           const nextRun = preparedNextRun ?? computeFollowingSchedulerNextRun(config, now);
           if (nextRun == null) {

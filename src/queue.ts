@@ -941,8 +941,17 @@ export class Queue<D = any, R = any> extends EventEmitter {
       validateTimezone(schedule.tz);
     }
     validateSchedulerEvery(schedule.every);
-    if (!schedule.pattern && !schedule.every) {
-      throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
+    if (schedule.repeatAfterComplete != null) {
+      if (!Number.isSafeInteger(schedule.repeatAfterComplete) || schedule.repeatAfterComplete <= 0) {
+        throw new Error('repeatAfterComplete must be a positive safe integer');
+      }
+    }
+    const modeCount = [schedule.pattern, schedule.every, schedule.repeatAfterComplete].filter(Boolean).length;
+    if (modeCount === 0) {
+      throw new Error('Schedule must have pattern (cron), every (ms interval), or repeatAfterComplete (ms)');
+    }
+    if (modeCount > 1) {
+      throw new Error('Schedule options pattern, every, and repeatAfterComplete are mutually exclusive');
     }
     const startDate = normalizeScheduleDate(schedule.startDate, 'startDate');
     const endDate = normalizeScheduleDate(schedule.endDate, 'endDate');
@@ -957,6 +966,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         {
           pattern: schedule.pattern,
           every: schedule.every,
+          repeatAfterComplete: schedule.repeatAfterComplete,
           tz: schedule.tz,
           startDate,
           endDate,
@@ -970,6 +980,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           const scheduleUnchanged =
             existing.pattern === schedule.pattern &&
             existing.every === schedule.every &&
+            existing.repeatAfterComplete === schedule.repeatAfterComplete &&
             existing.tz === schedule.tz &&
             existing.startDate === startDate &&
             existing.endDate === endDate;
@@ -989,6 +1000,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const entry: SchedulerEntry = {
         pattern: schedule.pattern,
         every: schedule.every,
+        repeatAfterComplete: schedule.repeatAfterComplete,
         tz: schedule.tz,
         startDate,
         endDate,
