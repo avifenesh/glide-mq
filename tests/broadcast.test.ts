@@ -161,7 +161,11 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
       { connection: CONNECTION, subscription: 'failing', blockTimeout: 500, attempts: 1 },
     );
 
-    await Promise.all([successWorker1.waitUntilReady(), successWorker2.waitUntilReady(), failingWorker.waitUntilReady()]);
+    await Promise.all([
+      successWorker1.waitUntilReady(),
+      successWorker2.waitUntilReady(),
+      failingWorker.waitUntilReady(),
+    ]);
 
     await broadcast.publish({ event: 'test-failure' });
 
