@@ -412,7 +412,7 @@ describeEachMode('Worker batch validation', (CONNECTION) => {
   });
 
   it('partial batch failure: BatchError.results has correct per-index success/error', async () => {
-    const qName = Q + '-partial';
+    const qName = 'batch-val-partial-' + Date.now();
     const queue = new Queue(qName, { connection: CONNECTION });
 
     // Add 3 jobs
@@ -484,7 +484,7 @@ describeEachMode('Worker batch validation', (CONNECTION) => {
   }, 20000);
 
   it('batch processor returning wrong result count fails all jobs', async () => {
-    const qName = Q + '-wrongcount';
+    const qName = 'batch-val-wrongcount-' + Date.now();
     const queue = new Queue(qName, { connection: CONNECTION });
 
     await queue.add('job', { idx: 0 }, {});

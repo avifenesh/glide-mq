@@ -671,7 +671,7 @@ describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
   }, 15000);
 
   it('LIFO processes jobs in last-in-first-out order within a batch', async () => {
-    const qName = Q + '-order';
+    const qName = 'lifo-batch-order-' + Date.now();
     const queue = new Queue(qName, { connection: CONNECTION });
 
     // Add 5 LIFO jobs sequentially so they have a defined insertion order
