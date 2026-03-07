@@ -763,6 +763,27 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId}
   -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ...}
 
+  -- Phase 1.5: Try LIFO list first (before stream)
+  local lifoKey = prefix .. 'lifo'
+  local lifoJobId = redis.call('RPOP', lifoKey)
+  if lifoJobId then
+    local lifoJobKey = prefix .. 'job:' .. lifoJobId
+    if redis.call('EXISTS', lifoJobKey) == 1 then
+      local lifoRevoked = redis.call('HGET', lifoJobKey, 'revoked')
+      if lifoRevoked ~= '1' and not checkExpired(lifoJobKey, lifoJobId, prefix, timestamp) then
+        -- Valid LIFO job found - activate it
+        -- Note: LIFO jobs don't have an entryId (not from stream), so we use empty string
+        local lifoJobFields = redis.call('HGETALL', lifoJobKey)
+        local lifoJob = {}
+        for lf = 1, #lifoJobFields, 2 do lifoJob[lifoJobFields[lf]] = lifoJobFields[lf + 1] end
+        redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp))
+        emitEvent(eventsKey, 'active', lifoJobId, nil)
+        -- Return LIFO job details (no entryId for LIFO jobs)
+        return {'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}
+      end
+    end
+  end
+
   -- Phase 2: Fetch next job (non-blocking XREADGROUP), skip expired (up to 3 attempts)
   local nextJobId, nextEntryId, nextJobKey
   for _fetchAttempt = 1, 3 do
