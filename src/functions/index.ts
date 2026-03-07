@@ -8,7 +8,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 47: Skip removeOnFail job-hash deletion in glidemq_fail when broadcastMode=1 (matches removeOnComplete fix from v46).
 // Version 48: Fix Lua scope: move recordMetrics definition before releaseGroupSlotAndPromote/expireJob which call it.
 // Version 49: Guard XDEL in glidemq_moveToActive/deferActive/moveToWaitingChildren with broadcastMode flag.
-export const LIBRARY_VERSION = '49';
+// Version 50: Guard XDEL in glidemq_moveActiveToDelayed with broadcastMode flag.
+export const LIBRARY_VERSION = '50';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -2459,6 +2460,7 @@ redis.register_function('glidemq_moveActiveToDelayed', function(keys, args)
   local delayedUntil = tonumber(args[4]) or now
   local group = args[5]
   local nextData = args[6]
+  local broadcastMode = args[7] or '0'
 
   if redis.call('EXISTS', jobKey) == 0 then
     return 'error:not_found'
@@ -2478,7 +2480,9 @@ redis.register_function('glidemq_moveActiveToDelayed', function(keys, args)
   local score = priority * PRIORITY_SHIFT + delayedUntil
 
   pcall(redis.call, 'XACK', streamKey, group, entryId)
-  redis.call('XDEL', streamKey, entryId)
+  if broadcastMode ~= '1' then
+    redis.call('XDEL', streamKey, entryId)
+  end
   redis.call('ZADD', scheduledKey, string.format('%.0f', score), jobId)
   if nextData and nextData ~= '' then
     redis.call('HSET', jobKey, 'data', nextData, 'state', 'delayed', 'delay', tostring(delay))
@@ -3485,11 +3489,14 @@ export async function moveActiveToDelayed(
   serializedData?: string,
   timestamp: number = Date.now(),
   group: string = CONSUMER_GROUP,
+  broadcastMode?: boolean,
 ): Promise<string> {
+  const args = [jobId, entryId, timestamp.toString(), delayedUntil.toString(), group, serializedData ?? ''];
+  if (broadcastMode) args.push('1');
   const result = await client.fcall(
     'glidemq_moveActiveToDelayed',
     [k.job(jobId), k.stream, k.scheduled, k.events],
-    [jobId, entryId, timestamp.toString(), delayedUntil.toString(), group, serializedData ?? ''],
+    args,
   );
   return result as string;
 }

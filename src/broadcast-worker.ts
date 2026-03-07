@@ -1048,6 +1048,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       request.serializedData,
       Date.now(),
       this.subscription,
+      true,
     );
     if (result.startsWith('error:')) {
       const reason = result.slice(6);
