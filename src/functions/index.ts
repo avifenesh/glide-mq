@@ -731,28 +731,39 @@ redis.register_function('glidemq_complete', function(keys, args)
     local dagDepsMember = childQueuePrefix .. ':' .. jobId
     for pi = 1, #dagParents do
       local pEntry = dagParents[pi]
-      -- Format: "parentQueue:parentId"
-      local pSep = string.find(pEntry, ':')
+      -- Format: "parentQueuePrefix:parentId" where prefix is glide:{qname}
+      -- Must find LAST colon (not first, since prefix contains colons in {})
+      local pSep = nil
+      for i = #pEntry, 1, -1 do
+        if string.sub(pEntry, i, i) == ':' then
+          pSep = i
+          break
+        end
+      end
       if pSep then
         local pQueue = string.sub(pEntry, 1, pSep - 1)
         local pId = string.sub(pEntry, pSep + 1)
-        -- Only handle same-queue parents atomically in Lua
-        -- (cross-queue parents returned separately for TS handling)
-        local pPrefix = prefix
-        local pJobKey = pPrefix .. 'job:' .. pId
-        local pDepsKey = pPrefix .. 'deps:' .. pId
-        local pStreamKey = pPrefix .. 'stream'
-        local pEventsKey = pPrefix .. 'events'
-        local pDepMarker = 'depdone:' .. dagDepsMember
-        if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
-          local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
-          local pTotalDeps = redis.call('SCARD', pDepsKey)
-          if pTotalDeps - pDoneCount <= 0 then
-            local pState = redis.call('HGET', pJobKey, 'state')
-            if pState == 'waiting-children' then
-              redis.call('HSET', pJobKey, 'state', 'waiting')
-              redis.call('XADD', pStreamKey, '*', 'jobId', pId)
-              emitEvent(pEventsKey, 'active', pId, nil)
+        -- Only handle same-queue parents atomically in Lua.
+        -- Cross-queue parents are skipped here because their keys use a different
+        -- hash tag (different prefix), which may route to a different cluster slot.
+        -- The TypeScript layer handles cross-queue parent notification separately.
+        if pQueue == childQueuePrefix then
+          local pPrefix = prefix
+          local pJobKey = pPrefix .. 'job:' .. pId
+          local pDepsKey = pPrefix .. 'deps:' .. pId
+          local pStreamKey = pPrefix .. 'stream'
+          local pEventsKey = pPrefix .. 'events'
+          local pDepMarker = 'depdone:' .. dagDepsMember
+          if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
+            local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
+            local pTotalDeps = redis.call('SCARD', pDepsKey)
+            if pTotalDeps - pDoneCount <= 0 then
+              local pState = redis.call('HGET', pJobKey, 'state')
+              if pState == 'waiting-children' then
+                redis.call('HSET', pJobKey, 'state', 'waiting')
+                redis.call('XADD', pStreamKey, '*', 'jobId', pId)
+                emitEvent(pEventsKey, 'active', pId, nil)
+              end
             end
           end
         end
@@ -852,24 +863,39 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local dagDepsMember = childQueuePrefix .. ':' .. jobId
     for pi = 1, #dagParents do
       local pEntry = dagParents[pi]
-      local pSep = string.find(pEntry, ':')
+      -- Format: "parentQueuePrefix:parentId" where prefix is glide:{qname}
+      -- Must find LAST colon (not first, since prefix contains colons in {})
+      local pSep = nil
+      for i = #pEntry, 1, -1 do
+        if string.sub(pEntry, i, i) == ':' then
+          pSep = i
+          break
+        end
+      end
       if pSep then
+        local pQueue = string.sub(pEntry, 1, pSep - 1)
         local pId = string.sub(pEntry, pSep + 1)
-        local pPrefix = prefix
-        local pJobKey = pPrefix .. 'job:' .. pId
-        local pDepsKey = pPrefix .. 'deps:' .. pId
-        local pStreamKey = pPrefix .. 'stream'
-        local pEventsKey = pPrefix .. 'events'
-        local pDepMarker = 'depdone:' .. dagDepsMember
-        if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
-          local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
-          local pTotalDeps = redis.call('SCARD', pDepsKey)
-          if pTotalDeps - pDoneCount <= 0 then
-            local pState = redis.call('HGET', pJobKey, 'state')
-            if pState == 'waiting-children' then
-              redis.call('HSET', pJobKey, 'state', 'waiting')
-              redis.call('XADD', pStreamKey, '*', 'jobId', pId)
-              emitEvent(pEventsKey, 'active', pId, nil)
+        -- Only handle same-queue parents atomically in Lua.
+        -- Cross-queue parents are skipped here because their keys use a different
+        -- hash tag (different prefix), which may route to a different cluster slot.
+        -- The TypeScript layer handles cross-queue parent notification separately.
+        if pQueue == childQueuePrefix then
+          local pPrefix = prefix
+          local pJobKey = pPrefix .. 'job:' .. pId
+          local pDepsKey = pPrefix .. 'deps:' .. pId
+          local pStreamKey = pPrefix .. 'stream'
+          local pEventsKey = pPrefix .. 'events'
+          local pDepMarker = 'depdone:' .. dagDepsMember
+          if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
+            local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
+            local pTotalDeps = redis.call('SCARD', pDepsKey)
+            if pTotalDeps - pDoneCount <= 0 then
+              local pState = redis.call('HGET', pJobKey, 'state')
+              if pState == 'waiting-children' then
+                redis.call('HSET', pJobKey, 'state', 'waiting')
+                redis.call('XADD', pStreamKey, '*', 'jobId', pId)
+                emitEvent(pEventsKey, 'active', pId, nil)
+              end
             end
           end
         end

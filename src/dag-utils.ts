@@ -16,11 +16,15 @@ export class CycleError extends Error {
 }
 
 /**
- * Validate that a set of DAG nodes forms a valid DAG (no cycles).
- * Throws CycleError if a cycle is detected.
- * Throws Error if a node references a non-existent dependency.
+ * Build the dependency graph for a set of DAG nodes.
+ * Validates node names and dependencies.
+ * Returns { nodeMap, inDegree, adjacency }.
  */
-export function validateDAG(nodes: DAGNode[]): void {
+function buildGraph(nodes: DAGNode[]): {
+  nodeMap: Map<string, DAGNode>;
+  inDegree: Map<string, number>;
+  adjacency: Map<string, string[]>;
+} {
   const nodeMap = new Map<string, DAGNode>();
   for (const node of nodes) {
     if (nodeMap.has(node.name)) {
@@ -43,7 +47,6 @@ export function validateDAG(nodes: DAGNode[]): void {
     }
   }
 
-  // Kahn's algorithm for cycle detection
   const inDegree = new Map<string, number>();
   const adjacency = new Map<string, string[]>();
 
@@ -62,6 +65,18 @@ export function validateDAG(nodes: DAGNode[]): void {
     }
   }
 
+  return { nodeMap, inDegree, adjacency };
+}
+
+/**
+ * Validate that a set of DAG nodes forms a valid DAG (no cycles).
+ * Throws CycleError if a cycle is detected.
+ * Throws Error if a node references a non-existent dependency.
+ */
+export function validateDAG(nodes: DAGNode[]): void {
+  const { inDegree, adjacency } = buildGraph(nodes);
+
+  // Kahn's algorithm for cycle detection
   const queue: string[] = [];
   for (const [name, degree] of inDegree) {
     if (degree === 0) {
@@ -96,29 +111,7 @@ export function validateDAG(nodes: DAGNode[]): void {
  * Throws CycleError if a cycle is detected.
  */
 export function topoSort(nodes: DAGNode[]): DAGNode[] {
-  validateDAG(nodes);
-
-  const nodeMap = new Map<string, DAGNode>();
-  for (const node of nodes) {
-    nodeMap.set(node.name, node);
-  }
-
-  const inDegree = new Map<string, number>();
-  const adjacency = new Map<string, string[]>();
-
-  for (const node of nodes) {
-    inDegree.set(node.name, 0);
-    adjacency.set(node.name, []);
-  }
-
-  for (const node of nodes) {
-    if (node.deps) {
-      for (const dep of node.deps) {
-        adjacency.get(dep)!.push(node.name);
-        inDegree.set(node.name, inDegree.get(node.name)! + 1);
-      }
-    }
-  }
+  const { nodeMap, inDegree, adjacency } = buildGraph(nodes);
 
   const queue: string[] = [];
   for (const [name, degree] of inDegree) {
@@ -128,9 +121,11 @@ export function topoSort(nodes: DAGNode[]): DAGNode[] {
   }
 
   const sorted: DAGNode[] = [];
+  let processed = 0;
   while (queue.length > 0) {
     const current = queue.shift()!;
     sorted.push(nodeMap.get(current)!);
+    processed++;
     for (const neighbor of adjacency.get(current)!) {
       const newDegree = inDegree.get(neighbor)! - 1;
       inDegree.set(neighbor, newDegree);
@@ -138,6 +133,13 @@ export function topoSort(nodes: DAGNode[]): DAGNode[] {
         queue.push(neighbor);
       }
     }
+  }
+
+  if (processed < nodes.length) {
+    // Find a cycle for the error message
+    const remaining = nodes.filter((n) => inDegree.get(n.name)! > 0).map((n) => n.name);
+    const cyclePath = findCyclePath(remaining, adjacency);
+    throw new CycleError(cyclePath);
   }
 
   return sorted;

@@ -21,6 +21,13 @@ function validateJobId(jobId: string): void {
   }
 }
 
+const INVALID_QUEUE_NAME_CHARS = /[{}:]/;
+function validateQueueName(queueName: string): void {
+  if (INVALID_QUEUE_NAME_CHARS.test(queueName)) {
+    throw new Error('queueName must not contain curly braces or colons (reserved for Redis hash tags and delimiters)');
+  }
+}
+
 const LATE_PARENT_RECONCILE_ATTEMPTS = 5;
 const LATE_PARENT_RECONCILE_DELAY_MS = 10;
 
@@ -347,6 +354,7 @@ export class FlowProducer {
         // Nodes with 2+ deps: addJob with first parent, then registerParent for rest
         // Nodes that ARE parents (have children depending on them): created in waiting-children
         for (const node of sorted) {
+          validateQueueName(node.queueName);
           const queueKeys = buildKeys(node.queueName, prefix);
           const opts = node.opts ?? {};
           const timestamp = Date.now();
@@ -358,7 +366,7 @@ export class FlowProducer {
             );
           }
 
-          const customJobId = (opts as any).jobId ?? '';
+          const customJobId = opts.jobId ?? '';
           if (customJobId !== '') {
             if (customJobId.length > 256) throw new Error('jobId must be at most 256 characters');
             if (/[\x00-\x1f\x7f{}:]/.test(customJobId)) {
@@ -368,6 +376,20 @@ export class FlowProducer {
 
           const deps = node.deps ?? [];
           const isParent = hasChildren.has(node.name);
+
+          // Validate ordering.key if present (reserved chars: {, }, :)
+          const orderingKey = opts.ordering?.key;
+          if (orderingKey) {
+            validateQueueName(orderingKey);
+          }
+
+          // Extract rate-limit and token bucket params
+          const groupConcurrency = opts.ordering?.concurrency ?? 0;
+          const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
+          const groupRateDuration = opts.ordering?.rateLimit?.duration ?? 0;
+          const tbCapacity = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.capacity * 1000) : 0;
+          const tbRefillRate = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.refillRate * 1000) : 0;
+          const jobCost = opts.cost != null ? Math.round(opts.cost * 1000) : 0;
 
           if (isParent && deps.length === 0) {
             // Node is a parent with no deps of its own - use addFlow with no children (empty flow)
@@ -380,16 +402,16 @@ export class FlowProducer {
               serializedData,
               JSON.stringify(opts),
               timestamp,
-              (opts as any).delay ?? 0,
-              (opts as any).priority ?? 0,
-              (opts as any).attempts ?? 0,
+              opts.delay ?? 0,
+              opts.priority ?? 0,
+              opts.attempts ?? 0,
               [],
               [],
               customJobId,
             );
             if (ids[0] === 'duplicate') throw new Error('Duplicate job ID in DAG');
             if (ids[0] === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
-            const job = new Job(client, queueKeys, ids[0], node.name, node.data, opts as any, this.serializer);
+            const job = new Job(client, queueKeys, ids[0], node.name, node.data, opts, this.serializer);
             job.timestamp = timestamp;
             result.set(node.name, job);
           } else if (isParent && deps.length > 0) {
@@ -402,9 +424,9 @@ export class FlowProducer {
               serializedData,
               JSON.stringify(opts),
               timestamp,
-              (opts as any).delay ?? 0,
-              (opts as any).priority ?? 0,
-              (opts as any).attempts ?? 0,
+              opts.delay ?? 0,
+              opts.priority ?? 0,
+              opts.attempts ?? 0,
               [],
               [],
               customJobId,
@@ -412,7 +434,7 @@ export class FlowProducer {
             if (ids[0] === 'duplicate') throw new Error('Duplicate job ID in DAG');
             if (ids[0] === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
             const jobId = ids[0];
-            const job = new Job(client, queueKeys, jobId, node.name, node.data, opts as any, this.serializer);
+            const job = new Job(client, queueKeys, jobId, node.name, node.data, opts, this.serializer);
             job.timestamp = timestamp;
             result.set(node.name, job);
 
@@ -428,7 +450,7 @@ export class FlowProducer {
                 queueKeys,
                 jobId,
                 parentJob.id,
-                parentNode.queueName,
+                keyPrefix(prefix, parentNode.queueName),
                 parentQueueKeys,
                 depsMember,
               );
@@ -439,27 +461,23 @@ export class FlowProducer {
             }
 
             // Store parent info on the job
-            if (deps.length === 1) {
-              const parentJob = result.get(deps[0])!;
-              const parentNode = dag.nodes.find((n) => n.name === deps[0])!;
-              job.parentId = parentJob.id;
-              job.parentQueue = parentNode.queueName;
-              await client.hset(queueKeys.job(jobId), {
-                parentId: parentJob.id,
-                parentQueue: parentNode.queueName,
-              });
-            } else {
-              const pIds = deps.map((d) => result.get(d)!.id);
-              const pQueues = deps.map((d) => dag.nodes.find((n) => n.name === d)!.queueName);
+            const pIds = deps.map((d) => result.get(d)!.id);
+            const pQueues = deps.map((d) => dag.nodes.find((n) => n.name === d)!.queueName);
+            job.parentId = pIds[0];
+            job.parentQueue = pQueues[0];
+            if (deps.length > 1) {
               job.parentIds = pIds;
               job.parentQueues = pQueues;
-              job.parentId = pIds[0];
-              job.parentQueue = pQueues[0];
               await client.hset(queueKeys.job(jobId), {
                 parentId: pIds[0],
                 parentQueue: pQueues[0],
                 parentIds: JSON.stringify(pIds),
                 parentQueues: JSON.stringify(pQueues),
+              });
+            } else {
+              await client.hset(queueKeys.job(jobId), {
+                parentId: pIds[0],
+                parentQueue: pQueues[0],
               });
             }
           } else if (deps.length === 0) {
@@ -471,22 +489,29 @@ export class FlowProducer {
               serializedData,
               JSON.stringify(opts),
               timestamp,
-              (opts as any).delay ?? 0,
-              (opts as any).priority ?? 0,
+              opts.delay ?? 0,
+              opts.priority ?? 0,
               '',
-              (opts as any).attempts ?? 0,
-              (opts as any).ordering?.key ?? '',
-              0, 0, 0, 0, 0, 0,
-              (opts as any).ttl ?? 0,
+              opts.attempts ?? 0,
+              orderingKey ?? '',
+              groupConcurrency,
+              groupRateMax,
+              groupRateDuration,
+              tbCapacity,
+              tbRefillRate,
+              jobCost,
+              opts.ttl ?? 0,
               customJobId,
             );
             if (String(jobId) === 'duplicate') throw new Error('Duplicate job ID in DAG');
             if (String(jobId) === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
-            const job = new Job(client, queueKeys, String(jobId), node.name, node.data, opts as any, this.serializer);
+            const job = new Job(client, queueKeys, String(jobId), node.name, node.data, opts, this.serializer);
             job.timestamp = timestamp;
             result.set(node.name, job);
           } else {
             // Non-parent node with deps (terminal/sink node) - add as regular job
+            // Dependency semantics: deps are the PARENTS this child waits for.
+            // The child (current node) becomes a dependency of the parent via the deps SET.
             // Use first dep as the primary parent for backward compatibility
             const firstDepName = deps[0];
             const firstParentJob = result.get(firstDepName)!;
@@ -501,13 +526,18 @@ export class FlowProducer {
               serializedData,
               JSON.stringify(opts),
               timestamp,
-              (opts as any).delay ?? 0,
-              (opts as any).priority ?? 0,
+              opts.delay ?? 0,
+              opts.priority ?? 0,
               firstParentJob.id,
-              (opts as any).attempts ?? 0,
-              (opts as any).ordering?.key ?? '',
-              0, 0, 0, 0, 0, 0,
-              (opts as any).ttl ?? 0,
+              opts.attempts ?? 0,
+              orderingKey ?? '',
+              groupConcurrency,
+              groupRateMax,
+              groupRateDuration,
+              tbCapacity,
+              tbRefillRate,
+              jobCost,
+              opts.ttl ?? 0,
               customJobId,
               firstParentNode.queueName,
               firstParentKeys.deps(firstParentJob.id),
@@ -515,7 +545,7 @@ export class FlowProducer {
             if (String(jobId) === 'duplicate') throw new Error('Duplicate job ID in DAG');
             if (String(jobId) === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
             const jid = String(jobId);
-            const job = new Job(client, queueKeys, jid, node.name, node.data, opts as any, this.serializer);
+            const job = new Job(client, queueKeys, jid, node.name, node.data, opts, this.serializer);
             job.timestamp = timestamp;
             job.parentId = firstParentJob.id;
             job.parentQueue = firstParentNode.queueName;
@@ -544,7 +574,7 @@ export class FlowProducer {
                   queueKeys,
                   jid,
                   parentJob.id,
-                  parentNode.queueName,
+                  keyPrefix(prefix, parentNode.queueName),
                   parentQueueKeys,
                   depsMember,
                 );
