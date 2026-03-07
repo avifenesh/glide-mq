@@ -472,7 +472,10 @@ export function nextCronOccurrence(pattern: string, afterMs: number, tz?: string
 }
 
 export function computeInitialSchedulerNextRun(
-  schedule: Pick<ScheduleOpts, 'pattern' | 'every' | 'repeatAfterComplete' | 'tz'> & { startDate?: number; endDate?: number },
+  schedule: Pick<ScheduleOpts, 'pattern' | 'every' | 'repeatAfterComplete' | 'tz'> & {
+    startDate?: number;
+    endDate?: number;
+  },
   now: number,
 ): number | null {
   if (!schedule.pattern && !schedule.repeatAfterComplete) {
@@ -509,7 +512,11 @@ export function computeFollowingSchedulerNextRun(
   schedule: Pick<SchedulerEntry, 'pattern' | 'every' | 'repeatAfterComplete' | 'tz' | 'endDate'>,
   afterMs: number,
 ): number | null {
-  if (!schedule.pattern && !isValidSchedulerEvery(schedule.every) && !isValidSchedulerEvery(schedule.repeatAfterComplete)) {
+  if (
+    !schedule.pattern &&
+    !isValidSchedulerEvery(schedule.every) &&
+    !isValidSchedulerEvery(schedule.repeatAfterComplete)
+  ) {
     return null;
   }
   let nextRun: number;

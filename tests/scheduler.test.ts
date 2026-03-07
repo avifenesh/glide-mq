@@ -741,11 +741,7 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     const localQueue = new Queue(qName, { connection: CONNECTION });
     const { UnrecoverableError } = require('../dist/errors') as typeof import('../src/errors');
 
-    await localQueue.upsertJobScheduler(
-      'rac-fail-test',
-      { repeatAfterComplete: 300 },
-      { name: 'rac-fail-job' },
-    );
+    await localQueue.upsertJobScheduler('rac-fail-test', { repeatAfterComplete: 300 }, { name: 'rac-fail-job' });
 
     let jobCount = 0;
     let worker: InstanceType<typeof Worker>;

@@ -320,7 +320,8 @@ export class Scheduler {
           continue;
         }
 
-        const invalid = !config.pattern && !isValidSchedulerEvery(config.every) && !isValidSchedulerEvery(config.repeatAfterComplete);
+        const invalid =
+          !config.pattern && !isValidSchedulerEvery(config.every) && !isValidSchedulerEvery(config.repeatAfterComplete);
         if (invalid) {
           pendingDeletions.push(schedulerName);
           continue;
