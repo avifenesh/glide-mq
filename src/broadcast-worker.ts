@@ -338,6 +338,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
           maxStalledCount: this.maxStalledCount,
           consumerId: this.consumerId,
           consumerGroup: this.subscription,
+          broadcastMode: true,
           queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
           onPromotionTick: () => this.refreshMetaFlags(),
           onError: (err) => {

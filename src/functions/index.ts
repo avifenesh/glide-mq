@@ -5,7 +5,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 44: Added metrics recording (time-series data for getMetrics).
 // Version 45: DAG multi-parent dependencies - glidemq_registerParent, multi-parent completion notification.
 // Version 46: Broadcast fan-out safety: broadcastMode flag in glidemq_complete/completeAndFetchNext/fail/reclaimStalled skips XDEL and per-subscription retry tracking.
-export const LIBRARY_VERSION = '46';
+// Version 47: Skip removeOnFail job-hash deletion in glidemq_fail when broadcastMode=1 (matches removeOnComplete fix from v46).
+export const LIBRARY_VERSION = '47';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1129,26 +1130,29 @@ redis.register_function('glidemq_fail', function(keys, args)
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
     recordMetrics(metricsKey, timestamp, timestamp - processedOn)
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-    if removeMode == 'true' then
-      redis.call('ZREM', failedKey, jobId)
-      redis.call('DEL', jobKey)
-    elseif removeMode == 'count' and removeCount > 0 then
-      local total = redis.call('ZCARD', failedKey)
-      if total > removeCount then
-        local excess = redis.call('ZRANGE', failedKey, 0, math.min(total - removeCount, 1000) - 1)
-        if #excess > 0 then removeExcessJobs(failedKey, prefix, excess) end
-      end
-    elseif removeMode == 'age_count' then
-      if removeAge > 0 then
-        local cutoff = timestamp - (removeAge * 1000)
-        local old = redis.call('ZRANGEBYSCORE', failedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
-        if #old > 0 then removeExcessJobs(failedKey, prefix, old) end
-      end
-      if removeCount > 0 then
+    -- In broadcast mode, skip job hash deletion: the job must persist for all subscriptions
+    if broadcastMode ~= '1' then
+      if removeMode == 'true' then
+        redis.call('ZREM', failedKey, jobId)
+        redis.call('DEL', jobKey)
+      elseif removeMode == 'count' and removeCount > 0 then
         local total = redis.call('ZCARD', failedKey)
         if total > removeCount then
           local excess = redis.call('ZRANGE', failedKey, 0, math.min(total - removeCount, 1000) - 1)
           if #excess > 0 then removeExcessJobs(failedKey, prefix, excess) end
+        end
+      elseif removeMode == 'age_count' then
+        if removeAge > 0 then
+          local cutoff = timestamp - (removeAge * 1000)
+          local old = redis.call('ZRANGEBYSCORE', failedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
+          if #old > 0 then removeExcessJobs(failedKey, prefix, old) end
+        end
+        if removeCount > 0 then
+          local total = redis.call('ZCARD', failedKey)
+          if total > removeCount then
+            local excess = redis.call('ZRANGE', failedKey, 0, math.min(total - removeCount, 1000) - 1)
+            if #excess > 0 then removeExcessJobs(failedKey, prefix, excess) end
+          end
         end
       end
     end
