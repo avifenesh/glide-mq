@@ -10,6 +10,7 @@ import type { ConnectionOptions, JobOptions, Client, Serializer } from './types'
 import { JSON_SERIALIZER } from './types';
 import { buildKeys, keyPrefix, compress, MAX_JOB_DATA_SIZE } from './utils';
 import { createClient, ensureFunctionLibraryOnce, isClusterClient } from './connection';
+import { GlideMQError } from './errors';
 import { LIBRARY_SOURCE, addJob, dedup } from './functions/index';
 import type { QueueKeys } from './functions/index';
 
@@ -78,7 +79,7 @@ export class Producer<D = any> {
 
   constructor(name: string, opts: ProducerOptions) {
     if (!opts.connection && !opts.client) {
-      throw new Error('Either `connection` or `client` must be provided.');
+      throw new GlideMQError('Either `connection` or `client` must be provided.');
     }
     this.name = name;
     this.opts = opts;
@@ -100,7 +101,7 @@ export class Producer<D = any> {
 
   private async getClient(): Promise<Client> {
     if (this.closing) {
-      throw new Error('Producer is closed');
+      throw new GlideMQError('Producer is closed');
     }
     if (!this.client) {
       if (this.opts.client) {
@@ -120,6 +121,17 @@ export class Producer<D = any> {
       }
     }
     return this.client;
+  }
+
+  /**
+   * Register a job as a child in a cross-queue parent's dependency set.
+   */
+  private async registerCrossQueueParent(parentId: string, parentQueue: string, jobId: string): Promise<void> {
+    const client = await this.getClient();
+    const parentKeys = buildKeys(parentQueue, this.opts.prefix);
+    const pfx = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+    const depsMember = `${pfx}:${jobId}`;
+    await client.sadd(parentKeys.deps(parentId), [depsMember]);
   }
 
   /**
@@ -257,10 +269,7 @@ export class Producer<D = any> {
 
       // Cross-queue parent: register dedup child in parent deps separately
       if (p.parentId && p.parentQueue && p.parentQueue !== this.name) {
-        const parentKeys = buildKeys(p.parentQueue, this.opts.prefix);
-        const pfx = keyPrefix(this.opts.prefix ?? 'glide', this.name);
-        const depsMember = `${pfx}:${jobId}`;
-        await client.sadd(parentKeys.deps(p.parentId), [depsMember]);
+        await this.registerCrossQueueParent(p.parentId, p.parentQueue, jobId);
       }
     } else {
       const result = await addJob(
@@ -299,10 +308,7 @@ export class Producer<D = any> {
 
       // Cross-queue parent: register child in parent deps separately
       if (p.parentId && p.parentQueue && p.parentQueue !== this.name) {
-        const parentKeys = buildKeys(p.parentQueue, this.opts.prefix);
-        const pfx = keyPrefix(this.opts.prefix ?? 'glide', this.name);
-        const depsMember = `${pfx}:${jobId}`;
-        await client.sadd(parentKeys.deps(p.parentId), [depsMember]);
+        await this.registerCrossQueueParent(p.parentId, p.parentQueue, jobId);
       }
     }
 
@@ -393,6 +399,8 @@ export class Producer<D = any> {
       : await (client as GlideClient).exec(batch as Batch, true);
 
     const results: (string | null)[] = [];
+    const crossQueueParents: { parentId: string; parentQueue: string; jobId: string }[] = [];
+
     for (let i = 0; i < prepared.length; i++) {
       const raw = rawResults ? String(rawResults[i]) : '';
       if (raw === 'skipped' || raw === 'duplicate') {
@@ -404,15 +412,29 @@ export class Producer<D = any> {
       } else {
         results.push(raw);
 
-        // Cross-queue parent deps registration
+        // Collect cross-queue parent deps for batch registration
         const p = prepared[i];
         if (p.parentId && p.parentQueue && p.parentQueue !== this.name && raw) {
-          const parentKeys = buildKeys(p.parentQueue, this.opts.prefix);
-          const pfx = keyPrefix(this.opts.prefix ?? 'glide', this.name);
-          const depsMember = `${pfx}:${raw}`;
-          await client.sadd(parentKeys.deps(p.parentId), [depsMember]);
+          crossQueueParents.push({ parentId: p.parentId, parentQueue: p.parentQueue, jobId: raw });
         }
       }
+    }
+
+    // Batch all cross-queue parent registrations
+    if (crossQueueParents.length > 0) {
+      const parentBatch = isCluster ? new ClusterBatch(false) : new Batch(false);
+      const pfx = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+
+      for (const { parentId, parentQueue, jobId } of crossQueueParents) {
+        const parentKeys = buildKeys(parentQueue, this.opts.prefix);
+        const depsMember = `${pfx}:${jobId}`;
+        parentBatch.sadd(parentKeys.deps(parentId), [depsMember]);
+      }
+
+      const executeBatch = isCluster
+        ? (client as GlideClusterClient).exec(parentBatch as ClusterBatch, true)
+        : (client as GlideClient).exec(parentBatch as Batch, true);
+      await executeBatch;
     }
 
     return results;
