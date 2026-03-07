@@ -626,8 +626,8 @@ redis.register_function('glidemq_complete', function(keys, args)
   local removeAge = tonumber(args[8]) or 0
   local depsMember = args[9] or ''
   local parentId = args[10] or ''
-  redis.call('XACK', streamKey, group, entryId)
-  redis.call('XDEL', streamKey, entryId)
+  if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+  if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
   redis.call('ZADD', completedKey, timestamp, jobId)
   redis.call('HSET', jobKey,
     'state', 'completed',
@@ -702,8 +702,8 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local currentGroupKey = args[14] or ''
 
   -- Phase 1: Complete current job (same as glidemq_complete)
-  redis.call('XACK', streamKey, group, entryId)
-  redis.call('XDEL', streamKey, entryId)
+  if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+  if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
   redis.call('ZADD', completedKey, timestamp, jobId)
   redis.call('HSET', jobKey,
     'state', 'completed',
@@ -945,8 +945,8 @@ redis.register_function('glidemq_fail', function(keys, args)
   local removeMode = args[8] or '0'
   local removeCount = tonumber(args[9]) or 0
   local removeAge = tonumber(args[10]) or 0
-  redis.call('XACK', streamKey, group, entryId)
-  redis.call('XDEL', streamKey, entryId)
+  if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+  if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
   local attemptsMade = redis.call('HINCRBY', jobKey, 'attemptsMade', 1)
   if maxAttempts > 0 and attemptsMade < maxAttempts then
     local retryAt = timestamp + backoffDelay
@@ -1036,8 +1036,8 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
     if jobId then
       local jobKey = prefix .. 'job:' .. jobId
       if checkExpired(jobKey, jobId, prefix, timestamp) then
-        redis.call('XACK', streamKey, group, entryId)
-        redis.call('XDEL', streamKey, entryId)
+        if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+        if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
         count = count + 1
       else
       local lastActive = tonumber(redis.call('HGET', jobKey, 'lastActive'))
@@ -1046,8 +1046,8 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       else
       local stalledCount = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
       if stalledCount > maxStalledCount then
-        redis.call('XACK', streamKey, group, entryId)
-        redis.call('XDEL', streamKey, entryId)
+        if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+        if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
         redis.call('ZADD', failedKey, timestamp, jobId)
         redis.call('HSET', jobKey,
           'state', 'failed',
@@ -1479,8 +1479,8 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
   if expireAt > 0 and ts > expireAt then
     expireJob(jobKey, jobId, prefix, ts, curState, orderingKey, orderingSeq, groupKey)
     if streamKey ~= '' and entryId ~= '' and group ~= '' then
-      redis.call('XACK', streamKey, group, entryId)
-      redis.call('XDEL', streamKey, entryId)
+      if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+      if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
     end
     return 'EXPIRED'
   end
@@ -1495,8 +1495,8 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     -- Concurrency gate (checked first to avoid burning rate/token slots on parked jobs)
     if maxConc > 0 and active >= maxConc then
       if streamKey ~= '' and entryId ~= '' and group ~= '' then
-        redis.call('XACK', streamKey, group, entryId)
-        redis.call('XDEL', streamKey, entryId)
+        if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+        if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
       end
       local waitListKey = prefix .. 'groupq:' .. groupKey
       redis.call('RPUSH', waitListKey, jobId)
@@ -1515,8 +1515,8 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       -- DLQ guard: cost > capacity
       if jobCostVal > tbCapacity then
         if streamKey ~= '' and entryId ~= '' and group ~= '' then
-          redis.call('XACK', streamKey, group, entryId)
-          redis.call('XDEL', streamKey, entryId)
+          if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+          if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
         end
         redis.call('ZADD', prefix .. 'failed', ts, jobId)
         redis.call('HSET', jobKey,
@@ -1550,8 +1550,8 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     -- If ANY gate blocked: park + register
     if tbBlocked or rlBlocked then
       if streamKey ~= '' and entryId ~= '' and group ~= '' then
-        redis.call('XACK', streamKey, group, entryId)
-        redis.call('XDEL', streamKey, entryId)
+        if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+        if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
       end
       local waitListKey = prefix .. 'groupq:' .. groupKey
       redis.call('RPUSH', waitListKey, jobId)
@@ -1609,8 +1609,8 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   local entryId = args[2]
   local group = args[3]
   local exists = redis.call('EXISTS', jobKey)
-  redis.call('XACK', streamKey, group, entryId)
-  redis.call('XDEL', streamKey, entryId)
+  if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+  if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
   if exists == 0 then
     return 0
   end
@@ -1994,8 +1994,8 @@ redis.register_function('glidemq_revoke', function(keys, args)
       local fields = entries[i][2]
       for j = 1, #fields, 2 do
         if fields[j] == 'jobId' and fields[j+1] == jobId then
-          redis.call('XACK', streamKey, group, entryId)
-          redis.call('XDEL', streamKey, entryId)
+          if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+          if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
           break
         end
       end
@@ -2045,7 +2045,7 @@ redis.register_function('glidemq_changePriority', function(keys, args)
         for j = 1, #fields, 2 do
           if fields[j] == 'jobId' and fields[j+1] == jobId then
             pcall(redis.call, 'XACK', streamKey, group, entryId)
-            redis.call('XDEL', streamKey, entryId)
+            if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
             found = true
             break
           end
@@ -2156,7 +2156,7 @@ redis.register_function('glidemq_changeDelay', function(keys, args)
         for j = 1, #fields, 2 do
           if fields[j] == 'jobId' and fields[j+1] == jobId then
             pcall(redis.call, 'XACK', streamKey, group, entryId)
-            redis.call('XDEL', streamKey, entryId)
+            if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
             found = true
             break
           end
@@ -2246,7 +2246,7 @@ redis.register_function('glidemq_moveActiveToDelayed', function(keys, args)
   local score = priority * PRIORITY_SHIFT + delayedUntil
 
   pcall(redis.call, 'XACK', streamKey, group, entryId)
-  redis.call('XDEL', streamKey, entryId)
+  if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
   redis.call('ZADD', scheduledKey, string.format('%.0f', score), jobId)
   if nextData and nextData ~= '' then
     redis.call('HSET', jobKey, 'data', nextData, 'state', 'delayed', 'delay', tostring(delay))
@@ -2597,8 +2597,8 @@ export async function dedup(
       tbRefillRate.toString(),
       jobCost.toString(),
       jobTtl.toString(),
-      lifo.toString(),
       customJobId,
+      lifo.toString(),
     ],
   );
   return result as string;

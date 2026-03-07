@@ -383,6 +383,25 @@ export class Worker<D = any, R = any> extends EventEmitter {
       }
     }
 
+    // Try LIFO list first (non-blocking) before stream
+    if (this.commandClient) {
+      try {
+        const lifoJobId = await this.commandClient.rpop(this.queueKeys.lifo);
+        if (lifoJobId) {
+          const jobId = String(lifoJobId);
+          // Dispatch LIFO job with empty entryId
+          if (this.concurrency === 1) {
+            await this.processJob(jobId, "");
+          } else {
+            this.dispatchJob(jobId, "");
+          }
+          return; // Skip XREADGROUP this cycle
+        }
+      } catch (err) {
+        // LIFO fetch error - fall through to stream fetch
+      }
+    }
+
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
     // STREAMS {streamKey} >
     const result = await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
