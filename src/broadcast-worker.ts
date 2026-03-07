@@ -987,20 +987,12 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       // In broadcast mode attemptsMade is tracked per-subscription (Lua stores it in
       // {jobKey}:sub:{group} field 'a'), so job.attemptsMade is always 0. Read the
       // per-sub count to compute the correct exponential backoff on each retry.
-      const subAttemptStr = await this.commandClient.hget(
-        `${this.queueKeys.job(jobId)}:sub:${this.subscription}`,
-        'a',
-      );
+      const subAttemptStr = await this.commandClient.hget(`${this.queueKeys.job(jobId)}:sub:${this.subscription}`, 'a');
       const attemptsMade = subAttemptStr !== null ? Number(subAttemptStr) : job.attemptsMade;
       const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
       backoffDelay = strategyFn
         ? strategyFn(attemptsMade + 1, error)
-        : calculateBackoff(
-            job.opts.backoff.type,
-            job.opts.backoff.delay,
-            attemptsMade + 1,
-            job.opts.backoff.jitter,
-          );
+        : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, attemptsMade + 1, job.opts.backoff.jitter);
     }
 
     const failResult = await failJob(

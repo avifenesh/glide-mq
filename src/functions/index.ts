@@ -3510,11 +3510,7 @@ export async function moveToWaitingChildren(
 ): Promise<string> {
   const args = [jobId, entryId, group, timestamp.toString()];
   if (broadcastMode) args.push('1');
-  const result = await client.fcall(
-    'glidemq_moveToWaitingChildren',
-    [k.job(jobId), k.stream, k.events],
-    args,
-  );
+  const result = await client.fcall('glidemq_moveToWaitingChildren', [k.job(jobId), k.stream, k.events], args);
   return result as string;
 }
 
