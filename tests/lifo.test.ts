@@ -709,7 +709,7 @@ describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
           } catch (e) {
             reject(e);
           } finally {
-            await cleanupClient.del([...Object.keys(require('../dist/utils').buildKeys(qName))]);
+            await cleanupClient.del([...Object.values(require('../dist/utils').buildKeys(qName))]);
           }
         }
       });

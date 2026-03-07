@@ -8,26 +8,23 @@ import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { ConnectionOptions, JobOptions, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
-import { buildKeys, keyPrefix, compress, MAX_JOB_DATA_SIZE } from './utils';
+import {
+  buildKeys,
+  keyPrefix,
+  compress,
+  MAX_JOB_DATA_SIZE,
+  MAX_ORDERING_KEY_LENGTH,
+  validateQueueName,
+  validateJobId,
+} from './utils';
 import { createClient, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
 import { LIBRARY_SOURCE, addJob, dedup } from './functions/index';
 import type { QueueKeys } from './functions/index';
 
-const MAX_ORDERING_KEY_LENGTH = 256;
-
-const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
-
 function validateOrderingKey(orderingKey: string): void {
   if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
     throw new GlideMQError(`Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`);
-  }
-}
-
-function validateJobId(jobId: string): void {
-  if (jobId.length > 256) throw new GlideMQError('jobId must be at most 256 characters');
-  if (INVALID_JOB_ID_CHARS.test(jobId)) {
-    throw new GlideMQError('jobId must not contain control characters, curly braces, or colons');
   }
 }
 
@@ -64,6 +61,7 @@ interface PreparedJob {
   ttl: number;
   customJobId: string;
   parentDepsKey: string;
+  lifo: number;
   deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
 }
 
@@ -82,6 +80,7 @@ export class Producer<D = any> {
     if (!opts.connection && !opts.client) {
       throw new GlideMQError('Either `connection` or `client` must be provided.');
     }
+    validateQueueName(name);
     this.name = name;
     this.opts = opts;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
@@ -106,22 +105,32 @@ export class Producer<D = any> {
     }
     if (this.client) return this.client;
     if (!this.initPromise) {
-      this.initPromise = this.opts.client
+      const init = this.opts.client
         ? ensureFunctionLibraryOnce(
             this.opts.client,
             LIBRARY_SOURCE,
             this.opts.connection?.clusterMode ?? isClusterClient(this.opts.client),
           ).then(() => {
+            if (this.closing) throw new GlideMQError('Producer is closed');
             this.clientOwned = false;
             this.client = this.opts.client!;
             return this.client;
           })
         : createClient(this.opts.connection!).then(async (client) => {
             await ensureFunctionLibraryOnce(client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
+            if (this.closing) {
+              client.close();
+              throw new GlideMQError('Producer is closed');
+            }
             this.clientOwned = true;
             this.client = client;
             return client;
           });
+      // Clear the promise on failure so callers can retry after transient errors
+      this.initPromise = init.catch((err) => {
+        this.initPromise = null;
+        throw err;
+      });
     }
     return this.initPromise;
   }
@@ -143,6 +152,7 @@ export class Producer<D = any> {
   private prepareJobParams(jobName: string, data: D, opts?: JobOptions): PreparedJob {
     const delay = opts?.delay ?? 0;
     const priority = opts?.priority ?? 0;
+    if (priority > 2048) throw new GlideMQError('priority must be between 0 and 2048');
     const parentId = opts?.parent ? opts.parent.id : '';
     const parentQueue = opts?.parent ? opts.parent.queue : '';
     const maxAttempts = opts?.attempts ?? 0;
@@ -193,6 +203,11 @@ export class Producer<D = any> {
     }
 
     const ttl = opts?.ttl ?? 0;
+    const lifo = opts?.lifo ? 1 : 0;
+
+    if (lifo && orderingKey) {
+      throw new GlideMQError('lifo and ordering.key cannot be used together');
+    }
 
     let parentDepsKey = '';
     if (parentId && parentQueue && parentQueue === this.name) {
@@ -219,6 +234,7 @@ export class Producer<D = any> {
       ttl,
       customJobId,
       parentDepsKey,
+      lifo,
       deduplication: opts?.deduplication,
     };
   }
@@ -257,7 +273,7 @@ export class Producer<D = any> {
         p.jobCost,
         p.ttl,
         p.customJobId,
-        0,
+        p.lifo,
         p.parentQueue,
         p.parentDepsKey,
       );
@@ -297,7 +313,7 @@ export class Producer<D = any> {
         p.jobCost,
         p.ttl,
         p.customJobId,
-        0,
+        p.lifo,
         p.parentQueue,
         p.parentDepsKey,
       );
@@ -370,7 +386,7 @@ export class Producer<D = any> {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
-          '0',
+          p.lifo.toString(),
           p.parentQueue,
         ]);
       } else {
@@ -396,7 +412,7 @@ export class Producer<D = any> {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
-          '0',
+          p.lifo.toString(),
           p.parentQueue,
         ]);
       }
