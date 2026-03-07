@@ -333,7 +333,7 @@ local function recordMetrics(metricsKey, timestamp, duration)
   if duration > 0 then
     redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':d', duration)
   end
-  if math.random(100) == 1 then
+  if timestamp % 100 == 0 then
     local cutoff = minuteTs - 86400000
     local fields = redis.call('HKEYS', metricsKey)
     local toDelete = {}
@@ -343,8 +343,12 @@ local function recordMetrics(metricsKey, timestamp, duration)
         toDelete[#toDelete + 1] = f
       end
     end
-    if #toDelete > 0 then
+    if #toDelete > 0 and #toDelete <= 1000 then
       redis.call('HDEL', metricsKey, unpack(toDelete))
+    elseif #toDelete > 1000 then
+      for i = 1, #toDelete, 1000 do
+        redis.call('HDEL', metricsKey, unpack(toDelete, i, math.min(i + 999, #toDelete)))
+      end
     end
   end
 end

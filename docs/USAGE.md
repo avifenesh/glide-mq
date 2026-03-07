@@ -80,7 +80,7 @@ const metrics = await queue.getMetrics('completed');
 //   meta: { resolution: 'minute' }
 // }
 
-// Slice data points (e.g. last 10 minutes):
+// Slice data points (e.g. last 10 data points):
 const recent = await queue.getMetrics('completed', { start: -10 });
 ```
 

@@ -321,7 +321,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       buckets.set(minuteTs, bucket);
     }
     bucket.count++;
-    const duration = processedOn != null ? finishedOn - processedOn : 0;
+    const duration = processedOn !== undefined ? finishedOn - processedOn : 0;
     if (duration > 0) bucket.totalDuration += duration;
   }
 

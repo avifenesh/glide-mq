@@ -1029,14 +1029,17 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const match = field.match(/^m:(\d+):([cd])$/);
         if (!match) continue;
         const ts = parseInt(match[1], 10);
+        if (isNaN(ts)) continue;
         const kind = match[2];
         let bucket = buckets.get(ts);
         if (!bucket) {
           bucket = { count: 0, totalDuration: 0 };
           buckets.set(ts, bucket);
         }
-        if (kind === 'c') bucket.count = parseInt(value, 10);
-        else bucket.totalDuration = parseInt(value, 10);
+        const numValue = parseInt(value, 10);
+        if (isNaN(numValue)) continue;
+        if (kind === 'c') bucket.count = numValue;
+        else bucket.totalDuration = numValue;
       }
     }
 
@@ -1050,6 +1053,13 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     const start = opts?.start ?? 0;
     const end = opts?.end ?? -1;
+
+    if (!Number.isInteger(start)) throw new TypeError('start must be an integer');
+    if (!Number.isInteger(end)) throw new TypeError('end must be an integer');
+    if (start >= 0 && end >= 0 && end < start) {
+      throw new RangeError('end must be >= start when both are non-negative');
+    }
+
     const sliced = end === -1 ? data.slice(start) : data.slice(start, end + 1);
 
     return { count, data: sliced, meta: { resolution: 'minute' } };
