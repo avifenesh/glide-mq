@@ -264,7 +264,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
           groupConcurrency = 1;
         }
         validateOrderingKey(orderingKey);
-n        if (opts?.lifo && orderingKey) {
+
+        if (opts?.lifo && orderingKey) {
           throw new Error('lifo and ordering.key cannot be used together');
         }
         const lifo = opts?.lifo ?? false;
@@ -471,7 +472,8 @@ n        if (opts?.lifo && orderingKey) {
       const delay = opts.delay ?? 0;
       const priority = opts.priority ?? 0;
       const parentId = opts.parent ? opts.parent.id : '';
-n      if (opts.lifo && orderingKey) {
+
+      if (opts.lifo && orderingKey) {
         throw new Error('lifo and ordering.key cannot be used together');
       }
       const parentQueue = opts.parent ? opts.parent.queue : '';
