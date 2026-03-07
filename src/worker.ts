@@ -48,6 +48,10 @@ import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
 export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained';
 
+function isRateLimitError(e: unknown): e is { delayMs: number } {
+  return typeof e === 'object' && e !== null && typeof (e as Record<string, unknown>).delayMs === 'number';
+}
+
 export class Worker<D = any, R = any> extends EventEmitter {
   readonly name: string;
   private opts: WorkerOptions;
@@ -1009,7 +1013,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
 
     if (error instanceof Worker.RateLimitError) {
-      const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
+      const delayMs = isRateLimitError(error) ? error.delayMs : (this.opts.limiter?.duration ?? 1000);
       this.rateLimitUntil = Date.now() + delayMs;
       try {
         await failJob(
