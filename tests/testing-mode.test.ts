@@ -192,6 +192,79 @@ describe('TestQueue', () => {
     expect(completed).toHaveLength(1);
     expect(completed[0].id).toBe('1');
   });
+
+  describe('excludeData', () => {
+    it('getJob with excludeData returns job without data or returnvalue', async () => {
+      queue = new TestQueue('test-q');
+      const added = await queue.add('job-a', { big: 'payload' });
+      // Simulate completion with returnvalue
+      queue.jobs.get(added!.id)!.returnvalue = 'result' as any;
+
+      const job = await queue.getJob(added!.id, { excludeData: true });
+      expect(job).not.toBeNull();
+      expect(job!.id).toBe(added!.id);
+      expect(job!.name).toBe('job-a');
+      expect(job!.data).toBeUndefined();
+      expect(job!.returnvalue).toBeUndefined();
+    });
+
+    it('getJob without excludeData returns full data', async () => {
+      queue = new TestQueue('test-q');
+      await queue.add('job-b', { big: 'payload' });
+      const job = await queue.getJob('1');
+      expect(job).not.toBeNull();
+      expect(job!.data).toEqual({ big: 'payload' });
+    });
+
+    it('getJobs with excludeData returns jobs without data', async () => {
+      queue = new TestQueue('test-q');
+      await queue.add('j1', { x: 1 });
+      await queue.add('j2', { x: 2 });
+
+      const jobs = await queue.getJobs('waiting', 0, -1, { excludeData: true });
+      expect(jobs).toHaveLength(2);
+      for (const j of jobs) {
+        expect(j.data).toBeUndefined();
+        expect(j.returnvalue).toBeUndefined();
+        expect(j.name).toBeDefined();
+      }
+    });
+
+    it('getJobs without opts returns full data (backwards compat)', async () => {
+      queue = new TestQueue('test-q');
+      await queue.add('j1', { x: 1 });
+      const jobs = await queue.getJobs('waiting');
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0].data).toEqual({ x: 1 });
+    });
+
+    it('searchJobs with excludeData returns jobs without data', async () => {
+      queue = new TestQueue('test-q');
+      await queue.add('find-me', { val: 100 });
+      await queue.add('find-me', { val: 200 });
+
+      const results = await queue.searchJobs({ name: 'find-me', excludeData: true });
+      expect(results).toHaveLength(2);
+      for (const j of results) {
+        expect(j.name).toBe('find-me');
+        expect(j.data).toBeUndefined();
+        expect(j.returnvalue).toBeUndefined();
+      }
+    });
+
+    it('searchJobs with excludeData and data filter strips data after filtering', async () => {
+      queue = new TestQueue('test-q');
+      await queue.add('j1', { color: 'red' });
+      await queue.add('j2', { color: 'blue' });
+
+      // Data filter is applied first, then data is stripped since excludeData was requested
+      const results = await queue.searchJobs({ data: { color: 'red' }, excludeData: true });
+      expect(results).toHaveLength(1);
+      expect(results[0].name).toBe('j1');
+      expect(results[0].data).toBeUndefined();
+      expect(results[0].returnvalue).toBeUndefined();
+    });
+  });
 });
 
 describe('TestWorker', () => {
@@ -1386,5 +1459,80 @@ describe('TestWorker batch mode', () => {
     expect(callCount).toBeGreaterThanOrEqual(2);
     const completed = await queue.getJobs('completed');
     expect(completed).toHaveLength(2);
+  });
+
+  it('getMetrics returns time-series data for completed jobs', async () => {
+    queue = new TestQueue('test-metrics');
+    const worker = new TestWorker(queue, async () => 'done');
+
+    await queue.add('j1', {});
+    await queue.add('j2', {});
+    await queue.add('j3', {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const metrics = await queue.getMetrics('completed');
+    expect(metrics.count).toBe(3);
+    expect(metrics.meta).toEqual({ resolution: 'minute' });
+    expect(metrics.data.length).toBeGreaterThanOrEqual(1);
+
+    const totalCount = metrics.data.reduce((sum: number, dp: any) => sum + dp.count, 0);
+    expect(totalCount).toBe(3);
+
+    for (const dp of metrics.data) {
+      expect(dp.timestamp % 60000).toBe(0);
+      expect(dp.avgDuration).toBeGreaterThanOrEqual(0);
+    }
+
+    await worker.close();
+  });
+
+  it('getMetrics returns time-series data for failed jobs', async () => {
+    queue = new TestQueue('test-metrics-fail');
+    const worker = new TestWorker(queue, async () => {
+      throw new Error('fail');
+    });
+
+    await queue.add('f1', {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const metrics = await queue.getMetrics('failed');
+    expect(metrics.count).toBe(1);
+    expect(metrics.data.length).toBeGreaterThanOrEqual(1);
+    expect(metrics.data[0].count).toBe(1);
+    expect(metrics.data[0].avgDuration).toBeGreaterThanOrEqual(0);
+
+    const completedMetrics = await queue.getMetrics('completed');
+    expect(completedMetrics.count).toBe(0);
+    expect(completedMetrics.data).toEqual([]);
+
+    await worker.close();
+  });
+
+  it('getMetrics empty queue returns zero count and empty data', async () => {
+    queue = new TestQueue('test-metrics-empty');
+
+    const metrics = await queue.getMetrics('completed');
+    expect(metrics.count).toBe(0);
+    expect(metrics.data).toEqual([]);
+    expect(metrics.meta).toEqual({ resolution: 'minute' });
+  });
+
+  it('getMetrics supports start/end slicing', async () => {
+    queue = new TestQueue('test-metrics-slice');
+    const worker = new TestWorker(queue, async () => 'ok');
+
+    await queue.add('s1', {});
+    await new Promise((r) => setTimeout(r, 50));
+
+    const all = await queue.getMetrics('completed');
+    expect(all.data.length).toBeGreaterThanOrEqual(1);
+
+    const sliced = await queue.getMetrics('completed', { start: 0, end: 0 });
+    expect(sliced.data.length).toBe(1);
+    expect(sliced.count).toBe(all.count);
+
+    await worker.close();
   });
 });

@@ -259,6 +259,11 @@ export interface ScheduleOpts {
   pattern?: string;
   /** Repeat interval in milliseconds */
   every?: number;
+  /**
+   * Schedule next job N ms after the current one completes (or terminally fails).
+   * Mutually exclusive with `pattern` and `every`.
+   */
+  repeatAfterComplete?: number;
   /** IANA timezone for cron patterns (e.g. 'America/New_York'). Defaults to UTC. */
   tz?: string;
   /** Earliest time the scheduler may create a job. Accepts a Date or epoch milliseconds. */
@@ -278,6 +283,8 @@ export interface JobTemplate {
 export interface SchedulerEntry {
   pattern?: string;
   every?: number;
+  /** Delay in ms after completion before scheduling the next job. */
+  repeatAfterComplete?: number;
   /** IANA timezone for cron patterns (e.g. 'America/New_York'). Defaults to UTC. */
   tz?: string;
   startDate?: number;
@@ -289,9 +296,29 @@ export interface SchedulerEntry {
   nextRun: number;
 }
 
-export interface Metrics {
-  /** Total count of completed or failed jobs */
+export interface MetricsDataPoint {
+  /** Minute-bucket epoch ms (floored to start of minute). */
+  timestamp: number;
+  /** Number of jobs completed/failed in this bucket. */
   count: number;
+  /** Average processing duration in ms for this bucket. */
+  avgDuration: number;
+}
+
+export interface MetricsOptions {
+  /** Start index for data points (default 0). */
+  start?: number;
+  /** End index for data points (default -1 = all). */
+  end?: number;
+}
+
+export interface Metrics {
+  /** Total count of completed or failed jobs. */
+  count: number;
+  /** Per-minute data points sorted oldest-first. */
+  data: MetricsDataPoint[];
+  /** Resolution metadata. */
+  meta: { resolution: 'minute' };
 }
 
 export interface JobCounts {
@@ -302,11 +329,18 @@ export interface JobCounts {
   failed: number;
 }
 
+export interface GetJobsOptions {
+  /** When true, excludes `data` and `returnvalue` fields from returned jobs. */
+  excludeData?: boolean;
+}
+
 export interface SearchJobsOptions {
   state?: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed';
   name?: string;
   data?: Record<string, unknown>;
   limit?: number;
+  /** When true, excludes `data` and `returnvalue` fields from returned jobs. */
+  excludeData?: boolean;
 }
 
 export interface WorkerInfo {

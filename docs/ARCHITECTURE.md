@@ -197,8 +197,8 @@ class Queue<D = any, R = any> extends EventEmitter {
   add(name: string, data: D, opts?: JobOptions): Promise<Job<D, R> | null>
   addAndWait(name: string, data: D, opts?: AddAndWaitOptions): Promise<R>
   addBulk(jobs: { name: string; data: D; opts?: JobOptions }[]): Promise<Job<D, R>[]>
-  getJob(id: string): Promise<Job<D, R> | null>
-  getJobs(type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed', start?: number, end?: number): Promise<Job<D, R>[]>
+  getJob(id: string, opts?: GetJobsOptions): Promise<Job<D, R> | null>
+  getJobs(type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed', start?: number, end?: number, opts?: GetJobsOptions): Promise<Job<D, R>[]>
   getJobCounts(): Promise<JobCounts>
   getJobCountByTypes(): Promise<JobCounts>
   count(): Promise<number>
@@ -206,7 +206,7 @@ class Queue<D = any, R = any> extends EventEmitter {
   resume(): Promise<void>
   isPaused(): Promise<boolean>
   revoke(jobId: string): Promise<string>
-  getMetrics(type: 'completed' | 'failed'): Promise<Metrics>
+  getMetrics(type: 'completed' | 'failed', opts?: MetricsOptions): Promise<Metrics>
   obliterate(opts?: { force: boolean }): Promise<void>
   close(): Promise<void>
 
@@ -226,7 +226,7 @@ class Queue<D = any, R = any> extends EventEmitter {
 
   // Logs and DLQ
   getJobLogs(id: string, start?: number, end?: number): Promise<{ logs: string[]; count: number }>
-  getDeadLetterJobs(start?: number, end?: number): Promise<Job<D, R>[]>
+  getDeadLetterJobs(start?: number, end?: number, opts?: GetJobsOptions): Promise<Job<D, R>[]>
   searchJobs(opts: SearchJobsOptions): Promise<Job<D, R>[]>
 
   // Job schedulers (repeatable/cron)
@@ -382,6 +382,10 @@ glide-mq/
 │   ├── connection.ts           # Client factory (blocking vs non-blocking)
 │   ├── functions/
 │   │   └── index.ts            # Lua library source (embedded as string) + FCALL wrappers
+│   ├── proxy/
+│   │   ├── index.ts            # createProxyServer factory (glide-mq/proxy)
+│   │   ├── routes.ts           # Express route handlers for all endpoints
+│   │   └── types.ts            # Proxy request/response type definitions
 │   ├── sandbox/
 │   │   ├── index.ts            # Sandbox factory
 │   │   ├── pool.ts             # Worker pool manager
@@ -409,6 +413,7 @@ glide-mq/
 │   ├── OBSERVABILITY.md        # OpenTelemetry, job logs
 │   ├── TESTING.md              # TestQueue & TestWorker
 │   ├── MIGRATION.md            # BullMQ migration guide
+│   ├── WIRE_PROTOCOL.md        # Cross-language wire protocol (FCALL specs, Python/Go examples)
 │   └── ARCHITECTURE.md         # This file
 ├── package.json
 ├── tsconfig.json

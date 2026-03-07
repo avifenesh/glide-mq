@@ -48,3 +48,10 @@ export class DelayedError extends GlideMQError {
     this.delayedUntil = delayedUntil;
   }
 }
+
+export class WaitingChildrenError extends GlideMQError {
+  constructor(message = 'Job moved to waiting-children state') {
+    super(message);
+    this.name = 'WaitingChildrenError';
+  }
+}

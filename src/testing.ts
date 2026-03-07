@@ -4,6 +4,11 @@
  *
  * Usage:
  *   import { TestQueue, TestWorker } from 'glide-mq/testing';
+ *
+ * LIMITATION: repeatAfterComplete schedulers are accepted but behave like `every` schedulers
+ * in testing mode (fire at regular intervals, not based on job completion). This is because
+ * the in-memory implementation doesn't track job-to-scheduler linkage. For full repeatAfterComplete
+ * behavior, use the real Queue/Worker with a Valkey instance.
  */
 
 import { EventEmitter } from 'events';
@@ -12,6 +17,10 @@ import os from 'os';
 import type {
   JobOptions,
   JobCounts,
+  Metrics,
+  MetricsOptions,
+  MetricsDataPoint,
+  GetJobsOptions,
   Processor,
   WorkerInfo,
   SchedulerEntry,
@@ -126,6 +135,8 @@ export interface SearchJobsOptions {
   name?: string;
   data?: Record<string, unknown>;
   state?: TestJobRecord['state'];
+  /** When true, excludes `data` and `returnvalue` fields from returned jobs. */
+  excludeData?: boolean;
 }
 
 /** Check if all key-value pairs in filter exist in data (shallow match). */
@@ -161,6 +172,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private paused = false;
   private opts: TestQueueOptions;
   /** @internal */ readonly serializer: Serializer;
+
+  /** @internal */ readonly metricsData: Map<string, Map<number, { count: number; totalDuration: number }>> = new Map([
+    ['completed', new Map()],
+    ['failed', new Map()],
+  ]);
 
   /** Workers register themselves here so we can notify on add. */
   /** @internal */ readonly workers: Set<TestWorker<D, R>> = new Set();
@@ -252,10 +268,15 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   }
 
   /** Retrieve a job by ID. */
-  async getJob(id: string): Promise<TestJob<D, R> | null> {
+  async getJob(id: string, opts?: GetJobsOptions): Promise<TestJob<D, R> | null> {
     const record = this.jobs.get(id);
     if (!record) return null;
-    return new TestJob<D, R>(record);
+    const job = new TestJob<D, R>(record);
+    if (opts?.excludeData) {
+      job.data = undefined as unknown as D;
+      job.returnvalue = undefined;
+    }
+    return job;
   }
 
   /** Retrieve jobs by state. */
@@ -263,11 +284,17 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed',
     start = 0,
     end = -1,
+    opts?: GetJobsOptions,
   ): Promise<TestJob<D, R>[]> {
     const matching: TestJob<D, R>[] = [];
     for (const record of this.jobs.values()) {
       if (record.state === type) {
-        matching.push(new TestJob<D, R>(record));
+        const job = new TestJob<D, R>(record);
+        if (opts?.excludeData) {
+          job.data = undefined as unknown as D;
+          job.returnvalue = undefined;
+        }
+        matching.push(job);
       }
     }
     const sliceEnd = end >= 0 ? end + 1 : undefined;
@@ -281,6 +308,48 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       counts[record.state]++;
     }
     return counts;
+  }
+
+  /** Get metrics for completed or failed jobs with per-minute data points. */
+  async getMetrics(type: 'completed' | 'failed', opts?: MetricsOptions): Promise<Metrics> {
+    let count = 0;
+    for (const record of this.jobs.values()) {
+      if (record.state === type) count++;
+    }
+    const buckets = this.metricsData.get(type)!;
+    const data: MetricsDataPoint[] = Array.from(buckets.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([timestamp, b]) => ({
+        timestamp,
+        count: b.count,
+        avgDuration: b.count > 0 ? Math.round(b.totalDuration / b.count) : 0,
+      }));
+
+    const start = opts?.start ?? 0;
+    const end = opts?.end ?? -1;
+
+    if (!Number.isInteger(start)) throw new TypeError('start must be an integer');
+    if (!Number.isInteger(end)) throw new TypeError('end must be an integer');
+    if (start >= 0 && end >= 0 && end < start) {
+      throw new RangeError('end must be >= start when both are non-negative');
+    }
+
+    const sliced = end === -1 ? data.slice(start) : data.slice(start, end + 1);
+    return { count, data: sliced, meta: { resolution: 'minute' } };
+  }
+
+  /** @internal */
+  recordMetric(type: 'completed' | 'failed', processedOn: number | undefined, finishedOn: number): void {
+    const minuteTs = finishedOn - (finishedOn % 60000);
+    const buckets = this.metricsData.get(type)!;
+    let bucket = buckets.get(minuteTs);
+    if (!bucket) {
+      bucket = { count: 0, totalDuration: 0 };
+      buckets.set(minuteTs, bucket);
+    }
+    bucket.count++;
+    const duration = processedOn !== undefined ? finishedOn - processedOn : 0;
+    if (duration > 0) bucket.totalDuration += duration;
   }
 
   /** Pause the queue - workers stop picking up new jobs. */
@@ -310,7 +379,12 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       if (opts.name !== undefined && record.name !== opts.name) continue;
       if (opts.state !== undefined && record.state !== opts.state) continue;
       if (opts.data !== undefined && !matchesData(record.data as Record<string, unknown>, opts.data)) continue;
-      results.push(new TestJob<D, R>(record));
+      const job = new TestJob<D, R>(record);
+      if (opts.excludeData) {
+        job.data = undefined as unknown as D;
+        job.returnvalue = undefined;
+      }
+      results.push(job);
     }
     return results;
   }
@@ -403,8 +477,17 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   async upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void> {
     validateSchedulerEvery(schedule.every);
-    if (!schedule.pattern && !schedule.every) {
-      throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
+    if (schedule.repeatAfterComplete != null) {
+      if (!Number.isSafeInteger(schedule.repeatAfterComplete) || schedule.repeatAfterComplete <= 0) {
+        throw new Error('repeatAfterComplete must be a positive safe integer');
+      }
+    }
+    const modeCount = (schedule.pattern ? 1 : 0) + (schedule.every ? 1 : 0) + (schedule.repeatAfterComplete ? 1 : 0);
+    if (modeCount === 0) {
+      throw new Error('Schedule must have pattern (cron), every (ms interval), or repeatAfterComplete (ms)');
+    }
+    if (modeCount > 1) {
+      throw new Error('Schedule must have only one of: pattern, every, repeatAfterComplete');
     }
     if (schedule.tz) {
       validateTimezone(schedule.tz);
@@ -419,6 +502,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       {
         pattern: schedule.pattern,
         every: schedule.every,
+        repeatAfterComplete: schedule.repeatAfterComplete,
         tz: schedule.tz,
         startDate,
         endDate,
@@ -430,10 +514,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       const scheduleUnchanged =
         existing.pattern === schedule.pattern &&
         existing.every === schedule.every &&
+        existing.repeatAfterComplete === schedule.repeatAfterComplete &&
         existing.tz === schedule.tz &&
         existing.startDate === startDate &&
         existing.endDate === endDate;
-      if (scheduleUnchanged && existing.nextRun) {
+      if (scheduleUnchanged && existing.nextRun != null) {
         iterationCount = existing.iterationCount ?? 0;
         lastRun = existing.lastRun;
         nextRun = existing.nextRun;
@@ -445,6 +530,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     const entry: SchedulerEntry = {
       pattern: schedule.pattern,
       every: schedule.every,
+      repeatAfterComplete: schedule.repeatAfterComplete,
       tz: schedule.tz,
       startDate,
       endDate,
@@ -542,10 +628,13 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       const now = Date.now();
       const dueNames: string[] = [];
       for (const [name, entry] of this.schedulers.entries()) {
-        if (!entry.pattern && !entry.every) {
+        if (!entry.pattern && !entry.every && !entry.repeatAfterComplete) {
           dueNames.push(name);
           continue;
         }
+        // Skip repeatAfterComplete entries with nextRun=0 (awaiting completion)
+        if (entry.repeatAfterComplete && entry.nextRun === 0) continue;
+
         if (entry.nextRun != null && entry.nextRun <= now) {
           dueNames.push(name);
         }
@@ -555,7 +644,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
         const entry = this.schedulers.get(name);
         if (!entry) continue;
 
-        if (!entry.pattern && !entry.every) {
+        if (!entry.pattern && !entry.every && !entry.repeatAfterComplete) {
           this.schedulers.delete(name);
           continue;
         }
@@ -753,6 +842,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       record.finishedOn = Date.now();
       job.failedReason = 'expired';
       job.finishedOn = record.finishedOn;
+      this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
       const err = new Error('expired');
       this.emit('failed', job, err);
       this.queue.emit('failed', job, err);
@@ -772,6 +862,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         record.finishedOn = Date.now();
         job.returnvalue = roundtripped;
         job.finishedOn = record.finishedOn;
+        this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
         this.emit('completed', job, roundtripped);
         this.queue.emit('completed', job, roundtripped);
       })
@@ -791,6 +882,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           record.finishedOn = Date.now();
           job.failedReason = err.message;
           job.finishedOn = record.finishedOn;
+          this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
           this.emit('failed', job, err);
           this.queue.emit('failed', job, err);
         }
@@ -899,6 +991,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           record.finishedOn = Date.now();
           job.returnvalue = roundtripped;
           job.finishedOn = record.finishedOn;
+          this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
           this.emit('completed', job, roundtripped);
           this.queue.emit('completed', job, roundtripped);
         }
@@ -925,6 +1018,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
                 record.finishedOn = Date.now();
                 job.failedReason = result.message;
                 job.finishedOn = record.finishedOn;
+                this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
                 this.emit('failed', job, result);
                 this.queue.emit('failed', job, result);
               }
@@ -937,6 +1031,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
               record.finishedOn = Date.now();
               job.returnvalue = roundtripped;
               job.finishedOn = record.finishedOn;
+              this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
               this.emit('completed', job, roundtripped);
               this.queue.emit('completed', job, roundtripped);
             }
@@ -958,6 +1053,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
               record.finishedOn = Date.now();
               job.failedReason = err.message;
               job.finishedOn = record.finishedOn;
+              this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
               this.emit('failed', job, err);
               this.queue.emit('failed', job, err);
             }

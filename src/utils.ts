@@ -73,6 +73,8 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     log: (id: string) => `${p}:log:${id}`,
     deps: (id: string) => `${p}:deps:${id}`,
     ratelimited: `${p}:ratelimited`,
+    metricsCompleted: `${p}:metrics:completed`,
+    metricsFailed: `${p}:metrics:failed`,
     lifo: `${p}:lifo`,
     group: (key: string) => `${p}:group:${key}`,
     groupq: (key: string) => `${p}:groupq:${key}`,
@@ -143,6 +145,59 @@ export function hashDataToRecord(
     record[String(k)] = String(entry.value);
   }
   return record;
+}
+
+// ---- Job metadata fields (everything except data/returnvalue) ----
+
+/**
+ * All known job hash fields except `data` and `returnvalue`.
+ * Used by getJob/getJobs with `excludeData: true` to fetch only metadata via HMGET.
+ */
+// Keep in sync with hash fields written by Lua job-hash writers
+// (addJob, completeJob, failJob, moveToActive, revoke, etc.).
+export const JOB_METADATA_FIELDS: readonly string[] = Object.freeze([
+  'id',
+  'name',
+  'opts',
+  'timestamp',
+  'attemptsMade',
+  'state',
+  'delay',
+  'priority',
+  'maxAttempts',
+  'processedOn',
+  'finishedOn',
+  'failedReason',
+  'parentId',
+  'parentQueue',
+  'orderingKey',
+  'orderingSeq',
+  'groupKey',
+  'cost',
+  'expireAt',
+  'progress',
+  'revoked',
+  'lastActive',
+  'schedulerName',
+]);
+
+/**
+ * Convert an HMGET result array to a Record keyed by field name.
+ * Returns null if every value is null (key does not exist).
+ */
+export function hmgetArrayToRecord(
+  values: (unknown | null)[],
+  fields: readonly string[],
+): Record<string, string> | null {
+  const record: Record<string, string> = Object.create(null);
+  let hasAny = false;
+  for (let i = 0; i < fields.length && i < values.length; i++) {
+    if (values[i] != null) {
+      record[fields[i]] = String(values[i]);
+      hasAny = true;
+    }
+  }
+  return hasAny ? record : null;
 }
 
 // ---- Stream jobId extraction ----
@@ -421,14 +476,20 @@ export function nextCronOccurrence(pattern: string, afterMs: number, tz?: string
 }
 
 export function computeInitialSchedulerNextRun(
-  schedule: Pick<ScheduleOpts, 'pattern' | 'every' | 'tz'> & { startDate?: number; endDate?: number },
+  schedule: Pick<ScheduleOpts, 'pattern' | 'every' | 'repeatAfterComplete' | 'tz'> & {
+    startDate?: number;
+    endDate?: number;
+  },
   now: number,
 ): number | null {
-  if (!schedule.pattern) {
+  if (!schedule.pattern && !schedule.repeatAfterComplete) {
     validateSchedulerEvery(schedule.every);
   }
   let nextRun: number;
-  if (schedule.pattern) {
+  if (schedule.repeatAfterComplete) {
+    // First job fires immediately (or at startDate if in the future)
+    nextRun = schedule.startDate != null && schedule.startDate > now ? schedule.startDate : now;
+  } else if (schedule.pattern) {
     const base = schedule.startDate != null && schedule.startDate > now ? schedule.startDate : now;
     nextRun = nextCronOccurrence(schedule.pattern, base - 1, schedule.tz);
   } else if (schedule.every) {
@@ -442,7 +503,7 @@ export function computeInitialSchedulerNextRun(
       nextRun = schedule.startDate + steps * schedule.every;
     }
   } else {
-    throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
+    throw new Error('Schedule must have pattern (cron), every (ms interval), or repeatAfterComplete (ms)');
   }
 
   if (schedule.endDate != null && nextRun > schedule.endDate) {
@@ -452,14 +513,20 @@ export function computeInitialSchedulerNextRun(
 }
 
 export function computeFollowingSchedulerNextRun(
-  schedule: Pick<SchedulerEntry, 'pattern' | 'every' | 'tz' | 'endDate'>,
+  schedule: Pick<SchedulerEntry, 'pattern' | 'every' | 'repeatAfterComplete' | 'tz' | 'endDate'>,
   afterMs: number,
 ): number | null {
-  if (!schedule.pattern && !isValidSchedulerEvery(schedule.every)) {
+  if (
+    !schedule.pattern &&
+    !isValidSchedulerEvery(schedule.every) &&
+    !isValidSchedulerEvery(schedule.repeatAfterComplete)
+  ) {
     return null;
   }
   let nextRun: number;
-  if (schedule.pattern) {
+  if (schedule.repeatAfterComplete) {
+    nextRun = afterMs + schedule.repeatAfterComplete;
+  } else if (schedule.pattern) {
     nextRun = nextCronOccurrence(schedule.pattern, afterMs, schedule.tz);
   } else if (schedule.every) {
     nextRun = afterMs + schedule.every;

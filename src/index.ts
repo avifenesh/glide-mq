@@ -26,6 +26,8 @@ export type {
   JobTemplate,
   SchedulerEntry,
   Metrics,
+  MetricsDataPoint,
+  MetricsOptions,
   JobCounts,
   DeadLetterQueueOptions,
   RateLimitConfig,
@@ -33,13 +35,21 @@ export type {
   ReadFrom,
   SandboxOptions,
   SearchJobsOptions,
+  GetJobsOptions,
   WorkerInfo,
   Serializer,
 } from './types';
 
 export { JSON_SERIALIZER } from './types';
 
-export { GlideMQError, ConnectionError, UnrecoverableError, DelayedError, BatchError } from './errors';
+export {
+  GlideMQError,
+  ConnectionError,
+  UnrecoverableError,
+  DelayedError,
+  BatchError,
+  WaitingChildrenError,
+} from './errors';
 export { isClusterClient } from './connection';
 export { gracefulShutdown } from './graceful-shutdown';
 export type { GracefulShutdownHandle } from './graceful-shutdown';

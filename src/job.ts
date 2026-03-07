@@ -4,7 +4,7 @@ import type { JobOptions, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
-import { DelayedError } from './errors';
+import { DelayedError, WaitingChildrenError } from './errors';
 import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
@@ -27,6 +27,7 @@ export class Job<D = any, R = any> {
   groupKey?: string;
   cost?: number;
   expireAt?: number;
+  schedulerName?: string;
 
   /**
    * AbortSignal that fires when this job is revoked during processing.
@@ -43,6 +44,9 @@ export class Job<D = any, R = any> {
 
   /** @internal Request captured by moveToDelayed() while inside the worker. */
   moveToDelayedRequest?: { delayedUntil: number; serializedData?: string; nextData?: D };
+
+  /** @internal Request captured by moveToWaitingChildren() while inside the worker. */
+  moveToWaitingChildrenRequest?: boolean;
 
   /**
    * Set to true when data or returnvalue could not be deserialized from Valkey.
@@ -168,6 +172,27 @@ export class Job<D = any, R = any> {
     | undefined {
     const requested = this.moveToDelayedRequest;
     this.moveToDelayedRequest = undefined;
+    return requested;
+  }
+
+  /**
+   * Pause an active job and wait for dynamically-added child jobs to complete.
+   * When all children finish, this job resumes and the processor is invoked again.
+   *
+   * This method must be called from inside a Worker processor.
+   */
+  async moveToWaitingChildren(): Promise<never> {
+    if (!this.entryId) {
+      throw new Error('moveToWaitingChildren() can only be used while the job is active in a Worker');
+    }
+    this.moveToWaitingChildrenRequest = true;
+    throw new WaitingChildrenError();
+  }
+
+  /** @internal */
+  consumeMoveToWaitingChildrenRequest(): boolean {
+    const requested = this.moveToWaitingChildrenRequest ?? false;
+    this.moveToWaitingChildrenRequest = undefined;
     return requested;
   }
 
@@ -439,7 +464,7 @@ export class Job<D = any, R = any> {
   }
 
   /**
-   * Construct a Job instance from a hash returned by HGETALL.
+   * Construct a Job instance from a hash returned by HGETALL or HMGET.
    * @internal
    */
   static fromHash<D, R>(
@@ -448,28 +473,36 @@ export class Job<D = any, R = any> {
     id: string,
     hash: Record<string, string>,
     serializer?: Serializer,
+    excludeData?: boolean,
   ): Job<D, R> {
     const s = serializer ?? JSON_SERIALIZER;
     let data: D;
     let opts: JobOptions;
     let returnvalue: R | undefined;
     let deserializationFailed = false;
-    try {
-      data = hash.data ? (s.deserialize(decompress(hash.data)) as D) : ({} as D);
-    } catch {
-      data = {} as D;
-      deserializationFailed = true;
+
+    if (excludeData) {
+      data = undefined as unknown as D;
+      returnvalue = undefined;
+    } else {
+      try {
+        data = hash.data ? (s.deserialize(decompress(hash.data)) as D) : ({} as D);
+      } catch {
+        data = {} as D;
+        deserializationFailed = true;
+      }
+      try {
+        returnvalue = hash.returnvalue ? (s.deserialize(hash.returnvalue) as R) : undefined;
+      } catch {
+        returnvalue = undefined;
+        deserializationFailed = true;
+      }
     }
+
     try {
       opts = JSON.parse(hash.opts || '{}');
     } catch {
       opts = {};
-    }
-    try {
-      returnvalue = hash.returnvalue ? (s.deserialize(hash.returnvalue) as R) : undefined;
-    } catch {
-      returnvalue = undefined;
-      deserializationFailed = true;
     }
 
     const job = new Job<D, R>(client, queueKeys, id, hash.name || '', data, opts, s);
@@ -487,6 +520,7 @@ export class Job<D = any, R = any> {
     job.groupKey = hash.groupKey || undefined;
     job.cost = hash.cost ? parseInt(hash.cost, 10) : undefined;
     job.expireAt = hash.expireAt ? parseInt(hash.expireAt, 10) : undefined;
+    job.schedulerName = hash.schedulerName || undefined;
     if (hash.progress) {
       try {
         job.progress = JSON.parse(hash.progress);

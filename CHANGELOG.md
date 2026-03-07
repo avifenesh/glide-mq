@@ -10,12 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Time-series metrics - `queue.getMetrics(type, opts?)` now returns per-minute throughput and latency data in addition to total count. Returns `{ count, data: MetricsDataPoint[], meta }` with minute-resolution buckets retained for 24 hours. Optional `MetricsOptions` parameter supports slicing data points (`start`/`end`). Metrics are recorded server-side in Valkey functions with zero extra RTTs. `TestQueue.getMetrics()` mirrors the same API in testing mode (#82).
 - `opts.jobId` - custom job IDs for deterministic job identity. Max 256 characters; must not contain control characters, colons, or curly braces. `Queue.add` returns `null` on duplicate (silent skip); `FlowProducer.add` throws on duplicate since flows cannot be partially created. Supported on `Queue.add`, `Queue.addBulk`, and `FlowProducer.add`. `TestQueue` mirrors the same behaviour in testing mode (#79).
 - LIFO (Last-In-First-Out) job processing order via `lifo: true` option. Jobs are processed in reverse-chronological order (newest first). Priority and delayed jobs take precedence over LIFO. Cannot be combined with ordering keys (#87).
 - `queue.addAndWait(name, data, { waitTimeout })` - enqueue a job and wait for the matching completed/failed event on the queue events stream without polling the job hash.
 - `job.moveToDelayed(timestampMs, nextStep?)` - pause an active job mid-processor and resume it later from the scheduled set. Supports step-job workflows and updates `job.data.step` atomically for plain object payloads.
 - `DelayedError` - exported error type for advanced/manual step-job control.
 - Batch processing - workers can process multiple jobs at once via `batch: { size, timeout? }` option. Processor receives `Job[]` and returns `R[]`. Use `BatchError` for per-job partial failure reporting. Supported in both Worker and TestWorker (#81).
+- `glide-mq/proxy` subpath export - HTTP proxy for cross-language job enqueue. Seven REST endpoints (add, bulk add, get job, pause, resume, counts, health) with queue allowlist, 1MB payload limit, and lazy Queue caching. Requires `express` as an optional peer dependency (#83).
+- Wire protocol documentation (`docs/WIRE_PROTOCOL.md`) - complete reference for enqueuing and managing jobs from any language using raw FCALL commands. Covers all key layouts, FCALL signatures, priority encoding, compression format, and examples in Python and Go (#83).
 
 ---
 

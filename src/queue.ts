@@ -11,8 +11,11 @@ import type {
   JobTemplate,
   SchedulerEntry,
   Metrics,
+  MetricsOptions,
+  MetricsDataPoint,
   JobCounts,
   SearchJobsOptions,
+  GetJobsOptions,
   RateLimitConfig,
   WorkerInfo,
   Serializer,
@@ -30,9 +33,11 @@ import {
   validateSchedulerBounds,
   computeInitialSchedulerNextRun,
   hashDataToRecord,
+  hmgetArrayToRecord,
   extractJobIdsFromStreamEntries,
   compress,
   MAX_JOB_DATA_SIZE,
+  JOB_METADATA_FIELDS,
 } from './utils';
 import {
   createBlockingClient,
@@ -231,6 +236,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const client = await this.getClient();
         const timestamp = Date.now();
         const parentId = opts?.parent ? opts.parent.id : '';
+        const parentQueue = opts?.parent ? opts.parent.queue : '';
         const maxAttempts = opts?.attempts ?? 0;
         const orderingKey = opts?.ordering?.key ?? '';
         const groupRateMax = opts?.ordering?.rateLimit?.max ?? 0;
@@ -289,6 +295,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
         const ttl = opts?.ttl ?? 0;
 
+        // Compute parent deps key for same-queue parent (atomic SADD in Lua)
+        let parentDepsKey = '';
+        if (parentId && parentQueue && parentQueue === this.name) {
+          parentDepsKey = this.keys.deps(parentId);
+        }
+
         if (opts?.deduplication) {
           const dedupOpts = opts.deduplication;
           const result = await dedup(
@@ -315,6 +327,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
             ttl,
             customJobId,
             lifo ? 1 : 0,
+            parentQueue,
+            parentDepsKey,
           );
           if (result === 'skipped' || result === 'duplicate') {
             return null;
@@ -326,6 +340,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
             throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
           }
           jobId = result;
+
+          // Cross-queue parent: register dedup child in parent deps separately
+          if (parentId && parentQueue && parentQueue !== this.name) {
+            const parentKeys = buildKeys(parentQueue, this.opts.prefix);
+            const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+            const depsMember = `${prefix}:${jobId}`;
+            await client.sadd(parentKeys.deps(parentId), [depsMember]);
+          }
         } else {
           const result = await addJob(
             client,
@@ -348,6 +370,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
             ttl,
             customJobId,
             lifo ? 1 : 0,
+            parentQueue,
+            parentDepsKey,
           );
           if (result === 'duplicate') {
             return null;
@@ -359,6 +383,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
             throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
           }
           jobId = result;
+
+          // Cross-queue parent: register child in parent deps separately
+          if (parentId && parentQueue && parentQueue !== this.name) {
+            const parentKeys = buildKeys(parentQueue, this.opts.prefix);
+            const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+            const depsMember = `${prefix}:${jobId}`;
+            await client.sadd(parentKeys.deps(parentId), [depsMember]);
+          }
         }
 
         span.setAttribute('glide-mq.job.id', String(jobId));
@@ -366,6 +398,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const job = new Job<D, R>(client, this.keys, String(jobId), name, data, opts ?? {}, this.serializer);
         job.timestamp = timestamp;
         job.parentId = parentId || undefined;
+        job.parentQueue = parentQueue || undefined;
         return job;
       },
     );
@@ -440,6 +473,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const delay = opts.delay ?? 0;
       const priority = opts.priority ?? 0;
       const parentId = opts.parent ? opts.parent.id : '';
+      const parentQueue = opts.parent ? opts.parent.queue : '';
       const maxAttempts = opts.attempts ?? 0;
       const orderingKey = opts.ordering?.key ?? '';
       validateOrderingKey(orderingKey);
@@ -492,6 +526,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         delay,
         priority,
         parentId,
+        parentQueue,
         maxAttempts,
         orderingKey,
         groupConcurrency,
@@ -515,7 +550,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     for (const p of prepared) {
       if (p.deduplication) {
-        batch.fcall('glidemq_dedup', dedupKeys, [
+        let dKeys = dedupKeys;
+        if (p.parentId && p.parentQueue && p.parentQueue === this.name) {
+          dKeys = [...dedupKeys, this.keys.deps(p.parentId)];
+        }
+        batch.fcall('glidemq_dedup', dKeys, [
           p.deduplication.id,
           String(p.deduplication.ttl ?? 0),
           p.deduplication.mode ?? 'simple',
@@ -536,10 +575,16 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
-          String(p.lifo ? 1 : 0),
+            lifo ? 1 : 0,
+            parentQueue,
+            parentDepsKey,
         ]);
       } else {
-        batch.fcall('glidemq_addJob', keys, [
+        let jobKeys = keys;
+        if (p.parentId && p.parentQueue && p.parentQueue === this.name) {
+          jobKeys = [...keys, this.keys.deps(p.parentId)];
+        }
+        batch.fcall('glidemq_addJob', jobKeys, [
           p.entry.name,
           p.serializedData,
           JSON.stringify(p.opts),
@@ -557,7 +602,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
-          String(p.lifo ? 1 : 0),
+            lifo ? 1 : 0,
+            parentQueue,
+            parentDepsKey,
         ]);
       }
     }
@@ -566,7 +613,20 @@ export class Queue<D = any, R = any> extends EventEmitter {
       ? await (client as GlideClusterClient).exec(batch as ClusterBatch, true)
       : await (client as GlideClient).exec(batch as Batch, true);
 
-    return this.buildBulkJobs(client, prepared, rawResults, timestamp);
+    const builtJobs = await this.buildBulkJobs(client, prepared, rawResults, timestamp);
+
+    // Handle cross-queue parent deps registration (non-atomic, after batch)
+    for (let i = 0; i < prepared.length; i++) {
+      const p = prepared[i];
+      if (p.parentId && p.parentQueue && p.parentQueue !== this.name && builtJobs[i]) {
+        const parentKeys = buildKeys(p.parentQueue, this.opts.prefix);
+        const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+        const depsMember = `${prefix}:${builtJobs[i].id}`;
+        await client.sadd(parentKeys.deps(p.parentId), [depsMember]);
+      }
+    }
+
+    return builtJobs;
   }
 
   private async latestEventCursor(client: Client): Promise<string> {
@@ -743,13 +803,22 @@ export class Queue<D = any, R = any> extends EventEmitter {
   /**
    * Retrieve a job by ID from the queue.
    * Returns null if the job does not exist.
+   * @param id - The job ID
+   * @param opts - Set `excludeData: true` to omit `data` and `returnvalue` fields
    */
-  async getJob(id: string): Promise<Job<D, R> | null> {
+  async getJob(id: string, opts?: GetJobsOptions): Promise<Job<D, R> | null> {
     const client = await this.getClient();
+
+    if (opts?.excludeData) {
+      const values = await client.hmget(this.keys.job(id), JOB_METADATA_FIELDS as string[]);
+      const hash = hmgetArrayToRecord(values, JOB_METADATA_FIELDS);
+      if (!hash) return null;
+      return Job.fromHash<D, R>(client, this.keys, id, hash, this.serializer, true);
+    }
+
     const hashData = await client.hgetall(this.keys.job(id));
     const hash = hashDataToRecord(hashData);
     if (!hash) return null;
-
     return Job.fromHash<D, R>(client, this.keys, id, hash, this.serializer);
   }
 
@@ -890,8 +959,17 @@ export class Queue<D = any, R = any> extends EventEmitter {
       validateTimezone(schedule.tz);
     }
     validateSchedulerEvery(schedule.every);
-    if (!schedule.pattern && !schedule.every) {
-      throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
+    if (schedule.repeatAfterComplete != null) {
+      if (!Number.isSafeInteger(schedule.repeatAfterComplete) || schedule.repeatAfterComplete <= 0) {
+        throw new Error('repeatAfterComplete must be a positive safe integer');
+      }
+    }
+    const modeCount = [schedule.pattern, schedule.every, schedule.repeatAfterComplete].filter(Boolean).length;
+    if (modeCount === 0) {
+      throw new Error('Schedule must have pattern (cron), every (ms interval), or repeatAfterComplete (ms)');
+    }
+    if (modeCount > 1) {
+      throw new Error('Schedule options pattern, every, and repeatAfterComplete are mutually exclusive');
     }
     const startDate = normalizeScheduleDate(schedule.startDate, 'startDate');
     const endDate = normalizeScheduleDate(schedule.endDate, 'endDate');
@@ -906,6 +984,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         {
           pattern: schedule.pattern,
           every: schedule.every,
+          repeatAfterComplete: schedule.repeatAfterComplete,
           tz: schedule.tz,
           startDate,
           endDate,
@@ -919,6 +998,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           const scheduleUnchanged =
             existing.pattern === schedule.pattern &&
             existing.every === schedule.every &&
+            existing.repeatAfterComplete === schedule.repeatAfterComplete &&
             existing.tz === schedule.tz &&
             existing.startDate === startDate &&
             existing.endDate === endDate;
@@ -938,6 +1018,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const entry: SchedulerEntry = {
         pattern: schedule.pattern,
         every: schedule.every,
+        repeatAfterComplete: schedule.repeatAfterComplete,
         tz: schedule.tz,
         startDate,
         endDate,
@@ -969,13 +1050,59 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   /**
    * Get metrics for completed or failed jobs.
-   * Returns the count of entries in the corresponding ZSet.
+   * Returns total count and per-minute time-series data points with throughput and avg duration.
    */
-  async getMetrics(type: 'completed' | 'failed'): Promise<Metrics> {
+  async getMetrics(type: 'completed' | 'failed', opts?: MetricsOptions): Promise<Metrics> {
     const client = await this.getClient();
     const key = type === 'completed' ? this.keys.completed : this.keys.failed;
-    const count = await client.zcard(key);
-    return { count };
+    const metricsKey = type === 'completed' ? this.keys.metricsCompleted : this.keys.metricsFailed;
+
+    const [count, rawHash] = await Promise.all([
+      client.zcard(key),
+      client.hgetall(metricsKey),
+    ]);
+
+    const buckets = new Map<number, { count: number; totalDuration: number }>();
+    const hashRecord = hashDataToRecord(rawHash);
+    if (hashRecord) {
+      for (const [field, value] of Object.entries(hashRecord)) {
+        const match = field.match(/^m:(\d+):([cd])$/);
+        if (!match) continue;
+        const ts = parseInt(match[1], 10);
+        if (isNaN(ts)) continue;
+        const kind = match[2];
+        let bucket = buckets.get(ts);
+        if (!bucket) {
+          bucket = { count: 0, totalDuration: 0 };
+          buckets.set(ts, bucket);
+        }
+        const numValue = parseInt(value, 10);
+        if (isNaN(numValue)) continue;
+        if (kind === 'c') bucket.count = numValue;
+        else bucket.totalDuration = numValue;
+      }
+    }
+
+    const data: MetricsDataPoint[] = Array.from(buckets.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([timestamp, b]) => ({
+        timestamp,
+        count: b.count,
+        avgDuration: b.count > 0 ? Math.round(b.totalDuration / b.count) : 0,
+      }));
+
+    const start = opts?.start ?? 0;
+    const end = opts?.end ?? -1;
+
+    if (!Number.isInteger(start)) throw new TypeError('start must be an integer');
+    if (!Number.isInteger(end)) throw new TypeError('end must be an integer');
+    if (start >= 0 && end >= 0 && end < start) {
+      throw new RangeError('end must be >= start when both are non-negative');
+    }
+
+    const sliced = end === -1 ? data.slice(start) : data.slice(start, end + 1);
+
+    return { count, data: sliced, meta: { resolution: 'minute' } };
   }
 
   /**
@@ -1097,7 +1224,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
       this.keys.schedulers,
       this.keys.ordering,
       this.keys.ratelimited,
-      this.keys.lifo,
+            lifo ? 1 : 0,
+            parentQueue,
+            parentDepsKey,
     ];
     await client.del(staticKeys);
 
@@ -1182,11 +1311,13 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * @param type - The job state to query
    * @param start - Start index for pagination (default 0)
    * @param end - End index for pagination (default -1, meaning all)
+   * @param opts - Set `excludeData: true` to omit `data` and `returnvalue` fields
    */
   async getJobs(
     type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed',
     start = 0,
     end = -1,
+    opts?: GetJobsOptions,
   ): Promise<Job<D, R>[]> {
     const client = await this.getClient();
     let jobIds: string[];
@@ -1228,16 +1359,23 @@ export class Queue<D = any, R = any> extends EventEmitter {
     }
 
     if (jobIds.length === 0) return [];
+    const excludeData = opts?.excludeData === true;
     const jobs: Job<D, R>[] = [];
     for (let offset = 0; offset < jobIds.length; offset += PIPELINE_CHUNK_SIZE) {
       const chunk = jobIds.slice(offset, offset + PIPELINE_CHUNK_SIZE);
       const batch = this.newBatch();
-      for (const id of chunk) (batch as any).hgetall(this.keys.job(id));
+      if (excludeData) {
+        for (const id of chunk) (batch as any).hmget(this.keys.job(id), JOB_METADATA_FIELDS);
+      } else {
+        for (const id of chunk) (batch as any).hgetall(this.keys.job(id));
+      }
       const batchResults = await client.exec(batch as any, false);
       if (batchResults) {
         for (let i = 0; i < batchResults.length; i++) {
-          const hash = hashDataToRecord(batchResults[i] as any);
-          if (hash) jobs.push(Job.fromHash<D, R>(client, this.keys, chunk[i], hash, this.serializer));
+          const hash = excludeData
+            ? hmgetArrayToRecord(batchResults[i] as (unknown | null)[], JOB_METADATA_FIELDS)
+            : hashDataToRecord(batchResults[i] as any);
+          if (hash) jobs.push(Job.fromHash<D, R>(client, this.keys, chunk[i], hash, this.serializer, excludeData));
         }
       }
     }
@@ -1269,31 +1407,40 @@ export class Queue<D = any, R = any> extends EventEmitter {
       jobIds = await this.scanJobIds(client, pfx, opts.name, limit);
     }
 
-    // Fetch full job objects
+    const hasDataFilter = opts.data && Object.keys(opts.data).length > 0;
+    const excludeData = opts.excludeData === true && !hasDataFilter;
     const jobs: Job<D, R>[] = [];
-    // ⚡ Bolt: Fix N+1 query by batching hgetall calls instead of awaiting them in a loop.
-    // Chunking ensures we only load what we need, properly satisfying the limit after filtering.
     const CHUNK = 100;
     for (let offset = 0; offset < jobIds.length && jobs.length < limit; offset += CHUNK) {
       const chunk = jobIds.slice(offset, offset + CHUNK);
       const batch = this.newBatch();
-      for (const id of chunk) {
-        (batch as any).hgetall(this.keys.job(id));
+      if (excludeData) {
+        for (const id of chunk) (batch as any).hmget(this.keys.job(id), JOB_METADATA_FIELDS);
+      } else {
+        for (const id of chunk) (batch as any).hgetall(this.keys.job(id));
       }
       const batchResults = await client.exec(batch as any, false);
       if (!batchResults) continue;
 
       for (let i = 0; i < chunk.length && jobs.length < limit; i++) {
-        const hash = hashDataToRecord(batchResults[i] as any);
+        const hash = excludeData
+          ? hmgetArrayToRecord(batchResults[i] as (unknown | null)[], JOB_METADATA_FIELDS)
+          : hashDataToRecord(batchResults[i] as any);
         if (!hash) continue;
 
-        const job = Job.fromHash<D, R>(client, this.keys, chunk[i], hash, this.serializer);
+        const job = Job.fromHash<D, R>(client, this.keys, chunk[i], hash, this.serializer, excludeData);
 
         // Apply name filter if we used a non-Lua path
         if (opts.name && !opts.state && job.name !== opts.name) continue;
 
         // Apply data filter (shallow key-value match)
         if (opts.data && !matchesData(job.data as Record<string, unknown>, opts.data)) continue;
+
+        // Strip data after filtering if caller originally requested excludeData
+        if (opts.excludeData && !excludeData) {
+          job.data = undefined as unknown as D;
+          job.returnvalue = undefined;
+        }
 
         jobs.push(job);
       }
@@ -1510,8 +1657,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * Returns an empty array if no DLQ is configured.
    * @param start - Start index (default 0)
    * @param end - End index (default -1, meaning all)
+   * @param opts - Set `excludeData: true` to omit `data` and `returnvalue` fields
    */
-  async getDeadLetterJobs(start = 0, end = -1): Promise<Job<D, R>[]> {
+  async getDeadLetterJobs(start = 0, end = -1, opts?: GetJobsOptions): Promise<Job<D, R>[]> {
     if (!this.opts.deadLetterQueue) return [];
     const client = await this.getClient();
     const dlqKeys = buildKeys(this.opts.deadLetterQueue.name, this.opts.prefix);
@@ -1527,19 +1675,26 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const jobIds = extractJobIdsFromStreamEntries(entries);
     const sliced = jobIds.slice(start, end >= 0 ? end + 1 : undefined);
     if (sliced.length === 0) return [];
+    const excludeData = opts?.excludeData === true;
     const jobs: Job<D, R>[] = [];
     for (let offset = 0; offset < sliced.length; offset += PIPELINE_CHUNK_SIZE) {
       const chunk = sliced.slice(offset, offset + PIPELINE_CHUNK_SIZE);
       const batch = this.newBatch();
-      for (const id of chunk) (batch as any).hgetall(dlqKeys.job(id));
+      if (excludeData) {
+        for (const id of chunk) (batch as any).hmget(dlqKeys.job(id), JOB_METADATA_FIELDS);
+      } else {
+        for (const id of chunk) (batch as any).hgetall(dlqKeys.job(id));
+      }
       const batchResults = await client.exec(batch as any, false);
       if (batchResults) {
         for (let i = 0; i < batchResults.length; i++) {
-          const hash = hashDataToRecord(batchResults[i] as any);
+          const hash = excludeData
+            ? hmgetArrayToRecord(batchResults[i] as (unknown | null)[], JOB_METADATA_FIELDS)
+            : hashDataToRecord(batchResults[i] as any);
           if (!hash) continue;
           // DLQ envelope is always JSON (written by Worker.moveToDLQ with JSON.stringify),
           // regardless of the queue's custom serializer.
-          jobs.push(Job.fromHash<D, R>(client, dlqKeys, chunk[i], hash));
+          jobs.push(Job.fromHash<D, R>(client, dlqKeys, chunk[i], hash, undefined, excludeData));
         }
       }
     }

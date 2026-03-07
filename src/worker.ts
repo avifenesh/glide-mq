@@ -2,12 +2,13 @@ import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
 import { TimeUnit } from '@glidemq/speedkey';
-import type { WorkerOptions, Processor, BatchProcessor, Client, Serializer } from './types';
+import type { WorkerOptions, Processor, BatchProcessor, Client, Serializer, SchedulerEntry } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import {
   buildKeys,
   calculateBackoff,
+  computeFollowingSchedulerNextRun,
   keyPrefix,
   nextReconnectDelay,
   reconnectWithBackoff,
@@ -21,7 +22,14 @@ import {
   ensureFunctionLibraryOnce,
   createConsumerGroup,
 } from './connection';
-import { GlideMQError, ConnectionError, DelayedError, UnrecoverableError, BatchError } from './errors';
+import {
+  GlideMQError,
+  ConnectionError,
+  DelayedError,
+  WaitingChildrenError,
+  UnrecoverableError,
+  BatchError,
+} from './errors';
 import {
   CONSUMER_GROUP,
   completeJob,
@@ -32,6 +40,7 @@ import {
   checkConcurrency,
   moveToActive,
   moveActiveToDelayed,
+  moveToWaitingChildren,
   deferActive,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
@@ -979,6 +988,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
     job.failedReason = error.message;
     this.emit('failed', job, error);
+
+    // Terminal failure: schedule next run for repeatAfterComplete schedulers
+    if (failResult === 'failed' && job.schedulerName) {
+      await this.updateSchedulerAfterComplete(job.schedulerName, Date.now());
+    }
+
     return failResult === 'failed';
   }
 
@@ -1012,6 +1027,60 @@ export class Worker<D = any, R = any> extends EventEmitter {
       job.data = request.nextData;
     }
     job.opts.delay = Math.max(0, request.delayedUntil - Date.now());
+  }
+
+  /**
+   * After a repeatAfterComplete job completes or terminally fails,
+   * update the scheduler entry so the next job is scheduled.
+   *
+   * KNOWN LIMITATIONS:
+   * 1. Non-atomic: This update happens after the job completion transaction,
+   *    so a worker crash between completion and this call will leave the scheduler
+   *    stuck at nextRun=0 (awaiting completion sentinel) indefinitely.
+   * 2. Non-worker failures: Jobs that reach terminal failure outside the worker
+   *    path (e.g., revoked jobs, expired jobs in moveToActive, stalled terminal
+   *    failures in glidemq_reclaimStalled) never trigger this update, leaving
+   *    the scheduler permanently stuck.
+   * 3. Race conditions: The idempotency check (nextRun === 0) prevents duplicate
+   *    updates from stalled reclaim, but doesn't prevent races with concurrent
+   *    upsertJobScheduler/removeJobScheduler (those use scheduler lock, this doesn't).
+   *
+   * MITIGATION: Run multiple workers for redundancy. Manually remove/re-add the
+   * scheduler to recover from stuck state.
+   *
+   * FUTURE WORK: Move scheduler update into Lua completion/failure functions to
+   * make it atomic and handle all terminal failure paths.
+   */
+  private async updateSchedulerAfterComplete(schedulerName: string, now: number): Promise<void> {
+    if (!this.commandClient) return;
+    try {
+      const raw = await this.commandClient.hget(this.queueKeys.schedulers, schedulerName);
+      if (raw == null) return; // scheduler was deleted while job was in flight
+
+      let config: SchedulerEntry;
+      try {
+        config = JSON.parse(String(raw));
+      } catch {
+        return;
+      }
+
+      if (!config.repeatAfterComplete) return;
+
+      // Idempotency: only update if nextRun is 0 (awaiting completion sentinel).
+      // This prevents duplicate updates from stalled reclaim or double-processing.
+      if (config.nextRun !== 0) return;
+
+      const nextRun = computeFollowingSchedulerNextRun(config, now);
+      if (nextRun == null || (config.limit != null && (config.iterationCount ?? 0) >= config.limit)) {
+        await this.commandClient.hdel(this.queueKeys.schedulers, [schedulerName]);
+      } else {
+        config.nextRun = nextRun;
+        // Don't overwrite lastRun - it was set by runSchedulers when the job was enqueued
+        await this.commandClient.hset(this.queueKeys.schedulers, { [schedulerName]: JSON.stringify(config) });
+      }
+    } catch (err) {
+      this.emit('error', err instanceof Error ? err : new Error(String(err)));
+    }
   }
 
   /**
@@ -1136,6 +1205,28 @@ export class Worker<D = any, R = any> extends EventEmitter {
         return;
       }
 
+      const waitingChildrenRequest = job.consumeMoveToWaitingChildrenRequest();
+      if (processError instanceof WaitingChildrenError || waitingChildrenRequest) {
+        if (!this.commandClient) return;
+        try {
+          const wtcResult = await moveToWaitingChildren(
+            this.commandClient,
+            this.queueKeys,
+            currentJobId,
+            currentEntryId,
+            CONSUMER_GROUP,
+          );
+          if (typeof wtcResult === 'string' && wtcResult.startsWith('error:')) {
+            const reason = wtcResult.slice(6);
+            throw new Error(`Cannot move to waiting-children: ${reason}`);
+          }
+        } catch (wtcErr) {
+          const err = wtcErr instanceof Error ? wtcErr : new Error(String(wtcErr));
+          await this.handleJobFailure(job, currentJobId, currentEntryId, err);
+        }
+        return;
+      }
+
       if (processError || aborted) {
         await this.handleJobFailure(job, currentJobId, currentEntryId, aborted ? new Error('revoked') : processError!);
         return;
@@ -1187,6 +1278,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
       job.returnvalue = processResult;
       job.finishedOn = Date.now();
       this.emit('completed', job, processResult);
+
+      if (job.schedulerName) {
+        await this.updateSchedulerAfterComplete(job.schedulerName, Date.now());
+      }
 
       // No next job - return to poll loop
       if (fetchResult.next === false) {

@@ -12,6 +12,10 @@
     "./testing": {
       "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
+    },
+    "./proxy": {
+      "types": "./dist/proxy/index.d.ts",
+      "default": "./dist/proxy/index.js"
     }
   },
   "type": "commonjs",
@@ -57,10 +61,14 @@
     "vitest": "^3"
   },
   "peerDependencies": {
-    "@opentelemetry/api": "^1.0.0"
+    "@opentelemetry/api": "^1.0.0",
+    "express": ">=4.18.0"
   },
   "peerDependenciesMeta": {
     "@opentelemetry/api": {
+      "optional": true
+    },
+    "express": {
       "optional": true
     }
   },
