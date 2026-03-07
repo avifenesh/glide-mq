@@ -669,4 +669,52 @@ describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
 
     expect(secondProcessed).toBe(true);
   }, 15000);
+
+  it('LIFO processes jobs in last-in-first-out order within a batch', async () => {
+    const qName = Q + '-order';
+    const queue = new Queue(qName, { connection: CONNECTION });
+
+    // Add 5 LIFO jobs sequentially so they have a defined insertion order
+    for (let i = 0; i < 5; i++) {
+      await queue.add('task', { seq: i }, { lifo: true });
+    }
+
+    const processedOrder: number[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
+
+      const worker = new Worker(
+        qName,
+        async (job: any) => {
+          processedOrder.push(job.data.seq);
+          return 'ok';
+        },
+        { connection: CONNECTION, concurrency: 1 },
+      );
+
+      worker.on('drained', async () => {
+        if (processedOrder.length === 5) {
+          clearTimeout(timeout);
+          await worker.close(true);
+          await queue.close();
+          try {
+            // Last added (seq=4) should be processed first in LIFO order
+            expect(processedOrder[0]).toBe(4);
+            expect(processedOrder[1]).toBe(3);
+            expect(processedOrder[2]).toBe(2);
+            expect(processedOrder[3]).toBe(1);
+            expect(processedOrder[4]).toBe(0);
+            resolve();
+          } catch (e) {
+            reject(e);
+          } finally {
+            await cleanupClient.del([...Object.keys(require('../dist/utils').buildKeys(qName))]);
+          }
+        }
+      });
+
+      worker.on('error', (err: Error) => { reject(err); });
+    });
+  }, 15000);
 });

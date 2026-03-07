@@ -325,4 +325,65 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
     await worker2.close(true);
     await broadcast.close();
   });
+
+  it('pause() stops message flow to subscribers', async () => {
+    const qName = Q + '-pause';
+    const broadcast = new Broadcast(qName, { connection: CONNECTION });
+    const received: any[] = [];
+
+    const worker = new BroadcastWorker(
+      qName,
+      async (job: any) => {
+        received.push(job.data);
+      },
+      { connection: CONNECTION, subscription: 'sub-pause' },
+    );
+
+    // Wait for worker to be ready
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+
+    // Pause the worker
+    await worker.pause(true);
+
+    // Publish a message while paused
+    await broadcast.publish({ msg: 'while-paused' });
+
+    // Wait briefly to confirm message is NOT processed
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    expect(received).toHaveLength(0);
+
+    await worker.close(true);
+    await broadcast.close();
+  }, 10000);
+
+  it('resume() restarts message flow after pause', async () => {
+    const qName = Q + '-resume';
+    const broadcast = new Broadcast(qName, { connection: CONNECTION });
+    const received: any[] = [];
+
+    const worker = new BroadcastWorker(
+      qName,
+      async (job: any) => {
+        received.push(job.data);
+      },
+      { connection: CONNECTION, subscription: 'sub-resume', startFrom: '0' },
+    );
+
+    // Wait for worker to be ready
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+
+    // Pause and publish
+    await worker.pause(true);
+    await broadcast.publish({ msg: 'before-resume' });
+
+    // Resume - worker should pick up pending messages
+    await worker.resume();
+
+    // Wait for message to be processed
+    await waitFor(() => received.length >= 1, 8000);
+    expect(received.length).toBeGreaterThanOrEqual(1);
+
+    await worker.close(true);
+    await broadcast.close();
+  }, 15000);
 });
