@@ -175,6 +175,7 @@ export const JOB_METADATA_FIELDS: readonly string[] = Object.freeze([
   'progress',
   'revoked',
   'lastActive',
+  'schedulerName',
 ]);
 
 /**
@@ -472,14 +473,20 @@ export function nextCronOccurrence(pattern: string, afterMs: number, tz?: string
 }
 
 export function computeInitialSchedulerNextRun(
-  schedule: Pick<ScheduleOpts, 'pattern' | 'every' | 'tz'> & { startDate?: number; endDate?: number },
+  schedule: Pick<ScheduleOpts, 'pattern' | 'every' | 'repeatAfterComplete' | 'tz'> & {
+    startDate?: number;
+    endDate?: number;
+  },
   now: number,
 ): number | null {
-  if (!schedule.pattern) {
+  if (!schedule.pattern && !schedule.repeatAfterComplete) {
     validateSchedulerEvery(schedule.every);
   }
   let nextRun: number;
-  if (schedule.pattern) {
+  if (schedule.repeatAfterComplete) {
+    // First job fires immediately (or at startDate if in the future)
+    nextRun = schedule.startDate != null && schedule.startDate > now ? schedule.startDate : now;
+  } else if (schedule.pattern) {
     const base = schedule.startDate != null && schedule.startDate > now ? schedule.startDate : now;
     nextRun = nextCronOccurrence(schedule.pattern, base - 1, schedule.tz);
   } else if (schedule.every) {
@@ -493,7 +500,7 @@ export function computeInitialSchedulerNextRun(
       nextRun = schedule.startDate + steps * schedule.every;
     }
   } else {
-    throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
+    throw new Error('Schedule must have pattern (cron), every (ms interval), or repeatAfterComplete (ms)');
   }
 
   if (schedule.endDate != null && nextRun > schedule.endDate) {
@@ -503,14 +510,20 @@ export function computeInitialSchedulerNextRun(
 }
 
 export function computeFollowingSchedulerNextRun(
-  schedule: Pick<SchedulerEntry, 'pattern' | 'every' | 'tz' | 'endDate'>,
+  schedule: Pick<SchedulerEntry, 'pattern' | 'every' | 'repeatAfterComplete' | 'tz' | 'endDate'>,
   afterMs: number,
 ): number | null {
-  if (!schedule.pattern && !isValidSchedulerEvery(schedule.every)) {
+  if (
+    !schedule.pattern &&
+    !isValidSchedulerEvery(schedule.every) &&
+    !isValidSchedulerEvery(schedule.repeatAfterComplete)
+  ) {
     return null;
   }
   let nextRun: number;
-  if (schedule.pattern) {
+  if (schedule.repeatAfterComplete) {
+    nextRun = afterMs + schedule.repeatAfterComplete;
+  } else if (schedule.pattern) {
     nextRun = nextCronOccurrence(schedule.pattern, afterMs, schedule.tz);
   } else if (schedule.every) {
     nextRun = afterMs + schedule.every;

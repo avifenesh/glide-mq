@@ -114,7 +114,7 @@ describeEachMode('Job schedulers', (CONNECTION) => {
 
   it('upsertJobScheduler rejects missing schedule', async () => {
     await expect(queue.upsertJobScheduler('bad', {} as any)).rejects.toThrow(
-      'Schedule must have either pattern (cron) or every (ms interval)',
+      'Schedule must have pattern (cron), every (ms interval), or repeatAfterComplete (ms)',
     );
   });
 
@@ -682,4 +682,159 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     await localQueue.close();
     await flushQueue(cleanupClient, qName);
   }, 15000);
+
+  it('repeatAfterComplete scheduler fires next job only after completion', async () => {
+    const qName = Q + '-rac';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+
+    await localQueue.upsertJobScheduler(
+      'rac-test',
+      { repeatAfterComplete: 500 },
+      { name: 'rac-job', data: { seq: true } },
+    );
+
+    const timestamps: { start: number; end: number }[] = [];
+    let worker: InstanceType<typeof Worker>;
+    const done = new Promise<void>((resolve) => {
+      worker = new Worker(
+        qName,
+        async () => {
+          const start = Date.now();
+          await new Promise((r) => setTimeout(r, 200));
+          timestamps.push({ start, end: Date.now() });
+          if (timestamps.length >= 3) {
+            setTimeout(() => worker.close(true).then(resolve), 100);
+          }
+          return 'ok';
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 500,
+          stalledInterval: 60000,
+          promotionInterval: 300,
+        },
+      );
+      worker.on('error', () => {});
+
+      // Safety timeout
+      setTimeout(() => worker.close(true).then(resolve), 12000);
+    });
+
+    await done;
+
+    expect(timestamps.length).toBeGreaterThanOrEqual(2);
+
+    // Verify non-overlapping: each job starts after previous completes
+    for (let i = 1; i < timestamps.length; i++) {
+      // Assert true non-overlap: next starts after previous ends
+      expect(timestamps[i].start).toBeGreaterThanOrEqual(timestamps[i - 1].end);
+
+      // Assert repeatAfterComplete delay is honored (500ms with tolerance for jitter)
+      const gap = timestamps[i].start - timestamps[i - 1].end;
+      expect(gap).toBeGreaterThanOrEqual(400); // 500ms - 100ms jitter tolerance
+    }
+
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 20000);
+
+  it('repeatAfterComplete schedules next after terminal failure', async () => {
+    const qName = Q + '-rac-fail';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const { UnrecoverableError } = require('../dist/errors') as typeof import('../src/errors');
+
+    await localQueue.upsertJobScheduler('rac-fail-test', { repeatAfterComplete: 300 }, { name: 'rac-fail-job' });
+
+    let jobCount = 0;
+    let worker: InstanceType<typeof Worker>;
+    const done = new Promise<void>((resolve) => {
+      worker = new Worker(
+        qName,
+        async () => {
+          jobCount++;
+          if (jobCount === 1) {
+            throw new UnrecoverableError('terminal failure');
+          }
+          return 'ok';
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 500,
+          stalledInterval: 60000,
+          promotionInterval: 300,
+        },
+      );
+      worker.on('error', () => {});
+
+      setTimeout(() => worker.close(true).then(resolve), 6000);
+    });
+
+    await done;
+
+    // First job fails terminally, but scheduler should still create a second job
+    expect(jobCount).toBeGreaterThanOrEqual(2);
+
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
+  it('repeatAfterComplete respects limit', async () => {
+    const qName = Q + '-rac-limit';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+
+    await localQueue.upsertJobScheduler(
+      'rac-limit-test',
+      { repeatAfterComplete: 200, limit: 2 },
+      { name: 'rac-limit-job' },
+    );
+
+    let jobCount = 0;
+    let worker: InstanceType<typeof Worker>;
+    const done = new Promise<void>((resolve) => {
+      worker = new Worker(
+        qName,
+        async () => {
+          jobCount++;
+          return 'ok';
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 500,
+          stalledInterval: 60000,
+          promotionInterval: 300,
+        },
+      );
+      worker.on('error', () => {});
+
+      setTimeout(() => worker.close(true).then(resolve), 5000);
+    });
+
+    await done;
+
+    // Scheduler limit is 2: first job fired by scheduler tick (iterationCount=1),
+    // worker completion schedules second (iterationCount stays at 1 on scheduler side,
+    // but limit is checked in runSchedulers after bump to 2). Expect exactly 2.
+    expect(jobCount).toBe(2);
+
+    // Scheduler entry should be deleted after reaching the limit
+    const k = buildKeys(qName);
+    const entry = await cleanupClient.hget(k.schedulers, 'rac-limit-test');
+    expect(entry).toBeNull();
+
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
+  it('repeatAfterComplete is mutually exclusive with every/pattern', async () => {
+    await expect(
+      queue.upsertJobScheduler('bad-combo-1', { every: 1000, repeatAfterComplete: 500 } as any),
+    ).rejects.toThrow('mutually exclusive');
+
+    await expect(
+      queue.upsertJobScheduler('bad-combo-2', { pattern: '* * * * *', repeatAfterComplete: 500 } as any),
+    ).rejects.toThrow('mutually exclusive');
+  });
 });

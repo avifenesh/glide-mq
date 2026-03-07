@@ -4,6 +4,11 @@
  *
  * Usage:
  *   import { TestQueue, TestWorker } from 'glide-mq/testing';
+ *
+ * LIMITATION: repeatAfterComplete schedulers are accepted but behave like `every` schedulers
+ * in testing mode (fire at regular intervals, not based on job completion). This is because
+ * the in-memory implementation doesn't track job-to-scheduler linkage. For full repeatAfterComplete
+ * behavior, use the real Queue/Worker with a Valkey instance.
  */
 
 import { EventEmitter } from 'events';
@@ -422,8 +427,17 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   async upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void> {
     validateSchedulerEvery(schedule.every);
-    if (!schedule.pattern && !schedule.every) {
-      throw new Error('Schedule must have either pattern (cron) or every (ms interval)');
+    if (schedule.repeatAfterComplete != null) {
+      if (!Number.isSafeInteger(schedule.repeatAfterComplete) || schedule.repeatAfterComplete <= 0) {
+        throw new Error('repeatAfterComplete must be a positive safe integer');
+      }
+    }
+    const modeCount = (schedule.pattern ? 1 : 0) + (schedule.every ? 1 : 0) + (schedule.repeatAfterComplete ? 1 : 0);
+    if (modeCount === 0) {
+      throw new Error('Schedule must have pattern (cron), every (ms interval), or repeatAfterComplete (ms)');
+    }
+    if (modeCount > 1) {
+      throw new Error('Schedule must have only one of: pattern, every, repeatAfterComplete');
     }
     if (schedule.tz) {
       validateTimezone(schedule.tz);
@@ -438,6 +452,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       {
         pattern: schedule.pattern,
         every: schedule.every,
+        repeatAfterComplete: schedule.repeatAfterComplete,
         tz: schedule.tz,
         startDate,
         endDate,
@@ -449,10 +464,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       const scheduleUnchanged =
         existing.pattern === schedule.pattern &&
         existing.every === schedule.every &&
+        existing.repeatAfterComplete === schedule.repeatAfterComplete &&
         existing.tz === schedule.tz &&
         existing.startDate === startDate &&
         existing.endDate === endDate;
-      if (scheduleUnchanged && existing.nextRun) {
+      if (scheduleUnchanged && existing.nextRun != null) {
         iterationCount = existing.iterationCount ?? 0;
         lastRun = existing.lastRun;
         nextRun = existing.nextRun;
@@ -464,6 +480,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     const entry: SchedulerEntry = {
       pattern: schedule.pattern,
       every: schedule.every,
+      repeatAfterComplete: schedule.repeatAfterComplete,
       tz: schedule.tz,
       startDate,
       endDate,
@@ -561,10 +578,13 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       const now = Date.now();
       const dueNames: string[] = [];
       for (const [name, entry] of this.schedulers.entries()) {
-        if (!entry.pattern && !entry.every) {
+        if (!entry.pattern && !entry.every && !entry.repeatAfterComplete) {
           dueNames.push(name);
           continue;
         }
+        // Skip repeatAfterComplete entries with nextRun=0 (awaiting completion)
+        if (entry.repeatAfterComplete && entry.nextRun === 0) continue;
+
         if (entry.nextRun != null && entry.nextRun <= now) {
           dueNames.push(name);
         }
@@ -574,7 +594,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
         const entry = this.schedulers.get(name);
         if (!entry) continue;
 
-        if (!entry.pattern && !entry.every) {
+        if (!entry.pattern && !entry.every && !entry.repeatAfterComplete) {
           this.schedulers.delete(name);
           continue;
         }
