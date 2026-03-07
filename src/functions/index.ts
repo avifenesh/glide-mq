@@ -827,7 +827,28 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId}
   -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ...}
 
--- Phase 1.5: Try LIFO list first (before stream), retry up to 3 times  local lifoKey = prefix .. 'lifo'  for _lifoAttempt = 1, 3 do    local lifoJobId = redis.call('RPOP', lifoKey)    if not lifoJobId then      break  -- LIFO list is empty    end    local lifoJobKey = prefix .. 'job:' .. lifoJobId    if redis.call('EXISTS', lifoJobKey) == 1 then      local lifoRevoked = redis.call('HGET', lifoJobKey, 'revoked')      if lifoRevoked ~= '1' and not checkExpired(lifoJobKey, lifoJobId, prefix, timestamp) then        -- Valid LIFO job found - activate it        local lifoJobFields = redis.call('HGETALL', lifoJobKey)        redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp))        emitEvent(eventsKey, 'active', lifoJobId, nil)        -- Return LIFO job (no entryId for LIFO jobs, use empty string)        return {'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}      end    end  end
+  -- Phase 1.5: Try LIFO list first (before stream), retry up to 3 times
+  local lifoKey = prefix .. 'lifo'
+  for _lifoAttempt = 1, 3 do
+    local lifoJobId = redis.call('RPOP', lifoKey)
+    if not lifoJobId then
+      break  -- LIFO list is empty
+    end
+
+    local lifoJobKey = prefix .. 'job:' .. lifoJobId
+    if redis.call('EXISTS', lifoJobKey) == 1 then
+      local lifoRevoked = redis.call('HGET', lifoJobKey, 'revoked')
+      if lifoRevoked ~= '1' and not checkExpired(lifoJobKey, lifoJobId, prefix, timestamp) then
+        -- Valid LIFO job found - activate it
+        local lifoJobFields = redis.call('HGETALL', lifoJobKey)
+        redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp))
+        emitEvent(eventsKey, 'active', lifoJobId, nil)
+        -- Return LIFO job (no entryId for LIFO jobs, use empty string)
+        return {'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}
+      end
+    end
+  end
+
   -- Phase 2: Fetch next job (non-blocking XREADGROUP), skip expired (up to 3 attempts)
   local nextJobId, nextEntryId, nextJobKey
   for _fetchAttempt = 1, 3 do
