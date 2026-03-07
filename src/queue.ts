@@ -443,6 +443,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const maxAttempts = opts.attempts ?? 0;
       const orderingKey = opts.ordering?.key ?? '';
       validateOrderingKey(orderingKey);
+      if (opts.lifo && orderingKey) {
+        throw new Error('lifo and ordering.key cannot be used together');
+      }
       if (opts.ttl != null) {
         if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
       }
@@ -501,6 +504,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         deduplication,
         serializedData,
         customJobId,
+        lifo: opts.lifo ?? false,
       };
     });
 
@@ -532,6 +536,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
+          String(p.lifo ? 1 : 0),
         ]);
       } else {
         batch.fcall('glidemq_addJob', keys, [
@@ -552,6 +557,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
+          String(p.lifo ? 1 : 0),
         ]);
       }
     }
@@ -1091,6 +1097,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       this.keys.schedulers,
       this.keys.ordering,
       this.keys.ratelimited,
+      this.keys.lifo,
     ];
     await client.del(staticKeys);
 

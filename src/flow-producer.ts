@@ -127,6 +127,9 @@ export class FlowProducer {
       }
       const customJobId = opts.jobId ?? '';
       if (customJobId !== '') validateJobId(customJobId);
+      if (opts.lifo && opts.ordering?.key) {
+        throw new Error('lifo and ordering.key cannot be used together');
+      }
       const jobId = await addJob(
         client,
         parentKeys,
@@ -147,6 +150,7 @@ export class FlowProducer {
         jobCost,
         opts.ttl ?? 0,
         customJobId,
+        opts.lifo ? 1 : 0,
       );
       if (String(jobId) === 'duplicate') {
         throw new Error('Duplicate job ID in flow');

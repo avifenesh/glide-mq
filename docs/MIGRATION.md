@@ -1120,7 +1120,6 @@ These BullMQ features are not yet implemented.
 
 | Missing feature | Workaround |
 |---|---|
-| `lifo` | `lifo` | Same |
 | QueueEvents `'waiting'`, `'active'`, `'delayed'`, `'drained'`, `'deduplicated'` events | Use worker-level events or poll `getJobCounts()` |
 | `@nestjs/bullmq` integration | Not yet supported - use glide-mq directly |
 | `failParentOnFailure` in FlowJob | Implement manually in the worker's `failed` handler |
