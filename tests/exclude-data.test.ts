@@ -114,10 +114,16 @@ describeEachMode('excludeData option', (CONNECTION) => {
 
       await q.add('fail-work', { input: 'data' }, { attempts: 1 });
 
-      const w = new Worker(qName, async () => { throw new Error('intentional'); }, {
-        connection: CONNECTION,
-        stalledInterval: 60000,
-      });
+      const w = new Worker(
+        qName,
+        async () => {
+          throw new Error('intentional');
+        },
+        {
+          connection: CONNECTION,
+          stalledInterval: 60000,
+        },
+      );
 
       await waitFor(async () => {
         const counts = await q.getJobCounts();
@@ -237,11 +243,17 @@ describeEachMode('excludeData option', (CONNECTION) => {
 
       await q.add('dlq-task', { bigPayload: 'x'.repeat(1000) }, { attempts: 1 });
 
-      const w = new Worker(qName, async () => { throw new Error('dlq test'); }, {
-        connection: CONNECTION,
-        deadLetterQueue: { name: dlqName },
-        stalledInterval: 60000,
-      });
+      const w = new Worker(
+        qName,
+        async () => {
+          throw new Error('dlq test');
+        },
+        {
+          connection: CONNECTION,
+          deadLetterQueue: { name: dlqName },
+          stalledInterval: 60000,
+        },
+      );
 
       await waitFor(async () => {
         const jobs = await q.getDeadLetterJobs();
