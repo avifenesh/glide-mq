@@ -168,6 +168,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   readonly name: string;
   /** @internal */ readonly jobs: Map<string, TestJobRecord<D, R>> = new Map();
   /** @internal */ readonly dedupSet: Set<string> = new Set();
+  /** @internal */ readonly waitingQueue: TestJobRecord<D, R>[] = [];
   private idCounter = 0;
   private paused = false;
   private opts: TestQueueOptions;
@@ -241,6 +242,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       expireAt: ttl > 0 ? now + ttl : undefined,
     };
     this.jobs.set(id, record);
+    this.waitingQueue.push(record);
 
     const job = new TestJob<D, R>(record);
     this.emit('added', job);
@@ -420,6 +422,9 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     for (const id of toRemove) {
       this.jobs.delete(id);
     }
+    // Clear waitingQueue - stale entries will be skipped by findNextWaiting,
+    // but draining waiting jobs means the queue should be empty.
+    this.waitingQueue.length = 0;
     if (toRemove.length > 0) {
       this.emit('drained', toRemove.length);
     }
@@ -444,6 +449,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       record.attemptsMade = 0;
       record.failedReason = undefined;
       record.finishedOn = undefined;
+      this.waitingQueue.push(record);
       retried++;
     }
     // Notify workers so retried jobs get picked up
@@ -828,7 +834,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   }
 
   private findNextWaiting(): TestJobRecord<D, R> | undefined {
-    for (const record of this.queue.jobs.values()) {
+    // Shift from the front of the waitingQueue, skipping stale entries
+    // (records whose state changed out of 'waiting' since they were enqueued).
+    while (this.queue.waitingQueue.length > 0) {
+      const record = this.queue.waitingQueue.shift()!;
       if (record.state === 'waiting') return record;
     }
     return undefined;
@@ -874,6 +883,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
           // Retry: put back to waiting
           record.state = 'waiting';
+          this.queue.waitingQueue.push(record);
           // Schedule a re-drain so the retry gets picked up
           queueMicrotask(() => this.processAvailable());
         } else {
@@ -902,13 +912,16 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     // Respect concurrency: don't start a new batch if at capacity
     if (this.activeCount >= this.concurrency * this.batchSize) return;
 
-    // Collect up to batchSize waiting jobs
+    // Collect up to batchSize waiting jobs from the waitingQueue
     const records: TestJobRecord<D, R>[] = [];
-    for (const record of this.queue.jobs.values()) {
-      if (record.state === 'waiting') {
-        records.push(record);
-        if (records.length >= this.batchSize) break;
+    while (this.queue.waitingQueue.length > 0 && records.length < this.batchSize) {
+      const record = this.queue.waitingQueue[0];
+      if (record.state !== 'waiting') {
+        this.queue.waitingQueue.shift();
+        continue;
       }
+      this.queue.waitingQueue.shift();
+      records.push(record);
     }
 
     if (records.length === 0) {
@@ -946,13 +959,16 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
   private flushBatch(): void {
     if (!this.running) return;
-    // Re-collect - some jobs may have been claimed or state changed
+    // Re-collect from waitingQueue, skipping stale entries
     const records: TestJobRecord<D, R>[] = [];
-    for (const record of this.queue.jobs.values()) {
-      if (record.state === 'waiting') {
-        records.push(record);
-        if (records.length >= this.batchSize) break;
+    while (this.queue.waitingQueue.length > 0 && records.length < this.batchSize) {
+      const record = this.queue.waitingQueue[0];
+      if (record.state !== 'waiting') {
+        this.queue.waitingQueue.shift();
+        continue;
       }
+      this.queue.waitingQueue.shift();
+      records.push(record);
     }
     if (records.length > 0) {
       this.executeBatch(records);
@@ -1011,6 +1027,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
                 job.discarded || result instanceof UnrecoverableError || result.name === 'UnrecoverableError';
               if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
                 record.state = 'waiting';
+                this.queue.waitingQueue.push(record);
                 queueMicrotask(() => this.processAvailable());
               } else {
                 record.state = 'failed';
@@ -1046,6 +1063,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
             const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
             if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
               record.state = 'waiting';
+              this.queue.waitingQueue.push(record);
               queueMicrotask(() => this.processAvailable());
             } else {
               record.state = 'failed';
