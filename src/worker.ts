@@ -402,7 +402,15 @@ export class Worker<D = any, R = any> extends EventEmitter {
         if (nextJobId) {
           const jobId = String(nextJobId);
           if (this.concurrency === 1) {
-            await this.processJob(jobId, '');
+            this.activeCount++;
+            const promise = this.processJob(jobId, '');
+            this.activePromises.add(promise);
+            try {
+              await promise;
+            } finally {
+              this.activeCount--;
+              this.activePromises.delete(promise);
+            }
           } else {
             this.dispatchJob(jobId, '');
           }
@@ -432,7 +440,15 @@ export class Worker<D = any, R = any> extends EventEmitter {
             if (nextJobId) {
               const jobId = String(nextJobId);
               if (this.concurrency === 1) {
-                await this.processJob(jobId, '');
+                this.activeCount++;
+                const promise = this.processJob(jobId, '');
+                this.activePromises.add(promise);
+                try {
+                  await promise;
+                } finally {
+                  this.activeCount--;
+                  this.activePromises.delete(promise);
+                }
               } else {
                 this.dispatchJob(jobId, '');
               }

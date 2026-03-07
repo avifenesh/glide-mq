@@ -8,7 +8,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 46: Added lifo parameter to glidemq_addJob (arg 18) and glidemq_dedup (arg 21) for LIFO mode.
 // Version 47: Priority-promoted jobs routed to dedicated priority list (priority > LIFO > FIFO ordering).
 // Version 48: Use LPUSH for priority list so RPOP returns highest-priority (lowest score) job first.
-export const LIBRARY_VERSION = '48';
+// Version 49: Fix Phase 1.0/1.5 in completeAndFetchNext - HSET before HGETALL, add lastActive.
+export const LIBRARY_VERSION = '49';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -942,9 +943,9 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     if redis.call('EXISTS', priJobKey) == 1 then
       local priRevoked = redis.call('HGET', priJobKey, 'revoked')
       if priRevoked ~= '1' and not checkExpired(priJobKey, priJobId, prefix, timestamp) then
-        local priJobFields = redis.call('HGETALL', priJobKey)
-        redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp))
+        redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
         emitEvent(eventsKey, 'active', priJobId, nil)
+        local priJobFields = redis.call('HGETALL', priJobKey)
         return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
       end
     end
@@ -962,10 +963,10 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     if redis.call('EXISTS', lifoJobKey) == 1 then
       local lifoRevoked = redis.call('HGET', lifoJobKey, 'revoked')
       if lifoRevoked ~= '1' and not checkExpired(lifoJobKey, lifoJobId, prefix, timestamp) then
-        -- Valid LIFO job found - activate it
-        local lifoJobFields = redis.call('HGETALL', lifoJobKey)
-        redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp))
+        -- Activate: set state, processedOn, lastActive before HGETALL so returned hash is current
+        redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
         emitEvent(eventsKey, 'active', lifoJobId, nil)
+        local lifoJobFields = redis.call('HGETALL', lifoJobKey)
         -- Return LIFO job (no entryId for LIFO jobs, use empty string)
         return {'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}
       end
