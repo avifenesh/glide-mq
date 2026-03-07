@@ -7,6 +7,22 @@ const DEFAULT_PREFIX = 'glide';
 // 1MB max payload size to prevent DoS
 export const MAX_JOB_DATA_SIZE = 1048576;
 
+/** Characters that break Valkey cluster hash-tag routing when used in queue names. */
+export const INVALID_QUEUE_NAME_CHARS = /[{}:]/;
+
+/**
+ * Validate a queue name. Throws if it contains characters that would corrupt
+ * cluster hash-tag routing (curly braces or colons).
+ */
+export function validateQueueName(name: string): void {
+  if (!name || typeof name !== 'string') {
+    throw new Error('Queue name must be a non-empty string');
+  }
+  if (INVALID_QUEUE_NAME_CHARS.test(name)) {
+    throw new Error('Queue name must not contain curly braces or colons');
+  }
+}
+
 export function isPlainStepPayload(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   return Object.getPrototypeOf(value) === Object.prototype;

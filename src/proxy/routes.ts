@@ -1,6 +1,9 @@
 import type { Router, Request, Response } from 'express';
 import { Queue } from '../queue';
 import type { ProxyOptions, AddJobRequest, AddJobResponse, AddJobSkippedResponse } from './types';
+import { validateQueueName } from '../utils';
+
+const MAX_BULK_SIZE = 1000;
 
 /** Extract a single string from a route param (Express 5 params can be string | string[]). */
 function param(req: Request, key: string): string {
@@ -32,6 +35,13 @@ export function createRoutes(
     if (closed) {
       const err = new Error('Proxy is shutting down');
       (err as any).status = 503;
+      throw err;
+    }
+    try {
+      validateQueueName(name);
+    } catch (validationErr) {
+      const err = validationErr instanceof Error ? validationErr : new Error(String(validationErr));
+      (err as any).status = 400;
       throw err;
     }
     let q = queueCache.get(name);
@@ -97,6 +107,10 @@ export function createRoutes(
       }
 
       const jobs = body.jobs as AddJobRequest[];
+      if (jobs.length > MAX_BULK_SIZE) {
+        res.status(400).json({ error: `Too many jobs (max ${MAX_BULK_SIZE})` });
+        return;
+      }
       for (let i = 0; i < jobs.length; i++) {
         if (!jobs[i] || typeof jobs[i].name !== 'string' || !jobs[i].name) {
           res.status(400).json({ error: `jobs[${i}]: missing required field: name` });

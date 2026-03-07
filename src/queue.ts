@@ -38,6 +38,7 @@ import {
   compress,
   MAX_JOB_DATA_SIZE,
   JOB_METADATA_FIELDS,
+  validateQueueName,
 } from './utils';
 import {
   createBlockingClient,
@@ -111,6 +112,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (!opts.connection && !opts.client) {
       throw new GlideMQError('Either `connection` or `client` must be provided.');
     }
+    validateQueueName(name);
     this.name = name;
     this.opts = opts;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
@@ -647,6 +649,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     let cursor = lastId;
     const deadline = Date.now() + waitTimeout;
     let reconnectBackoff = 0;
+    let clientClosed = false;
     let rejectOnClose: ((err: Error) => void) | null = null;
     const closePromise = new Promise<never>((_, reject) => {
       rejectOnClose = reject;
@@ -672,6 +675,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
               this.emit('error', closeErr as Error);
             }
           }
+          clientClosed = true;
           if (this.closing) {
             throw new GlideMQError('Queue is closing');
           }
@@ -689,6 +693,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             try {
               blockingClient = await createBlockingClient(this.opts.connection!);
               this.waitClients.add(blockingClient);
+              clientClosed = false;
               break;
             } catch (createErr) {
               const reconnectRemaining = deadline - Date.now();
@@ -747,12 +752,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
       if (rejectOnClose) {
         this.waitRejectors.delete(rejectOnClose);
       }
-      this.waitClients.delete(blockingClient);
-      try {
-        blockingClient.close();
-      } catch (closeErr) {
-        if (this.listenerCount('error') > 0) {
-          this.emit('error', closeErr as Error);
+      if (!clientClosed) {
+        this.waitClients.delete(blockingClient);
+        try {
+          blockingClient.close();
+        } catch (closeErr) {
+          if (this.listenerCount('error') > 0) {
+            this.emit('error', closeErr as Error);
+          }
         }
       }
     }
