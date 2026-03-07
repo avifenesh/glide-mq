@@ -2,7 +2,9 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '43';
+// Version 43: Added schedulerName to glidemq_addJob (arg 19) for repeatAfterComplete feature.
+// Version 44: Added metrics recording (time-series data for getMetrics).
+export const LIBRARY_VERSION = '44';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -386,6 +388,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local ttl = tonumber(args[16]) or 0
   local customJobId = args[17] or ''
   local parentQueue = args[18] or ''
+  local schedulerName = args[19] or ''
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local jobIdStr
   local jobKey
@@ -507,6 +510,10 @@ redis.register_function('glidemq_addJob', function(keys, args)
       hashFields[#hashFields + 1] = 'parentQueue'
       hashFields[#hashFields + 1] = parentQueue
     end
+  end
+  if schedulerName ~= '' then
+    hashFields[#hashFields + 1] = 'schedulerName'
+    hashFields[#hashFields + 1] = schedulerName
   end
   if delay > 0 or priority > 0 then
     hashFields[#hashFields + 1] = 'state'
@@ -2549,6 +2556,7 @@ export function addJobArgs(
   customJobId: string = '',
   parentQueue: string = '',
   parentDepsKey: string = '',
+  schedulerName: string = '',
 ): { keys: string[]; args: string[] } {
   const keys = [k.id, k.stream, k.scheduled, k.events];
   if (parentDepsKey) {
@@ -2575,6 +2583,7 @@ export function addJobArgs(
       ttl.toString(),
       customJobId,
       parentQueue,
+      schedulerName,
     ],
   };
 }
@@ -2601,6 +2610,7 @@ export async function addJob(
   customJobId: string = '',
   parentQueue: string = '',
   parentDepsKey: string = '',
+  schedulerName: string = '',
 ): Promise<string> {
   const { keys, args } = addJobArgs(
     k,
@@ -2623,6 +2633,7 @@ export async function addJob(
     customJobId,
     parentQueue,
     parentDepsKey,
+    schedulerName,
   );
   const result = await client.fcall('glidemq_addJob', keys, args);
   return result as string;

@@ -257,6 +257,11 @@ export interface ScheduleOpts {
   pattern?: string;
   /** Repeat interval in milliseconds */
   every?: number;
+  /**
+   * Schedule next job N ms after the current one completes (or terminally fails).
+   * Mutually exclusive with `pattern` and `every`.
+   */
+  repeatAfterComplete?: number;
   /** IANA timezone for cron patterns (e.g. 'America/New_York'). Defaults to UTC. */
   tz?: string;
   /** Earliest time the scheduler may create a job. Accepts a Date or epoch milliseconds. */
@@ -276,6 +281,8 @@ export interface JobTemplate {
 export interface SchedulerEntry {
   pattern?: string;
   every?: number;
+  /** Delay in ms after completion before scheduling the next job. */
+  repeatAfterComplete?: number;
   /** IANA timezone for cron patterns (e.g. 'America/New_York'). Defaults to UTC. */
   tz?: string;
   startDate?: number;
