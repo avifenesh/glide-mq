@@ -30,6 +30,10 @@ export interface SchedulerOptions {
   onError?: (err: Error) => void;
   /** Serializer for job template data. Inherited from the parent Worker/Queue. */
   serializer?: Serializer;
+  /** Consumer group name for stalled job reclamation. Defaults to 'workers'. */
+  consumerGroup?: string;
+  /** When true, stalled reclaim skips XDEL so other consumer groups can still consume the entry. */
+  broadcastMode?: boolean;
 }
 
 /**
@@ -47,6 +51,8 @@ export class Scheduler {
   private stalledInterval: number;
   private maxStalledCount: number;
   private consumerId: string;
+  private consumerGroup: string;
+  private broadcastMode: boolean;
   private onPromotionTick?: () => void;
   private onError?: (err: Error) => void;
   private serializer: Serializer;
@@ -66,6 +72,8 @@ export class Scheduler {
     this.stalledInterval = opts.stalledInterval ?? 30000;
     this.maxStalledCount = opts.maxStalledCount ?? 1;
     this.consumerId = opts.consumerId ?? 'scheduler';
+    this.consumerGroup = opts.consumerGroup ?? CONSUMER_GROUP;
+    this.broadcastMode = opts.broadcastMode ?? false;
     this.onPromotionTick = opts.onPromotionTick;
     this.onError = opts.onError;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
@@ -237,7 +245,8 @@ export class Scheduler {
       this.stalledInterval,
       this.maxStalledCount,
       Date.now(),
-      CONSUMER_GROUP,
+      this.consumerGroup,
+      this.broadcastMode,
     );
   }
 

@@ -119,6 +119,23 @@ export interface WorkerOptions extends QueueOptions {
   batch?: BatchOptions;
 }
 
+export interface BroadcastOptions extends QueueOptions {
+  /** Max messages to retain in stream (must be a positive integer). Trimmed exactly (hard limit) on each publish. Opt-in; no trimming by default. */
+  maxMessages?: number;
+}
+
+export interface BroadcastWorkerOptions extends WorkerOptions {
+  /** Subscription name - becomes the consumer group name. Required for broadcast workers. */
+  subscription: string;
+  /**
+   * Stream ID to start from when creating this subscription.
+   * - '$': Only new messages (default)
+   * - '0-0': All history (backfill)
+   * - '<stream-id>': Start from specific ID
+   */
+  startFrom?: string;
+}
+
 export interface JobOptions {
   /**
    * Custom job ID. Max 256 characters, must not contain control characters,

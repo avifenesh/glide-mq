@@ -6,6 +6,8 @@ export { Job } from './job';
 export { QueueEvents } from './queue-events';
 export { FlowProducer } from './flow-producer';
 export type { JobNode } from './flow-producer';
+export { Broadcast } from './broadcast';
+export { BroadcastWorker } from './broadcast-worker';
 
 export type {
   QueueOptions,
@@ -38,6 +40,8 @@ export type {
   GetJobsOptions,
   WorkerInfo,
   Serializer,
+  BroadcastOptions,
+  BroadcastWorkerOptions,
   DAGNode,
   DAGFlow,
 } from './types';
