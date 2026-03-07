@@ -315,3 +315,72 @@ describeEachMode('LIFO: Global concurrency enforcement', (CONNECTION) => {
     expect(processed).toHaveLength(4);
   }, 20000);
 });
+
+describeEachMode('LIFO: Scheduler template', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('scheduler with lifo:true enqueues jobs to the LIFO list', async () => {
+    const Q = 'lifo-scheduler-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    // Set up scheduler with lifo: true
+    await queue.upsertJobScheduler('lifo-sched', { every: 100 }, { name: 'report', data: {}, opts: { lifo: true } });
+
+    const processed: string[] = [];
+    let completed = 0;
+
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        processed.push(job.id);
+        completed++;
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 500, promotionInterval: 200 },
+    );
+    worker.on('error', () => {});
+
+    // Wait for 3 scheduler firings
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (completed >= 3) { clearInterval(check); resolve(); }
+      }, 100);
+    });
+
+    await worker.close(true);
+
+    // Verify jobs had lifo flag set (each processed job should be from LIFO path)
+    const jobs = await Promise.all(processed.map((id) => queue.getJob(id)));
+    for (const job of jobs) {
+      expect(job?.opts).toMatchObject({ lifo: true });
+    }
+
+    await queue.removeJobScheduler('lifo-sched');
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+  }, 15000);
+
+  it('rejects scheduler template with lifo + ordering.key', async () => {
+    const Q = 'lifo-sched-val-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    await expect(
+      queue.upsertJobScheduler(
+        'bad-sched',
+        { every: 1000 },
+        { name: 'job', data: {}, opts: { lifo: true, ordering: { key: 'grp' } } },
+      ),
+    ).rejects.toThrow('lifo and ordering.key cannot be used together');
+
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+  }, 10000);
+});
