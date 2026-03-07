@@ -4,7 +4,8 @@ import type { GlideReturnType } from '@glidemq/speedkey';
 export const LIBRARY_NAME = 'glidemq';
 // Version 43: Added schedulerName to glidemq_addJob (arg 19) for repeatAfterComplete feature.
 // Version 44: Added metrics recording (time-series data for getMetrics).
-export const LIBRARY_VERSION = '44';
+// Version 45: DAG multi-parent dependencies - glidemq_registerParent, multi-parent completion notification.
+export const LIBRARY_VERSION = '45';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -722,6 +723,42 @@ redis.register_function('glidemq_complete', function(keys, args)
       end
     end
   end
+  -- DAG multi-parent: notify additional same-queue parents via parents SET
+  local parentsKey = prefix .. 'parents:' .. jobId
+  local dagParents = redis.call('SMEMBERS', parentsKey)
+  if dagParents and #dagParents > 0 then
+    local childQueuePrefix = string.sub(prefix, 1, #prefix - 1)
+    local dagDepsMember = childQueuePrefix .. ':' .. jobId
+    for pi = 1, #dagParents do
+      local pEntry = dagParents[pi]
+      -- Format: "parentQueue:parentId"
+      local pSep = string.find(pEntry, ':')
+      if pSep then
+        local pQueue = string.sub(pEntry, 1, pSep - 1)
+        local pId = string.sub(pEntry, pSep + 1)
+        -- Only handle same-queue parents atomically in Lua
+        -- (cross-queue parents returned separately for TS handling)
+        local pPrefix = prefix
+        local pJobKey = pPrefix .. 'job:' .. pId
+        local pDepsKey = pPrefix .. 'deps:' .. pId
+        local pStreamKey = pPrefix .. 'stream'
+        local pEventsKey = pPrefix .. 'events'
+        local pDepMarker = 'depdone:' .. dagDepsMember
+        if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
+          local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
+          local pTotalDeps = redis.call('SCARD', pDepsKey)
+          if pTotalDeps - pDoneCount <= 0 then
+            local pState = redis.call('HGET', pJobKey, 'state')
+            if pState == 'waiting-children' then
+              redis.call('HSET', pJobKey, 'state', 'waiting')
+              redis.call('XADD', pStreamKey, '*', 'jobId', pId)
+              emitEvent(pEventsKey, 'active', pId, nil)
+            end
+          end
+        end
+      end
+    end
+  end
   return 1
 end)
 
@@ -803,6 +840,38 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
           redis.call('HSET', parentJobKey, 'state', 'waiting')
           redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
           emitEvent(parentEventsKey, 'active', parentId, nil)
+        end
+      end
+    end
+  end
+  -- DAG multi-parent: notify additional same-queue parents via parents SET
+  local parentsKey = prefix .. 'parents:' .. jobId
+  local dagParents = redis.call('SMEMBERS', parentsKey)
+  if dagParents and #dagParents > 0 then
+    local childQueuePrefix = string.sub(prefix, 1, #prefix - 1)
+    local dagDepsMember = childQueuePrefix .. ':' .. jobId
+    for pi = 1, #dagParents do
+      local pEntry = dagParents[pi]
+      local pSep = string.find(pEntry, ':')
+      if pSep then
+        local pId = string.sub(pEntry, pSep + 1)
+        local pPrefix = prefix
+        local pJobKey = pPrefix .. 'job:' .. pId
+        local pDepsKey = pPrefix .. 'deps:' .. pId
+        local pStreamKey = pPrefix .. 'stream'
+        local pEventsKey = pPrefix .. 'events'
+        local pDepMarker = 'depdone:' .. dagDepsMember
+        if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
+          local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
+          local pTotalDeps = redis.call('SCARD', pDepsKey)
+          if pTotalDeps - pDoneCount <= 0 then
+            local pState = redis.call('HGET', pJobKey, 'state')
+            if pState == 'waiting-children' then
+              redis.call('HSET', pJobKey, 'state', 'waiting')
+              redis.call('XADD', pStreamKey, '*', 'jobId', pId)
+              emitEvent(pEventsKey, 'active', pId, nil)
+            end
+          end
         end
       end
     end
@@ -1941,6 +2010,49 @@ redis.register_function('glidemq_completeChild', function(keys, args)
   return remaining
 end)
 
+redis.register_function('glidemq_registerParent', function(keys, args)
+  -- Register an additional parent for an existing child job (DAG multi-parent).
+  -- Keys: [childJobKey, childParentsKey, parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey]
+  -- Args: [childJobId, parentId, parentQueue, depsMember]
+  local childJobKey = keys[1]
+  local childParentsKey = keys[2]
+  local parentDepsKey = keys[3]
+  local parentJobKey = keys[4]
+  local parentStreamKey = keys[5]
+  local parentEventsKey = keys[6]
+  local childJobId = args[1]
+  local parentId = args[2]
+  local parentQueue = args[3]
+  local depsMember = args[4]
+  -- Verify child exists
+  if redis.call('EXISTS', childJobKey) == 0 then
+    return 'error:child_not_found'
+  end
+  -- Add parent entry to child's parents SET (idempotent)
+  redis.call('SADD', childParentsKey, parentQueue .. ':' .. parentId)
+  -- Add child as dependency in parent's deps SET (idempotent)
+  redis.call('SADD', parentDepsKey, depsMember)
+  -- Race condition check: if child already completed, trigger parent notification immediately
+  local childState = redis.call('HGET', childJobKey, 'state')
+  if childState == 'completed' then
+    local depMarker = 'depdone:' .. depsMember
+    if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
+      local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+      local totalDeps = redis.call('SCARD', parentDepsKey)
+      if totalDeps - doneCount <= 0 then
+        local parentState = redis.call('HGET', parentJobKey, 'state')
+        if parentState == 'waiting-children' then
+          redis.call('HSET', parentJobKey, 'state', 'waiting')
+          redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
+          emitEvent(parentEventsKey, 'active', parentId, nil)
+        end
+      end
+    end
+    return 'already_completed'
+  end
+  return 'ok'
+end)
+
 redis.register_function('glidemq_removeJob', function(keys, args)
   local jobKey = keys[1]
   local streamKey = keys[2]
@@ -1969,6 +2081,10 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
   markOrderingDone(jobKey, jobId)
+  -- Clean up DAG parents SET
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  local parentsKey = prefix .. 'parents:' .. jobId
+  redis.call('DEL', parentsKey)
   redis.call('DEL', jobKey)
   redis.call('DEL', logKey)
   emitEvent(eventsKey, 'removed', jobId, nil)
@@ -1988,7 +2104,7 @@ redis.register_function('glidemq_clean', function(keys, args)
     return {}
   end
   for i = 1, #ids do
-    redis.call('DEL', prefix .. 'job:' .. ids[i], prefix .. 'log:' .. ids[i], prefix .. 'deps:' .. ids[i])
+    redis.call('DEL', prefix .. 'job:' .. ids[i], prefix .. 'log:' .. ids[i], prefix .. 'deps:' .. ids[i], prefix .. 'parents:' .. ids[i])
   end
   for i = 1, #ids, 1000 do
     redis.call('ZREM', setKey, unpack(ids, i, math.min(i + 999, #ids)))
@@ -3410,4 +3526,33 @@ export async function completeChild(
     [depsMember, parentId],
   );
   return result as number;
+}
+
+/**
+ * Register an additional parent for an existing child job (DAG multi-parent).
+ * If the child has already completed, triggers parent notification immediately.
+ * Returns 'ok', 'already_completed', or 'error:child_not_found'.
+ */
+export async function registerParent(
+  client: Client,
+  childKeys: QueueKeys,
+  childJobId: string,
+  parentId: string,
+  parentQueue: string,
+  parentKeys: QueueKeys,
+  depsMember: string,
+): Promise<string> {
+  const result = await client.fcall(
+    'glidemq_registerParent',
+    [
+      childKeys.job(childJobId),
+      childKeys.parents(childJobId),
+      parentKeys.deps(parentId),
+      parentKeys.job(parentId),
+      parentKeys.stream,
+      parentKeys.events,
+    ],
+    [childJobId, parentId, parentQueue, depsMember],
+  );
+  return result as string;
 }
