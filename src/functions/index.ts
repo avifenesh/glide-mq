@@ -1111,6 +1111,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local jobCost = tonumber(args[18]) or 0
   local ttl = tonumber(args[19]) or 0
   local customJobId = args[20] or ''
+  local lifo = tonumber(args[21]) or 0
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local existing = redis.call('HGET', dedupKey, dedupId)
   if mode == 'simple' then
@@ -1267,6 +1268,10 @@ redis.register_function('glidemq_dedup', function(keys, args)
     hashFields[#hashFields + 1] = 'parentId'
     hashFields[#hashFields + 1] = parentId
   end
+  if lifo > 0 then
+    hashFields[#hashFields + 1] = 'lifo'
+    hashFields[#hashFields + 1] = '1'
+  end
   if delay > 0 or priority > 0 then
     hashFields[#hashFields + 1] = 'state'
     hashFields[#hashFields + 1] = delay > 0 and 'delayed' or 'prioritized'
@@ -1281,6 +1286,9 @@ redis.register_function('glidemq_dedup', function(keys, args)
   elseif priority > 0 then
     local score = priority * PRIORITY_SHIFT
     redis.call('ZADD', scheduledKey, score, jobIdStr)
+  elseif lifo > 0 then
+    local lifoKey = prefix .. 'lifo'
+    redis.call('RPUSH', lifoKey, jobIdStr)
   else
     redis.call('XADD', streamKey, '*', 'jobId', jobIdStr)
   end
@@ -2461,6 +2469,7 @@ export function addJobArgs(
   jobCost: number = 0,
   ttl: number = 0,
   customJobId: string = '',
+  lifo: number = 0,
 ): { keys: string[]; args: string[] } {
   return {
     keys: [k.id, k.stream, k.scheduled, k.events],
@@ -2482,6 +2491,7 @@ export function addJobArgs(
       jobCost.toString(),
       ttl.toString(),
       customJobId,
+      lifo.toString(),
     ],
   };
 }
@@ -2506,6 +2516,7 @@ export async function addJob(
   jobCost: number = 0,
   ttl: number = 0,
   customJobId: string = '',
+  lifo: number = 0,
 ): Promise<string> {
   const { keys, args } = addJobArgs(
     k,
@@ -2526,6 +2537,7 @@ export async function addJob(
     jobCost,
     ttl,
     customJobId,
+    lifo,
   );
   const result = await client.fcall('glidemq_addJob', keys, args);
   return result as string;
@@ -2558,6 +2570,7 @@ export async function dedup(
   jobCost: number = 0,
   jobTtl: number = 0,
   customJobId: string = '',
+  lifo: number = 0,
 ): Promise<string> {
   const result = await client.fcall(
     'glidemq_dedup',
@@ -2582,6 +2595,7 @@ export async function dedup(
       tbRefillRate.toString(),
       jobCost.toString(),
       jobTtl.toString(),
+      lifo.toString(),
       customJobId,
     ],
   );
