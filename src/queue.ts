@@ -537,6 +537,7 @@ n      if (opts.lifo && orderingKey) {
         deduplication,
         serializedData,
         customJobId,
+        lifo: opts.lifo ?? false,
       };
     });
 
@@ -572,6 +573,7 @@ n      if (opts.lifo && orderingKey) {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
+          String(p.lifo ? 1 : 0),
           p.parentQueue,
         ]);
       } else {
@@ -597,6 +599,7 @@ n      if (opts.lifo && orderingKey) {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
+          String(p.lifo ? 1 : 0),
           p.parentQueue,
         ]);
       }
@@ -1219,6 +1222,7 @@ n      if (opts.lifo && orderingKey) {
       this.keys.ratelimited,
       this.keys.metricsCompleted,
       this.keys.metricsFailed,
+      this.keys.lifo,
     ];
     await client.del(staticKeys);
 
