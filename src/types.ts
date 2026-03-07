@@ -134,6 +134,12 @@ export interface BroadcastWorkerOptions extends WorkerOptions {
    * - '<stream-id>': Start from specific ID
    */
   startFrom?: string;
+  /**
+   * **Unsupported in broadcast mode**: The `ordering` option in JobOptions is not
+   * supported for broadcast workers. Ordering state is shared across all consumer
+   * groups; using ordering keys produces undefined cross-subscription behavior.
+   */
+  // Note: `ordering` is inherited from WorkerOptions but unsupported in broadcast mode.
 }
 
 export interface JobOptions {
