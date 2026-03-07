@@ -206,7 +206,7 @@ class Queue<D = any, R = any> extends EventEmitter {
   resume(): Promise<void>
   isPaused(): Promise<boolean>
   revoke(jobId: string): Promise<string>
-  getMetrics(type: 'completed' | 'failed'): Promise<Metrics>
+  getMetrics(type: 'completed' | 'failed', opts?: MetricsOptions): Promise<Metrics>
   obliterate(opts?: { force: boolean }): Promise<void>
   close(): Promise<void>
 
