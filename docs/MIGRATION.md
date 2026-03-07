@@ -681,6 +681,13 @@ const job = await queue.add('job', data, { jobId: 'my-deterministic-id' });
 
 **LIFO support** - Last-in-first-out ordering is supported via `lifo: true` option. Jobs are processed in reverse-chronological order (newest first). Priority and delayed jobs take precedence over LIFO. Cannot be combined with ordering keys (per-key sequencing).
 
+> **LIFO + `globalConcurrency` — crash limitation:** When `globalConcurrency` is set on a queue, LIFO and priority-list jobs are tracked via a `{queue}:list-active` counter in Valkey. If a worker process is killed hard (SIGKILL, OOM) while processing a list-backed job, the counter is not decremented. This permanently reduces effective global concurrency by one slot until it is manually reset:
+> ```
+> # Reset stuck list-active counter
+> valkey-cli DEL glide:{queueName}:list-active
+> ```
+> Stream-backed (FIFO) jobs are self-healing via stream PEL and `glidemq_reclaimStalled`. LIFO/priority jobs lack this self-healing because they have no PEL entry. A future enhancement will integrate `list-active` with stall detection.
+
 **`job.promote()` is now implemented** - call `job.promote()` to move a delayed job to waiting immediately. Throws if the job is not in the delayed state (#11).
 
 **`job.discard()` is now implemented** - call `job.discard()` inside a processor to immediately fail the job without consuming any remaining retry attempts. Alternatively, throw `UnrecoverableError` to trigger the same behavior declaratively. Both are exported from `glide-mq` (#14).

@@ -202,6 +202,9 @@ export class FlowProducer {
       .filter((_, i) => !childNodeMap.has(i))
       .map((child) => {
         const childOpts = child.opts ?? {};
+        if (childOpts.lifo && childOpts.ordering?.key) {
+          throw new Error(`Flow child "${child.name}": lifo and ordering.key cannot be used together`);
+        }
         const childData = this.serializer.serialize(child.data);
         const childByteLen = Buffer.byteLength(childData, 'utf8');
         if (childByteLen > MAX_JOB_DATA_SIZE) {

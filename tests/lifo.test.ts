@@ -251,3 +251,422 @@ describeEachMode('LIFO: Mixed with FIFO', (CONNECTION) => {
     expect(processed[3]).toBe(fifo2!.id);
   }, 15000);
 });
+
+describeEachMode('LIFO: Global concurrency enforcement', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('globalConcurrency=1 prevents concurrent LIFO job processing across workers', async () => {
+    const Q = 'lifo-gc-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+    await queue.setGlobalConcurrency(1);
+
+    // Add 4 LIFO jobs
+    for (let i = 0; i < 4; i++) {
+      await queue.add('job', { i }, { lifo: true });
+    }
+
+    let maxConcurrent = 0;
+    let concurrent = 0;
+    const processed: number[] = [];
+
+    const makeWorker = () =>
+      new Worker(
+        Q,
+        async (job: any) => {
+          concurrent++;
+          maxConcurrent = Math.max(maxConcurrent, concurrent);
+          await new Promise((r) => setTimeout(r, 50));
+          concurrent--;
+          processed.push(job.data.i);
+          return 'ok';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+      );
+
+    const w1 = makeWorker();
+    const w2 = makeWorker();
+    w1.on('error', () => {});
+    w2.on('error', () => {});
+
+    // Wait for all 4 jobs to complete
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (processed.length >= 4) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 100);
+    });
+
+    await w1.close(true);
+    await w2.close(true);
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+
+    expect(maxConcurrent).toBe(1);
+    expect(processed).toHaveLength(4);
+  }, 20000);
+});
+
+describeEachMode('LIFO: Scheduler template', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('scheduler with lifo:true enqueues jobs to the LIFO list', async () => {
+    const Q = 'lifo-scheduler-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    // Set up scheduler with lifo: true
+    await queue.upsertJobScheduler('lifo-sched', { every: 100 }, { name: 'report', data: {}, opts: { lifo: true } });
+
+    const processed: string[] = [];
+    let completed = 0;
+
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        processed.push(job.id);
+        completed++;
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 500, promotionInterval: 200 },
+    );
+    worker.on('error', () => {});
+
+    // Wait for 3 scheduler firings
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (completed >= 3) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 100);
+    });
+
+    await worker.close(true);
+
+    // Verify jobs had lifo flag set (each processed job should be from LIFO path)
+    const jobs = await Promise.all(processed.map((id) => queue.getJob(id)));
+    for (const job of jobs) {
+      expect(job?.opts).toMatchObject({ lifo: true });
+    }
+
+    await queue.removeJobScheduler('lifo-sched');
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+  }, 15000);
+
+  it('rejects scheduler template with lifo + ordering.key', async () => {
+    const Q = 'lifo-sched-val-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    await expect(
+      queue.upsertJobScheduler(
+        'bad-sched',
+        { every: 1000 },
+        { name: 'job', data: {}, opts: { lifo: true, ordering: { key: 'grp' } } },
+      ),
+    ).rejects.toThrow('lifo and ordering.key cannot be used together');
+
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+  }, 10000);
+});
+
+describeEachMode('LIFO: FlowProducer child jobs', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('FlowProducer child jobs with lifo:true are processed in LIFO order', async () => {
+    const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
+    const Q = 'lifo-flow-children-' + Date.now();
+    const flow = new FlowProducer({ connection: CONNECTION });
+
+    const result = await flow.add({
+      name: 'parent',
+      queueName: Q,
+      data: { step: 'root' },
+      children: [
+        { name: 'child-a', queueName: Q, data: { seq: 1 }, opts: { lifo: true } },
+        { name: 'child-b', queueName: Q, data: { seq: 2 }, opts: { lifo: true } },
+        { name: 'child-c', queueName: Q, data: { seq: 3 }, opts: { lifo: true } },
+      ],
+    });
+
+    const processedNames: string[] = [];
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        processedNames.push(job.name);
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
+    );
+    worker.on('error', () => {});
+
+    // Wait for all 3 children + parent to complete
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (processedNames.length >= 4) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 100);
+    });
+
+    await worker.close(true);
+    await flow.close();
+
+    // Children should be processed LIFO: child-c first, then child-b, then child-a
+    const childOrder = processedNames.filter((n) => n.startsWith('child-'));
+    expect(childOrder[0]).toBe('child-c');
+    expect(childOrder[1]).toBe('child-b');
+    expect(childOrder[2]).toBe('child-a');
+
+    const queue = new (require('../dist/queue') as any).Queue(Q, { connection: CONNECTION });
+    await flushQueue(cleanupClient, Q);
+    await queue.close();
+  }, 20000);
+
+  it('rejects FlowProducer child with lifo + ordering.key', async () => {
+    const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
+    const Q = 'lifo-flow-val-' + Date.now();
+    const flow = new FlowProducer({ connection: CONNECTION });
+
+    await expect(
+      flow.add({
+        name: 'parent',
+        queueName: Q,
+        data: {},
+        children: [{ name: 'child', queueName: Q, data: {}, opts: { lifo: true, ordering: { key: 'grp' } } }],
+      }),
+    ).rejects.toThrow('lifo and ordering.key cannot be used together');
+
+    await flow.close();
+    await flushQueue(cleanupClient, Q);
+  }, 10000);
+});
+
+describeEachMode('LIFO: Global concurrency enforcement for priority jobs', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('globalConcurrency=1 prevents concurrent priority job processing across workers', async () => {
+    const Q = 'priority-gc-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+    await queue.setGlobalConcurrency(1);
+
+    // Add 4 priority jobs
+    for (let i = 0; i < 4; i++) {
+      await queue.add('job', { i }, { priority: 1 });
+    }
+
+    let maxConcurrent = 0;
+    let concurrent = 0;
+    const processed: number[] = [];
+
+    const makeWorker = () =>
+      new Worker(
+        Q,
+        async (job: any) => {
+          concurrent++;
+          maxConcurrent = Math.max(maxConcurrent, concurrent);
+          await new Promise((r) => setTimeout(r, 50));
+          concurrent--;
+          processed.push(job.data.i);
+          return 'ok';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+      );
+
+    const w1 = makeWorker();
+    const w2 = makeWorker();
+    w1.on('error', () => {});
+    w2.on('error', () => {});
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (processed.length >= 4) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 100);
+    });
+
+    await w1.close(true);
+    await w2.close(true);
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+
+    expect(maxConcurrent).toBe(1);
+    expect(processed).toHaveLength(4);
+  }, 20000);
+});
+
+describeEachMode('LIFO: Batch pop throughput', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('worker with concurrency=5 dispatches multiple LIFO jobs concurrently via rpopCount', async () => {
+    const Q = 'lifo-batch-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    // Add 10 LIFO jobs with a fixed delay to confirm concurrency
+    for (let i = 0; i < 10; i++) {
+      await queue.add('job', { i }, { lifo: true });
+    }
+
+    let maxConcurrent = 0;
+    let concurrent = 0;
+    const processedIds: number[] = [];
+
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        concurrent++;
+        maxConcurrent = Math.max(maxConcurrent, concurrent);
+        await new Promise((r) => setTimeout(r, 30));
+        concurrent--;
+        processedIds.push(job.data.i);
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 5, blockTimeout: 500 },
+    );
+    worker.on('error', () => {});
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (processedIds.length >= 10) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 50);
+    });
+
+    await worker.close(true);
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+
+    expect(processedIds).toHaveLength(10);
+    // With concurrency=5 and 30ms processing time, multiple jobs must run in parallel
+    // If sequential: 10 × 30ms = 300ms minimum. True concurrency should allow ≥2 concurrent.
+    expect(maxConcurrent).toBeGreaterThanOrEqual(2);
+    // Note: LIFO ordering under concurrency>1 is non-deterministic; we only verify throughput.
+  }, 15000);
+});
+
+describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('list-active counter is decremented when a LIFO job fails permanently', async () => {
+    const Q = 'lifo-fail-counter-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+    await queue.setGlobalConcurrency(1);
+
+    // Add a LIFO job that will fail (1 attempt max)
+    await queue.add('fail-job', { fail: true }, { lifo: true, attempts: 1 });
+
+    let failedCount = 0;
+    const w1 = new Worker(
+      Q,
+      async () => {
+        throw new Error('intentional failure');
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+    );
+    w1.on('failed', () => {
+      failedCount++;
+    });
+    w1.on('error', () => {});
+
+    // Wait for the job to fail permanently
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (failedCount >= 1) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 100);
+    });
+    await w1.close(true);
+
+    // Now add a second LIFO job under gc=1.
+    // If list-active was decremented correctly, a new worker can pop it.
+    // If list-active is stuck at 1, rpopAndReserve returns null and the job never runs.
+    await queue.add('second-job', { ok: true }, { lifo: true });
+
+    let secondProcessed = false;
+    const w2 = new Worker(
+      Q,
+      async () => {
+        secondProcessed = true;
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+    );
+    w2.on('error', () => {});
+
+    await new Promise<void>((resolve, reject) => {
+      const check = setInterval(() => {
+        if (secondProcessed) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 100);
+      setTimeout(() => {
+        clearInterval(check);
+        reject(new Error('second job not processed - list-active counter may be stuck'));
+      }, 5000);
+    });
+
+    await w2.close(true);
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+
+    expect(secondProcessed).toBe(true);
+  }, 15000);
+});

@@ -21,6 +21,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Wire protocol documentation (`docs/WIRE_PROTOCOL.md`) - complete reference for enqueuing and managing jobs from any language using raw FCALL commands. Covers all key layouts, FCALL signatures, priority encoding, compression format, and examples in Python and Go (#83).
 - DAG workflows - `FlowProducer.addDAG()` method and `dag()` helper for arbitrary DAG topologies. Each node can declare multiple dependencies via the `deps` array; a job only becomes runnable once all dependencies have completed. Use for fan-in merge scenarios, diamond dependencies, or multi-stage pipelines that converge. See `docs/WORKFLOWS.md` for examples (#86).
 
+### Fixed
+
+- `globalConcurrency` now enforced for LIFO and priority-list jobs. `glidemq_rpopAndReserve` atomically checks capacity, pops from the list, and increments `list-active` in a single FCALL. Non-atomic path (no global concurrency) uses `rpopCount` for batch pops under high concurrency. `complete` and `fail` functions DECR `list-active` on list-sourced jobs to keep the counter balanced (#87).
+- Scheduler LIFO forwarding - `lifo: true` in a job scheduler template is now forwarded to every enqueued job. Previously ignored (#87).
+- FlowProducer child LIFO routing - `glidemq_addFlow` now routes child jobs with `lifo: true` to the LIFO list. Previously children were always added to the stream (#87).
+- `glidemq_removeJob` and `moveActiveToDelayed` / `moveToWaitingChildren` now DECR `list-active` when removing or deferring an active list-sourced job, preventing counter drift after job removal or mid-execution delay (#87).
+- Function library bumped to version 52 (version 51 introduced `list-active` counter; version 52 added FlowProducer LIFO child routing).
+
 ---
 
 ## [0.8.1] - 2026-02-27

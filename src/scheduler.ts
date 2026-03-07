@@ -376,6 +376,7 @@ export class Scheduler {
         const priority = template.opts?.priority ?? 0;
         const maxAttempts = template.opts?.attempts ?? 0;
         const jobTtl = template.opts?.ttl ?? 0;
+        const lifo = template.opts?.lifo ? 1 : 0;
 
         const isRepeatAfterComplete = isValidSchedulerEvery(config.repeatAfterComplete);
 
@@ -399,7 +400,7 @@ export class Scheduler {
             0,
             jobTtl,
             '',
-            0,
+            lifo,
             '',
             '',
             isRepeatAfterComplete ? schedulerName : '',

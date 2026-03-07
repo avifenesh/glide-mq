@@ -14,7 +14,9 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 53: Fix Lua scope: move recordMetrics definition before releaseGroupSlotAndPromote/expireJob.
 // Version 54: Guard XDEL in glidemq_moveToActive/deferActive/moveToWaitingChildren with broadcastMode flag.
 // Version 55: Guard XDEL in glidemq_moveActiveToDelayed with broadcastMode flag.
-export const LIBRARY_VERSION = '55';
+// Version 56: glidemq_checkConcurrency includes list-active counter; complete/fail DECR on list jobs; rpopAndReserve.
+// Version 57: glidemq_addFlow routes child jobs with lifo:true to LIFO list.
+export const LIBRARY_VERSION = '57';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -290,6 +292,13 @@ local function extractOrderingKeyFromOpts(optsJson)
     return ''
   end
   return tostring(key)
+end
+
+local function extractLifoFromOpts(optsJson)
+  if not optsJson or optsJson == '' then return 0 end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then return 0 end
+  return (decoded['lifo'] == true or decoded['lifo'] == 1) and 1 or 0
 end
 
 local function extractGroupConcurrencyFromOpts(optsJson)
@@ -801,6 +810,7 @@ redis.register_function('glidemq_complete', function(keys, args)
       end
     end
   end
+  if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
   return 1
 end)
 
@@ -841,6 +851,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   recordMetrics(metricsKey, timestamp, timestamp - processedOn)
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
 
   -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
   if broadcastMode ~= '1' then
@@ -962,6 +973,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
         emitEvent(eventsKey, 'active', priJobId, nil)
         local priJobFields = redis.call('HGETALL', priJobKey)
+        redis.call('INCR', prefix .. 'list-active')
         return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
       end
     end
@@ -983,6 +995,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
         emitEvent(eventsKey, 'active', lifoJobId, nil)
         local lifoJobFields = redis.call('HGETALL', lifoJobKey)
+        redis.call('INCR', prefix .. 'list-active')
         -- Return LIFO job (no entryId for LIFO jobs, use empty string)
         return {'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}
       end
@@ -1179,6 +1192,7 @@ redis.register_function('glidemq_fail', function(keys, args)
       'attemptsMade', tostring(attemptsMade),
       'delay', tostring(backoffDelay)
     })
+    if entryId == '' then redis.call('DECR', string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
     return 'retrying'
   else
     redis.call('ZADD', failedKey, timestamp, jobId)
@@ -1219,6 +1233,7 @@ redis.register_function('glidemq_fail', function(keys, args)
         end
       end
     end
+    if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
     return 'failed'
   end
 end)
@@ -1646,18 +1661,45 @@ end)
 redis.register_function('glidemq_checkConcurrency', function(keys, args)
   local metaKey = keys[1]
   local streamKey = keys[2]
+  local listActiveKey = keys[3]
   local group = args[1]
   local gc = tonumber(redis.call('HGET', metaKey, 'globalConcurrency')) or 0
   if gc <= 0 then
     return -1
   end
-  local pending = redis.call('XPENDING', streamKey, group)
-  local pendingCount = tonumber(pending[1]) or 0
-  local remaining = gc - pendingCount
+  local ok_cc, pending = pcall(redis.call, 'XPENDING', streamKey, group)
+  local pendingCount = (ok_cc and pending and tonumber(pending[1])) or 0
+  local listActive = tonumber(redis.call('GET', listActiveKey)) or 0
+  local remaining = gc - pendingCount - listActive
   if remaining <= 0 then
     return 0
   end
   return remaining
+end)
+
+-- Atomically check global concurrency capacity, then RPOP from a list and INCR list-active counter.
+-- Returns the popped jobId if a slot was available, or false/nil if at capacity or list is empty.
+-- KEYS: [metaKey, streamKey, listActiveKey, listKey]
+-- ARGS: [group]
+redis.register_function('glidemq_rpopAndReserve', function(keys, args)
+  local metaKey = keys[1]
+  local streamKey = keys[2]
+  local listActiveKey = keys[3]
+  local listKey = keys[4]
+  local group = args[1]
+  local gc = tonumber(redis.call('HGET', metaKey, 'globalConcurrency')) or 0
+  if gc > 0 then
+    local ok_ra, pending = pcall(redis.call, 'XPENDING', streamKey, group)
+    local pendingCount = (ok_ra and pending and tonumber(pending[1])) or 0
+    local listActive = tonumber(redis.call('GET', listActiveKey)) or 0
+    if pendingCount + listActive >= gc then
+      return false
+    end
+  end
+  local jobId = redis.call('RPOP', listKey)
+  if not jobId then return false end
+  redis.call('INCR', listActiveKey)
+  return jobId
 end)
 
 redis.register_function('glidemq_moveToActive', function(keys, args)
@@ -2022,6 +2064,7 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       end
     end
     local childOrderingKey = extractOrderingKeyFromOpts(childOpts)
+    local childLifo = extractLifoFromOpts(childOpts)
     local childGroupConc = extractGroupConcurrencyFromOpts(childOpts)
     local childRateMax, childRateDuration = extractGroupRateLimitFromOpts(childOpts)
     local childTbCapacity, childTbRefillRate = extractTokenBucketFromOpts(childOpts)
@@ -2076,6 +2119,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       childHash[#childHash + 1] = 'expireAt'
       childHash[#childHash + 1] = tostring(timestamp + childTtl)
     end
+    if childLifo > 0 then
+      childHash[#childHash + 1] = 'lifo'
+      childHash[#childHash + 1] = '1'
+    end
     if childDelay > 0 or childPriority > 0 then
       childHash[#childHash + 1] = 'state'
       childHash[#childHash + 1] = childDelay > 0 and 'delayed' or 'prioritized'
@@ -2092,6 +2139,8 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     elseif childPriority > 0 then
       local score = childPriority * PRIORITY_SHIFT
       redis.call('ZADD', childScheduledKey, score, childJobIdStr)
+    elseif childLifo > 0 then
+      redis.call('RPUSH', childPrefix .. 'lifo', childJobIdStr)
     else
       redis.call('XADD', childStreamKey, '*', 'jobId', childJobIdStr)
     end
@@ -2204,6 +2253,15 @@ redis.register_function('glidemq_removeJob', function(keys, args)
       local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
       local waitListKey = prefix .. 'groupq:' .. groupKey
       redis.call('LREM', waitListKey, 1, jobId)
+    end
+  end
+  -- DECR list-active if the job was active and list-sourced (LIFO or priority-list)
+  if state == 'active' then
+    local jobLifo = redis.call('HGET', jobKey, 'lifo')
+    local jobPriority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
+    if jobLifo == '1' or jobPriority > 0 then
+      local prefix_r = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+      redis.call('DECR', prefix_r .. 'list-active')
     end
   end
   redis.call('ZREM', scheduledKey, jobId)
@@ -2550,6 +2608,7 @@ redis.register_function('glidemq_moveActiveToDelayed', function(keys, args)
   else
     redis.call('HSET', jobKey, 'state', 'delayed', 'delay', tostring(delay))
   end
+  if entryId == '' then redis.call('DECR', string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
   releaseGroupSlotAndPromote(jobKey, jobId, now, nil)
   emitEvent(eventsKey, 'delay-changed', jobId, {'delay', tostring(delay)})
   return 'ok'
@@ -2589,10 +2648,12 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
       redis.call('HSET', jobKey, 'state', 'waiting')
       redis.call('XADD', streamKey, '*', 'jobId', jobId)
       emitEvent(eventsKey, 'active', jobId, nil)
+      if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
       return 'completed'
     end
   end
 
+  if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
   emitEvent(eventsKey, 'waiting-children', jobId, nil)
   return 'ok'
 end)
@@ -3320,8 +3381,23 @@ export async function rateLimit(
  * capacity (globalConcurrency - pending).
  */
 export async function checkConcurrency(client: Client, k: QueueKeys, group: string = CONSUMER_GROUP): Promise<number> {
-  const result = await client.fcall('glidemq_checkConcurrency', [k.meta, k.stream], [group]);
+  const result = await client.fcall('glidemq_checkConcurrency', [k.meta, k.stream, k.listActive], [group]);
   return result as number;
+}
+
+/**
+ * Atomically check global concurrency capacity, RPOP from a list, and INCR list-active counter.
+ * Returns the jobId if a slot was available and the list was non-empty, or null otherwise.
+ */
+export async function rpopAndReserve(
+  client: Client,
+  k: QueueKeys,
+  listKey: string,
+  group: string = CONSUMER_GROUP,
+): Promise<string | null> {
+  const result = await client.fcall('glidemq_rpopAndReserve', [k.meta, k.stream, k.listActive, listKey], [group]);
+  if (!result) return null;
+  return String(result);
 }
 
 /**
