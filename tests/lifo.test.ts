@@ -516,3 +516,67 @@ describeEachMode('LIFO: Batch pop throughput', (CONNECTION) => {
     expect(endTime - start).toBeLessThan(5000);
   }, 15000);
 });
+
+describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('list-active counter is decremented when a LIFO job fails permanently', async () => {
+    const Q = 'lifo-fail-counter-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+    await queue.setGlobalConcurrency(1);
+
+    // Add a LIFO job that will fail (1 attempt max)
+    await queue.add('fail-job', { fail: true }, { lifo: true, attempts: 1 });
+
+    let failedCount = 0;
+    const w1 = new Worker(
+      Q,
+      async () => { throw new Error('intentional failure'); },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+    );
+    w1.on('failed', () => { failedCount++; });
+    w1.on('error', () => {});
+
+    // Wait for the job to fail permanently
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (failedCount >= 1) { clearInterval(check); resolve(); }
+      }, 100);
+    });
+    await w1.close(true);
+
+    // Now add a second LIFO job under gc=1.
+    // If list-active was decremented correctly, a new worker can pop it.
+    // If list-active is stuck at 1, rpopAndReserve returns null and the job never runs.
+    await queue.add('second-job', { ok: true }, { lifo: true });
+
+    let secondProcessed = false;
+    const w2 = new Worker(
+      Q,
+      async () => { secondProcessed = true; return 'ok'; },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+    );
+    w2.on('error', () => {});
+
+    await new Promise<void>((resolve, reject) => {
+      const check = setInterval(() => {
+        if (secondProcessed) { clearInterval(check); resolve(); }
+      }, 100);
+      setTimeout(() => { clearInterval(check); reject(new Error('second job not processed - list-active counter may be stuck')); }, 5000);
+    });
+
+    await w2.close(true);
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+
+    expect(secondProcessed).toBe(true);
+  }, 15000);
+});
