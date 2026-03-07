@@ -16,7 +16,7 @@ const DOC_FILES = [
 ];
 
 const CODE_BLOCK_REGEX = /```(?:ts|typescript|js|javascript)\n([\s\S]*?)```/g;
-const IMPORT_REGEX = /^\s*import\s+(?:type\s+)?([\s\S]*?)\s+from\s+['"]([^'"]+)['"];?\s*$/gm;
+const IMPORT_REGEX = /^\s*import\s+(type\s+)?([\s\S]*?)\s+from\s+['"]([^'"]+)['"];?\s*$/gm;
 
 const RECEIVER_PROTOTYPES: Record<string, object> = {
   queue: Queue.prototype,
@@ -74,12 +74,14 @@ describe('Documentation examples', () => {
         const snippet = match[1];
 
         const imports = [...snippet.matchAll(IMPORT_REGEX)];
-        const hasGlideImport = imports.some((m) => m[2] === 'glide-mq' || m[2] === 'glide-mq/testing');
-        const hasNonGlideImport = imports.some((m) => m[2] !== 'glide-mq' && m[2] !== 'glide-mq/testing');
+        const hasGlideImport = imports.some((m) => m[3] === 'glide-mq' || m[3] === 'glide-mq/testing');
+        const hasNonGlideImport = imports.some((m) => m[3] !== 'glide-mq' && m[3] !== 'glide-mq/testing');
 
         for (const importMatch of imports) {
-          const clause = importMatch[1];
-          const moduleName = importMatch[2];
+          const isTypeImport = !!importMatch[1]; // `import type { ... }` — skip runtime check
+          const clause = importMatch[2];
+          const moduleName = importMatch[3];
+          if (isTypeImport) continue;
           const importedNames = extractNamedImports(clause);
 
           if (moduleName === 'glide-mq') {

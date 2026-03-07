@@ -443,9 +443,6 @@ describeEachMode('Worker batch validation', (CONNECTION) => {
           clearTimeout(timeout);
           worker.close(true).then(async () => {
             await queue.close();
-            await cleanupClient.del(
-              [...Object.values(require('../dist/utils').buildKeys(qName))].filter((k: any) => typeof k === 'string'),
-            );
             try {
               expect(successes).toHaveLength(2);
               expect(failures).toHaveLength(1);

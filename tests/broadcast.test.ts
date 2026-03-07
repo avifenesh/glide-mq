@@ -342,14 +342,15 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
     // Wait for worker to be ready
     await new Promise<void>((resolve) => setTimeout(resolve, 500));
 
-    // Pause the worker
+    // Pause the worker and wait for it to fully stop polling
     await worker.pause(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
 
     // Publish a message while paused
     await broadcast.publish({ msg: 'while-paused' });
 
-    // Wait briefly to confirm message is NOT processed
-    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    // Wait to confirm message is NOT processed while paused
+    await new Promise<void>((resolve) => setTimeout(resolve, 1000));
     expect(received).toHaveLength(0);
 
     await worker.close(true);
