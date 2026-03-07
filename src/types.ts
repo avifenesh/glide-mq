@@ -120,7 +120,7 @@ export interface WorkerOptions extends QueueOptions {
 }
 
 export interface BroadcastOptions extends QueueOptions {
-  /** Max messages to retain in stream (must be a positive integer). Trimmed approximately on each publish. Opt-in; no trimming by default. */
+  /** Max messages to retain in stream (must be a positive integer). Trimmed exactly (hard limit) on each publish. Opt-in; no trimming by default. */
   maxMessages?: number;
 }
 

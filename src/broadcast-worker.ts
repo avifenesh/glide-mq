@@ -255,6 +255,11 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
         }
       }
     }
+    // Loop exited because this.paused became true. Clear the promise so that
+    // resume() can detect the loop is no longer running and restart it.
+    if (this.paused && !this.closing) {
+      this.pollLoopPromise = null;
+    }
   }
 
   private reconnectCtx = {
