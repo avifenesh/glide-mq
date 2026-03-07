@@ -1,4 +1,4 @@
-import type { FlowProducerOptions, FlowJob, DAGFlow, DAGNode, Client, Serializer } from './types';
+import type { FlowProducerOptions, FlowJob, DAGFlow, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE } from './utils';
