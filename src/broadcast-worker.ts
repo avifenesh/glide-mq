@@ -218,6 +218,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       maxStalledCount: this.maxStalledCount,
       consumerId: this.consumerId,
       consumerGroup: this.subscription,
+      broadcastMode: true,
       queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
       onPromotionTick: () => this.refreshMetaFlags(),
       onError: (err) => {
@@ -1524,22 +1525,18 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
   async drain(): Promise<void> {
     await this.initPromise;
 
-    // Poll until everything is empty
+    // In broadcast mode, stream entries are never XDEL'd (intentional retention for fan-out).
+    // Only wait for active processing to finish and the scheduled set to empty.
     while (true) {
       if (!this.commandClient) break;
 
-      // Wait for active jobs to complete
       await this.waitForActiveJobs();
 
-      // Check if stream and scheduled set are both empty
-      const streamLen = await this.commandClient.xlen(this.queueKeys.stream);
       const scheduledLen = await this.commandClient.zcard(this.queueKeys.scheduled);
-
-      if (streamLen === 0 && scheduledLen === 0 && this.activeCount === 0) {
+      if (scheduledLen === 0 && this.activeCount === 0) {
         break;
       }
 
-      // Small delay before re-checking
       await new Promise<void>((resolve) => setTimeout(resolve, 100));
     }
 

@@ -2,8 +2,8 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-// Version 44: Added broadcastMode flag to glidemq_complete/completeAndFetchNext/fail - skip XDEL and use per-subscription retry tracking for fan-out safety.
-export const LIBRARY_VERSION = '44';
+// Version 45: broadcastMode in glidemq_reclaimStalled (skip XDEL on stall/expiry), skip removeOnComplete job hash deletion in glidemq_complete/completeAndFetchNext.
+export const LIBRARY_VERSION = '45';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -646,26 +646,28 @@ redis.register_function('glidemq_complete', function(keys, args)
   releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-  if removeMode == 'true' then
-    redis.call('ZREM', completedKey, jobId)
-    redis.call('DEL', jobKey)
-  elseif removeMode == 'count' and removeCount > 0 then
-    local total = redis.call('ZCARD', completedKey)
-    if total > removeCount then
-      local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
-      if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
-    end
-  elseif removeMode == 'age_count' then
-    if removeAge > 0 then
-      local cutoff = timestamp - (removeAge * 1000)
-      local old = redis.call('ZRANGEBYSCORE', completedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
-      if #old > 0 then removeExcessJobs(completedKey, prefix, old) end
-    end
-    if removeCount > 0 then
+  if broadcastMode ~= '1' then
+    if removeMode == 'true' then
+      redis.call('ZREM', completedKey, jobId)
+      redis.call('DEL', jobKey)
+    elseif removeMode == 'count' and removeCount > 0 then
       local total = redis.call('ZCARD', completedKey)
       if total > removeCount then
         local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
         if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
+      end
+    elseif removeMode == 'age_count' then
+      if removeAge > 0 then
+        local cutoff = timestamp - (removeAge * 1000)
+        local old = redis.call('ZRANGEBYSCORE', completedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
+        if #old > 0 then removeExcessJobs(completedKey, prefix, old) end
+      end
+      if removeCount > 0 then
+        local total = redis.call('ZCARD', completedKey)
+        if total > removeCount then
+          local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
+          if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
+        end
       end
     end
   end
@@ -729,27 +731,29 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
 
-  -- Retention cleanup
-  if removeMode == 'true' then
-    redis.call('ZREM', completedKey, jobId)
-    redis.call('DEL', jobKey)
-  elseif removeMode == 'count' and removeCount > 0 then
-    local total = redis.call('ZCARD', completedKey)
-    if total > removeCount then
-      local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
-      if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
-    end
-  elseif removeMode == 'age_count' then
-    if removeAge > 0 then
-      local cutoff = timestamp - (removeAge * 1000)
-      local old = redis.call('ZRANGEBYSCORE', completedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
-      if #old > 0 then removeExcessJobs(completedKey, prefix, old) end
-    end
-    if removeCount > 0 then
+  -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
+  if broadcastMode ~= '1' then
+    if removeMode == 'true' then
+      redis.call('ZREM', completedKey, jobId)
+      redis.call('DEL', jobKey)
+    elseif removeMode == 'count' and removeCount > 0 then
       local total = redis.call('ZCARD', completedKey)
       if total > removeCount then
         local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
         if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
+      end
+    elseif removeMode == 'age_count' then
+      if removeAge > 0 then
+        local cutoff = timestamp - (removeAge * 1000)
+        local old = redis.call('ZRANGEBYSCORE', completedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
+        if #old > 0 then removeExcessJobs(completedKey, prefix, old) end
+      end
+      if removeCount > 0 then
+        local total = redis.call('ZCARD', completedKey)
+        if total > removeCount then
+          local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
+          if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
+        end
       end
     end
   end
@@ -1022,6 +1026,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   local maxStalledCount = tonumber(args[4]) or 1
   local timestamp = tonumber(args[5])
   local failedKey = args[6]
+  local broadcastMode = args[7] or '0'
   local result = redis.call('XAUTOCLAIM', streamKey, group, consumer, minIdleMs, '0-0')
   local entries = result[2]
   if not entries or #entries == 0 then
@@ -1046,7 +1051,9 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       local jobKey = prefix .. 'job:' .. jobId
       if checkExpired(jobKey, jobId, prefix, timestamp) then
         redis.call('XACK', streamKey, group, entryId)
-        redis.call('XDEL', streamKey, entryId)
+        if broadcastMode ~= '1' then
+          redis.call('XDEL', streamKey, entryId)
+        end
         count = count + 1
       else
       local lastActive = tonumber(redis.call('HGET', jobKey, 'lastActive'))
@@ -1056,7 +1063,9 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       local stalledCount = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
       if stalledCount > maxStalledCount then
         redis.call('XACK', streamKey, group, entryId)
-        redis.call('XDEL', streamKey, entryId)
+        if broadcastMode ~= '1' then
+          redis.call('XDEL', streamKey, entryId)
+        end
         redis.call('ZADD', failedKey, timestamp, jobId)
         redis.call('HSET', jobKey,
           'state', 'failed',
@@ -2951,11 +2960,12 @@ export async function reclaimStalled(
   maxStalledCount: number,
   timestamp: number,
   group: string = CONSUMER_GROUP,
+  broadcastMode?: boolean,
 ): Promise<number> {
   const result = await client.fcall(
     'glidemq_reclaimStalled',
     [k.stream, k.events],
-    [group, consumer, minIdleMs.toString(), maxStalledCount.toString(), timestamp.toString(), k.failed],
+    [group, consumer, minIdleMs.toString(), maxStalledCount.toString(), timestamp.toString(), k.failed, broadcastMode ? '1' : '0'],
   );
   return result as number;
 }
