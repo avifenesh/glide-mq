@@ -384,3 +384,83 @@ describeEachMode('LIFO: Scheduler template', (CONNECTION) => {
     await flushQueue(cleanupClient, Q);
   }, 10000);
 });
+
+describeEachMode('LIFO: FlowProducer child jobs', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('FlowProducer child jobs with lifo:true are processed in LIFO order', async () => {
+    const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
+    const Q = 'lifo-flow-children-' + Date.now();
+    const flow = new FlowProducer({ connection: CONNECTION });
+
+    const result = await flow.add({
+      name: 'parent',
+      queueName: Q,
+      data: { step: 'root' },
+      children: [
+        { name: 'child-a', queueName: Q, data: { seq: 1 }, opts: { lifo: true } },
+        { name: 'child-b', queueName: Q, data: { seq: 2 }, opts: { lifo: true } },
+        { name: 'child-c', queueName: Q, data: { seq: 3 }, opts: { lifo: true } },
+      ],
+    });
+
+    const processedNames: string[] = [];
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        processedNames.push(job.name);
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
+    );
+    worker.on('error', () => {});
+
+    // Wait for all 3 children + parent to complete
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (processedNames.length >= 4) { clearInterval(check); resolve(); }
+      }, 100);
+    });
+
+    await worker.close(true);
+    await flow.close();
+
+    // Children should be processed LIFO: child-c first, then child-b, then child-a
+    const childOrder = processedNames.filter((n) => n.startsWith('child-'));
+    expect(childOrder[0]).toBe('child-c');
+    expect(childOrder[1]).toBe('child-b');
+    expect(childOrder[2]).toBe('child-a');
+
+    const queue = new (require('../dist/queue') as any).Queue(Q, { connection: CONNECTION });
+    await flushQueue(cleanupClient, Q);
+    await queue.close();
+  }, 20000);
+
+  it('rejects FlowProducer child with lifo + ordering.key', async () => {
+    const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
+    const Q = 'lifo-flow-val-' + Date.now();
+    const flow = new FlowProducer({ connection: CONNECTION });
+
+    await expect(
+      flow.add({
+        name: 'parent',
+        queueName: Q,
+        data: {},
+        children: [
+          { name: 'child', queueName: Q, data: {}, opts: { lifo: true, ordering: { key: 'grp' } } },
+        ],
+      }),
+    ).rejects.toThrow('lifo and ordering.key cannot be used together');
+
+    await flow.close();
+    await flushQueue(cleanupClient, Q);
+  }, 10000);
+});

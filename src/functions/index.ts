@@ -11,7 +11,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 49: Fix Phase 1.0/1.5 in completeAndFetchNext - HSET before HGETALL, add lastActive.
 // Version 50: glidemq_drain cleans LIFO and priority list keys and their job hashes.
 // Version 51: glidemq_checkConcurrency includes list-active counter; complete/fail DECR on list jobs.
-export const LIBRARY_VERSION = '51';
+// Version 52: glidemq_addFlow routes child jobs with lifo:true to LIFO list.
+export const LIBRARY_VERSION = '52';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -287,6 +288,13 @@ local function extractOrderingKeyFromOpts(optsJson)
     return ''
   end
   return tostring(key)
+end
+
+local function extractLifoFromOpts(optsJson)
+  if not optsJson or optsJson == '' then return 0 end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then return 0 end
+  return decoded['lifo'] == true and 1 or 0
 end
 
 local function extractGroupConcurrencyFromOpts(optsJson)
@@ -2027,6 +2035,7 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       end
     end
     local childOrderingKey = extractOrderingKeyFromOpts(childOpts)
+    local childLifo = extractLifoFromOpts(childOpts)
     local childGroupConc = extractGroupConcurrencyFromOpts(childOpts)
     local childRateMax, childRateDuration = extractGroupRateLimitFromOpts(childOpts)
     local childTbCapacity, childTbRefillRate = extractTokenBucketFromOpts(childOpts)
@@ -2081,6 +2090,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       childHash[#childHash + 1] = 'expireAt'
       childHash[#childHash + 1] = tostring(timestamp + childTtl)
     end
+    if childLifo > 0 then
+      childHash[#childHash + 1] = 'lifo'
+      childHash[#childHash + 1] = '1'
+    end
     if childDelay > 0 or childPriority > 0 then
       childHash[#childHash + 1] = 'state'
       childHash[#childHash + 1] = childDelay > 0 and 'delayed' or 'prioritized'
@@ -2097,6 +2110,8 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     elseif childPriority > 0 then
       local score = childPriority * PRIORITY_SHIFT
       redis.call('ZADD', childScheduledKey, score, childJobIdStr)
+    elseif childLifo > 0 then
+      redis.call('RPUSH', childPrefix .. 'lifo', childJobIdStr)
     else
       redis.call('XADD', childStreamKey, '*', 'jobId', childJobIdStr)
     end
