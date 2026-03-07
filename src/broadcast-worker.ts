@@ -320,13 +320,18 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
 
         this.blockingClient = await createBlockingClient(this.opts.connection!);
 
-        // Re-ensure consumer group
-        await createConsumerGroup(
-          this.commandClient!,
-          this.queueKeys.stream,
-          this.subscription,
-          this.opts.startFrom ?? '$',
-        );
+        // Re-ensure consumer group; if this fails the reconnect loop will retry.
+        try {
+          await createConsumerGroup(
+            this.commandClient!,
+            this.queueKeys.stream,
+            this.subscription,
+            this.opts.startFrom ?? '$',
+          );
+        } catch (err) {
+          this.emit('error', err instanceof Error ? err : new Error(String(err)));
+          throw err;
+        }
 
         // Restart scheduler with the (possibly same) client
         if (this.scheduler) {
@@ -1605,7 +1610,11 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
 
     // Shut down sandbox worker pool
     if (this.sandboxClose) {
-      await this.sandboxClose(force);
+      try {
+        await this.sandboxClose(force);
+      } catch (err) {
+        this.emit('error', err instanceof Error ? err : new Error(String(err)));
+      }
     }
 
     // Clear worker registration heartbeat
