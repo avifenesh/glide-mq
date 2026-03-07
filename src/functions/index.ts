@@ -2226,6 +2226,15 @@ redis.register_function('glidemq_removeJob', function(keys, args)
       redis.call('LREM', waitListKey, 1, jobId)
     end
   end
+  -- DECR list-active if the job was active and list-sourced (LIFO or priority-list)
+  if state == 'active' then
+    local jobLifo = redis.call('HGET', jobKey, 'lifo')
+    local jobPriority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
+    if jobLifo == '1' or jobPriority > 0 then
+      local prefix_r = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+      redis.call('DECR', prefix_r .. 'list-active')
+    end
+  end
   redis.call('ZREM', scheduledKey, jobId)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
