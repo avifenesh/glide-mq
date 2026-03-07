@@ -351,7 +351,10 @@ describeEachMode('LIFO: Scheduler template', (CONNECTION) => {
     // Wait for 3 scheduler firings
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
-        if (completed >= 3) { clearInterval(check); resolve(); }
+        if (completed >= 3) {
+          clearInterval(check);
+          resolve();
+        }
       }, 100);
     });
 
@@ -426,7 +429,10 @@ describeEachMode('LIFO: FlowProducer child jobs', (CONNECTION) => {
     // Wait for all 3 children + parent to complete
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
-        if (processedNames.length >= 4) { clearInterval(check); resolve(); }
+        if (processedNames.length >= 4) {
+          clearInterval(check);
+          resolve();
+        }
       }, 100);
     });
 
@@ -454,9 +460,7 @@ describeEachMode('LIFO: FlowProducer child jobs', (CONNECTION) => {
         name: 'parent',
         queueName: Q,
         data: {},
-        children: [
-          { name: 'child', queueName: Q, data: {}, opts: { lifo: true, ordering: { key: 'grp' } } },
-        ],
+        children: [{ name: 'child', queueName: Q, data: {}, opts: { lifo: true, ordering: { key: 'grp' } } }],
       }),
     ).rejects.toThrow('lifo and ordering.key cannot be used together');
 
@@ -511,7 +515,10 @@ describeEachMode('LIFO: Global concurrency enforcement for priority jobs', (CONN
 
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
-        if (processed.length >= 4) { clearInterval(check); resolve(); }
+        if (processed.length >= 4) {
+          clearInterval(check);
+          resolve();
+        }
       }, 100);
     });
 
@@ -565,7 +572,10 @@ describeEachMode('LIFO: Batch pop throughput', (CONNECTION) => {
 
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
-        if (processedIds.length >= 10) { clearInterval(check); resolve(); }
+        if (processedIds.length >= 10) {
+          clearInterval(check);
+          resolve();
+        }
       }, 50);
     });
 
@@ -603,16 +613,23 @@ describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
     let failedCount = 0;
     const w1 = new Worker(
       Q,
-      async () => { throw new Error('intentional failure'); },
+      async () => {
+        throw new Error('intentional failure');
+      },
       { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
     );
-    w1.on('failed', () => { failedCount++; });
+    w1.on('failed', () => {
+      failedCount++;
+    });
     w1.on('error', () => {});
 
     // Wait for the job to fail permanently
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
-        if (failedCount >= 1) { clearInterval(check); resolve(); }
+        if (failedCount >= 1) {
+          clearInterval(check);
+          resolve();
+        }
       }, 100);
     });
     await w1.close(true);
@@ -625,16 +642,25 @@ describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
     let secondProcessed = false;
     const w2 = new Worker(
       Q,
-      async () => { secondProcessed = true; return 'ok'; },
+      async () => {
+        secondProcessed = true;
+        return 'ok';
+      },
       { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
     );
     w2.on('error', () => {});
 
     await new Promise<void>((resolve, reject) => {
       const check = setInterval(() => {
-        if (secondProcessed) { clearInterval(check); resolve(); }
+        if (secondProcessed) {
+          clearInterval(check);
+          resolve();
+        }
       }, 100);
-      setTimeout(() => { clearInterval(check); reject(new Error('second job not processed - list-active counter may be stuck')); }, 5000);
+      setTimeout(() => {
+        clearInterval(check);
+        reject(new Error('second job not processed - list-active counter may be stuck'));
+      }, 5000);
     });
 
     await w2.close(true);
