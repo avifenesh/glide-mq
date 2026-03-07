@@ -22,6 +22,7 @@ function fingerprint(name: string, opts: ProducerOptions): string {
     clusterMode: opts.connection?.clusterMode ?? false,
     compression: opts.compression ?? 'none',
     serializer: serializerKey,
+    useTLS: opts.connection?.useTLS ?? false,
   });
 }
 

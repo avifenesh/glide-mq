@@ -398,11 +398,16 @@ export class Producer<D = any> {
       ? await (client as GlideClusterClient).exec(batch as ClusterBatch, true)
       : await (client as GlideClient).exec(batch as Batch, true);
 
+    // Validate batch execution returned expected number of results
+    if (!rawResults || !Array.isArray(rawResults) || rawResults.length !== prepared.length) {
+      throw new GlideMQError('Internal error: addBulk() returned unexpected result length');
+    }
+
     const results: (string | null)[] = [];
     const crossQueueParents: { parentId: string; parentQueue: string; jobId: string }[] = [];
 
     for (let i = 0; i < prepared.length; i++) {
-      const raw = rawResults ? String(rawResults[i]) : '';
+      const raw = String(rawResults[i]);
       if (raw === 'skipped' || raw === 'duplicate') {
         results.push(null);
       } else if (raw === 'ERR:COST_EXCEEDS_CAPACITY') {
