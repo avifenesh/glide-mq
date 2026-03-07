@@ -60,9 +60,9 @@ describeEachMode('LIFO: Basic ordering', (CONNECTION) => {
     const Q = 'lifo-ordering-reject-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
 
-    await expect(
-      queue.add('bad', { x: 1 }, { lifo: true, ordering: { key: 'test' } }),
-    ).rejects.toThrow('lifo and ordering.key cannot be used together');
+    await expect(queue.add('bad', { x: 1 }, { lifo: true, ordering: { key: 'test' } })).rejects.toThrow(
+      'lifo and ordering.key cannot be used together',
+    );
 
     await queue.close();
     await flushQueue(cleanupClient, Q);
