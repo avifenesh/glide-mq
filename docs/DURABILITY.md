@@ -144,6 +144,34 @@ glide-mq does **not** guarantee:
 
 Compared with BullMQ-style Redis queues, glide-mq still depends on the same underlying Valkey durability settings, but its in-flight recovery model is built on Streams consumer groups, the PEL, and `XAUTOCLAIM` rather than a separate lock-renew / stall-detection cycle.
 
+## Feature-Specific Durability
+
+The core persistence guarantees above apply to all queue state. Several features have additional durability characteristics worth noting.
+
+### Schedulers
+
+Scheduler configurations persist in the `glide:{queueName}:schedulers` hash. Each field stores the scheduler name and its next-run timestamp. These entries survive restart with any persistence mode that captures hash writes. When a worker reconnects after a restart, it resumes its promotion loop and picks up any schedulers whose next-run time has already passed.
+
+### Metrics
+
+Time-series metrics data is stored in `glide:{queueName}:metrics:*` keys. Data is retained for 24 hours and auto-trimmed. This data survives restart if AOF is enabled; with RDB-only, recent metrics may be lost depending on snapshot frequency.
+
+### Group State
+
+Token bucket state, rate limit windows, and ordering sequence counters are stored in `glide:{queueName}:group:{key}` hash keys. All fields (active count, maxConcurrency, rateMax, rateDuration, window start, token count, refill rate, etc.) are persisted as part of the hash and survive restart with the rest of the dataset.
+
+### Deduplication
+
+Dedup entries are stored in the `glide:{queueName}:dedup` hash, with field-level TTL semantics managed by the Lua functions. These entries persist with AOF. After a restart, dedup windows that have not expired continue to prevent duplicate job submission.
+
+### Step Jobs
+
+When a processor calls `moveToDelayed`, the job is moved to the scheduled ZSet with a new timestamp score and `data.step` is updated atomically within the same Lua function call. The delayed job survives restart like any other entry in the scheduled ZSet, and the promotion loop re-queues it once the timestamp is reached.
+
+### Broadcast
+
+Stream entries in broadcast queues are intentionally not deleted after processing (no XDEL). Entries are retained according to the `maxMessages` XTRIM policy. Each consumer group independently tracks its own read offset. After a restart, consumer groups resume from their last acknowledged position, so no subscriber misses messages that were added while it was down.
+
 ## Practical Guidance
 
 - If your priority is throughput with strong-enough durability, use AOF with `appendfsync everysec`.
