@@ -39,6 +39,9 @@ import {
   MAX_JOB_DATA_SIZE,
   JOB_METADATA_FIELDS,
   validateQueueName,
+  INVALID_JOB_ID_CHARS,
+  MAX_ORDERING_KEY_LENGTH,
+  validateJobId,
 } from './utils';
 import {
   createBlockingClient,
@@ -66,7 +69,6 @@ import {
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
 
-const MAX_ORDERING_KEY_LENGTH = 256;
 const PIPELINE_CHUNK_SIZE = 1000;
 const SCHEDULER_LOCK_TTL_MS = 5000;
 const SCHEDULER_LOCK_RETRY_DELAY_MS = 25;
@@ -75,14 +77,6 @@ const SCHEDULER_LOCK_MAX_ATTEMPTS = Math.ceil(SCHEDULER_LOCK_TTL_MS / SCHEDULER_
 function validateOrderingKey(orderingKey: string): void {
   if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
     throw new Error(`Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`);
-  }
-}
-
-const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
-function validateJobId(jobId: string): void {
-  if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
-  if (INVALID_JOB_ID_CHARS.test(jobId)) {
-    throw new Error('jobId must not contain control characters, curly braces, or colons');
   }
 }
 
@@ -225,6 +219,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async add(name: string, data: D, opts?: JobOptions): Promise<Job<D, R> | null> {
     const delay = opts?.delay ?? 0;
     const priority = opts?.priority ?? 0;
+    if (priority > 2048) {
+      throw new Error('Priority must be <= 2048');
+    }
 
     return withSpan(
       'glide-mq.queue.add',

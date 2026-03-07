@@ -38,6 +38,8 @@ import {
   validateSchedulerBounds,
   validateSchedulerEvery,
   validateTimezone,
+  INVALID_JOB_ID_CHARS,
+  validateJobId,
 } from './utils';
 
 const MAX_TIMEOUT_DELAY_MS = 2_147_483_647;
@@ -154,14 +156,6 @@ export interface TestQueueOptions {
   dedup?: boolean;
   /** Custom serializer for job data and return values. When provided, values are roundtripped through serialize/deserialize to match production behavior. */
   serializer?: Serializer;
-}
-
-const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
-function validateJobId(jobId: string): void {
-  if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
-  if (INVALID_JOB_ID_CHARS.test(jobId)) {
-    throw new Error('jobId must not contain control characters, curly braces, or colons');
-  }
 }
 
 export class TestQueue<D = any, R = any> extends EventEmitter {
@@ -348,6 +342,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     if (!bucket) {
       bucket = { count: 0, totalDuration: 0 };
       buckets.set(minuteTs, bucket);
+      // Cap at 1440 buckets (24 hours of per-minute data)
+      if (buckets.size > 1440) {
+        const oldest = buckets.keys().next().value;
+        if (oldest !== undefined) buckets.delete(oldest);
+      }
     }
     bucket.count++;
     const duration = processedOn !== undefined ? finishedOn - processedOn : 0;

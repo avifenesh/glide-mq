@@ -269,8 +269,6 @@ export interface FlowProducerOptions {
 
 export interface QueueEventsOptions {
   connection: ConnectionOptions;
-  /** @internal Not supported - QueueEvents uses blocking XREAD and requires a dedicated connection. */
-  client?: never;
   prefix?: string;
   /** Starting stream ID. Defaults to '$' (new events only). Use '0' for historical replay. */
   lastEventId?: string;
