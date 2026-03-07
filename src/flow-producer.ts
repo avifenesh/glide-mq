@@ -1,11 +1,12 @@
-import type { FlowProducerOptions, FlowJob, Client, Serializer } from './types';
+import type { FlowProducerOptions, FlowJob, DAGFlow, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE } from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
-import { LIBRARY_SOURCE, addFlow, addJob, completeChild } from './functions/index';
+import { LIBRARY_SOURCE, addFlow, addJob, completeChild, registerParent } from './functions/index';
 import { withSpan } from './telemetry';
+import { validateDAG, topoSort } from './dag-utils';
 
 export interface JobNode {
   job: Job;
@@ -17,6 +18,13 @@ function validateJobId(jobId: string): void {
   if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
   if (INVALID_JOB_ID_CHARS.test(jobId)) {
     throw new Error('jobId must not contain control characters, curly braces, or colons');
+  }
+}
+
+const INVALID_QUEUE_NAME_CHARS = /[{}:]/;
+function validateQueueName(queueName: string): void {
+  if (INVALID_QUEUE_NAME_CHARS.test(queueName)) {
+    throw new Error('queueName must not contain curly braces or colons (reserved for Redis hash tags and delimiters)');
   }
 }
 
@@ -305,6 +313,283 @@ export class FlowProducer {
     parentJob.timestamp = timestamp;
 
     return { job: parentJob, children: childNodes };
+  }
+
+  /**
+   * Add a DAG (Directed Acyclic Graph) flow where jobs can have multiple parents.
+   * Validates the graph for cycles, performs topological sort, and submits nodes
+   * bottom-up (leaves first). For nodes with multiple parents, registers each
+   * parent dependency.
+   *
+   * Returns a map of node name to Job instance.
+   */
+  async addDAG(dag: DAGFlow): Promise<Map<string, Job>> {
+    return withSpan(
+      'glide-mq.flow.addDAG',
+      {
+        'glide-mq.flow.nodeCount': dag.nodes.length,
+      },
+      async () => {
+        // Validate the DAG and get submission order (leaves first)
+        validateDAG(dag.nodes);
+        const sorted = topoSort(dag.nodes);
+
+        const client = await this.getClient();
+        const prefix = this.opts.prefix ?? 'glide';
+        const result = new Map<string, Job>();
+
+        // Track which nodes have dependents (children) - they become "parents" in waiting-children
+        const hasChildren = new Set<string>();
+        for (const node of dag.nodes) {
+          if (node.deps) {
+            for (const dep of node.deps) {
+              hasChildren.add(dep);
+            }
+          }
+        }
+
+        // Submit nodes in topological order (leaves first)
+        // Nodes with 0 deps: simple addJob
+        // Nodes with 1 dep: addJob with parent (traditional single-parent)
+        // Nodes with 2+ deps: addJob with first parent, then registerParent for rest
+        // Nodes that ARE parents (have children depending on them): created in waiting-children
+        for (const node of sorted) {
+          validateQueueName(node.queueName);
+          const queueKeys = buildKeys(node.queueName, prefix);
+          const opts = node.opts ?? {};
+          const timestamp = Date.now();
+          const serializedData = this.serializer.serialize(node.data);
+          const dataByteLen = Buffer.byteLength(serializedData, 'utf8');
+          if (dataByteLen > MAX_JOB_DATA_SIZE) {
+            throw new Error(
+              `Job data exceeds maximum size (${dataByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
+            );
+          }
+
+          const customJobId = opts.jobId ?? '';
+          if (customJobId !== '') {
+            if (customJobId.length > 256) throw new Error('jobId must be at most 256 characters');
+            if (/[\x00-\x1f\x7f{}:]/.test(customJobId)) {
+              throw new Error('jobId must not contain control characters, curly braces, or colons');
+            }
+          }
+
+          const deps = node.deps ?? [];
+          const isParent = hasChildren.has(node.name);
+
+          // Validate ordering.key if present (reserved chars: {, }, :)
+          const orderingKey = opts.ordering?.key;
+          if (orderingKey) {
+            validateQueueName(orderingKey);
+          }
+
+          // Extract rate-limit and token bucket params
+          const groupConcurrency = opts.ordering?.concurrency ?? 0;
+          const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
+          const groupRateDuration = opts.ordering?.rateLimit?.duration ?? 0;
+          const tbCapacity = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.capacity * 1000) : 0;
+          const tbRefillRate = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.refillRate * 1000) : 0;
+          const jobCost = opts.cost != null ? Math.round(opts.cost * 1000) : 0;
+
+          if (isParent && deps.length === 0) {
+            // Node is a parent with no deps of its own - use addFlow with no children (empty flow)
+            // Actually, we create it as waiting-children and let children register later
+            // Use addFlow with 0 children to set state=waiting-children
+            const ids = await addFlow(
+              client,
+              queueKeys,
+              node.name,
+              serializedData,
+              JSON.stringify(opts),
+              timestamp,
+              opts.delay ?? 0,
+              opts.priority ?? 0,
+              opts.attempts ?? 0,
+              [],
+              [],
+              customJobId,
+            );
+            if (ids[0] === 'duplicate') throw new Error('Duplicate job ID in DAG');
+            if (ids[0] === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
+            const job = new Job(client, queueKeys, ids[0], node.name, node.data, opts, this.serializer);
+            job.timestamp = timestamp;
+            result.set(node.name, job);
+          } else if (isParent && deps.length > 0) {
+            // Node is both a child (has deps) and a parent (has dependents)
+            // Create as waiting-children via addFlow with 0 children
+            const ids = await addFlow(
+              client,
+              queueKeys,
+              node.name,
+              serializedData,
+              JSON.stringify(opts),
+              timestamp,
+              opts.delay ?? 0,
+              opts.priority ?? 0,
+              opts.attempts ?? 0,
+              [],
+              [],
+              customJobId,
+            );
+            if (ids[0] === 'duplicate') throw new Error('Duplicate job ID in DAG');
+            if (ids[0] === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
+            const jobId = ids[0];
+            const job = new Job(client, queueKeys, jobId, node.name, node.data, opts, this.serializer);
+            job.timestamp = timestamp;
+            result.set(node.name, job);
+
+            // Register all parent dependencies
+            for (const depName of deps) {
+              const parentJob = result.get(depName)!;
+              const parentNode = dag.nodes.find((n) => n.name === depName)!;
+              const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
+              const depsMember = `${keyPrefix(prefix, node.queueName)}:${jobId}`;
+
+              const registerResult = await registerParent(
+                client,
+                queueKeys,
+                jobId,
+                parentJob.id,
+                keyPrefix(prefix, parentNode.queueName),
+                parentQueueKeys,
+                depsMember,
+              );
+
+              if (registerResult.startsWith('error:')) {
+                throw new Error(`Failed to register parent ${depName} for node ${node.name}: ${registerResult}`);
+              }
+            }
+
+            // Store parent info on the job
+            const pIds = deps.map((d) => result.get(d)!.id);
+            const pQueues = deps.map((d) => dag.nodes.find((n) => n.name === d)!.queueName);
+            job.parentId = pIds[0];
+            job.parentQueue = pQueues[0];
+            if (deps.length > 1) {
+              job.parentIds = pIds;
+              job.parentQueues = pQueues;
+              await client.hset(queueKeys.job(jobId), {
+                parentId: pIds[0],
+                parentQueue: pQueues[0],
+                parentIds: JSON.stringify(pIds),
+                parentQueues: JSON.stringify(pQueues),
+              });
+            } else {
+              await client.hset(queueKeys.job(jobId), {
+                parentId: pIds[0],
+                parentQueue: pQueues[0],
+              });
+            }
+          } else if (deps.length === 0) {
+            // Leaf node with no deps and no children - simple addJob
+            const jobId = await addJob(
+              client,
+              queueKeys,
+              node.name,
+              serializedData,
+              JSON.stringify(opts),
+              timestamp,
+              opts.delay ?? 0,
+              opts.priority ?? 0,
+              '',
+              opts.attempts ?? 0,
+              orderingKey ?? '',
+              groupConcurrency,
+              groupRateMax,
+              groupRateDuration,
+              tbCapacity,
+              tbRefillRate,
+              jobCost,
+              opts.ttl ?? 0,
+              customJobId,
+            );
+            if (String(jobId) === 'duplicate') throw new Error('Duplicate job ID in DAG');
+            if (String(jobId) === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
+            const job = new Job(client, queueKeys, String(jobId), node.name, node.data, opts, this.serializer);
+            job.timestamp = timestamp;
+            result.set(node.name, job);
+          } else {
+            // Non-parent node with deps (terminal/sink node) - add as regular job
+            // Dependency semantics: deps are the PARENTS this child waits for.
+            // The child (current node) becomes a dependency of the parent via the deps SET.
+            // Use first dep as the primary parent for backward compatibility
+            const firstDepName = deps[0];
+            const firstParentJob = result.get(firstDepName)!;
+            const firstParentNode = dag.nodes.find((n) => n.name === firstDepName)!;
+            const firstParentKeys = buildKeys(firstParentNode.queueName, prefix);
+            const queuePrefix = keyPrefix(prefix, node.queueName);
+
+            const jobId = await addJob(
+              client,
+              queueKeys,
+              node.name,
+              serializedData,
+              JSON.stringify(opts),
+              timestamp,
+              opts.delay ?? 0,
+              opts.priority ?? 0,
+              firstParentJob.id,
+              opts.attempts ?? 0,
+              orderingKey ?? '',
+              groupConcurrency,
+              groupRateMax,
+              groupRateDuration,
+              tbCapacity,
+              tbRefillRate,
+              jobCost,
+              opts.ttl ?? 0,
+              customJobId,
+              firstParentNode.queueName,
+              firstParentKeys.deps(firstParentJob.id),
+            );
+            if (String(jobId) === 'duplicate') throw new Error('Duplicate job ID in DAG');
+            if (String(jobId) === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
+            const jid = String(jobId);
+            const job = new Job(client, queueKeys, jid, node.name, node.data, opts, this.serializer);
+            job.timestamp = timestamp;
+            job.parentId = firstParentJob.id;
+            job.parentQueue = firstParentNode.queueName;
+            result.set(node.name, job);
+
+            // Register additional parents (2nd, 3rd, etc.)
+            if (deps.length > 1) {
+              const pIds = deps.map((d) => result.get(d)!.id);
+              const pQueues = deps.map((d) => dag.nodes.find((n) => n.name === d)!.queueName);
+              job.parentIds = pIds;
+              job.parentQueues = pQueues;
+              await client.hset(queueKeys.job(jid), {
+                parentIds: JSON.stringify(pIds),
+                parentQueues: JSON.stringify(pQueues),
+              });
+
+              for (let p = 1; p < deps.length; p++) {
+                const depName = deps[p];
+                const parentJob = result.get(depName)!;
+                const parentNode = dag.nodes.find((n) => n.name === depName)!;
+                const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
+                const depsMember = `${queuePrefix}:${jid}`;
+
+                const registerResult = await registerParent(
+                  client,
+                  queueKeys,
+                  jid,
+                  parentJob.id,
+                  keyPrefix(prefix, parentNode.queueName),
+                  parentQueueKeys,
+                  depsMember,
+                );
+
+                if (registerResult.startsWith('error:')) {
+                  throw new Error(`Failed to register parent ${depName} for node ${node.name}: ${registerResult}`);
+                }
+              }
+            }
+          }
+        }
+
+        return result;
+      },
+    );
   }
 
   /**

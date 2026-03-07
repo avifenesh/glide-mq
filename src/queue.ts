@@ -1041,10 +1041,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const key = type === 'completed' ? this.keys.completed : this.keys.failed;
     const metricsKey = type === 'completed' ? this.keys.metricsCompleted : this.keys.metricsFailed;
 
-    const [count, rawHash] = await Promise.all([
-      client.zcard(key),
-      client.hgetall(metricsKey),
-    ]);
+    const [count, rawHash] = await Promise.all([client.zcard(key), client.hgetall(metricsKey)]);
 
     const buckets = new Map<number, { count: number; totalDuration: number }>();
     const hashRecord = hashDataToRecord(rawHash);

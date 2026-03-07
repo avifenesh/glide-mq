@@ -164,11 +164,12 @@ describeEachMode('Queue metrics', (CONNECTION) => {
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
-      const worker = new Worker(
-        qName,
-        async () => 'ok',
-        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000, stalledInterval: 60000 },
-      );
+      const worker = new Worker(qName, async () => 'ok', {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 1000,
+        stalledInterval: 60000,
+      });
       worker.on('completed', () => {
         clearTimeout(timeout);
         setTimeout(() => worker.close(true).then(resolve), 200);

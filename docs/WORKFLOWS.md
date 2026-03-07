@@ -4,6 +4,7 @@
 
 - [FlowProducer — Parent-Child Job Trees](#flowproducer)
 - [Reading Child Results](#reading-child-results)
+- [DAG Workflows — Multiple Parents](#dag-workflows--multiple-parents)
 - [`chain` — Sequential Pipeline](#chain)
 - [`group` — Parallel Execution](#group)
 - [`chord` — Parallel + Callback](#chord)
@@ -76,6 +77,125 @@ const worker = new Worker('reports', async (job) => {
   const totalSales = results.reduce((s, v) => s + (v.sales ?? 0), 0);
   return { totalSales };
 }, { connection });
+```
+
+---
+
+## DAG Workflows — Multiple Parents
+
+`FlowProducer.addDAG()` lets you define **arbitrary DAG (Directed Acyclic Graph) topologies** where any job can have multiple parent dependencies. A job only becomes runnable once **all** of its dependencies have successfully completed.
+
+### Use cases
+
+- **Fan-in merge**: Multiple parallel data sources converge into a single aggregation job
+- **Diamond dependencies**: Job D depends on both B and C, which both depend on A
+- **Multi-stage pipelines**: Complex workflows where certain jobs must wait for multiple upstream tasks
+
+### API
+
+```typescript
+import { FlowProducer, dag } from 'glide-mq';
+
+const flow = new FlowProducer({ connection });
+
+// Submit a DAG using the helper function
+const jobs = await dag('queueName', [
+  { name: 'A', data: { step: 1 } },
+  { name: 'B', data: { step: 2 }, deps: ['A'] },
+  { name: 'C', data: { step: 3 }, deps: ['A'] },
+  { name: 'D', data: { step: 4 }, deps: ['B', 'C'] },
+], connection);
+
+// Or use FlowProducer.addDAG() directly
+const jobs = await flow.addDAG({
+  nodes: [
+    { name: 'A', queueName: 'tasks', data: { step: 1 } },
+    { name: 'B', queueName: 'tasks', data: { step: 2 }, deps: ['A'] },
+    { name: 'C', queueName: 'tasks', data: { step: 3 }, deps: ['A'] },
+    { name: 'D', queueName: 'tasks', data: { step: 4 }, deps: ['B', 'C'] },
+  ],
+});
+// Returns Map<string, Job> keyed by node name
+```
+
+Each **DAGNode** has:
+- `name` — unique identifier within this DAG (used in `deps` arrays)
+- `queueName` — queue to submit this job to
+- `data` — job payload
+- `opts?` — job options (delay, priority, attempts, etc.)
+- `deps?` — array of node names that must complete before this job runs
+
+### Example: Fan-in merge
+
+```typescript
+import { dag } from 'glide-mq';
+
+// Three parallel data fetches, then one merge job
+const jobs = await dag('data', [
+  { name: 'fetch-sales', data: { source: 'sales-db' } },
+  { name: 'fetch-inventory', data: { source: 'warehouse-db' } },
+  { name: 'fetch-returns', data: { source: 'returns-db' } },
+  {
+    name: 'merge-reports',
+    data: { reportId: 'Q1-2025' },
+    deps: ['fetch-sales', 'fetch-inventory', 'fetch-returns'],
+  },
+], connection);
+
+// All three fetches run in parallel.
+// 'merge-reports' runs only after all three complete.
+```
+
+### Example: Diamond dependency
+
+```typescript
+import { dag } from 'glide-mq';
+
+// Job topology:
+//       A
+//      / \
+//     B   C
+//      \ /
+//       D
+
+const jobs = await dag('tasks', [
+  { name: 'A', data: { step: 'root' } },
+  { name: 'B', data: { step: 'left' }, deps: ['A'] },
+  { name: 'C', data: { step: 'right' }, deps: ['A'] },
+  { name: 'D', data: { step: 'converge' }, deps: ['B', 'C'] },
+], connection);
+
+// A runs first, then B and C in parallel, then D after both complete.
+```
+
+**Implementation notes:**
+- DAG validation runs automatically - cycles are detected and rejected with `CycleError`.
+- Jobs are submitted in topological order (leaves first, roots last).
+- If any parent fails or is dead-lettered, dependent jobs remain blocked indefinitely (manual cleanup required).
+- Cross-queue dependencies are supported - each node can specify its own `queueName`.
+
+### Reading results from multiple parents
+
+Use `job.getParents()` to fetch all parent jobs and their results:
+
+```typescript
+const worker = new Worker('tasks', async (job) => {
+  if (job.name === 'D') {
+    const parents = await job.getParents();
+    // parents is an array of Job instances
+    const results = parents.map(p => p.returnvalue);
+    return { merged: results };
+  }
+}, { connection });
+```
+
+Alternatively, manually fetch specific parents if you know their IDs:
+
+```typescript
+const parentB = await Job.fromId(queue, 'B-job-id');
+const parentC = await Job.fromId(queue, 'C-job-id');
+const resultB = parentB?.returnvalue;
+const resultC = parentC?.returnvalue;
 ```
 
 ---

@@ -38,6 +38,8 @@ export type {
   GetJobsOptions,
   WorkerInfo,
   Serializer,
+  DAGNode,
+  DAGFlow,
 } from './types';
 
 export { JSON_SERIALIZER } from './types';
@@ -54,7 +56,9 @@ export { isClusterClient } from './connection';
 export { gracefulShutdown } from './graceful-shutdown';
 export type { GracefulShutdownHandle } from './graceful-shutdown';
 
-export { chain, group, chord } from './workflows';
+export { chain, group, chord, dag } from './workflows';
 export type { WorkflowJobDef } from './workflows';
+
+export { validateDAG, topoSort, CycleError } from './dag-utils';
 
 export { setTracer, isTracingEnabled } from './telemetry';
