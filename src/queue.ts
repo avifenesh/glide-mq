@@ -264,6 +264,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
           groupConcurrency = 1;
         }
         validateOrderingKey(orderingKey);
+n        if (opts?.lifo && orderingKey) {
+          throw new Error('lifo and ordering.key cannot be used together');
+        }
+        const lifo = opts?.lifo ?? false;
 
         const customJobId = opts?.jobId ?? '';
         if (customJobId !== '') validateJobId(customJobId);
@@ -320,6 +324,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             jobCost,
             ttl,
             customJobId,
+            lifo ? 1 : 0,
             parentQueue,
             parentDepsKey,
           );
@@ -362,6 +367,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             jobCost,
             ttl,
             customJobId,
+            lifo ? 1 : 0,
             parentQueue,
             parentDepsKey,
           );
@@ -465,6 +471,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const delay = opts.delay ?? 0;
       const priority = opts.priority ?? 0;
       const parentId = opts.parent ? opts.parent.id : '';
+n      if (opts.lifo && orderingKey) {
+        throw new Error('lifo and ordering.key cannot be used together');
+      }
       const parentQueue = opts.parent ? opts.parent.queue : '';
       const maxAttempts = opts.attempts ?? 0;
       const orderingKey = opts.ordering?.key ?? '';
