@@ -24,11 +24,15 @@ describeEachMode('Queue metrics', (CONNECTION) => {
     cleanupClient.close();
   });
 
-  it('getMetrics returns zero counts on empty queue', async () => {
+  it('getMetrics returns zero counts and empty data on empty queue', async () => {
     const completed = await queue.getMetrics('completed');
     const failed = await queue.getMetrics('failed');
     expect(completed.count).toBe(0);
+    expect(completed.data).toEqual([]);
+    expect(completed.meta).toEqual({ resolution: 'minute' });
     expect(failed.count).toBe(0);
+    expect(failed.data).toEqual([]);
+    expect(failed.meta).toEqual({ resolution: 'minute' });
   });
 
   it('getJobCounts returns zero counts on empty queue', async () => {
@@ -88,6 +92,18 @@ describeEachMode('Queue metrics', (CONNECTION) => {
 
     const metrics = await localQueue.getMetrics('completed');
     expect(metrics.count).toBe(3);
+    expect(metrics.meta).toEqual({ resolution: 'minute' });
+    expect(metrics.data.length).toBeGreaterThanOrEqual(1);
+
+    const totalCount = metrics.data.reduce((sum, dp) => sum + dp.count, 0);
+    expect(totalCount).toBe(3);
+
+    for (const dp of metrics.data) {
+      expect(dp.timestamp).toBeGreaterThan(0);
+      expect(dp.timestamp % 60000).toBe(0);
+      expect(dp.count).toBeGreaterThan(0);
+      expect(dp.avgDuration).toBeGreaterThanOrEqual(0);
+    }
 
     const counts = await localQueue.getJobCounts();
     expect(counts.completed).toBe(3);
@@ -123,9 +139,51 @@ describeEachMode('Queue metrics', (CONNECTION) => {
 
     const metrics = await localQueue.getMetrics('failed');
     expect(metrics.count).toBe(1);
+    expect(metrics.data.length).toBeGreaterThanOrEqual(1);
+
+    const totalCount = metrics.data.reduce((sum, dp) => sum + dp.count, 0);
+    expect(totalCount).toBe(1);
+
+    for (const dp of metrics.data) {
+      expect(dp.timestamp % 60000).toBe(0);
+      expect(dp.avgDuration).toBeGreaterThanOrEqual(0);
+    }
 
     const counts = await localQueue.getJobCounts();
     expect(counts.failed).toBe(1);
+
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
+  it('getMetrics supports start/end slicing', async () => {
+    const qName = Q + '-slice';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+
+    await localQueue.add('s1', { x: 1 });
+
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
+      const worker = new Worker(
+        qName,
+        async () => 'ok',
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000, stalledInterval: 60000 },
+      );
+      worker.on('completed', () => {
+        clearTimeout(timeout);
+        setTimeout(() => worker.close(true).then(resolve), 200);
+      });
+      worker.on('error', () => {});
+    });
+
+    await done;
+
+    const all = await localQueue.getMetrics('completed');
+    expect(all.data.length).toBeGreaterThanOrEqual(1);
+
+    const sliced = await localQueue.getMetrics('completed', { start: 0, end: 0 });
+    expect(sliced.data.length).toBe(1);
+    expect(sliced.count).toBe(all.count);
 
     await localQueue.close();
     await flushQueue(cleanupClient, qName);

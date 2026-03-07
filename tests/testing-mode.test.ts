@@ -1387,4 +1387,79 @@ describe('TestWorker batch mode', () => {
     const completed = await queue.getJobs('completed');
     expect(completed).toHaveLength(2);
   });
+
+  it('getMetrics returns time-series data for completed jobs', async () => {
+    queue = new TestQueue('test-metrics');
+    const worker = new TestWorker(queue, async () => 'done');
+
+    await queue.add('j1', {});
+    await queue.add('j2', {});
+    await queue.add('j3', {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const metrics = await queue.getMetrics('completed');
+    expect(metrics.count).toBe(3);
+    expect(metrics.meta).toEqual({ resolution: 'minute' });
+    expect(metrics.data.length).toBeGreaterThanOrEqual(1);
+
+    const totalCount = metrics.data.reduce((sum: number, dp: any) => sum + dp.count, 0);
+    expect(totalCount).toBe(3);
+
+    for (const dp of metrics.data) {
+      expect(dp.timestamp % 60000).toBe(0);
+      expect(dp.avgDuration).toBeGreaterThanOrEqual(0);
+    }
+
+    await worker.close();
+  });
+
+  it('getMetrics returns time-series data for failed jobs', async () => {
+    queue = new TestQueue('test-metrics-fail');
+    const worker = new TestWorker(queue, async () => {
+      throw new Error('fail');
+    });
+
+    await queue.add('f1', {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const metrics = await queue.getMetrics('failed');
+    expect(metrics.count).toBe(1);
+    expect(metrics.data.length).toBeGreaterThanOrEqual(1);
+    expect(metrics.data[0].count).toBe(1);
+    expect(metrics.data[0].avgDuration).toBeGreaterThanOrEqual(0);
+
+    const completedMetrics = await queue.getMetrics('completed');
+    expect(completedMetrics.count).toBe(0);
+    expect(completedMetrics.data).toEqual([]);
+
+    await worker.close();
+  });
+
+  it('getMetrics empty queue returns zero count and empty data', async () => {
+    queue = new TestQueue('test-metrics-empty');
+
+    const metrics = await queue.getMetrics('completed');
+    expect(metrics.count).toBe(0);
+    expect(metrics.data).toEqual([]);
+    expect(metrics.meta).toEqual({ resolution: 'minute' });
+  });
+
+  it('getMetrics supports start/end slicing', async () => {
+    queue = new TestQueue('test-metrics-slice');
+    const worker = new TestWorker(queue, async () => 'ok');
+
+    await queue.add('s1', {});
+    await new Promise((r) => setTimeout(r, 50));
+
+    const all = await queue.getMetrics('completed');
+    expect(all.data.length).toBeGreaterThanOrEqual(1);
+
+    const sliced = await queue.getMetrics('completed', { start: 0, end: 0 });
+    expect(sliced.data.length).toBe(1);
+    expect(sliced.count).toBe(all.count);
+
+    await worker.close();
+  });
 });
