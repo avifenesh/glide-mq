@@ -7,6 +7,38 @@ const DEFAULT_PREFIX = 'glide';
 // 1MB max payload size to prevent DoS
 export const MAX_JOB_DATA_SIZE = 1048576;
 
+/** Characters that break Valkey cluster hash-tag routing when used in queue names. */
+export const INVALID_QUEUE_NAME_CHARS = /[{}:]/;
+
+/** Characters that are invalid in job IDs. */
+export const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
+
+/** Maximum length for ordering keys. */
+export const MAX_ORDERING_KEY_LENGTH = 256;
+
+/**
+ * Validate a job ID. Throws if the ID is too long or contains forbidden characters.
+ */
+export function validateJobId(jobId: string): void {
+  if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
+  if (INVALID_JOB_ID_CHARS.test(jobId)) {
+    throw new Error('jobId must not contain control characters, curly braces, or colons');
+  }
+}
+
+/**
+ * Validate a queue name. Throws if it contains characters that would corrupt
+ * cluster hash-tag routing (curly braces or colons).
+ */
+export function validateQueueName(name: string): void {
+  if (!name || typeof name !== 'string') {
+    throw new Error('Queue name must be a non-empty string');
+  }
+  if (INVALID_QUEUE_NAME_CHARS.test(name)) {
+    throw new Error('Queue name must not contain curly braces or colons');
+  }
+}
+
 export function isPlainStepPayload(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   return Object.getPrototypeOf(value) === Object.prototype;
@@ -73,8 +105,14 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     log: (id: string) => `${p}:log:${id}`,
     deps: (id: string) => `${p}:deps:${id}`,
     ratelimited: `${p}:ratelimited`,
+    metricsCompleted: `${p}:metrics:completed`,
+    lifo: `${p}:lifo`,
+    priority: `${p}:priority`,
+    listActive: `${p}:list-active`,
+    metricsFailed: `${p}:metrics:failed`,
     group: (key: string) => `${p}:group:${key}`,
     groupq: (key: string) => `${p}:groupq:${key}`,
+    parents: (id: string) => `${p}:parents:${id}`,
     worker: (id: string) => `${p}:w:${id}`,
   };
 }
@@ -84,6 +122,9 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
 const PRIORITY_SHIFT = 2 ** 42;
 
 export function encodeScore(priority: number, timestampMs: number): number {
+  if (priority > 2048) {
+    throw new Error('Priority must be <= 2048');
+  }
   return priority * PRIORITY_SHIFT + timestampMs;
 }
 
@@ -176,6 +217,8 @@ export const JOB_METADATA_FIELDS: readonly string[] = Object.freeze([
   'revoked',
   'lastActive',
   'schedulerName',
+  'parentIds',
+  'parentQueues',
 ]);
 
 /**
@@ -257,7 +300,12 @@ export async function reconnectWithBackoff(
 // Format: minute hour dayOfMonth month dayOfWeek
 // Supports: *, specific numbers, ranges (1-5), steps (*/5), lists (1,3,5)
 
-function parseCronField(field: string, min: number, max: number): number[] {
+interface CronField {
+  set: Set<number>;
+  sorted: number[];
+}
+
+function parseCronField(field: string, min: number, max: number): CronField {
   const values: Set<number> = new Set();
 
   for (const part of field.split(',')) {
@@ -314,7 +362,8 @@ function parseCronField(field: string, min: number, max: number): number[] {
     values.add(num);
   }
 
-  return [...values].sort((a, b) => a - b);
+  const sorted = [...values].sort((a, b) => a - b);
+  return { set: values, sorted };
 }
 
 // Maximum search horizon in years to prevent infinite loops (e.g. Feb 30)
@@ -543,11 +592,11 @@ function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
     throw new Error(`Invalid cron pattern: expected 5 fields, got ${fields.length}`);
   }
 
-  const minutes = parseCronField(fields[0], 0, 59);
-  const hours = parseCronField(fields[1], 0, 23);
-  const daysOfMonth = parseCronField(fields[2], 1, 31);
-  const months = parseCronField(fields[3], 1, 12);
-  const daysOfWeek = parseCronField(fields[4], 0, 6); // 0=Sunday
+  const { set: minuteSet, sorted: minutesSorted } = parseCronField(fields[0], 0, 59);
+  const { set: hourSet, sorted: hoursSorted } = parseCronField(fields[1], 0, 23);
+  const { set: domSet } = parseCronField(fields[2], 1, 31);
+  const { set: monthSet, sorted: monthsSorted } = parseCronField(fields[3], 1, 12);
+  const { set: dowSet } = parseCronField(fields[4], 0, 6); // 0=Sunday
 
   // Start from the next minute after afterMs (all operations in UTC)
   const d = new Date(afterMs);
@@ -559,13 +608,13 @@ function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
   while (d.getUTCFullYear() <= endYear) {
     // 1. Month check
     const currentMonth = d.getUTCMonth() + 1;
-    if (!months.includes(currentMonth)) {
-      const nextMonth = months.find((m) => m > currentMonth);
+    if (!monthSet.has(currentMonth)) {
+      const nextMonth = monthsSorted.find((m) => m > currentMonth);
       if (nextMonth != null) {
         d.setUTCMonth(nextMonth - 1, 1);
         d.setUTCHours(0, 0, 0, 0);
       } else {
-        d.setUTCFullYear(d.getUTCFullYear() + 1, months[0] - 1, 1);
+        d.setUTCFullYear(d.getUTCFullYear() + 1, monthsSorted[0] - 1, 1);
         d.setUTCHours(0, 0, 0, 0);
       }
       continue;
@@ -574,7 +623,7 @@ function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
     // 2. Day check
     const currentDay = d.getUTCDate();
     const currentDayOfWeek = d.getUTCDay();
-    if (!daysOfMonth.includes(currentDay) || !daysOfWeek.includes(currentDayOfWeek)) {
+    if (!domSet.has(currentDay) || !dowSet.has(currentDayOfWeek)) {
       d.setUTCDate(d.getUTCDate() + 1);
       d.setUTCHours(0, 0, 0, 0);
       continue;
@@ -582,8 +631,8 @@ function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
 
     // 3. Hour check
     const currentHour = d.getUTCHours();
-    if (!hours.includes(currentHour)) {
-      const nextHour = hours.find((h) => h > currentHour);
+    if (!hourSet.has(currentHour)) {
+      const nextHour = hoursSorted.find((h) => h > currentHour);
       if (nextHour != null) {
         d.setUTCHours(nextHour, 0, 0, 0);
       } else {
@@ -595,8 +644,8 @@ function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
 
     // 4. Minute check
     const currentMinute = d.getUTCMinutes();
-    if (!minutes.includes(currentMinute)) {
-      const nextMinute = minutes.find((m) => m > currentMinute);
+    if (!minuteSet.has(currentMinute)) {
+      const nextMinute = minutesSorted.find((m) => m > currentMinute);
       if (nextMinute != null) {
         d.setUTCMinutes(nextMinute, 0, 0);
         return d.getTime();
@@ -626,11 +675,11 @@ function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): num
     throw new Error(`Invalid cron pattern: expected 5 fields, got ${fields.length}`);
   }
 
-  const minutes = parseCronField(fields[0], 0, 59);
-  const hours = parseCronField(fields[1], 0, 23);
-  const daysOfMonth = parseCronField(fields[2], 1, 31);
-  const months = parseCronField(fields[3], 1, 12);
-  const daysOfWeek = parseCronField(fields[4], 0, 6);
+  const { set: minuteSet, sorted: minutesSorted } = parseCronField(fields[0], 0, 59);
+  const { set: hourSet, sorted: hoursSorted } = parseCronField(fields[1], 0, 23);
+  const { set: domSet } = parseCronField(fields[2], 1, 31);
+  const { set: monthSet, sorted: monthsSorted } = parseCronField(fields[3], 1, 12);
+  const { set: dowSet } = parseCronField(fields[4], 0, 6);
 
   // Get the wall-clock time in the target timezone for "afterMs + 1 minute"
   const startParts = utcToTzParts(afterMs, tz);
@@ -659,8 +708,8 @@ function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): num
 
   while (year <= endYear) {
     // 1. Month check
-    if (!months.includes(month)) {
-      const nextMonth = months.find((m) => m > month);
+    if (!monthSet.has(month)) {
+      const nextMonth = monthsSorted.find((m) => m > month);
       if (nextMonth != null) {
         month = nextMonth;
         day = 1;
@@ -668,7 +717,7 @@ function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): num
         minute = 0;
       } else {
         year++;
-        month = months[0];
+        month = monthsSorted[0];
         day = 1;
         hour = 0;
         minute = 0;
@@ -691,7 +740,7 @@ function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): num
       continue;
     }
     const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
-    if (!daysOfMonth.includes(day) || !daysOfWeek.includes(dow)) {
+    if (!domSet.has(day) || !dowSet.has(dow)) {
       day++;
       hour = 0;
       minute = 0;
@@ -699,8 +748,8 @@ function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): num
     }
 
     // 3. Hour check
-    if (!hours.includes(hour)) {
-      const nextHour = hours.find((h) => h > hour);
+    if (!hourSet.has(hour)) {
+      const nextHour = hoursSorted.find((h) => h > hour);
       if (nextHour != null) {
         hour = nextHour;
         minute = 0;
@@ -713,8 +762,8 @@ function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): num
     }
 
     // 4. Minute check
-    if (!minutes.includes(minute)) {
-      const nextMinute = minutes.find((m) => m > minute);
+    if (!minuteSet.has(minute)) {
+      const nextMinute = minutesSorted.find((m) => m > minute);
       if (nextMinute != null) {
         minute = nextMinute;
       } else {

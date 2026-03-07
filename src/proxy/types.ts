@@ -109,7 +109,6 @@ export interface JobCountsResponse {
 export interface HealthResponse {
   status: 'ok';
   uptime: number;
-  queues: string[];
 }
 
 /**

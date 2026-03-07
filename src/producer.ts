@@ -76,6 +76,7 @@ export class Producer<D = any> {
   private closing = false;
   private keys: QueueKeys;
   private serializer: Serializer;
+  private initPromise: Promise<Client> | null = null;
 
   constructor(name: string, opts: ProducerOptions) {
     if (!opts.connection && !opts.client) {
@@ -103,24 +104,26 @@ export class Producer<D = any> {
     if (this.closing) {
       throw new GlideMQError('Producer is closed');
     }
-    if (!this.client) {
-      if (this.opts.client) {
-        const injected = this.opts.client;
-        await ensureFunctionLibraryOnce(
-          injected,
-          LIBRARY_SOURCE,
-          this.opts.connection?.clusterMode ?? isClusterClient(injected),
-        );
-        this.client = injected;
-        this.clientOwned = false;
-      } else {
-        const client = await createClient(this.opts.connection!);
-        await ensureFunctionLibraryOnce(client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
-        this.client = client;
-        this.clientOwned = true;
-      }
+    if (this.client) return this.client;
+    if (!this.initPromise) {
+      this.initPromise = this.opts.client
+        ? ensureFunctionLibraryOnce(
+            this.opts.client,
+            LIBRARY_SOURCE,
+            this.opts.connection?.clusterMode ?? isClusterClient(this.opts.client),
+          ).then(() => {
+            this.clientOwned = false;
+            this.client = this.opts.client!;
+            return this.client;
+          })
+        : createClient(this.opts.connection!).then(async (client) => {
+            await ensureFunctionLibraryOnce(client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
+            this.clientOwned = true;
+            this.client = client;
+            return client;
+          });
     }
-    return this.client;
+    return this.initPromise;
   }
 
   /**
@@ -173,7 +176,8 @@ export class Producer<D = any> {
     if (customJobId !== '') validateJobId(customJobId);
 
     if (opts?.ttl != null) {
-      if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new GlideMQError('ttl must be a non-negative finite number');
+      if (!Number.isFinite(opts.ttl) || opts.ttl < 0)
+        throw new GlideMQError('ttl must be a non-negative finite number');
     }
 
     let serialized = this.serializer.serialize(data);
@@ -253,6 +257,7 @@ export class Producer<D = any> {
         p.jobCost,
         p.ttl,
         p.customJobId,
+        0,
         p.parentQueue,
         p.parentDepsKey,
       );
@@ -292,6 +297,7 @@ export class Producer<D = any> {
         p.jobCost,
         p.ttl,
         p.customJobId,
+        0,
         p.parentQueue,
         p.parentDepsKey,
       );
@@ -364,6 +370,7 @@ export class Producer<D = any> {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
+          '0',
           p.parentQueue,
         ]);
       } else {
@@ -389,6 +396,7 @@ export class Producer<D = any> {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
+          '0',
           p.parentQueue,
         ]);
       }

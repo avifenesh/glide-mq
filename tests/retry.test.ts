@@ -8,6 +8,7 @@ import { it, expect, beforeAll, afterAll } from 'vitest';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
+const { UnrecoverableError } = require('../dist/errors') as typeof import('../src/errors');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
@@ -331,4 +332,50 @@ describeEachMode('Retry lifecycle', (CONNECTION) => {
     await queue.close();
     await flushQueue(cleanupClient, Q);
   }, 20000);
+
+  it('UnrecoverableError immediately fails job even when attempts remain', async () => {
+    const Q = 'test-retry-unrecoverable-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const k = buildKeys(Q);
+
+    let processorCallCount = 0;
+
+    await queue.add('task', {}, { attempts: 5, backoff: { type: 'fixed', delay: 100 } });
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
+
+      const worker = new Worker(
+        Q,
+        async () => {
+          processorCallCount++;
+          throw new UnrecoverableError('cannot recover from this');
+        },
+        { connection: CONNECTION },
+      );
+
+      worker.on('failed', async (job: any) => {
+        clearTimeout(timeout);
+        await worker.close(true);
+
+        try {
+          expect(processorCallCount).toBe(1);
+          expect(job.failedReason).toBe('cannot recover from this');
+
+          const state = await cleanupClient.hget(k.job(job.id), 'state');
+          expect(String(state)).toBe('failed');
+          resolve();
+        } catch (e) {
+          reject(e);
+        } finally {
+          await flushQueue(cleanupClient, Q);
+          await queue.close();
+        }
+      });
+
+      worker.on('error', (err: Error) => {
+        if (!err.message.includes('timeout')) reject(err);
+      });
+    });
+  }, 15000);
 });

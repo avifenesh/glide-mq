@@ -1,5 +1,6 @@
 import { FlowProducer, JobNode } from './flow-producer';
-import type { ConnectionOptions, FlowJob, JobOptions } from './types';
+import type { ConnectionOptions, FlowJob, JobOptions, DAGNode } from './types';
+import type { Job } from './job';
 
 export interface WorkflowJobDef {
   name: string;
@@ -139,6 +140,37 @@ export async function chord(
       opts: callback.opts,
       children,
     });
+  } finally {
+    await flow.close();
+  }
+}
+
+/**
+ * DAG: submit a directed acyclic graph of jobs where each job can depend on
+ * multiple other jobs. The graph is validated for cycles and submitted in
+ * topological order (leaves first).
+ *
+ * Returns a Map of node name to Job instance.
+ *
+ * Example - diamond dependency:
+ * ```
+ * const jobs = await dag([
+ *   { name: 'A', queueName: 'q', data: {}, deps: [] },
+ *   { name: 'B', queueName: 'q', data: {}, deps: ['A'] },
+ *   { name: 'C', queueName: 'q', data: {}, deps: ['A'] },
+ *   { name: 'D', queueName: 'q', data: {}, deps: ['B', 'C'] },
+ * ], connection);
+ * ```
+ */
+export async function dag(nodes: DAGNode[], connection: ConnectionOptions, prefix?: string): Promise<Map<string, Job>> {
+  if (nodes.length === 0) {
+    throw new Error('dag() requires at least one node');
+  }
+
+  const flow = new FlowProducer({ connection, prefix });
+
+  try {
+    return await flow.addDAG({ nodes });
   } finally {
     await flow.close();
   }

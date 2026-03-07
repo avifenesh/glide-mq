@@ -119,6 +119,23 @@ export interface WorkerOptions extends QueueOptions {
   batch?: BatchOptions;
 }
 
+export interface BroadcastOptions extends QueueOptions {
+  /** Max messages to retain in stream (must be a positive integer). Trimmed exactly (hard limit) on each publish. Opt-in; no trimming by default. */
+  maxMessages?: number;
+}
+
+export interface BroadcastWorkerOptions extends WorkerOptions {
+  /** Subscription name - becomes the consumer group name. Required for broadcast workers. */
+  subscription: string;
+  /**
+   * Stream ID to start from when creating this subscription.
+   * - '$': Only new messages (default)
+   * - '0-0': All history (backfill)
+   * - '<stream-id>': Start from specific ID
+   */
+  startFrom?: string;
+}
+
 export interface JobOptions {
   /**
    * Custom job ID. Max 256 characters, must not contain control characters,
@@ -129,6 +146,8 @@ export interface JobOptions {
   jobId?: string;
   delay?: number;
   priority?: number;
+  /** Process jobs in LIFO (last-in-first-out) order. Cannot be combined with ordering keys. */
+  lifo?: boolean;
   /**
    * Per-key ordering and group concurrency control.
    * Jobs sharing the same key are constrained to run at most `concurrency`
@@ -154,6 +173,13 @@ export interface JobOptions {
   removeOnFail?: boolean | number | { age: number; count: number };
   deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
   parent?: { queue: string; id: string };
+  /**
+   * Multiple parent dependencies for DAG flows.
+   * When set, this job waits for ALL parents to complete before it can run.
+   * Each parent tracks this job as a child in its deps SET.
+   * Mutually exclusive with `parent` - use one or the other.
+   */
+  parents?: Array<{ queue: string; id: string }>;
   /** Time-to-live in milliseconds. Jobs not processed within this window are failed as 'expired'. */
   ttl?: number;
 }
@@ -243,8 +269,6 @@ export interface FlowProducerOptions {
 
 export interface QueueEventsOptions {
   connection: ConnectionOptions;
-  /** @internal Not supported - QueueEvents uses blocking XREAD and requires a dedicated connection. */
-  client?: never;
   prefix?: string;
   /** Starting stream ID. Defaults to '$' (new events only). Use '0' for historical replay. */
   lastEventId?: string;
@@ -294,9 +318,29 @@ export interface SchedulerEntry {
   nextRun: number;
 }
 
-export interface Metrics {
-  /** Total count of completed or failed jobs */
+export interface MetricsDataPoint {
+  /** Minute-bucket epoch ms (floored to start of minute). */
+  timestamp: number;
+  /** Number of jobs completed/failed in this bucket. */
   count: number;
+  /** Average processing duration in ms for this bucket. */
+  avgDuration: number;
+}
+
+export interface MetricsOptions {
+  /** Start index for data points (default 0). */
+  start?: number;
+  /** End index for data points (default -1 = all). */
+  end?: number;
+}
+
+export interface Metrics {
+  /** Total count of completed or failed jobs. */
+  count: number;
+  /** Per-minute data points sorted oldest-first. */
+  data: MetricsDataPoint[];
+  /** Resolution metadata. */
+  meta: { resolution: 'minute' };
 }
 
 export interface JobCounts {
@@ -328,4 +372,29 @@ export interface WorkerInfo {
   startedAt: number;
   age: number;
   activeJobs: number;
+}
+
+/**
+ * A node in a DAG flow. Each node is a job with optional dependencies on other nodes.
+ * The `deps` array lists the names of nodes that must complete before this node can run.
+ */
+export interface DAGNode {
+  /** Unique name within this DAG submission. Used as reference in `deps` arrays. */
+  name: string;
+  /** Queue to add this job to. */
+  queueName: string;
+  /** Job data payload. */
+  data: any;
+  /** Job options (delay, priority, etc.). `parent` and `parents` are managed automatically. */
+  opts?: Omit<JobOptions, 'parent' | 'parents'>;
+  /** Names of other nodes in this DAG that must complete before this node runs. */
+  deps?: string[];
+}
+
+/**
+ * A complete DAG flow definition for submission via FlowProducer.addDAG().
+ */
+export interface DAGFlow {
+  /** The nodes of the DAG. Order does not matter - topological sort is applied. */
+  nodes: DAGNode[];
 }

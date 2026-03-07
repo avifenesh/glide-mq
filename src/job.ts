@@ -4,7 +4,7 @@ import type { JobOptions, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
-import { DelayedError, WaitingChildrenError } from './errors';
+import { GlideMQError, DelayedError, WaitingChildrenError } from './errors';
 import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
@@ -22,6 +22,10 @@ export class Job<D = any, R = any> {
   processedOn: number | undefined;
   parentId?: string;
   parentQueue?: string;
+  /** Additional parent IDs for DAG multi-parent jobs. */
+  parentIds?: string[];
+  /** Additional parent queues for DAG multi-parent jobs (parallel array to parentIds). */
+  parentQueues?: string[];
   orderingKey?: string;
   orderingSeq?: number;
   groupKey?: string;
@@ -241,6 +245,50 @@ export class Job<D = any, R = any> {
   }
 
   /**
+   * Read all parent references for this job (for DAG multi-parent patterns).
+   * Returns an array of { queue, id } for each parent.
+   * For single-parent jobs, returns an array with one element.
+   * For jobs with no parent, returns an empty array.
+   */
+  async getParents(): Promise<Array<{ queue: string; id: string }>> {
+    const result: Array<{ queue: string; id: string }> = [];
+
+    // Check the parents SET first (multi-parent DAG jobs)
+    const parentsKey = this.queueKeys.parents(this.id);
+    const members = await this.client.smembers(parentsKey);
+    if (members && members.size > 0) {
+      for (const member of members) {
+        const memberStr = String(member);
+        // Format: "queue:parentId"
+        const sepIdx = memberStr.indexOf(':');
+        if (sepIdx !== -1) {
+          result.push({
+            queue: memberStr.substring(0, sepIdx),
+            id: memberStr.substring(sepIdx + 1),
+          });
+        }
+      }
+      return result;
+    }
+
+    // Fall back to single-parent fields
+    let parentId = this.parentId;
+    let parentQueue = this.parentQueue;
+    if (!parentId || !parentQueue) {
+      const [refreshedParentId, refreshedParentQueue] = await this.client.hmget(this.queueKeys.job(this.id), [
+        'parentId',
+        'parentQueue',
+      ]);
+      parentId = refreshedParentId ? String(refreshedParentId) : parentId;
+      parentQueue = refreshedParentQueue ? String(refreshedParentQueue) : parentQueue;
+    }
+    if (parentId && parentQueue) {
+      result.push({ queue: parentQueue, id: parentId });
+    }
+    return result;
+  }
+
+  /**
    * Move this job to the failed state.
    * If attempts remain and backoff is configured, retries via the scheduled ZSet.
    * Requires entryId to be set (set by Worker when processing).
@@ -256,7 +304,10 @@ export class Job<D = any, R = any> {
         this.opts.backoff.jitter,
       );
     }
-    const entryId = this.entryId ?? '0-0';
+    if (!this.entryId) {
+      throw new GlideMQError('moveToFailed can only be called while job is active in a Worker');
+    }
+    const entryId = this.entryId;
     const result = await failJob(
       this.client,
       this.queueKeys,
@@ -521,6 +572,20 @@ export class Job<D = any, R = any> {
     job.cost = hash.cost ? parseInt(hash.cost, 10) : undefined;
     job.expireAt = hash.expireAt ? parseInt(hash.expireAt, 10) : undefined;
     job.schedulerName = hash.schedulerName || undefined;
+    if (hash.parentIds) {
+      try {
+        job.parentIds = JSON.parse(hash.parentIds);
+      } catch {
+        job.parentIds = undefined;
+      }
+    }
+    if (hash.parentQueues) {
+      try {
+        job.parentQueues = JSON.parse(hash.parentQueues);
+      } catch {
+        job.parentQueues = undefined;
+      }
+    }
     if (hash.progress) {
       try {
         job.progress = JSON.parse(hash.progress);

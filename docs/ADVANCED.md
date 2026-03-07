@@ -105,6 +105,30 @@ await flow.close();     // detaches from shared client
 client.close();         // now safe - no components using it
 ```
 
+### Producer with an external client
+
+`Producer` also supports external client injection. When `opts.client` is provided the Producer borrows the connection without taking ownership — `close()` will not destroy it. This is the recommended pattern for serverless environments where the connection lifecycle must align with the request lifecycle:
+
+```typescript
+import { GlideClient } from '@glidemq/speedkey';
+import { Producer } from 'glide-mq';
+
+export async function handler(event) {
+  const client = await GlideClient.createClient({ addresses: [{ host: process.env.VALKEY_HOST }] });
+  const producer = new Producer('jobs', { client });
+
+  for (const job of event.jobs) {
+    await producer.add(job.name, job.data);
+  }
+
+  // producer.close() does NOT close the client when client was injected
+  await producer.close();
+  client.close(); // caller owns lifecycle
+}
+```
+
+For connection reuse across warm invocations, use `ServerlessPool` instead — see `docs/SERVERLESS.md`.
+
 ### `inflightRequestsLimit`
 
 GLIDE defaults to 1000 concurrent in-flight requests per client. For high-concurrency setups, you can tune this:

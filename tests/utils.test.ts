@@ -7,6 +7,8 @@ import {
   MAX_JOB_DATA_SIZE,
   hmgetArrayToRecord,
   JOB_METADATA_FIELDS,
+  encodeScore,
+  validateQueueName,
 } from '../src/utils';
 
 describe('decompress', () => {
@@ -302,5 +304,46 @@ describe('JOB_METADATA_FIELDS', () => {
     for (const field of ['id', 'name', 'opts', 'timestamp', 'attemptsMade', 'state']) {
       expect(JOB_METADATA_FIELDS).toContain(field);
     }
+  });
+});
+
+describe('encodeScore (T3)', () => {
+  it('throws for priority > 2048', () => {
+    expect(() => encodeScore(2049, Date.now())).toThrow('Priority must be <= 2048');
+    expect(() => encodeScore(9999, Date.now())).toThrow('Priority must be <= 2048');
+  });
+
+  it('accepts priority <= 2048', () => {
+    expect(() => encodeScore(0, Date.now())).not.toThrow();
+    expect(() => encodeScore(1024, Date.now())).not.toThrow();
+    expect(() => encodeScore(2048, Date.now())).not.toThrow();
+  });
+
+  it('returns correct score for priority 0 (just the timestamp)', () => {
+    const ts = 1000000;
+    expect(encodeScore(0, ts)).toBe(ts);
+  });
+});
+
+describe('validateQueueName (T3)', () => {
+  it('accepts valid queue names', () => {
+    expect(() => validateQueueName('my-queue')).not.toThrow();
+    expect(() => validateQueueName('queue_1')).not.toThrow();
+    expect(() => validateQueueName('emailQueue')).not.toThrow();
+  });
+
+  it('rejects names with curly braces', () => {
+    expect(() => validateQueueName('{queue}')).toThrow();
+    expect(() => validateQueueName('queue{name}')).toThrow();
+    expect(() => validateQueueName('{bad')).toThrow();
+  });
+
+  it('rejects names with colons', () => {
+    expect(() => validateQueueName('queue:name')).toThrow();
+    expect(() => validateQueueName('a:b')).toThrow();
+  });
+
+  it('rejects empty string', () => {
+    expect(() => validateQueueName('')).toThrow();
   });
 });

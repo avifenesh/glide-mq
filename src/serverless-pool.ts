@@ -13,8 +13,8 @@ function fingerprint(name: string, opts: ProducerOptions): string {
     const hostCmp = a.host.localeCompare(b.host);
     return hostCmp !== 0 ? hostCmp : a.port - b.port;
   });
-  // Include serializer name if custom, otherwise use default marker
-  const serializerKey = opts.serializer ? 'custom' : 'json';
+  // Use default marker for the built-in JSON serializer only
+  const serializerKey = 'json';
   return JSON.stringify({
     name,
     prefix: opts.prefix ?? 'glide',
@@ -33,12 +33,12 @@ export class ServerlessPool {
    * Get or create a Producer for the given queue name and options.
    * Returns a cached instance if one exists with matching connection parameters.
    *
-   * Note: Injected clients (opts.client) bypass caching to prevent collisions
-   * where different client instances could map to the same cache key.
+   * Note: Injected clients and custom serializers bypass caching to prevent
+   * collisions where different instances could map to the same cache key.
    */
   getProducer<D = any>(name: string, opts: ProducerOptions): Producer<D> {
-    // Bypass caching for injected clients to prevent cache collisions
-    if (opts.client) {
+    // Bypass caching for injected clients or custom serializers to prevent cache collisions
+    if (opts.client || opts.serializer) {
       return new Producer(name, opts);
     }
 

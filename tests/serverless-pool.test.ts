@@ -6,7 +6,8 @@
  */
 import { it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 
-const { ServerlessPool, serverlessPool } = require('../dist/serverless-pool') as typeof import('../src/serverless-pool');
+const { ServerlessPool, serverlessPool } =
+  require('../dist/serverless-pool') as typeof import('../src/serverless-pool');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';

@@ -411,6 +411,123 @@ describeEachMode('Worker batch validation', (CONNECTION) => {
     }).toThrow('batch.size must be an integer between 1 and 1000');
   });
 
+  it('partial batch failure: BatchError.results has correct per-index success/error', async () => {
+    const qName = Q + '-partial';
+    const queue = new Queue(qName, { connection: CONNECTION });
+
+    // Add 3 jobs
+    await queue.add('job', { idx: 0 }, {});
+    await queue.add('job', { idx: 1 }, {});
+    await queue.add('job', { idx: 2 }, {});
+
+    const failures: Array<{ idx: number; err: string }> = [];
+    const successes: number[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
+      let doneCount = 0;
+
+      const worker = new Worker(
+        qName,
+        async (jobs: any[]) => {
+          // Throw BatchError: job at index 1 fails, others succeed
+          throw new BatchError(jobs.map((j: any) => (j.data.idx === 1 ? new Error('index-1-failed') : j.data.idx)));
+        },
+        { connection: CONNECTION, batch: { size: 3 } },
+      );
+
+      worker.on('completed', (job: any, result: any) => {
+        successes.push(result);
+        doneCount++;
+        if (doneCount === 3) {
+          clearTimeout(timeout);
+          worker.close(true).then(async () => {
+            await queue.close();
+            await cleanupClient.del(
+              [...Object.values(require('../dist/utils').buildKeys(qName))].filter((k: any) => typeof k === 'string'),
+            );
+            try {
+              expect(successes).toHaveLength(2);
+              expect(failures).toHaveLength(1);
+              expect(failures[0].err).toContain('index-1-failed');
+              resolve();
+            } catch (e) {
+              reject(e);
+            }
+          });
+        }
+      });
+
+      worker.on('failed', (job: any, err: Error) => {
+        failures.push({ idx: job.data.idx, err: err.message });
+        doneCount++;
+        if (doneCount === 3) {
+          clearTimeout(timeout);
+          worker.close(true).then(async () => {
+            await queue.close();
+            try {
+              expect(successes).toHaveLength(2);
+              expect(failures).toHaveLength(1);
+              expect(failures[0].err).toContain('index-1-failed');
+              resolve();
+            } catch (e) {
+              reject(e);
+            }
+          });
+        }
+      });
+
+      worker.on('error', (err: Error) => {
+        if (!err.message.includes('drain')) reject(err);
+      });
+    });
+  }, 20000);
+
+  it('batch processor returning wrong result count fails all jobs', async () => {
+    const qName = Q + '-wrongcount';
+    const queue = new Queue(qName, { connection: CONNECTION });
+
+    await queue.add('job', { idx: 0 }, {});
+    await queue.add('job', { idx: 1 }, {});
+    await queue.add('job', { idx: 2 }, {});
+
+    const failedJobs: any[] = [];
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
+
+      const worker = new Worker(
+        qName,
+        async (jobs: any[]) => {
+          // Return only 1 result for 3 jobs - should fail all
+          return ['only-one-result'];
+        },
+        { connection: CONNECTION, batch: { size: 3 } },
+      );
+
+      worker.on('failed', (job: any, err: Error) => {
+        failedJobs.push({ id: job.id, err: err.message });
+        if (failedJobs.length === 3) {
+          clearTimeout(timeout);
+          worker.close(true).then(async () => {
+            await queue.close();
+            try {
+              expect(failedJobs).toHaveLength(3);
+              expect(failedJobs[0].err).toMatch(/returned 1 results but batch had 3/);
+              resolve();
+            } catch (e) {
+              reject(e);
+            }
+          });
+        }
+      });
+
+      worker.on('error', (err: Error) => {
+        if (!err.message.includes('drain')) reject(err);
+      });
+    });
+  }, 20000);
+
   it('throws on non-integer batch.size', () => {
     expect(() => {
       new Worker('test-batch-val-3', async () => [], { connection: CONNECTION, batch: { size: 2.5 } });

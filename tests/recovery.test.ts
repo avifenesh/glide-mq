@@ -28,6 +28,8 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     xgroupCreate: vi.fn().mockResolvedValue('OK'),
     // Return a promise that never resolves (simulates blocking) until explicitly resolved
     xreadgroup: vi.fn().mockResolvedValue(null),
+    rpop: vi.fn().mockResolvedValue(null),
+    rpopCount: vi.fn().mockResolvedValue(null),
     xread: vi.fn().mockResolvedValue(null),
     hgetall: vi.fn().mockResolvedValue([]),
     hget: vi.fn().mockResolvedValue(null),

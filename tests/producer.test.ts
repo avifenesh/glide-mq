@@ -97,9 +97,7 @@ describeEachMode('Producer - add()', (CONNECTION) => {
   });
 
   it('throws for invalid ttl', async () => {
-    await expect(producer.add('bad-ttl', {}, { ttl: -1 })).rejects.toThrow(
-      'ttl must be a non-negative finite number',
-    );
+    await expect(producer.add('bad-ttl', {}, { ttl: -1 })).rejects.toThrow('ttl must be a non-negative finite number');
     await expect(producer.add('bad-ttl', {}, { ttl: Infinity })).rejects.toThrow(
       'ttl must be a non-negative finite number',
     );

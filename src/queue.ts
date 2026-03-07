@@ -11,6 +11,8 @@ import type {
   JobTemplate,
   SchedulerEntry,
   Metrics,
+  MetricsOptions,
+  MetricsDataPoint,
   JobCounts,
   SearchJobsOptions,
   GetJobsOptions,
@@ -36,6 +38,10 @@ import {
   compress,
   MAX_JOB_DATA_SIZE,
   JOB_METADATA_FIELDS,
+  validateQueueName,
+  INVALID_JOB_ID_CHARS,
+  MAX_ORDERING_KEY_LENGTH,
+  validateJobId,
 } from './utils';
 import {
   createBlockingClient,
@@ -63,7 +69,6 @@ import {
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
 
-const MAX_ORDERING_KEY_LENGTH = 256;
 const PIPELINE_CHUNK_SIZE = 1000;
 const SCHEDULER_LOCK_TTL_MS = 5000;
 const SCHEDULER_LOCK_RETRY_DELAY_MS = 25;
@@ -72,14 +77,6 @@ const SCHEDULER_LOCK_MAX_ATTEMPTS = Math.ceil(SCHEDULER_LOCK_TTL_MS / SCHEDULER_
 function validateOrderingKey(orderingKey: string): void {
   if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
     throw new Error(`Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`);
-  }
-}
-
-const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
-function validateJobId(jobId: string): void {
-  if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
-  if (INVALID_JOB_ID_CHARS.test(jobId)) {
-    throw new Error('jobId must not contain control characters, curly braces, or colons');
   }
 }
 
@@ -109,6 +106,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (!opts.connection && !opts.client) {
       throw new GlideMQError('Either `connection` or `client` must be provided.');
     }
+    validateQueueName(name);
     this.name = name;
     this.opts = opts;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
@@ -221,6 +219,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async add(name: string, data: D, opts?: JobOptions): Promise<Job<D, R> | null> {
     const delay = opts?.delay ?? 0;
     const priority = opts?.priority ?? 0;
+    if (priority > 2048) {
+      throw new Error('Priority must be <= 2048');
+    }
 
     return withSpan(
       'glide-mq.queue.add',
@@ -262,6 +263,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
           groupConcurrency = 1;
         }
         validateOrderingKey(orderingKey);
+
+        if (opts?.lifo && orderingKey) {
+          throw new Error('lifo and ordering.key cannot be used together');
+        }
+        const lifo = opts?.lifo ?? false;
 
         const customJobId = opts?.jobId ?? '';
         if (customJobId !== '') validateJobId(customJobId);
@@ -318,6 +324,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             jobCost,
             ttl,
             customJobId,
+            lifo ? 1 : 0,
             parentQueue,
             parentDepsKey,
           );
@@ -360,6 +367,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             jobCost,
             ttl,
             customJobId,
+            lifo ? 1 : 0,
             parentQueue,
             parentDepsKey,
           );
@@ -467,6 +475,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const maxAttempts = opts.attempts ?? 0;
       const orderingKey = opts.ordering?.key ?? '';
       validateOrderingKey(orderingKey);
+
+      if (opts.lifo && orderingKey) {
+        throw new Error('lifo and ordering.key cannot be used together');
+      }
       if (opts.ttl != null) {
         if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
       }
@@ -526,6 +538,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         deduplication,
         serializedData,
         customJobId,
+        lifo: opts.lifo ?? false,
       };
     });
 
@@ -561,6 +574,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
+          String(p.lifo ? 1 : 0),
           p.parentQueue,
         ]);
       } else {
@@ -586,6 +600,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
+          String(p.lifo ? 1 : 0),
           p.parentQueue,
         ]);
       }
@@ -631,6 +646,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     let cursor = lastId;
     const deadline = Date.now() + waitTimeout;
     let reconnectBackoff = 0;
+    let clientClosed = false;
     let rejectOnClose: ((err: Error) => void) | null = null;
     const closePromise = new Promise<never>((_, reject) => {
       rejectOnClose = reject;
@@ -656,6 +672,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
               this.emit('error', closeErr as Error);
             }
           }
+          clientClosed = true;
           if (this.closing) {
             throw new GlideMQError('Queue is closing');
           }
@@ -673,6 +690,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             try {
               blockingClient = await createBlockingClient(this.opts.connection!);
               this.waitClients.add(blockingClient);
+              clientClosed = false;
               break;
             } catch (createErr) {
               const reconnectRemaining = deadline - Date.now();
@@ -731,12 +749,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
       if (rejectOnClose) {
         this.waitRejectors.delete(rejectOnClose);
       }
-      this.waitClients.delete(blockingClient);
-      try {
-        blockingClient.close();
-      } catch (closeErr) {
-        if (this.listenerCount('error') > 0) {
-          this.emit('error', closeErr as Error);
+      if (!clientClosed) {
+        this.waitClients.delete(blockingClient);
+        try {
+          blockingClient.close();
+        } catch (closeErr) {
+          if (this.listenerCount('error') > 0) {
+            this.emit('error', closeErr as Error);
+          }
         }
       }
     }
@@ -956,6 +976,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const startDate = normalizeScheduleDate(schedule.startDate, 'startDate');
     const endDate = normalizeScheduleDate(schedule.endDate, 'endDate');
     validateSchedulerBounds(startDate, endDate, schedule.limit);
+    if (template?.opts?.lifo && template.opts.ordering?.key) {
+      throw new Error('Scheduler template: lifo and ordering.key cannot be used together');
+    }
 
     const lock = await this.acquireSchedulerMutationLock(client);
     try {
@@ -1032,13 +1055,56 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   /**
    * Get metrics for completed or failed jobs.
-   * Returns the count of entries in the corresponding ZSet.
+   * Returns total count and per-minute time-series data points with throughput and avg duration.
    */
-  async getMetrics(type: 'completed' | 'failed'): Promise<Metrics> {
+  async getMetrics(type: 'completed' | 'failed', opts?: MetricsOptions): Promise<Metrics> {
     const client = await this.getClient();
     const key = type === 'completed' ? this.keys.completed : this.keys.failed;
-    const count = await client.zcard(key);
-    return { count };
+    const metricsKey = type === 'completed' ? this.keys.metricsCompleted : this.keys.metricsFailed;
+
+    const [count, rawHash] = await Promise.all([client.zcard(key), client.hgetall(metricsKey)]);
+
+    const buckets = new Map<number, { count: number; totalDuration: number }>();
+    const hashRecord = hashDataToRecord(rawHash);
+    if (hashRecord) {
+      for (const [field, value] of Object.entries(hashRecord)) {
+        const match = field.match(/^m:(\d+):([cd])$/);
+        if (!match) continue;
+        const ts = parseInt(match[1], 10);
+        if (isNaN(ts)) continue;
+        const kind = match[2];
+        let bucket = buckets.get(ts);
+        if (!bucket) {
+          bucket = { count: 0, totalDuration: 0 };
+          buckets.set(ts, bucket);
+        }
+        const numValue = parseInt(value, 10);
+        if (isNaN(numValue)) continue;
+        if (kind === 'c') bucket.count = numValue;
+        else bucket.totalDuration = numValue;
+      }
+    }
+
+    const data: MetricsDataPoint[] = Array.from(buckets.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([timestamp, b]) => ({
+        timestamp,
+        count: b.count,
+        avgDuration: b.count > 0 ? Math.round(b.totalDuration / b.count) : 0,
+      }));
+
+    const start = opts?.start ?? 0;
+    const end = opts?.end ?? -1;
+
+    if (!Number.isInteger(start)) throw new TypeError('start must be an integer');
+    if (!Number.isInteger(end)) throw new TypeError('end must be an integer');
+    if (start >= 0 && end >= 0 && end < start) {
+      throw new RangeError('end must be >= start when both are non-negative');
+    }
+
+    const sliced = end === -1 ? data.slice(start) : data.slice(start, end + 1);
+
+    return { count, data: sliced, meta: { resolution: 'minute' } };
   }
 
   /**
@@ -1160,6 +1226,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
       this.keys.schedulers,
       this.keys.ordering,
       this.keys.ratelimited,
+      this.keys.metricsCompleted,
+      this.keys.metricsFailed,
+      this.keys.lifo,
     ];
     await client.del(staticKeys);
 

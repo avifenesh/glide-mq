@@ -108,6 +108,11 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
     k.schedulers,
     k.ordering,
     k.ratelimited,
+    k.metricsCompleted,
+    k.metricsFailed,
+    k.lifo,
+    k.priority,
+    k.listActive,
   ];
   for (const key of staticKeys) {
     try {
@@ -123,6 +128,7 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
     `${pfx}:deps:*`,
     `${pfx}:group:*`,
     `${pfx}:groupq:*`,
+    `${pfx}:parents:*`,
     `${pfx}:w:*`,
   ]) {
     try {

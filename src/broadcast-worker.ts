@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
 import { TimeUnit } from '@glidemq/speedkey';
-import type { WorkerOptions, Processor, BatchProcessor, Client, Serializer, SchedulerEntry } from './types';
+import type { BroadcastWorkerOptions, Processor, BatchProcessor, Client, Serializer, SchedulerEntry } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import {
@@ -31,14 +31,12 @@ import {
   BatchError,
 } from './errors';
 import {
-  CONSUMER_GROUP,
   completeJob,
   completeAndFetchNext,
   failJob,
   addJob,
   rateLimit as rateLimitFn,
   checkConcurrency,
-  rpopAndReserve,
   moveToActive,
   moveActiveToDelayed,
   moveToWaitingChildren,
@@ -48,13 +46,10 @@ import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
 export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained';
 
-function isRateLimitError(e: unknown): e is { delayMs: number } {
-  return typeof e === 'object' && e !== null && typeof (e as Record<string, unknown>).delayMs === 'number';
-}
-
-export class Worker<D = any, R = any> extends EventEmitter {
+export class BroadcastWorker<D = any, R = any> extends EventEmitter {
   readonly name: string;
-  private opts: WorkerOptions;
+  private opts: BroadcastWorkerOptions;
+  private subscription: string;
   private processor: Processor<D, R>;
   private commandClient: Client | null = null;
   private commandClientOwned = true;
@@ -99,8 +94,13 @@ export class Worker<D = any, R = any> extends EventEmitter {
   private readonly batchTimeout: number;
   private readonly batchProcessor: BatchProcessor<D, R> | null;
 
-  constructor(name: string, processor: Processor<D, R> | BatchProcessor<D, R> | string, opts: WorkerOptions) {
+  constructor(name: string, processor: Processor<D, R> | BatchProcessor<D, R> | string, opts: BroadcastWorkerOptions) {
     super();
+
+    // Validate subscription field (required for BroadcastWorker)
+    if (!opts.subscription || typeof opts.subscription !== 'string' || opts.subscription.trim() === '') {
+      throw new GlideMQError('BroadcastWorker requires a `subscription` name (consumer group name).');
+    }
 
     // Validate client injection options
     if (opts.client && opts.commandClient) {
@@ -112,12 +112,13 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
     if (!opts.connection && injectedClient) {
       throw new GlideMQError(
-        'Worker requires `connection` even when a shared client is provided, ' +
+        'BroadcastWorker requires `connection` even when a shared client is provided, ' +
           'because the blocking client for XREADGROUP must be auto-created.',
       );
     }
 
     this.name = name;
+    this.subscription = opts.subscription;
 
     // Batch mode validation
     this.batchMode = !!opts.batch;
@@ -196,10 +197,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
     this.blockingClient = await createBlockingClient(this.opts.connection!);
 
-    this.xreadStreams = { [this.queueKeys.stream]: '>' };
+    this.xreadStreams = Object.assign(Object.create(null), { [this.queueKeys.stream]: '>' });
 
     // Create consumer group on the stream (idempotent)
-    await createConsumerGroup(this.commandClient, this.queueKeys.stream, CONSUMER_GROUP);
+    // Use subscription name as consumer group, with configurable startFrom
+    await createConsumerGroup(this.commandClient, this.queueKeys.stream, this.subscription, this.opts.startFrom ?? '$');
 
     // Check if global concurrency / rate limit are configured (refreshed on scheduler tick)
     await this.refreshMetaFlags();
@@ -210,6 +212,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
       stalledInterval: this.stalledInterval,
       maxStalledCount: this.maxStalledCount,
       consumerId: this.consumerId,
+      consumerGroup: this.subscription,
+      broadcastMode: true,
       queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
       onPromotionTick: () => this.refreshMetaFlags(),
       onError: (err) => {
@@ -250,6 +254,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
           return; // reconnectAndResume restarts the loop
         }
       }
+    }
+    // Loop exited because this.paused became true. Clear the promise so that
+    // resume() can detect the loop is no longer running and restart it.
+    if (this.paused && !this.closing) {
+      this.pollLoopPromise = null;
     }
   }
 
@@ -311,8 +320,18 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
         this.blockingClient = await createBlockingClient(this.opts.connection!);
 
-        // Re-ensure consumer group
-        await createConsumerGroup(this.commandClient!, this.queueKeys.stream, CONSUMER_GROUP);
+        // Re-ensure consumer group; if this fails the reconnect loop will retry.
+        try {
+          await createConsumerGroup(
+            this.commandClient!,
+            this.queueKeys.stream,
+            this.subscription,
+            this.opts.startFrom ?? '$',
+          );
+        } catch (err) {
+          this.emit('error', err instanceof Error ? err : new Error(String(err)));
+          throw err;
+        }
 
         // Restart scheduler with the (possibly same) client
         if (this.scheduler) {
@@ -323,6 +342,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
           stalledInterval: this.stalledInterval,
           maxStalledCount: this.maxStalledCount,
           consumerId: this.consumerId,
+          consumerGroup: this.subscription,
+          broadcastMode: true,
           queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
           onPromotionTick: () => this.refreshMetaFlags(),
           onError: (err) => {
@@ -387,7 +408,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     // Only check global concurrency if configured. Skipping this FCALL entirely
     // saves one Valkey round trip per poll cycle (~0.2ms).
     if (this.globalConcurrencyEnabled) {
-      const gcRemaining = await checkConcurrency(this.commandClient, this.queueKeys, CONSUMER_GROUP);
+      const gcRemaining = await checkConcurrency(this.commandClient, this.queueKeys, this.subscription);
       if (gcRemaining === 0) {
         await new Promise<void>((resolve) => setTimeout(resolve, 20));
         return;
@@ -397,108 +418,14 @@ export class Worker<D = any, R = any> extends EventEmitter {
       }
     }
 
-    // Check priority list first (priority > LIFO > FIFO), then LIFO, before blocking on stream
-    for (const [listKey, label] of [
-      [this.queueKeys.priority, 'priority'],
-      [this.queueKeys.lifo, 'LIFO'],
-    ] as [string, string][]) {
-      try {
-        // With gc enabled, use atomic rpopAndReserve (single slot).
-        // Without gc, batch pop up to fetchCount to reduce RTTs at concurrency > 1.
-        const popCount = this.concurrency === 1 ? 1 : fetchCount;
-        let jobIds: string[];
-        if (this.globalConcurrencyEnabled) {
-          const id = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP);
-          jobIds = id ? [id] : [];
-        } else if (popCount === 1) {
-          const id = await this.commandClient.rpop(listKey);
-          jobIds = id ? [String(id)] : [];
-        } else {
-          const ids = await this.commandClient.rpopCount(listKey, popCount);
-          jobIds = ids ? ids.map(String) : [];
-        }
-        if (jobIds.length > 0) {
-          // Always INCR list-active so complete/fail Lua DECRs stay balanced.
-          // rpopAndReserve already did the INCR atomically; for non-gc paths do it here.
-          if (!this.globalConcurrencyEnabled && jobIds.length > 0) {
-            await this.commandClient.incrBy(this.queueKeys.listActive, jobIds.length);
-          }
-          for (const jobId of jobIds) {
-            if (this.concurrency === 1) {
-              this.activeCount++;
-              const promise = this.processJob(jobId, '');
-              this.activePromises.add(promise);
-              try {
-                await promise;
-              } finally {
-                this.activeCount--;
-                this.activePromises.delete(promise);
-              }
-            } else {
-              this.dispatchJob(jobId, '');
-            }
-          }
-          return;
-        }
-      } catch (err) {
-        this.emit('error', new Error(`${label} fetch error`, { cause: err }));
-      }
-    }
-
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
     // STREAMS {streamKey} >
-    const result = await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
+    const result = await this.blockingClient.xreadgroup(this.subscription, this.consumerId, this.xreadStreams, {
       count: fetchCount,
       block: this.blockTimeout,
     });
 
     if (!result) {
-      // Stream empty - check priority and LIFO lists for jobs added while we were blocking
-      if (this.commandClient) {
-        for (const [listKey, label] of [
-          [this.queueKeys.priority, 'priority'],
-          [this.queueKeys.lifo, 'LIFO'],
-        ] as [string, string][]) {
-          try {
-            const popCount = this.concurrency === 1 ? 1 : fetchCount;
-            let jobIds: string[];
-            if (this.globalConcurrencyEnabled) {
-              const id = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP);
-              jobIds = id ? [id] : [];
-            } else if (popCount === 1) {
-              const id = await this.commandClient.rpop(listKey);
-              jobIds = id ? [String(id)] : [];
-            } else {
-              const ids = await this.commandClient.rpopCount(listKey, popCount);
-              jobIds = ids ? ids.map(String) : [];
-            }
-            if (jobIds.length > 0) {
-              if (!this.globalConcurrencyEnabled && jobIds.length > 0) {
-                await this.commandClient.incrBy(this.queueKeys.listActive, jobIds.length);
-              }
-              for (const jobId of jobIds) {
-                if (this.concurrency === 1) {
-                  this.activeCount++;
-                  const promise = this.processJob(jobId, '');
-                  this.activePromises.add(promise);
-                  try {
-                    await promise;
-                  } finally {
-                    this.activeCount--;
-                    this.activePromises.delete(promise);
-                  }
-                } else {
-                  this.dispatchJob(jobId, '');
-                }
-              }
-              return;
-            }
-          } catch (err) {
-            this.emit('error', new Error(`${label} fetch error`, { cause: err }));
-          }
-        }
-      }
-
       if (!this.isDrained && this.activeCount === 0) {
         this.isDrained = true;
         this.emit('drained');
@@ -621,7 +548,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
         if (remaining <= 0) break;
 
         const blockMs = Math.min(remaining, this.blockTimeout);
-        const moreResult = await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
+        const moreResult = await this.blockingClient.xreadgroup(this.subscription, this.consumerId, this.xreadStreams, {
           count: this.batchSize - collected.length,
           block: blockMs,
         });
@@ -659,7 +586,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
         Date.now(),
         this.queueKeys.stream,
         entry.entryId,
-        CONSUMER_GROUP,
+        this.subscription,
+        true,
       );
       if (await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId)) continue;
       const hash = moveResult as Record<string, string>;
@@ -843,9 +771,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
           entry.entryId,
           returnvalue,
           Date.now(),
-          CONSUMER_GROUP,
+          this.subscription,
           entry.job.opts.removeOnComplete,
           parentInfo,
+          true,
         );
 
         entry.job.returnvalue = result;
@@ -895,9 +824,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
             entry.entryId,
             returnvalue,
             Date.now(),
-            CONSUMER_GROUP,
+            this.subscription,
             entry.job.opts.removeOnComplete,
             parentInfo,
+            true,
           );
 
           entry.job.returnvalue = result as R;
@@ -937,7 +867,18 @@ export class Worker<D = any, R = any> extends EventEmitter {
     if (!this.commandClient) return true;
     if (moveResult === null) {
       try {
-        await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', Date.now(), CONSUMER_GROUP);
+        await completeJob(
+          this.commandClient,
+          this.queueKeys,
+          jobId,
+          entryId,
+          'null',
+          Date.now(),
+          this.subscription,
+          undefined,
+          undefined,
+          true,
+        );
       } catch (err) {
         this.emit('error', err);
       }
@@ -945,7 +886,19 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
     if (moveResult === 'REVOKED') {
       try {
-        await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, CONSUMER_GROUP);
+        await failJob(
+          this.commandClient,
+          this.queueKeys,
+          jobId,
+          entryId,
+          'revoked',
+          Date.now(),
+          0,
+          0,
+          this.subscription,
+          undefined,
+          true,
+        );
       } catch (err) {
         this.emit('error', err);
       }
@@ -1012,8 +965,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
       return true;
     }
 
-    if (error instanceof Worker.RateLimitError) {
-      const delayMs = isRateLimitError(error) ? error.delayMs : (this.opts.limiter?.duration ?? 1000);
+    if (error instanceof BroadcastWorker.RateLimitError) {
+      const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
       this.rateLimitUntil = Date.now() + delayMs;
       try {
         await failJob(
@@ -1025,7 +978,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
           Date.now(),
           job.attemptsMade + 2,
           delayMs,
-          CONSUMER_GROUP,
+          this.subscription,
+          undefined,
+          true,
         );
       } catch (e) {
         this.emit('error', e);
@@ -1039,15 +994,15 @@ export class Worker<D = any, R = any> extends EventEmitter {
     const maxAttempts = skipRetry ? 0 : configuredAttempts;
     let backoffDelay = 0;
     if (maxAttempts > 0 && job.opts.backoff) {
+      // In broadcast mode attemptsMade is tracked per-subscription (Lua stores it in
+      // {jobKey}:sub:{group} field 'a'), so job.attemptsMade is always 0. Read the
+      // per-sub count to compute the correct exponential backoff on each retry.
+      const subAttemptStr = await this.commandClient.hget(`${this.queueKeys.job(jobId)}:sub:${this.subscription}`, 'a');
+      const attemptsMade = subAttemptStr !== null ? Number(subAttemptStr) : job.attemptsMade;
       const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
       backoffDelay = strategyFn
-        ? strategyFn(job.attemptsMade + 1, error)
-        : calculateBackoff(
-            job.opts.backoff.type,
-            job.opts.backoff.delay,
-            job.attemptsMade + 1,
-            job.opts.backoff.jitter,
-          );
+        ? strategyFn(attemptsMade + 1, error)
+        : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, attemptsMade + 1, job.opts.backoff.jitter);
     }
 
     const failResult = await failJob(
@@ -1059,8 +1014,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
       Date.now(),
       maxAttempts,
       backoffDelay,
-      CONSUMER_GROUP,
+      this.subscription,
       job.opts.removeOnFail,
+      true,
     );
 
     if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
@@ -1096,7 +1052,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
       request.delayedUntil,
       request.serializedData,
       Date.now(),
-      CONSUMER_GROUP,
+      this.subscription,
+      true,
     );
     if (result.startsWith('error:')) {
       const reason = result.slice(6);
@@ -1215,7 +1172,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
    */
   private async deferOutOfOrderJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
-    await deferActive(this.commandClient, this.queueKeys, jobId, entryId, CONSUMER_GROUP);
+    await deferActive(this.commandClient, this.queueKeys, jobId, entryId, this.subscription, true);
   }
 
   // ---- Main processing path ----
@@ -1244,7 +1201,8 @@ export class Worker<D = any, R = any> extends EventEmitter {
           Date.now(),
           this.queueKeys.stream,
           currentEntryId,
-          CONSUMER_GROUP,
+          this.subscription,
+          true,
         );
         if (await this.handleMoveToActiveEdgeCase(moveResult, currentJobId, currentEntryId)) return;
         currentHash = moveResult as Record<string, string>;
@@ -1294,7 +1252,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
             this.queueKeys,
             currentJobId,
             currentEntryId,
-            CONSUMER_GROUP,
+            this.subscription,
+            Date.now(),
+            true,
           );
           if (typeof wtcResult === 'string' && wtcResult.startsWith('error:')) {
             const reason = wtcResult.slice(6);
@@ -1348,11 +1308,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
         currentEntryId,
         returnvalue,
         Date.now(),
-        CONSUMER_GROUP,
+        this.subscription,
         this.consumerId,
         job.opts.removeOnComplete,
         parentInfo,
         completionHints,
+        true,
       );
 
       job.returnvalue = processResult;
@@ -1384,7 +1345,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
               Date.now(),
               0,
               0,
-              CONSUMER_GROUP,
+              this.subscription,
+              undefined,
+              true,
             );
           } catch (err) {
             this.emit('error', err);
@@ -1583,7 +1546,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
   async resume(): Promise<void> {
     await this.initPromise;
     this.paused = false;
-    this.pollLoop();
+    if (!this.pollLoopPromise) {
+      this.pollLoopPromise = this.pollLoop();
+    }
   }
 
   /**
@@ -1594,22 +1559,18 @@ export class Worker<D = any, R = any> extends EventEmitter {
   async drain(): Promise<void> {
     await this.initPromise;
 
-    // Poll until everything is empty
+    // In broadcast mode, stream entries are never XDEL'd (intentional retention for fan-out).
+    // Only wait for active processing to finish and the scheduled set to empty.
     while (true) {
       if (!this.commandClient) break;
 
-      // Wait for active jobs to complete
       await this.waitForActiveJobs();
 
-      // Check if stream and scheduled set are both empty
-      const streamLen = await this.commandClient.xlen(this.queueKeys.stream);
       const scheduledLen = await this.commandClient.zcard(this.queueKeys.scheduled);
-
-      if (streamLen === 0 && scheduledLen === 0 && this.activeCount === 0) {
+      if (scheduledLen === 0 && this.activeCount === 0) {
         break;
       }
 
-      // Small delay before re-checking
       await new Promise<void>((resolve) => setTimeout(resolve, 100));
     }
 
@@ -1649,7 +1610,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     // Shut down sandbox worker pool
     if (this.sandboxClose) {
-      await this.sandboxClose(force);
+      try {
+        await this.sandboxClose(force);
+      } catch (err) {
+        this.emit('error', err instanceof Error ? err : new Error(String(err)));
+      }
     }
 
     // Clear worker registration heartbeat

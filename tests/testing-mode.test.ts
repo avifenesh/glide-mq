@@ -1460,4 +1460,151 @@ describe('TestWorker batch mode', () => {
     const completed = await queue.getJobs('completed');
     expect(completed).toHaveLength(2);
   });
+
+  it('getMetrics returns time-series data for completed jobs', async () => {
+    queue = new TestQueue('test-metrics');
+    const worker = new TestWorker(queue, async () => 'done');
+
+    await queue.add('j1', {});
+    await queue.add('j2', {});
+    await queue.add('j3', {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const metrics = await queue.getMetrics('completed');
+    expect(metrics.count).toBe(3);
+    expect(metrics.meta).toEqual({ resolution: 'minute' });
+    expect(metrics.data.length).toBeGreaterThanOrEqual(1);
+
+    const totalCount = metrics.data.reduce((sum: number, dp: any) => sum + dp.count, 0);
+    expect(totalCount).toBe(3);
+
+    for (const dp of metrics.data) {
+      expect(dp.timestamp % 60000).toBe(0);
+      expect(dp.avgDuration).toBeGreaterThanOrEqual(0);
+    }
+
+    await worker.close();
+  });
+
+  it('getMetrics returns time-series data for failed jobs', async () => {
+    queue = new TestQueue('test-metrics-fail');
+    const worker = new TestWorker(queue, async () => {
+      throw new Error('fail');
+    });
+
+    await queue.add('f1', {});
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const metrics = await queue.getMetrics('failed');
+    expect(metrics.count).toBe(1);
+    expect(metrics.data.length).toBeGreaterThanOrEqual(1);
+    expect(metrics.data[0].count).toBe(1);
+    expect(metrics.data[0].avgDuration).toBeGreaterThanOrEqual(0);
+
+    const completedMetrics = await queue.getMetrics('completed');
+    expect(completedMetrics.count).toBe(0);
+    expect(completedMetrics.data).toEqual([]);
+
+    await worker.close();
+  });
+
+  it('getMetrics empty queue returns zero count and empty data', async () => {
+    queue = new TestQueue('test-metrics-empty');
+
+    const metrics = await queue.getMetrics('completed');
+    expect(metrics.count).toBe(0);
+    expect(metrics.data).toEqual([]);
+    expect(metrics.meta).toEqual({ resolution: 'minute' });
+  });
+
+  it('getMetrics supports start/end slicing', async () => {
+    queue = new TestQueue('test-metrics-slice');
+    const worker = new TestWorker(queue, async () => 'ok');
+
+    await queue.add('s1', {});
+    await new Promise((r) => setTimeout(r, 50));
+
+    const all = await queue.getMetrics('completed');
+    expect(all.data.length).toBeGreaterThanOrEqual(1);
+
+    const sliced = await queue.getMetrics('completed', { start: 0, end: 0 });
+    expect(sliced.data.length).toBe(1);
+    expect(sliced.count).toBe(all.count);
+
+    await worker.close();
+  });
+});
+
+describe('TestWorker - event payloads (T2)', () => {
+  it('emits active, completed, failed events with correct payloads', async () => {
+    const queue = new TestQueue('events-test');
+    const activeEvents: any[] = [];
+    const completedEvents: any[] = [];
+    const failedEvents: any[] = [];
+
+    let callCount = 0;
+    const worker = new TestWorker(queue, async (job) => {
+      callCount++;
+      if (callCount === 2) throw new Error('forced failure');
+      return 'result-' + job.id;
+    });
+
+    worker.on('active', (job: any) => activeEvents.push({ id: job.id, name: job.name }));
+    worker.on('completed', (job: any, result: any) => completedEvents.push({ id: job.id, result }));
+    worker.on('failed', (job: any, err: any) => failedEvents.push({ id: job.id, message: err.message }));
+
+    await queue.add('job-a', { x: 1 });
+    await queue.add('job-b', { x: 2 });
+    await queue.add('job-c', { x: 3 });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(activeEvents.length).toBe(3);
+    expect(completedEvents.length).toBe(2);
+    expect(failedEvents.length).toBe(1);
+    expect(completedEvents[0].result).toBe('result-1');
+    expect(completedEvents[1].result).toBe('result-3');
+    expect(failedEvents[0].message).toBe('forced failure');
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('processes 1000 jobs without performance degradation', async () => {
+    const queue = new TestQueue('perf-test');
+    const results: string[] = [];
+
+    const worker = new TestWorker(
+      queue,
+      async (job) => {
+        results.push(job.id);
+        return 'ok';
+      },
+      { concurrency: 10 },
+    );
+
+    const start = Date.now();
+    for (let i = 0; i < 1000; i++) {
+      await queue.add('task', { i });
+    }
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (results.length >= 1000) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 50);
+    });
+
+    const elapsed = Date.now() - start;
+    expect(results.length).toBe(1000);
+    // Should process 1000 jobs in well under 10 seconds (generous bound for CI)
+    expect(elapsed).toBeLessThan(10000);
+
+    await worker.close();
+    await queue.close();
+  }, 15000);
 });

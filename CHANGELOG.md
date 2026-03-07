@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- LIFO (Last-In-First-Out) job processing order via `lifo: true` option. Jobs are processed in reverse-chronological order (newest first). Uses a dedicated Valkey LIST with RPUSH/RPOP for efficient LIFO fetching. Priority and delayed jobs take precedence over LIFO. Cannot be combined with ordering keys. Supported in `Queue.add`, `Queue.addBulk`, and `FlowProducer` (#87).
+- Time-series metrics - `queue.getMetrics(type, opts?)` now returns per-minute throughput and latency data in addition to total count. Returns `{ count, data: MetricsDataPoint[], meta }` with minute-resolution buckets retained for 24 hours. Optional `MetricsOptions` parameter supports slicing data points (`start`/`end`). Metrics are recorded server-side in Valkey functions with zero extra RTTs. `TestQueue.getMetrics()` mirrors the same API in testing mode (#82).
 - `opts.jobId` - custom job IDs for deterministic job identity. Max 256 characters; must not contain control characters, colons, or curly braces. `Queue.add` returns `null` on duplicate (silent skip); `FlowProducer.add` throws on duplicate since flows cannot be partially created. Supported on `Queue.add`, `Queue.addBulk`, and `FlowProducer.add`. `TestQueue` mirrors the same behaviour in testing mode (#79).
 - `queue.addAndWait(name, data, { waitTimeout })` - enqueue a job and wait for the matching completed/failed event on the queue events stream without polling the job hash.
 - `job.moveToDelayed(timestampMs, nextStep?)` - pause an active job mid-processor and resume it later from the scheduled set. Supports step-job workflows and updates `job.data.step` atomically for plain object payloads.
@@ -17,9 +19,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Batch processing - workers can process multiple jobs at once via `batch: { size, timeout? }` option. Processor receives `Job[]` and returns `R[]`. Use `BatchError` for per-job partial failure reporting. Supported in both Worker and TestWorker (#81).
 - `glide-mq/proxy` subpath export - HTTP proxy for cross-language job enqueue. Seven REST endpoints (add, bulk add, get job, pause, resume, counts, health) with queue allowlist, 1MB payload limit, and lazy Queue caching. Requires `express` as an optional peer dependency (#83).
 - Wire protocol documentation (`docs/WIRE_PROTOCOL.md`) - complete reference for enqueuing and managing jobs from any language using raw FCALL commands. Covers all key layouts, FCALL signatures, priority encoding, compression format, and examples in Python and Go (#83).
-- `Producer` class - lightweight job enqueuing for serverless/edge environments without EventEmitter or Job instances. Returns plain string IDs. Use with `ServerlessPool` for automatic connection reuse across warm Lambda/Edge invocations. API: `add(name, data, opts)`, `addBulk(jobs)`, `close()`. Reuses the same battle-tested `addJob`/`dedup` FCALL functions as Queue (#89).
-- `ServerlessPool` and `serverlessPool` singleton - connection pooling for serverless environments. Caches Producer instances by queue name and connection fingerprint to reuse connections across warm invocations. API: `getProducer(name, opts)`, `closeAll()`, `size` (#89).
+- DAG workflows - `FlowProducer.addDAG()` method and `dag()` helper for arbitrary DAG topologies. Each node can declare multiple dependencies via the `deps` array; a job only becomes runnable once all dependencies have completed. Use for fan-in merge scenarios, diamond dependencies, or multi-stage pipelines that converge. See `docs/WORKFLOWS.md` for examples (#86).
+- `Producer` class - lightweight job enqueuing for serverless/edge environments without EventEmitter or Job instances. Returns plain string IDs. Use with `ServerlessPool` for automatic connection reuse across warm Lambda/Edge invocations. API: `add(name, data, opts)`, `addBulk(jobs)`, `close()`. Reuses the same battle-tested `addJob`/`dedup` FCALL functions as Queue (#89, #116).
+- `ServerlessPool` and `serverlessPool` singleton - connection pooling for serverless environments. Caches Producer instances by queue name and connection fingerprint to reuse connections across warm invocations. Injected clients bypass caching to prevent key collisions. API: `getProducer(name, opts)`, `closeAll()`, `size` (#89).
 - Serverless usage guide (`docs/SERVERLESS.md`) - comprehensive guide covering Producer API, ServerlessPool patterns, and examples for AWS Lambda, Cloudflare Workers, and Vercel Edge Functions. Demonstrates both ephemeral and connection-reuse patterns for serverless job enqueueing (#89).
+
+### Fixed
+
+- `globalConcurrency` now enforced for LIFO and priority-list jobs. `glidemq_rpopAndReserve` atomically checks capacity, pops from the list, and increments `list-active` in a single FCALL. Non-atomic path (no global concurrency) uses `rpopCount` for batch pops under high concurrency. `complete` and `fail` functions DECR `list-active` on list-sourced jobs to keep the counter balanced (#87).
+- Scheduler LIFO forwarding - `lifo: true` in a job scheduler template is now forwarded to every enqueued job. Previously ignored (#87).
+- FlowProducer child LIFO routing - `glidemq_addFlow` now routes child jobs with `lifo: true` to the LIFO list. Previously children were always added to the stream (#87).
+- `glidemq_removeJob` and `moveActiveToDelayed` / `moveToWaitingChildren` now DECR `list-active` when removing or deferring an active list-sourced job, preventing counter drift after job removal or mid-execution delay (#87).
+- Function library bumped to version 52 (version 51 introduced `list-active` counter; version 52 added FlowProducer LIFO child routing).
 
 ---
 
