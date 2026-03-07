@@ -227,13 +227,13 @@ describe('HTTP Proxy', () => {
     expect(typeof body.failed).toBe('number');
   });
 
-  it('GET /health - returns 200 with status', async () => {
+  it('GET /health - returns 200 with status and uptime, no queues field', async () => {
     const res = await fetch(`${baseUrl}/health`);
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe('ok');
     expect(typeof body.uptime).toBe('number');
-    expect(Array.isArray(body.queues)).toBe(true);
+    expect('queues' in body).toBe(false);
   });
 
   it('missing body fields return 400', async () => {
@@ -275,6 +275,42 @@ describe('HTTP Proxy', () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain('jobs');
+  });
+
+  it('POST /queues/:name/jobs/bulk - more than 1000 jobs returns 400', async () => {
+    const queueName = uniqueQueue('bulk1001');
+    const jobs = Array.from({ length: 1001 }, (_, i) => ({ name: `job-${i}`, data: {} }));
+
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobs }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('1000');
+  });
+
+  it('POST /queues/:name/jobs - queue name with curly braces returns 400', async () => {
+    const res = await fetch(`${baseUrl}/queues/bad{queue}name/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'task', data: {} }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBeTruthy();
+  });
+
+  it('POST /queues/:name/jobs - queue name with colon returns 400', async () => {
+    const res = await fetch(`${baseUrl}/queues/bad:queue/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'task', data: {} }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBeTruthy();
   });
 });
 

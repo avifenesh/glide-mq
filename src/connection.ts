@@ -56,6 +56,8 @@ export async function createClient(opts: ConnectionOptions): Promise<Client> {
 /**
  * Create a dedicated client for XREADGROUP BLOCK / XREAD BLOCK.
  * Must not be shared with non-blocking commands.
+ * Blocking client uses same config as the command client;
+ * speedkey handles cluster topology changes transparently.
  */
 export async function createBlockingClient(opts: ConnectionOptions): Promise<Client> {
   return createClient(opts);

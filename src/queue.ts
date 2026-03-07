@@ -38,6 +38,10 @@ import {
   compress,
   MAX_JOB_DATA_SIZE,
   JOB_METADATA_FIELDS,
+  validateQueueName,
+  INVALID_JOB_ID_CHARS,
+  MAX_ORDERING_KEY_LENGTH,
+  validateJobId,
 } from './utils';
 import {
   createBlockingClient,
@@ -65,7 +69,6 @@ import {
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
 
-const MAX_ORDERING_KEY_LENGTH = 256;
 const PIPELINE_CHUNK_SIZE = 1000;
 const SCHEDULER_LOCK_TTL_MS = 5000;
 const SCHEDULER_LOCK_RETRY_DELAY_MS = 25;
@@ -74,14 +77,6 @@ const SCHEDULER_LOCK_MAX_ATTEMPTS = Math.ceil(SCHEDULER_LOCK_TTL_MS / SCHEDULER_
 function validateOrderingKey(orderingKey: string): void {
   if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
     throw new Error(`Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`);
-  }
-}
-
-const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
-function validateJobId(jobId: string): void {
-  if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
-  if (INVALID_JOB_ID_CHARS.test(jobId)) {
-    throw new Error('jobId must not contain control characters, curly braces, or colons');
   }
 }
 
@@ -111,6 +106,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (!opts.connection && !opts.client) {
       throw new GlideMQError('Either `connection` or `client` must be provided.');
     }
+    validateQueueName(name);
     this.name = name;
     this.opts = opts;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
@@ -223,6 +219,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async add(name: string, data: D, opts?: JobOptions): Promise<Job<D, R> | null> {
     const delay = opts?.delay ?? 0;
     const priority = opts?.priority ?? 0;
+    if (priority > 2048) {
+      throw new Error('Priority must be <= 2048');
+    }
 
     return withSpan(
       'glide-mq.queue.add',
@@ -647,6 +646,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     let cursor = lastId;
     const deadline = Date.now() + waitTimeout;
     let reconnectBackoff = 0;
+    let clientClosed = false;
     let rejectOnClose: ((err: Error) => void) | null = null;
     const closePromise = new Promise<never>((_, reject) => {
       rejectOnClose = reject;
@@ -672,6 +672,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
               this.emit('error', closeErr as Error);
             }
           }
+          clientClosed = true;
           if (this.closing) {
             throw new GlideMQError('Queue is closing');
           }
@@ -689,6 +690,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             try {
               blockingClient = await createBlockingClient(this.opts.connection!);
               this.waitClients.add(blockingClient);
+              clientClosed = false;
               break;
             } catch (createErr) {
               const reconnectRemaining = deadline - Date.now();
@@ -747,12 +749,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
       if (rejectOnClose) {
         this.waitRejectors.delete(rejectOnClose);
       }
-      this.waitClients.delete(blockingClient);
-      try {
-        blockingClient.close();
-      } catch (closeErr) {
-        if (this.listenerCount('error') > 0) {
-          this.emit('error', closeErr as Error);
+      if (!clientClosed) {
+        this.waitClients.delete(blockingClient);
+        try {
+          blockingClient.close();
+        } catch (closeErr) {
+          if (this.listenerCount('error') > 0) {
+            this.emit('error', closeErr as Error);
+          }
         }
       }
     }

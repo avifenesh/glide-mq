@@ -1536,3 +1536,71 @@ describe('TestWorker batch mode', () => {
     await worker.close();
   });
 });
+
+describe('TestWorker - event payloads (T2)', () => {
+  it('emits active, completed, failed events with correct payloads', async () => {
+    const queue = new TestQueue('events-test');
+    const activeEvents: any[] = [];
+    const completedEvents: any[] = [];
+    const failedEvents: any[] = [];
+
+    let callCount = 0;
+    const worker = new TestWorker(queue, async (job) => {
+      callCount++;
+      if (callCount === 2) throw new Error('forced failure');
+      return 'result-' + job.id;
+    });
+
+    worker.on('active', (job: any) => activeEvents.push({ id: job.id, name: job.name }));
+    worker.on('completed', (job: any, result: any) => completedEvents.push({ id: job.id, result }));
+    worker.on('failed', (job: any, err: any) => failedEvents.push({ id: job.id, message: err.message }));
+
+    await queue.add('job-a', { x: 1 });
+    await queue.add('job-b', { x: 2 });
+    await queue.add('job-c', { x: 3 });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(activeEvents.length).toBe(3);
+    expect(completedEvents.length).toBe(2);
+    expect(failedEvents.length).toBe(1);
+    expect(completedEvents[0].result).toBe('result-1');
+    expect(completedEvents[1].result).toBe('result-3');
+    expect(failedEvents[0].message).toBe('forced failure');
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('processes 1000 jobs without performance degradation', async () => {
+    const queue = new TestQueue('perf-test');
+    const results: string[] = [];
+
+    const worker = new TestWorker(queue, async (job) => {
+      results.push(job.id);
+      return 'ok';
+    }, { concurrency: 10 });
+
+    const start = Date.now();
+    for (let i = 0; i < 1000; i++) {
+      await queue.add('task', { i });
+    }
+
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (results.length >= 1000) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 50);
+    });
+
+    const elapsed = Date.now() - start;
+    expect(results.length).toBe(1000);
+    // Should process 1000 jobs in well under 10 seconds (generous bound for CI)
+    expect(elapsed).toBeLessThan(10000);
+
+    await worker.close();
+    await queue.close();
+  }, 15000);
+});
