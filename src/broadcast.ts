@@ -35,7 +35,10 @@ export class Broadcast<D = any> extends EventEmitter {
 
   constructor(name: string, opts: BroadcastOptions) {
     super();
-    if (opts.maxMessages !== undefined && (typeof opts.maxMessages !== 'number' || !Number.isInteger(opts.maxMessages) || opts.maxMessages <= 0)) {
+    if (
+      opts.maxMessages !== undefined &&
+      (typeof opts.maxMessages !== 'number' || !Number.isInteger(opts.maxMessages) || opts.maxMessages <= 0)
+    ) {
       throw new Error('maxMessages must be a positive integer');
     }
     this.name = name;

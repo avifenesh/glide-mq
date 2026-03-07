@@ -209,11 +209,7 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
 
   it('throws error if subscription is missing', () => {
     expect(() => {
-      new BroadcastWorker(
-        Q + '-invalid',
-        async () => {},
-        { connection: CONNECTION, subscription: '' } as any,
-      );
+      new BroadcastWorker(Q + '-invalid', async () => {}, { connection: CONNECTION, subscription: '' } as any);
     }).toThrow(/subscription/);
   });
 });
@@ -318,11 +314,17 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
     });
 
     // Publish with dedup ID - dedup is configured via JobOptions
-    const id1 = await broadcast.publish({ event: 'deduped' }, { deduplication: { id: 'unique-1', mode: 'simple', ttl: 5000 } });
+    const id1 = await broadcast.publish(
+      { event: 'deduped' },
+      { deduplication: { id: 'unique-1', mode: 'simple', ttl: 5000 } },
+    );
     expect(id1).not.toBeNull();
 
     // Duplicate - should be skipped
-    const id2 = await broadcast.publish({ event: 'deduped' }, { deduplication: { id: 'unique-1', mode: 'simple', ttl: 5000 } });
+    const id2 = await broadcast.publish(
+      { event: 'deduped' },
+      { deduplication: { id: 'unique-1', mode: 'simple', ttl: 5000 } },
+    );
     expect(id2).toBeNull();
 
     await waitFor(() => received.sub1.length === 1 && received.sub2.length === 1, 3000);

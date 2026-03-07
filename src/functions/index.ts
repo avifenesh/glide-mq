@@ -3158,7 +3158,15 @@ export async function reclaimStalled(
   const result = await client.fcall(
     'glidemq_reclaimStalled',
     [k.stream, k.events],
-    [group, consumer, minIdleMs.toString(), maxStalledCount.toString(), timestamp.toString(), k.failed, broadcastMode ? '1' : '0'],
+    [
+      group,
+      consumer,
+      minIdleMs.toString(),
+      maxStalledCount.toString(),
+      timestamp.toString(),
+      k.failed,
+      broadcastMode ? '1' : '0',
+    ],
   );
   return result as number;
 }

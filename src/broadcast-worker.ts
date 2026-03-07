@@ -201,12 +201,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
 
     // Create consumer group on the stream (idempotent)
     // Use subscription name as consumer group, with configurable startFrom
-    await createConsumerGroup(
-      this.commandClient,
-      this.queueKeys.stream,
-      this.subscription,
-      this.opts.startFrom ?? '$',
-    );
+    await createConsumerGroup(this.commandClient, this.queueKeys.stream, this.subscription, this.opts.startFrom ?? '$');
 
     // Check if global concurrency / rate limit are configured (refreshed on scheduler tick)
     await this.refreshMetaFlags();
@@ -861,7 +856,18 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     if (!this.commandClient) return true;
     if (moveResult === null) {
       try {
-        await completeJob(this.commandClient, this.queueKeys, jobId, entryId, 'null', Date.now(), this.subscription, undefined, undefined, true);
+        await completeJob(
+          this.commandClient,
+          this.queueKeys,
+          jobId,
+          entryId,
+          'null',
+          Date.now(),
+          this.subscription,
+          undefined,
+          undefined,
+          true,
+        );
       } catch (err) {
         this.emit('error', err);
       }
@@ -869,7 +875,19 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     }
     if (moveResult === 'REVOKED') {
       try {
-        await failJob(this.commandClient, this.queueKeys, jobId, entryId, 'revoked', Date.now(), 0, 0, this.subscription, undefined, true);
+        await failJob(
+          this.commandClient,
+          this.queueKeys,
+          jobId,
+          entryId,
+          'revoked',
+          Date.now(),
+          0,
+          0,
+          this.subscription,
+          undefined,
+          true,
+        );
       } catch (err) {
         this.emit('error', err);
       }
