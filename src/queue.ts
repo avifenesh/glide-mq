@@ -1328,7 +1328,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
       jobIds = await this.scanJobIds(client, pfx, opts.name, limit);
     }
 
-    const excludeData = opts.excludeData === true && !opts.data;
+    const hasDataFilter = opts.data && Object.keys(opts.data).length > 0;
+    const excludeData = opts.excludeData === true && !hasDataFilter;
     const jobs: Job<D, R>[] = [];
     const CHUNK = 100;
     for (let offset = 0; offset < jobIds.length && jobs.length < limit; offset += CHUNK) {

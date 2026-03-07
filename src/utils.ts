@@ -150,7 +150,8 @@ export function hashDataToRecord(
  * All known job hash fields except `data` and `returnvalue`.
  * Used by getJob/getJobs with `excludeData: true` to fetch only metadata via HMGET.
  */
-// Keep in sync with hash fields written by Lua addJob/completeJob/failJob functions.
+// Keep in sync with hash fields written by Lua job-hash writers
+// (addJob, completeJob, failJob, moveToActive, revoke, etc.).
 export const JOB_METADATA_FIELDS: readonly string[] = Object.freeze([
   'id',
   'name',
