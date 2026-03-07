@@ -70,6 +70,27 @@ const counts = await queue.getJobCounts();
 // { waiting, active, delayed, completed, failed }
 ```
 
+### Time-series metrics
+
+Get per-minute throughput and latency data for completed or failed jobs:
+
+```typescript
+const metrics = await queue.getMetrics('completed');
+// {
+//   count: 15234,
+//   data: [
+//     { timestamp: 1709654400000, count: 142, avgDuration: 234 },
+//     { timestamp: 1709654460000, count: 156, avgDuration: 218 },
+//   ],
+//   meta: { resolution: 'minute' }
+// }
+
+// Slice data points (e.g. last 10 data points):
+const recent = await queue.getMetrics('completed', { start: -10 });
+```
+
+Data points are recorded server-side inside the Valkey functions with zero extra RTTs. Minute-resolution buckets are retained for 24 hours and trimmed automatically.
+
 ### Pause / resume
 
 ```typescript

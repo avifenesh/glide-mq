@@ -294,9 +294,29 @@ export interface SchedulerEntry {
   nextRun: number;
 }
 
-export interface Metrics {
-  /** Total count of completed or failed jobs */
+export interface MetricsDataPoint {
+  /** Minute-bucket epoch ms (floored to start of minute). */
+  timestamp: number;
+  /** Number of jobs completed/failed in this bucket. */
   count: number;
+  /** Average processing duration in ms for this bucket. */
+  avgDuration: number;
+}
+
+export interface MetricsOptions {
+  /** Start index for data points (default 0). */
+  start?: number;
+  /** End index for data points (default -1 = all). */
+  end?: number;
+}
+
+export interface Metrics {
+  /** Total count of completed or failed jobs. */
+  count: number;
+  /** Per-minute data points sorted oldest-first. */
+  data: MetricsDataPoint[];
+  /** Resolution metadata. */
+  meta: { resolution: 'minute' };
 }
 
 export interface JobCounts {

@@ -108,6 +108,8 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
     k.schedulers,
     k.ordering,
     k.ratelimited,
+    k.metricsCompleted,
+    k.metricsFailed,
   ];
   for (const key of staticKeys) {
     try {

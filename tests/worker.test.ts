@@ -256,7 +256,7 @@ describe('Worker', () => {
     // At c=1, completeAndFetchNext is called instead of completeJob
     expect(mockCommandClient.fcall).toHaveBeenCalledWith(
       'glidemq_completeAndFetchNext',
-      [keys.stream, keys.completed, keys.events, keys.job('1')],
+      [keys.stream, keys.completed, keys.events, keys.job('1'), keys.metricsCompleted],
       expect.any(Array),
     );
     const completeAndFetchNextCall = (mockCommandClient.fcall as any).mock.calls.find(
@@ -313,7 +313,7 @@ describe('Worker', () => {
     // failJob is called via fcall('glidemq_fail', ...)
     expect(mockCommandClient.fcall).toHaveBeenCalledWith(
       'glidemq_fail',
-      [keys.stream, keys.failed, keys.scheduled, keys.events, keys.job('2')],
+      [keys.stream, keys.failed, keys.scheduled, keys.events, keys.job('2'), keys.metricsFailed],
       expect.arrayContaining(['2', '1234567890-0', 'Processing failed']),
     );
 

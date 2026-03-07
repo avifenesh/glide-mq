@@ -26,6 +26,8 @@ export type {
   JobTemplate,
   SchedulerEntry,
   Metrics,
+  MetricsDataPoint,
+  MetricsOptions,
   JobCounts,
   DeadLetterQueueOptions,
   RateLimitConfig,
