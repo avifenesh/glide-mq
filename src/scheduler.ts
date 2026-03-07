@@ -298,6 +298,7 @@ export class Scheduler {
           }
         })
         .catch((err) => {
+          markTickLockLost();
           this.reportError(err);
         });
     }, renewEveryMs);

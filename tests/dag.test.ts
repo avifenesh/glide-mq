@@ -517,4 +517,21 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await flushQueue(cleanupClient, qName);
     }
   });
+
+  it('addDAG throws on node with lifo+ordering combination', async () => {
+    const flow = new FlowProducer({ connection: CONNECTION });
+
+    try {
+      await expect(
+        flow.addDAG({
+          nodes: [
+            { name: 'A', queueName: Q, data: {}, opts: { lifo: true, ordering: { key: 'grp1' } } },
+            { name: 'B', queueName: Q, data: {}, deps: ['A'] },
+          ],
+        }),
+      ).rejects.toThrow('lifo and ordering.key cannot be combined in a DAG node');
+    } finally {
+      await flow.close();
+    }
+  });
 });

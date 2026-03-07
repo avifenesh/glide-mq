@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import { Job } from '../src/job';
+import { DelayedError, GlideMQError } from '../src/errors';
 import { buildKeys, MAX_JOB_DATA_SIZE } from '../src/utils';
 
 vi.mock('@glidemq/speedkey');
@@ -164,14 +165,13 @@ describe('Job', () => {
       expect(args[4]).toBe('3'); // maxAttempts
     });
 
-    it('should use fallback entryId when not set', async () => {
-      mockClient.fcall.mockResolvedValue('failed');
+    it('throws when entryId is not set (job not active in Worker)', async () => {
       const job = new Job(mockClient as any, keys, '5', 'job', {}, {});
 
-      await job.moveToFailed(new Error('fail'));
-
-      const args = mockClient.fcall.mock.calls[0][2];
-      expect(args[1]).toBe('0-0'); // fallback entryId
+      await expect(job.moveToFailed(new Error('fail'))).rejects.toThrow(
+        'moveToFailed can only be called while job is active in a Worker',
+      );
+      expect(mockClient.fcall).not.toHaveBeenCalled();
     });
 
     it('should calculate backoff delay when backoff option is set', async () => {
@@ -417,6 +417,25 @@ describe('Job', () => {
       expect(oversized.length).toBeLessThan(MAX_JOB_DATA_SIZE * 2);
       expect(Buffer.byteLength(oversized, 'utf8')).toBeGreaterThan(MAX_JOB_DATA_SIZE);
       await expect(job.log(oversized)).rejects.toThrow('Log message exceeds maximum size');
+    });
+  });
+
+  describe('DelayedError', () => {
+    it('rejects non-finite timestamp', () => {
+      expect(() => new DelayedError(Infinity)).toThrow(GlideMQError);
+      expect(() => new DelayedError(NaN)).toThrow(GlideMQError);
+    });
+
+    it('rejects negative timestamp', () => {
+      expect(() => new DelayedError(-1)).toThrow(GlideMQError);
+    });
+
+    it('accepts zero timestamp', () => {
+      expect(() => new DelayedError(0)).not.toThrow();
+    });
+
+    it('accepts positive finite timestamp', () => {
+      expect(() => new DelayedError(Date.now() + 5000)).not.toThrow();
     });
   });
 });

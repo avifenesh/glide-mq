@@ -28,6 +28,16 @@ function validateQueueName(queueName: string): void {
   }
 }
 
+/**
+ * Race-condition constants for late-parent reconciliation in addFlowRecursive.
+ *
+ * Children are created before the parent job exists. Between child creation and
+ * parent creation, a worker may pick up and complete a child job. When that
+ * happens, the child's completion Lua script cannot notify the parent (it does
+ * not exist yet). The reconcile loop below polls the child state after parent
+ * creation; if the child has already completed, it manually calls completeChild
+ * so the parent's dependency counter is incremented and the parent can proceed.
+ */
 const LATE_PARENT_RECONCILE_ATTEMPTS = 5;
 const LATE_PARENT_RECONCILE_DELAY_MS = 10;
 
@@ -387,6 +397,10 @@ export class FlowProducer {
           const deps = node.deps ?? [];
           const isParent = hasChildren.has(node.name);
 
+          if (opts.lifo && opts.ordering?.key) {
+            throw new GlideMQError('lifo and ordering.key cannot be combined in a DAG node');
+          }
+
           // Validate ordering.key if present (reserved chars: {, }, :)
           const orderingKey = opts.ordering?.key;
           if (orderingKey) {
@@ -455,18 +469,26 @@ export class FlowProducer {
               const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
               const depsMember = `${keyPrefix(prefix, node.queueName)}:${jobId}`;
 
-              const registerResult = await registerParent(
-                client,
-                queueKeys,
-                jobId,
-                parentJob.id,
-                keyPrefix(prefix, parentNode.queueName),
-                parentQueueKeys,
-                depsMember,
-              );
+              let registerResult: string;
+              try {
+                registerResult = await registerParent(
+                  client,
+                  queueKeys,
+                  jobId,
+                  parentJob.id,
+                  keyPrefix(prefix, parentNode.queueName),
+                  parentQueueKeys,
+                  depsMember,
+                );
+              } catch (regErr) {
+                const msg = regErr instanceof Error ? regErr.message : String(regErr);
+                throw new GlideMQError(
+                  `DAG partially submitted: registerParent failed for ${depName}->${node.name}: ${msg}. Graph may be in inconsistent state.`,
+                );
+              }
 
               if (registerResult.startsWith('error:')) {
-                throw new Error(`Failed to register parent ${depName} for node ${node.name}: ${registerResult}`);
+                throw new GlideMQError(`Failed to register parent ${depName} for node ${node.name}: ${registerResult}`);
               }
             }
 
@@ -584,18 +606,26 @@ export class FlowProducer {
                 const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
                 const depsMember = `${queuePrefix}:${jid}`;
 
-                const registerResult = await registerParent(
-                  client,
-                  queueKeys,
-                  jid,
-                  parentJob.id,
-                  keyPrefix(prefix, parentNode.queueName),
-                  parentQueueKeys,
-                  depsMember,
-                );
+                let registerResult: string;
+                try {
+                  registerResult = await registerParent(
+                    client,
+                    queueKeys,
+                    jid,
+                    parentJob.id,
+                    keyPrefix(prefix, parentNode.queueName),
+                    parentQueueKeys,
+                    depsMember,
+                  );
+                } catch (regErr) {
+                  const msg = regErr instanceof Error ? regErr.message : String(regErr);
+                  throw new GlideMQError(
+                    `DAG partially submitted: registerParent failed for ${depName}->${node.name}: ${msg}. Graph may be in inconsistent state.`,
+                  );
+                }
 
                 if (registerResult.startsWith('error:')) {
-                  throw new Error(`Failed to register parent ${depName} for node ${node.name}: ${registerResult}`);
+                  throw new GlideMQError(`Failed to register parent ${depName} for node ${node.name}: ${registerResult}`);
                 }
               }
             }
