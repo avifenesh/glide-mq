@@ -2,7 +2,7 @@ import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
 
 export const LIBRARY_NAME = 'glidemq';
-export const LIBRARY_VERSION = '42';
+export const LIBRARY_VERSION = '43';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
