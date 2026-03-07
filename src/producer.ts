@@ -406,9 +406,9 @@ export class Producer<D = any> {
       if (raw === 'skipped' || raw === 'duplicate') {
         results.push(null);
       } else if (raw === 'ERR:COST_EXCEEDS_CAPACITY') {
-        throw new Error('Job cost exceeds token bucket capacity');
+        throw new GlideMQError('Job cost exceeds token bucket capacity');
       } else if (raw === 'ERR:ID_EXHAUSTED') {
-        throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
+        throw new GlideMQError('Failed to generate job ID: too many collisions with custom job IDs');
       } else {
         results.push(raw);
 
