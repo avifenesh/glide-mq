@@ -4,7 +4,7 @@ import type { JobOptions, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
-import { DelayedError, WaitingChildrenError } from './errors';
+import { GlideMQError, DelayedError, WaitingChildrenError } from './errors';
 import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
@@ -304,7 +304,10 @@ export class Job<D = any, R = any> {
         this.opts.backoff.jitter,
       );
     }
-    const entryId = this.entryId ?? '0-0';
+    if (!this.entryId) {
+      throw new GlideMQError('moveToFailed can only be called while job is active in a Worker');
+    }
+    const entryId = this.entryId;
     const result = await failJob(
       this.client,
       this.queueKeys,
