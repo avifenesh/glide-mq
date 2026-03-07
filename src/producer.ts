@@ -117,7 +117,12 @@ export class Producer<D = any> {
             return this.client;
           })
         : createClient(this.opts.connection!).then(async (client) => {
-            await ensureFunctionLibraryOnce(client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
+            try {
+              await ensureFunctionLibraryOnce(client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
+            } catch (err) {
+              client.close();
+              throw err;
+            }
             if (this.closing) {
               client.close();
               throw new GlideMQError('Producer is closed');
@@ -429,15 +434,18 @@ export class Producer<D = any> {
 
     const results: (string | null)[] = [];
     const crossQueueParents: { parentId: string; parentQueue: string; jobId: string }[] = [];
+    let bulkError: GlideMQError | null = null;
 
     for (let i = 0; i < prepared.length; i++) {
       const raw = String(rawResults[i]);
       if (raw === 'skipped' || raw === 'duplicate') {
         results.push(null);
       } else if (raw === 'ERR:COST_EXCEEDS_CAPACITY') {
-        throw new GlideMQError('Job cost exceeds token bucket capacity');
+        bulkError = new GlideMQError('Job cost exceeds token bucket capacity');
+        results.push(null);
       } else if (raw === 'ERR:ID_EXHAUSTED') {
-        throw new GlideMQError('Failed to generate job ID: too many collisions with custom job IDs');
+        bulkError = new GlideMQError('Failed to generate job ID: too many collisions with custom job IDs');
+        results.push(null);
       } else {
         results.push(raw);
 
@@ -466,6 +474,7 @@ export class Producer<D = any> {
       await executeBatch;
     }
 
+    if (bulkError) throw bulkError;
     return results;
   }
 
