@@ -147,13 +147,14 @@ describe('Job', () => {
       expect(mockClient.fcall).toHaveBeenCalledTimes(1);
       const call = mockClient.fcall.mock.calls[0];
       expect(call[0]).toBe('glidemq_fail');
-      // keys: [stream, failed, scheduled, events, job:5]
+      // keys: [stream, failed, scheduled, events, job:5, metricsFailed]
       expect(call[1]).toEqual([
         'glide:{test-queue}:stream',
         'glide:{test-queue}:failed',
         'glide:{test-queue}:scheduled',
         'glide:{test-queue}:events',
         'glide:{test-queue}:job:5',
+        'glide:{test-queue}:metrics:failed',
       ]);
       // args: [jobId, entryId, failedReason, timestamp, maxAttempts, backoffDelay, group]
       const args = call[2];
