@@ -2975,7 +2975,7 @@ export async function completeJob(
     args.push('', '');
   }
 
-  args.push(broadcastMode ? '1' : '0');
+  if (broadcastMode) args.push('1');
 
   return client.fcall('glidemq_complete', keys, args);
 }
@@ -3042,7 +3042,7 @@ export async function completeAndFetchNext(
   const orderingSeqHint =
     hints?.orderingSeq != null && Number.isFinite(hints.orderingSeq) ? Math.trunc(hints.orderingSeq).toString() : '';
   args.push(hints?.orderingKey ?? '', orderingSeqHint, hints?.groupKey ?? '');
-  args.push(broadcastMode ? '1' : '0');
+  if (broadcastMode) args.push('1');
 
   const raw = await client.fcall('glidemq_completeAndFetchNext', keys, args);
 
@@ -3135,7 +3135,7 @@ export async function failJob(
       mode,
       count.toString(),
       age.toString(),
-      broadcastMode ? '1' : '0',
+      ...(broadcastMode ? ['1'] : []),
     ],
   );
   return result as string;
@@ -3165,7 +3165,7 @@ export async function reclaimStalled(
       maxStalledCount.toString(),
       timestamp.toString(),
       k.failed,
-      broadcastMode ? '1' : '0',
+      ...(broadcastMode ? ['1'] : []),
     ],
   );
   return result as number;
