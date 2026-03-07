@@ -353,6 +353,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local jobCost = tonumber(args[15]) or 0
   local ttl = tonumber(args[16]) or 0
   local customJobId = args[17] or ''
+  local lifo = tonumber(args[18]) or 0
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local jobIdStr
   local jobKey
@@ -471,6 +472,10 @@ redis.register_function('glidemq_addJob', function(keys, args)
     hashFields[#hashFields + 1] = 'parentId'
     hashFields[#hashFields + 1] = parentId
   end
+  if lifo > 0 then
+    hashFields[#hashFields + 1] = 'lifo'
+    hashFields[#hashFields + 1] = '1'
+  end
   if delay > 0 or priority > 0 then
     hashFields[#hashFields + 1] = 'state'
     hashFields[#hashFields + 1] = delay > 0 and 'delayed' or 'prioritized'
@@ -485,6 +490,9 @@ redis.register_function('glidemq_addJob', function(keys, args)
   elseif priority > 0 then
     local score = priority * PRIORITY_SHIFT
     redis.call('ZADD', scheduledKey, score, jobIdStr)
+  elseif lifo > 0 then
+    local lifoKey = prefix .. 'lifo'
+    redis.call('RPUSH', lifoKey, jobIdStr)
   else
     redis.call('XADD', streamKey, '*', 'jobId', jobIdStr)
   end
@@ -525,7 +533,13 @@ redis.register_function('glidemq_promote', function(keys, args)
       local jobKey = prefix .. 'job:' .. jobId
       redis.call('ZREM', scheduledKey, jobId)
       if not checkExpired(jobKey, jobId, prefix, now) then
-        redis.call('XADD', streamKey, '*', 'jobId', jobId)
+        local jobLifo = redis.call('HGET', jobKey, 'lifo')
+        if jobLifo == '1' then
+          local lifoKey = prefix .. 'lifo'
+          redis.call('RPUSH', lifoKey, jobId)
+        else
+          redis.call('XADD', streamKey, '*', 'jobId', jobId)
+        end
         redis.call('HSET', jobKey, 'state', 'waiting')
         emitEvent(eventsKey, 'promoted', jobId, nil)
         count = count + 1

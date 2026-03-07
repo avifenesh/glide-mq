@@ -259,6 +259,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
         }
         validateOrderingKey(orderingKey);
 
+        // Validate LIFO + ordering.key combination
+        if (opts?.lifo && orderingKey) {
+          throw new Error('lifo and ordering.key cannot be used together');
+        }
+        const lifo = opts?.lifo ?? false;
+
         const customJobId = opts?.jobId ?? '';
         if (customJobId !== '') validateJobId(customJobId);
 
@@ -308,6 +314,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             jobCost,
             ttl,
             customJobId,
+            lifo ? 1 : 0,
           );
           if (result === 'skipped' || result === 'duplicate') {
             return null;
@@ -340,6 +347,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             jobCost,
             ttl,
             customJobId,
+            lifo ? 1 : 0,
           );
           if (result === 'duplicate') {
             return null;
