@@ -506,7 +506,7 @@ The processor function signature is identical. The only change is the connection
 | `deduplication` | `deduplication` | Changed (see [Deduplication](#deduplication)) |
 | `parent` | `parent` | Full |
 | `jobId` (custom ID) | `jobId` | Full |
-| `lifo` | - | Gap - not supported |
+| `lifo` | `lifo` | Same |
 | `repeat` | - | Gap - use `queue.upsertJobScheduler()` |
 | `sizeLimit` | - | 1 MB hard limit enforced internally (JSON string character length) |
 | - | `ordering.key` | glide-mq only |
@@ -679,7 +679,7 @@ const job = await queue.add('job', data, { jobId: 'my-deterministic-id' });
 // job is null if a job with that ID already exists
 ```
 
-**No `lifo`** - Last-in-first-out ordering is not supported. Use `priority` (lower number = higher priority) to approximate LIFO behavior if needed.
+**LIFO support** - Last-in-first-out ordering is supported via `lifo: true` option. Cannot be combined with ordering keys (per-key sequencing).
 
 **`job.promote()` is now implemented** - call `job.promote()` to move a delayed job to waiting immediately. Throws if the job is not in the delayed state (#11).
 
@@ -1120,7 +1120,7 @@ These BullMQ features are not yet implemented.
 
 | Missing feature | Workaround |
 |---|---|
-| `lifo` | Use `priority` values in reverse insertion order |
+| `lifo` | `lifo` | Same |
 | QueueEvents `'waiting'`, `'active'`, `'delayed'`, `'drained'`, `'deduplicated'` events | Use worker-level events or poll `getJobCounts()` |
 | `@nestjs/bullmq` integration | Not yet supported - use glide-mq directly |
 | `failParentOnFailure` in FlowJob | Implement manually in the worker's `failed` handler |
