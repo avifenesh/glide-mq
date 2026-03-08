@@ -248,10 +248,7 @@ export class Scheduler {
     this.tickCount++;
     if (this.tickCount % 10 !== 0) return;
     try {
-      const drift = await healListActive(this.client, this.queueKeys);
-      if (drift > 0) {
-        this.reportError(new Error(`list-active counter healed: corrected drift of ${drift}`));
-      }
+      await healListActive(this.client, this.queueKeys);
     } catch (err) {
       this.reportError(err);
     }
