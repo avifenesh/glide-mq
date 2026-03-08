@@ -1,11 +1,7 @@
 import type { BroadcastWorkerOptions, Processor, BatchProcessor, Client } from './types';
 import { Job } from './job';
-import {
-  GlideMQError,
-} from './errors';
-import {
-  checkConcurrency,
-} from './functions/index';
+import { GlideMQError } from './errors';
+import { checkConcurrency } from './functions/index';
 import { BaseWorker } from './base-worker';
 export type { WorkerEvent } from './base-worker';
 
@@ -192,10 +188,7 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
    */
   protected async getAttemptsMade(job: Job<D, R>, jobId: string): Promise<number> {
     if (!this.commandClient) return job.attemptsMade;
-    const subAttemptStr = await this.commandClient.hget(
-      `${this.queueKeys.job(jobId)}:sub:${this.consumerGroup}`,
-      'a',
-    );
+    const subAttemptStr = await this.commandClient.hget(`${this.queueKeys.job(jobId)}:sub:${this.consumerGroup}`, 'a');
     return subAttemptStr !== null ? Number(subAttemptStr) : job.attemptsMade;
   }
 

@@ -1,0 +1,273 @@
+{
+  "benchmark": "user-centric",
+  "createdAt": "2026-03-05T03:30:05.654Z",
+  "env": {
+    "node": "v22.22.0",
+    "platform": "win32 x64",
+    "benchHost": "127.0.0.1",
+    "benchPort": 46379
+  },
+  "config": {
+    "rounds": 1,
+    "steady": {
+      "durationMs": 2000,
+      "producers": 4,
+      "concurrency": 40,
+      "payloadBytes": 512,
+      "processorMs": 0
+    },
+    "burst": {
+      "jobs": 500,
+      "bulkSize": 500,
+      "concurrency": 80,
+      "payloadBytes": 128,
+      "processorMs": 0
+    },
+    "retry": {
+      "jobs": 200,
+      "concurrency": 40,
+      "backoffMs": 50,
+      "failEvery": 5,
+      "processorMs": 0
+    },
+    "delay": {
+      "jobs": 100,
+      "concurrency": 30,
+      "bucketsMs": [
+        100,
+        250,
+        500,
+        1000
+      ],
+      "promotionIntervalMs": 100
+    }
+  },
+  "steady": {
+    "rounds": {
+      "glide-mq": [
+        {
+          "library": "glide-mq",
+          "round": 1,
+          "produced": 14646,
+          "completed": 14646,
+          "backlog": 0,
+          "drained": true,
+          "throughput": 7182.879264460607,
+          "addP50": 0.4981999999999971,
+          "addP95": 0.8636000000001332,
+          "addP99": 1.2305999999998676,
+          "e2eP50": 2,
+          "e2eP95": 3,
+          "e2eP99": 4
+        }
+      ],
+      "bullmq": [
+        {
+          "library": "bullmq",
+          "round": 1,
+          "produced": 13491,
+          "completed": 13491,
+          "backlog": 0,
+          "drained": true,
+          "throughput": 6627.152313976998,
+          "addP50": 0.46150000000034197,
+          "addP95": 1.3733000000001994,
+          "addP99": 2.5255999999999403,
+          "e2eP50": 12,
+          "e2eP95": 21,
+          "e2eP99": 28
+        }
+      ]
+    },
+    "baseline": {
+      "glide-mq": {
+        "library": "glide-mq",
+        "round": 0,
+        "produced": 14646,
+        "completed": 14646,
+        "backlog": 0,
+        "drained": true,
+        "throughput": 7182.879264460607,
+        "addP50": 0.4981999999999971,
+        "addP95": 0.8636000000001332,
+        "addP99": 1.2305999999998676,
+        "e2eP50": 2,
+        "e2eP95": 3,
+        "e2eP99": 4
+      },
+      "bullmq": {
+        "library": "bullmq",
+        "round": 0,
+        "produced": 13491,
+        "completed": 13491,
+        "backlog": 0,
+        "drained": true,
+        "throughput": 6627.152313976998,
+        "addP50": 0.46150000000034197,
+        "addP95": 1.3733000000001994,
+        "addP99": 2.5255999999999403,
+        "e2eP50": 12,
+        "e2eP95": 21,
+        "e2eP99": 28
+      }
+    }
+  },
+  "burst": {
+    "rounds": {
+      "glide-mq": [
+        {
+          "library": "glide-mq",
+          "round": 1,
+          "completed": 500,
+          "drained": true,
+          "drainMs": 47.55110000000059,
+          "throughput": 10515.003859006287
+        }
+      ],
+      "bullmq": [
+        {
+          "library": "bullmq",
+          "round": 1,
+          "completed": 500,
+          "drained": true,
+          "drainMs": 82.88480000000072,
+          "throughput": 6032.469162017591
+        }
+      ]
+    },
+    "baseline": {
+      "glide-mq": {
+        "library": "glide-mq",
+        "round": 0,
+        "completed": 500,
+        "drained": true,
+        "drainMs": 47.55110000000059,
+        "throughput": 10515.003859006287
+      },
+      "bullmq": {
+        "library": "bullmq",
+        "round": 0,
+        "completed": 500,
+        "drained": true,
+        "drainMs": 82.88480000000072,
+        "throughput": 6032.469162017591
+      }
+    }
+  },
+  "retry": {
+    "rounds": {
+      "glide-mq": [
+        {
+          "library": "glide-mq",
+          "round": 1,
+          "completed": 200,
+          "successRate": 100,
+          "elapsedMs": 216.96930000000066,
+          "throughput": 921.7893960113223,
+          "failedEvents": 40,
+          "retryExecutions": 40,
+          "e2eP50": 1,
+          "e2eP95": 118,
+          "e2eP99": 147
+        }
+      ],
+      "bullmq": [
+        {
+          "library": "bullmq",
+          "round": 1,
+          "completed": 200,
+          "successRate": 100,
+          "elapsedMs": 252.85459999999966,
+          "throughput": 790.9684063489462,
+          "failedEvents": 40,
+          "retryExecutions": 40,
+          "e2eP50": 18,
+          "e2eP95": 106,
+          "e2eP99": 135
+        }
+      ]
+    },
+    "baseline": {
+      "glide-mq": {
+        "library": "glide-mq",
+        "round": 0,
+        "completed": 200,
+        "successRate": 100,
+        "elapsedMs": 216.96930000000066,
+        "throughput": 921.7893960113223,
+        "failedEvents": 40,
+        "retryExecutions": 40,
+        "e2eP50": 1,
+        "e2eP95": 118,
+        "e2eP99": 147
+      },
+      "bullmq": {
+        "library": "bullmq",
+        "round": 0,
+        "completed": 200,
+        "successRate": 100,
+        "elapsedMs": 252.85459999999966,
+        "throughput": 790.9684063489462,
+        "failedEvents": 40,
+        "retryExecutions": 40,
+        "e2eP50": 18,
+        "e2eP95": 106,
+        "e2eP99": 135
+      }
+    }
+  },
+  "delay": {
+    "rounds": {
+      "glide-mq": [
+        {
+          "library": "glide-mq",
+          "round": 1,
+          "completed": 100,
+          "activeSeen": 100,
+          "earlyStarts": 0,
+          "lateP50": 54,
+          "lateP95": 106,
+          "lateP99": 110,
+          "lateMax": 113
+        }
+      ],
+      "bullmq": [
+        {
+          "library": "bullmq",
+          "round": 1,
+          "completed": 100,
+          "activeSeen": 100,
+          "earlyStarts": 0,
+          "lateP50": 43,
+          "lateP95": 95,
+          "lateP99": 103,
+          "lateMax": 105
+        }
+      ]
+    },
+    "baseline": {
+      "glide-mq": {
+        "library": "glide-mq",
+        "round": 0,
+        "completed": 100,
+        "activeSeen": 100,
+        "earlyStarts": 0,
+        "lateP50": 54,
+        "lateP95": 106,
+        "lateP99": 110,
+        "lateMax": 113
+      },
+      "bullmq": {
+        "library": "bullmq",
+        "round": 0,
+        "completed": 100,
+        "activeSeen": 100,
+        "earlyStarts": 0,
+        "lateP50": 43,
+        "lateP95": 95,
+        "lateP99": 103,
+        "lateMax": 105
+      }
+    }
+  }
+}

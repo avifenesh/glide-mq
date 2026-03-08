@@ -798,7 +798,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * Run the processor with optional timeout, AbortController, and heartbeat.
    * Returns { result, error } - exactly one will be set.
    */
-  protected async runProcessor(job: Job<D, R>, jobId: string): Promise<{ result?: R; error?: Error; aborted: boolean }> {
+  protected async runProcessor(
+    job: Job<D, R>,
+    jobId: string,
+  ): Promise<{ result?: R; error?: Error; aborted: boolean }> {
     if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
 
     const ac = new AbortController();
@@ -1052,7 +1055,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    */
   protected async deferOutOfOrderJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
-    await deferActive(this.commandClient, this.queueKeys, jobId, entryId, this.consumerGroup, this.broadcastMode ? true : undefined);
+    await deferActive(
+      this.commandClient,
+      this.queueKeys,
+      jobId,
+      entryId,
+      this.consumerGroup,
+      this.broadcastMode ? true : undefined,
+    );
   }
 
   // ---- Main processing path ----

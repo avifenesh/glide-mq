@@ -76,9 +76,11 @@ export function createRoutes(
   const queueInitMap = new Map<string, Promise<Queue>>();
   const startTime = Date.now();
   const allowedQueues = opts.queues ? new Set(opts.queues) : null;
-  const errorHandler = opts.onError ?? ((err: Error, queueName: string) => {
-    console.error(`[glide-mq proxy] queue "${queueName}" error:`, err);
-  });
+  const errorHandler =
+    opts.onError ??
+    ((err: Error, queueName: string) => {
+      console.error(`[glide-mq proxy] queue "${queueName}" error:`, err);
+    });
   let draining = false;
   let closed = false;
 
@@ -106,7 +108,9 @@ export function createRoutes(
         prefix: opts.prefix,
         compression: opts.compression,
       });
-      q.on('error', (err) => { errorHandler(err, name); });
+      q.on('error', (err) => {
+        errorHandler(err, name);
+      });
       queueCache.set(name, q);
       return q;
     })();
@@ -139,25 +143,43 @@ export function createRoutes(
         return `${prefix}${e instanceof Error ? e.message : 'invalid jobId'}`;
       }
     }
-    if (optsIn.delay !== undefined && (typeof optsIn.delay !== 'number' || !Number.isFinite(optsIn.delay) || optsIn.delay < 0)) {
+    if (
+      optsIn.delay !== undefined &&
+      (typeof optsIn.delay !== 'number' || !Number.isFinite(optsIn.delay) || optsIn.delay < 0)
+    ) {
       return `${prefix}opts.delay must be a non-negative number`;
     }
-    if (optsIn.priority !== undefined && (typeof optsIn.priority !== 'number' || !Number.isFinite(optsIn.priority) || optsIn.priority < 0)) {
+    if (
+      optsIn.priority !== undefined &&
+      (typeof optsIn.priority !== 'number' || !Number.isFinite(optsIn.priority) || optsIn.priority < 0)
+    ) {
       return `${prefix}opts.priority must be a non-negative number`;
     }
     if (optsIn.priority !== undefined && optsIn.priority > 2048) {
       return `${prefix}opts.priority must not exceed 2048`;
     }
-    if (optsIn.timeout !== undefined && (typeof optsIn.timeout !== 'number' || !Number.isFinite(optsIn.timeout) || optsIn.timeout <= 0)) {
+    if (
+      optsIn.timeout !== undefined &&
+      (typeof optsIn.timeout !== 'number' || !Number.isFinite(optsIn.timeout) || optsIn.timeout <= 0)
+    ) {
       return `${prefix}opts.timeout must be a positive number`;
     }
-    if (optsIn.cost !== undefined && (typeof optsIn.cost !== 'number' || !Number.isFinite(optsIn.cost) || optsIn.cost <= 0)) {
+    if (
+      optsIn.cost !== undefined &&
+      (typeof optsIn.cost !== 'number' || !Number.isFinite(optsIn.cost) || optsIn.cost <= 0)
+    ) {
       return `${prefix}opts.cost must be a positive number`;
     }
-    if (optsIn.attempts !== undefined && (typeof optsIn.attempts !== 'number' || !Number.isFinite(optsIn.attempts) || optsIn.attempts <= 0)) {
+    if (
+      optsIn.attempts !== undefined &&
+      (typeof optsIn.attempts !== 'number' || !Number.isFinite(optsIn.attempts) || optsIn.attempts <= 0)
+    ) {
       return `${prefix}opts.attempts must be a positive number`;
     }
-    if (optsIn.ttl !== undefined && (typeof optsIn.ttl !== 'number' || !Number.isFinite(optsIn.ttl) || optsIn.ttl <= 0)) {
+    if (
+      optsIn.ttl !== undefined &&
+      (typeof optsIn.ttl !== 'number' || !Number.isFinite(optsIn.ttl) || optsIn.ttl <= 0)
+    ) {
       return `${prefix}opts.ttl must be a positive number`;
     }
     if (optsIn.lifo !== undefined && typeof optsIn.lifo !== 'boolean') {

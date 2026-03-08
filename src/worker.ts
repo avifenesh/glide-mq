@@ -1,9 +1,5 @@
 import type { WorkerOptions, Processor, BatchProcessor, Client } from './types';
-import {
-  CONSUMER_GROUP,
-  checkConcurrency,
-  rpopAndReserve,
-} from './functions/index';
+import { CONSUMER_GROUP, checkConcurrency, rpopAndReserve } from './functions/index';
 import { BaseWorker } from './base-worker';
 export type { WorkerEvent } from './base-worker';
 

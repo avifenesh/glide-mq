@@ -123,9 +123,7 @@ export class Scheduler {
   async waitForIdle(): Promise<void> {
     while (this.pendingRuns.size > 0) {
       const results = await Promise.allSettled(this.pendingRuns);
-      const errors = results
-        .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-        .map((r) => r.reason);
+      const errors = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map((r) => r.reason);
       if (errors.length > 0) {
         throw errors[0];
       }
@@ -252,9 +250,7 @@ export class Scheduler {
     try {
       const drift = await healListActive(this.client, this.queueKeys);
       if (drift > 0) {
-        this.reportError(
-          new Error(`list-active counter healed: corrected drift of ${drift}`),
-        );
+        this.reportError(new Error(`list-active counter healed: corrected drift of ${drift}`));
       }
     } catch (err) {
       this.reportError(err);
