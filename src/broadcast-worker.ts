@@ -47,6 +47,18 @@ import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
 export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained';
 
+type BroadcastWorkerState = 'created' | 'initializing' | 'running' | 'paused' | 'draining' | 'closing' | 'closed';
+
+const VALID_TRANSITIONS: Record<BroadcastWorkerState, BroadcastWorkerState[]> = {
+  created: ['initializing', 'closing'],
+  initializing: ['running', 'closing'],
+  running: ['paused', 'draining', 'closing'],
+  paused: ['running', 'draining', 'closing'],
+  draining: ['closing'],
+  closing: ['closed'],
+  closed: [],
+};
+
 export class BroadcastWorker<D = any, R = any> extends EventEmitter {
   readonly name: string;
   private opts: BroadcastWorkerOptions;
@@ -55,10 +67,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
   private commandClient: Client | null = null;
   private commandClientOwned = true;
   private blockingClient: Client | null = null;
-  private running = false;
-  private paused = false;
-  private closing = false;
-  private closed = false;
+  private state: BroadcastWorkerState = 'created';
   private queueKeys: ReturnType<typeof buildKeys>;
   private consumerId: string;
   private activeCount = 0;
@@ -170,12 +179,25 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     this.subjectMatcher = compileSubjectMatcher(opts.subjects);
 
     // Auto-init: start the worker immediately
+    this.transition('initializing');
     this.initPromise = this.init();
     this.initPromise.catch((err) => {
-      if (!this.closing && !this.closed) {
+      if (this.state !== 'closing' && this.state !== 'closed') {
         this.emit('error', err);
       }
     });
+  }
+
+  private transition(to: BroadcastWorkerState): void {
+    const allowed = VALID_TRANSITIONS[this.state];
+    if (!allowed.includes(to)) {
+      throw new GlideMQError(`Invalid worker state transition: ${this.state} -> ${to}`);
+    }
+    this.state = to;
+  }
+
+  private isAlive(): boolean {
+    return this.state === 'running' || this.state === 'paused';
   }
 
   /**
@@ -220,7 +242,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
       onPromotionTick: () => this.refreshMetaFlags(),
       onError: (err) => {
-        if (!this.closing) {
+        if (this.state !== 'closing' && this.state !== 'closed') {
           this.emit('error', err);
         }
       },
@@ -235,7 +257,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       void this.registerWorker();
     }, heartbeatMs);
 
-    this.running = true;
+    this.transition('running');
     this.pollLoopPromise = this.pollLoop();
   }
 
@@ -245,12 +267,12 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
    * On connection errors, uses exponential backoff (1s, 2s, 4s, 8s, max 30s) and reconnects.
    */
   private async pollLoop(): Promise<void> {
-    while (this.running && !this.paused && !this.closing) {
+    while (this.state === 'running') {
       try {
         await this.pollOnce();
         this.reconnectBackoff = 0;
       } catch (err) {
-        if (this.running && !this.closing) {
+        if (this.state === 'running') {
           this.emit('error', err);
           this.reconnectBackoff = nextReconnectDelay(this.reconnectBackoff);
           await this.reconnectAndResume();
@@ -258,15 +280,15 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
         }
       }
     }
-    // Loop exited because this.paused became true. Clear the promise so that
+    // Loop exited because state became 'paused'. Clear the promise so that
     // resume() can detect the loop is no longer running and restart it.
-    if (this.paused && !this.closing) {
+    if (this.state === 'paused') {
       this.pollLoopPromise = null;
     }
   }
 
   private reconnectCtx = {
-    isActive: () => this.running && !this.closing,
+    isActive: () => this.state === 'running',
     getBackoff: () => this.reconnectBackoff,
     setBackoff: (ms: number) => {
       this.reconnectBackoff = ms;
@@ -350,7 +372,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
           queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
           onPromotionTick: () => this.refreshMetaFlags(),
           onError: (err) => {
-            if (!this.closing) {
+            if (this.state !== 'closing' && this.state !== 'closed') {
               this.emit('error', err);
             }
           },
@@ -441,7 +463,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     // Note: do NOT skip on pause - entries are already claimed in PEL and must
     // be processed, otherwise they're stuck. The pollLoop while-condition
     // stops after this iteration.
-    if (this.closing) return;
+    if (this.state === 'closing' || this.state === 'closed') return;
 
     // Batch mode: collect entries and process as a batch
     if (this.batchMode) {
@@ -523,14 +545,16 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       .catch((err) => {
         // Force close can interrupt in-flight commands and reject these promises.
         // Consume rejections to avoid unhandled promise warnings during shutdown.
-        if (!this.closing && this.running) {
+        if (this.isAlive()) {
           this.emit('error', err);
         }
       })
       .finally(() => {
         this.activeCount--;
         this.activePromises.delete(promise);
-        this.internalEvents.emit('slotFree');
+        if (this.isAlive()) {
+          this.internalEvents.emit('slotFree');
+        }
       });
 
     this.activePromises.add(promise);
@@ -569,7 +593,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     // If timeout is set and batch is not full, fetch more
     if (this.batchTimeout > 0 && collected.length < this.batchSize) {
       const deadline = Date.now() + this.batchTimeout;
-      while (collected.length < this.batchSize && this.running && !this.closing) {
+      while (collected.length < this.batchSize && this.state === 'running') {
         const remaining = deadline - Date.now();
         if (remaining <= 0) break;
 
@@ -658,14 +682,16 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
 
     const promise = this.processBatch(batch)
       .catch((err) => {
-        if (!this.closing && this.running) {
+        if (this.isAlive()) {
           this.emit('error', err);
         }
       })
       .finally(() => {
         this.activeCount -= batch.length;
         this.activePromises.delete(promise);
-        this.internalEvents.emit('slotFree');
+        if (this.isAlive()) {
+          this.internalEvents.emit('slotFree');
+        }
         if (!this.isDrained && this.activeCount === 0) {
           this.isDrained = true;
           this.emit('drained');
@@ -1213,7 +1239,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
 
     // Loop: process current job, then chain into next via completeAndFetchNext.
     // This reuses the same dispatch slot (activeCount) for sequential jobs.
-    while (this.running && !this.closing && this.commandClient) {
+    while ((this.state === 'running' || this.state === 'draining') && this.commandClient) {
       // Activate the job (skip if we already have a pre-fetched hash from completeAndFetchNext)
       if (!currentHash) {
         const moveResult = await moveToActive(
@@ -1534,14 +1560,14 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
    * Check if the worker is currently running and not paused.
    */
   isRunning(): boolean {
-    return this.running && !this.paused;
+    return this.state === 'running';
   }
 
   /**
    * Check if the worker is currently paused.
    */
   isPaused(): boolean {
-    return this.paused;
+    return this.state === 'paused';
   }
 
   /**
@@ -1556,7 +1582,9 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
    * Pause the worker. If force=false (default), waits for active jobs to finish.
    */
   async pause(force?: boolean): Promise<void> {
-    this.paused = true;
+    if (this.state === 'running') {
+      this.transition('paused');
+    }
     if (!force) {
       await this.waitForActiveJobs();
     }
@@ -1567,9 +1595,11 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
    */
   async resume(): Promise<void> {
     await this.initPromise;
-    this.paused = false;
-    if (!this.pollLoopPromise) {
-      this.pollLoopPromise = this.pollLoop();
+    if (this.state === 'paused') {
+      this.transition('running');
+      if (!this.pollLoopPromise) {
+        this.pollLoopPromise = this.pollLoop();
+      }
     }
   }
 
@@ -1604,15 +1634,14 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
    * Idempotent: safe to call multiple times.
    */
   async close(force?: boolean): Promise<void> {
-    if (this.closed) return;
-    if (this.closing) {
+    if (this.state === 'closed') return;
+    if (this.state === 'closing') {
       // Already closing - wait for init to settle, then return
       await this.initPromise.catch(() => {});
       return;
     }
 
-    this.closing = true;
-    this.running = false;
+    this.transition('closing');
     this.emit('closing');
 
     // Wait for init to complete so clients are available for cleanup
@@ -1674,7 +1703,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       }
     }
 
-    this.closed = true;
+    this.transition('closed');
     this.internalEvents.removeAllListeners();
     this.emit('closed');
   }
