@@ -8,9 +8,9 @@ import { Queue, Worker } from '../dist';
 import { Queue as BullQueue, Worker as BullWorker } from 'bullmq';
 import { flushDB, fmt, printTable, GLIDE_CONNECTION, BULL_CONNECTION } from './utils';
 
-const ADD_DURATION_MS = 5000;
-const PROCESS_DURATION_MS = 8000;
-const PROCESS_SIZES = [500, 2000];
+const ADD_DURATION_MS = 15000;
+const PROCESS_DURATION_MS = 60000;
+const PROCESS_SIZES = [5000, 20000];
 
 interface AddResult {
   library: string;
@@ -179,14 +179,14 @@ async function bullProcessThroughput(n: number, concurrency: number): Promise<Pr
 // ---- Run ----
 
 export async function runThroughput(): Promise<void> {
-  console.log('\n## Add Throughput (time-based, 5s)\n');
+  console.log('\n## Add Throughput (time-based, 15s)\n');
 
   await flushDB();
-  console.log('  [glide-mq] Adding jobs for 5s...');
+  console.log('  [glide-mq] Adding jobs for 15s...');
   const glideAdd = await glideAddThroughput();
 
   await flushDB();
-  console.log('  [bullmq]   Adding jobs for 5s...');
+  console.log('  [bullmq]   Adding jobs for 15s...');
   const bullAdd = await bullAddThroughput();
 
   console.log('');

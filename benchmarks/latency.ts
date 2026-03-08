@@ -13,8 +13,8 @@ import { Queue, Worker } from '../dist';
 import { Queue as BullQueue, Worker as BullWorker } from 'bullmq';
 import { flushDB, fmtMs, percentile, printTable, GLIDE_CONNECTION, BULL_CONNECTION } from './utils';
 
-const N_SERIAL = 200;
-const N_PIPELINED = 1000;
+const N_SERIAL = 500;
+const N_PIPELINED = 3000;
 
 // ---- Serial round-trip latency ----
 
