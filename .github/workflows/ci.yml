@@ -55,6 +55,7 @@ jobs:
           cache: npm
 
       - run: npm ci
+      - run: npm run build
 
       - name: Run unit tests (no Valkey needed)
         run: >-
