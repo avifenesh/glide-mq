@@ -75,9 +75,11 @@ export class SandboxPool {
 
     let cleaned = false;
     const onExit = (code: number | null) => {
+      thread.off('error', onError);
       removeAndCleanup(new GlideMQError(`Sandbox worker exited with code ${code}`));
     };
     const onError = (err: Error) => {
+      thread.off('exit', onExit);
       removeAndCleanup(err);
     };
 

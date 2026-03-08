@@ -35,11 +35,16 @@ export function createSandboxedProcessor<D = any, R = any>(
   concurrency: number,
 ): { processor: Processor<D, R>; close: (force?: boolean) => Promise<void> } {
   const absolutePath = path.resolve(processorPath);
-
+  let realPath: string;
   try {
-    fs.accessSync(absolutePath, fs.constants.R_OK);
+    realPath = fs.realpathSync(absolutePath);
   } catch {
-    throw new GlideMQError(`Processor file not found or not readable: ${absolutePath}`);
+    throw new GlideMQError(`Processor file not found or inaccessible: ${processorPath}`);
+  }
+  try {
+    fs.accessSync(realPath, fs.constants.R_OK);
+  } catch {
+    throw new GlideMQError(`Processor file not readable: ${processorPath}`);
   }
 
   const useWorkerThreads = sandboxOpts?.useWorkerThreads !== false;
@@ -49,7 +54,7 @@ export function createSandboxedProcessor<D = any, R = any>(
   }
   const runnerPath = resolveRunnerPath();
 
-  const pool = new SandboxPool(absolutePath, useWorkerThreads, maxWorkers, runnerPath);
+  const pool = new SandboxPool(realPath, useWorkerThreads, maxWorkers, runnerPath);
 
   const processor: Processor<D, R> = async (job) => {
     return pool.run<D, R>(job);

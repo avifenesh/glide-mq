@@ -431,7 +431,6 @@ export class Queue<D = any, R = any> extends EventEmitter {
       throw new GlideMQError('Queue is closing');
     }
     this.waitClients.add(blockingClient);
-    let handedOff = false;
     try {
       const job = await this.add(name, data, jobOpts);
       if (!job) {
@@ -442,12 +441,28 @@ export class Queue<D = any, R = any> extends EventEmitter {
       if (this.closing) {
         throw new GlideMQError('Queue is closing');
       }
-      handedOff = true;
-      return this.waitForJobResult(blockingClient, job.id, eventCursor, waitTimeout);
+      // Ownership of blockingClient transfers to waitForJobResult, which
+      // handles cleanup (including reconnection) in its own finally block.
+      // The await ensures that if waitForJobResult rejects, the error
+      // propagates through this try/catch for proper handling.
+      return await this.waitForJobResult(blockingClient, job.id, eventCursor, waitTimeout);
+    } catch (err) {
+      // Re-throw after ensuring cleanup runs in finally
+      throw err;
     } finally {
-      if (!handedOff) {
+      // waitForJobResult may have reconnected (replacing the original client),
+      // so it manages its own client lifecycle. We only clean up here if the
+      // client is still registered (i.e., waitForJobResult never ran or the
+      // original client was never replaced).
+      if (this.waitClients.has(blockingClient)) {
         this.waitClients.delete(blockingClient);
-        blockingClient.close();
+        try {
+          blockingClient.close();
+        } catch (closeErr) {
+          if (this.listenerCount('error') > 0) {
+            this.emit('error', closeErr as Error);
+          }
+        }
       }
     }
   }
@@ -1325,6 +1340,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     switch (type) {
       case 'waiting': {
+        // Note: stream pagination reads from start to end+1, then slices.
+        // For large offsets this is O(end) rather than O(end-start).
+        // Consider cursor-based pagination for better performance at scale.
         const entries = await client.xrange(
           this.keys.stream,
           InfBoundary.NegativeInfinity,

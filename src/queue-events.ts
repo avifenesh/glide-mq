@@ -54,7 +54,11 @@ export class QueueEvents extends EventEmitter {
     this.pollOnce()
       .then(() => {
         this.reconnectBackoff = 0;
-        this.pollLoop();
+        try {
+          this.pollLoop();
+        } catch (err) {
+          if (!this.closing) this.emit('error', err);
+        }
       })
       .catch((err) => {
         if (this.running && !this.closing) {

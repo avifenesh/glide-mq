@@ -157,6 +157,17 @@ export interface TestQueueOptions {
   serializer?: Serializer;
 }
 
+/**
+ * In-memory test double for Queue. Suitable for unit tests without Valkey.
+ *
+ * Known limitations vs real Queue:
+ * - No ordering key / concurrency group support
+ * - No global concurrency or rate limiting
+ * - No DAG / parent-child flows
+ * - No batch processing
+ * - repeatAfterComplete behaves like 'every'
+ * - No sandbox processor support
+ */
 export class TestQueue<D = any, R = any> extends EventEmitter {
   readonly name: string;
   /** @internal */ readonly jobs: Map<string, TestJobRecord<D, R>> = new Map();

@@ -28,6 +28,7 @@ function fingerprint(name: string, opts: ProducerOptions): string {
 
 export class ServerlessPool {
   private cache = new Map<string, Producer>();
+  private closing = false;
 
   /**
    * Get or create a Producer for the given queue name and options.
@@ -37,7 +38,11 @@ export class ServerlessPool {
    * collisions where different instances could map to the same cache key.
    */
   getProducer<D = any>(name: string, opts: ProducerOptions): Producer<D> {
-    // Bypass caching for injected clients or custom serializers to prevent cache collisions
+    if (this.closing) {
+      throw new Error('ServerlessPool is closing');
+    }
+    // Custom serializers or injected clients bypass the cache intentionally -
+    // serializer instances may hold state and must not be shared across callers.
     if (opts.client || opts.serializer) {
       return new Producer(name, opts);
     }
@@ -56,6 +61,7 @@ export class ServerlessPool {
    * Call this during Lambda SIGTERM or explicit cleanup.
    */
   async closeAll(): Promise<void> {
+    this.closing = true;
     const producers = [...this.cache.values()];
     this.cache.clear();
     await Promise.allSettled(producers.map((p) => p.close()));

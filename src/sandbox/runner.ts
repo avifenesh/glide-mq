@@ -120,7 +120,10 @@ function getSanitizedStack(err: any): string | undefined {
 }
 
 function handleMessage(msg: MainToChild): void {
-  if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') return;
+  if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') {
+    console.warn('[glidemq:sandbox] received invalid IPC message:', typeof msg);
+    return;
+  }
 
   switch (msg.type) {
     case 'process':

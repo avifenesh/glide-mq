@@ -29,7 +29,9 @@ function buildCredentials(creds?: ConnectionOptions['credentials']): ServerCrede
 }
 
 /**
- * Create a GlideClient (standalone) or GlideClusterClient (cluster) based on options.
+ * Create a new GLIDE client (standalone or cluster).
+ * Each call creates a fresh connection. For connection reuse,
+ * create a client once and pass it via the `client` option to Queue/Worker.
  */
 export async function createClient(opts: ConnectionOptions): Promise<Client> {
   const config: BaseClientConfiguration = {
