@@ -599,7 +599,11 @@ describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
   });
 
   afterAll(async () => {
-    cleanupClient.close();
+    try {
+      cleanupClient.close();
+    } catch {
+      /* ignore ClosingError if client was already closed */
+    }
   });
 
   it('list-active counter is decremented when a LIFO job fails permanently', async () => {
