@@ -52,7 +52,7 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
 
     await Promise.all([worker1.waitUntilReady(), worker2.waitUntilReady(), worker3.waitUntilReady()]);
 
-    await broadcast.publish('message', { event: 'test', seq: 1 });
+    await broadcast.publish({ event: 'test', seq: 1 });
 
     await waitFor(() => {
       return received.sub1.length === 1 && received.sub2.length === 1 && received.sub3.length === 1;
@@ -73,8 +73,8 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
     const broadcast = new Broadcast(Q + '-late', { connection: CONNECTION });
 
     // Publish 2 messages before subscriber joins
-    await broadcast.publish('message', { seq: 1 });
-    await broadcast.publish('message', { seq: 2 });
+    await broadcast.publish({ seq: 1 });
+    await broadcast.publish({ seq: 2 });
 
     await new Promise((r) => setTimeout(r, 200));
 
@@ -90,7 +90,7 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
     await lateWorker.waitUntilReady();
 
     // Publish a new message
-    await broadcast.publish('message', { seq: 3 });
+    await broadcast.publish({ seq: 3 });
 
     await waitFor(() => received.length === 1, 5000);
 
@@ -107,8 +107,8 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
     const broadcast = new Broadcast(Q + '-backfill', { connection: CONNECTION });
 
     // Publish 2 messages
-    await broadcast.publish('message', { seq: 1 });
-    await broadcast.publish('message', { seq: 2 });
+    await broadcast.publish({ seq: 1 });
+    await broadcast.publish({ seq: 2 });
 
     await new Promise((r) => setTimeout(r, 200));
 
@@ -167,7 +167,7 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
       failingWorker.waitUntilReady(),
     ]);
 
-    await broadcast.publish('message', { event: 'test-failure' });
+    await broadcast.publish({ event: 'test-failure' });
 
     await waitFor(() => {
       return received.success1.length === 1 && received.success2.length === 1 && received.failed.length === 1;
@@ -190,7 +190,7 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
 
     // Publish 10 messages
     for (let i = 1; i <= 10; i++) {
-      await broadcast.publish('message', { seq: i });
+      await broadcast.publish({ seq: i });
     }
 
     // Exact XTRIM is used; stream should be trimmed to maxMessages (5)
@@ -244,7 +244,7 @@ describeEachMode('Broadcast with scheduler integration', (CONNECTION) => {
     await Promise.all([worker1.waitUntilReady(), worker2.waitUntilReady()]);
 
     // Schedule a message with 2 second delay
-    await broadcast.publish('message', { event: 'scheduled' }, { delay: 2000 });
+    await broadcast.publish({ event: 'scheduled' }, { delay: 2000 });
 
     // Should not receive immediately
     await new Promise((r) => setTimeout(r, 500));
@@ -301,7 +301,6 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
 
     // Publish with dedup ID - dedup is configured via JobOptions
     const id1 = await broadcast.publish(
-      'message',
       { event: 'deduped' },
       { deduplication: { id: 'unique-1', mode: 'simple', ttl: 5000 } },
     );
@@ -309,7 +308,6 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
 
     // Duplicate - should be skipped
     const id2 = await broadcast.publish(
-      'message',
       { event: 'deduped' },
       { deduplication: { id: 'unique-1', mode: 'simple', ttl: 5000 } },
     );
@@ -344,13 +342,12 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
     // Wait for worker to be fully ready (poll loop running)
     await worker.waitUntilReady();
 
-    // Pause the worker - wait for it to finish any in-flight poll cycle
+    // Pause the worker - wait for blocking XREADGROUP to unblock (blockTimeout=500ms)
     await worker.pause(true);
-    // Allow the blocking XREADGROUP to unblock naturally (blockTimeout=500ms)
     await new Promise<void>((resolve) => setTimeout(resolve, 600));
 
     // Publish a message while paused
-    await broadcast.publish('message', { msg: 'while-paused' });
+    await broadcast.publish({ msg: 'while-paused' });
 
     // Wait to confirm message is NOT processed while paused
     await new Promise<void>((resolve) => setTimeout(resolve, 500));
@@ -378,7 +375,7 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
 
     // Pause and publish
     await worker.pause(true);
-    await broadcast.publish('message', { msg: 'before-resume' });
+    await broadcast.publish({ msg: 'before-resume' });
 
     // Resume - worker should pick up pending messages
     await worker.resume();
