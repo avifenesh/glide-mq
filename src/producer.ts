@@ -85,7 +85,9 @@ export class Producer<D = any> {
     this.opts = opts;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
     this.keys = buildKeys(name, opts.prefix);
-    if (opts.connection) {
+    // Only cache cluster mode from connection config if no injected client;
+    // when a client is injected, isClusterClient() is called lazily on first use.
+    if (opts.connection && !opts.client) {
       this._clusterMode = opts.connection.clusterMode ?? false;
     }
   }
