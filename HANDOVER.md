@@ -4,57 +4,83 @@ Current state of the glide-mq repository as of 2026-03-08.
 
 ## Branch
 
-`fix/deep-audit-fixes` - deep audit PR #124 open. Includes all Round 1/2 fixes + H1 BaseWorker.
+`perf/hot-path-optimizations` - performance optimization pass on worker hot paths.
 
-### Active PRs
+### Commits on this branch
 
-- PR #124: Deep audit fixes (62 findings, 7 commits + BaseWorker)
-- PR #120: Lua HMGET optimization (M9)
-- PR #121: Job state query tests (H10)
-- PR #122: Proxy endpoint tests + routes (M27)
-- PR #123: Worker state machine (H6+M10) - superseded by BaseWorker in #124
+1. `67d01c8` - perf: skip HMGET in buildParentInfo for non-parent jobs
+   - Eliminated wasted RTT (HMGET for parent lookup) on every non-parent job
+   - ~100% c=1 throughput improvement (~1300 -> ~2500 j/s)
+
+2. `67e338a` - chore: increase benchmark durations for more stable measurements
+   - ADD_DURATION 5s->15s, PROCESS_SIZES [500,2000]->[5000,20000]
+   - N_SERIAL 200->500, N_PIPELINED 1000->3000
+
+3. `995fdde` - perf: popLists Lua FCALL + timestamp caching in processJob
+   - New glidemq_popLists server function: checks priority + LIFO in 1 FCALL (was 2 RPOPs)
+   - Date.now() cached once after processor, shared across completeAndFetchNext/finishedOn/scheduler
+   - LIBRARY_VERSION bumped to 62
+   - ~6-9% c=10 throughput improvement
+
+4. `0ad67f8` - perf: skip redundant redis.call() in completeAndFetchNext for common jobs
+   - Fix B: pass processedOn hint from TS, skip HGET processedOn in Lua
+   - Fix C: use '__' sentinel for ordering/group keys, skip markOrderingDone/releaseGroupSlotAndPromote when confirmed absent
+   - Fix D: pass hasParents flag, skip SMEMBERS parents:{jobId} when no parent relationships exist
+   - Saves 2-4 internal redis.call() per standard job completion
+   - LIBRARY_VERSION bumped to 63
+   - ~2-4% improvement across all scenarios
+
+5. `7d12ca4` - fix: update test for new completeAndFetchNext arg positions
+
+### Performance results (with longer benchmarks)
+
+| Scenario | Before optimizations | After all fixes | Improvement |
+|---|---|---|---|
+| c=1 20k jobs | ~1,300 j/s (est.) | ~2,700 j/s | ~108% |
+| c=10 20k jobs | ~12,900 j/s | ~14,000-15,000 j/s | ~9-16% |
+
+### What was tried and reverted (no measurable improvement or regression)
+
+- Fix #3: completeAndFetchNext parsing - removed `.map()` intermediate array, parsed inline. No improvement.
+- Fix #4 alone: Date.now() caching alone. No improvement. Combined with Fix #2 and kept.
+- Fix A: HGETALL-first restructure for moveToActive - replaced EXISTS + 3 HGETs + final HGETALL with single early HGETALL + Lua scan. REGRESSED c=10 by -12%. Root cause: Lua string comparisons (~120 per job) are slower than 4 separate C-level redis.call() hash lookups.
+- Fix E: HMGET consolidation in fetch-next phase - replaced EXISTS + HGET revoked + HGET expireAt + HGET groupKey with single HMGET. REGRESSED c=1 by -8%. Same root cause: HMGET array result conversion overhead in Lua-C bridge outweighs fewer dispatches.
+- Fix F: tostring(timestamp) caching + prefix string optimization. Within noise, reverted.
+
+### Architecture insights
+
+- Steady-state processing is 1 RTT per job (completeAndFetchNext returns next job's hash inline).
+- The main win was eliminating wasted RTTs (HMGET for non-parent buildParentInfo, extra RPOPs via popLists FCALL).
+- In Valkey Lua, individual redis.call() with single returns beats batch calls (HMGET/HGETALL) that return arrays. The Lua-C bridge overhead for array conversion outweighs fewer dispatches.
+- The remaining ~14 internal redis.call()s per completeAndFetchNext are all mandatory (state mutations, validation, events/metrics). Further Lua optimization requires semantics changes (opt-out events/metrics).
+- JS-level micro-optimizations have no measurable effect since network RTT and Lua execution dominate.
+
+## Active PRs
+
+- PR #124: Deep audit fixes (merged)
 
 ## Recent merges
 
-- Audit sweep 2026-03-07 - 36 fixes across 10 commits (9296ee1 merge)
-  - Security: bulk jobs DoS cap (1000), queue name hash-tag injection guard, /health no longer leaks queue names, numeric opts validated in proxy
-  - Performance: TestWorker O(N^2) → O(1) waiting queue, cron loops use Set.has(), metricsData capped at 1440 buckets
-  - Correctness: scheduler lock loss aborts batch, moveToFailed throws outside Worker, addDAG enforces lifo+ordering.key, DAG registerParent partial-failure error, sandboxClose try-catch, priority > 2048 overflow guard
-  - Code quality: constants deduplicated into utils.ts, type guards replacing unsafe casts, resource leak in addAndWait fixed
-  - Tests: 177 non-integration tests passing; new graceful-shutdown, dag-utils cycles, job error, proxy error, worker event tests
-  - Remaining deferred: BroadcastWorker duplication (large refactor), 5 high-severity test gaps (obliterate, DAG failure propagation, state machine transitions - all need Valkey), 30 low-priority test gaps
-
-- PR #118 (follow-up to #87): LIFO mode gaps - merged 2026-03-07 at 1ac1bf8
-  - globalConcurrency enforcement via atomic glidemq_rpopAndReserve (XPENDING+listActive check → RPOP → INCR)
-  - Scheduler templates forward lifo flag (template.opts?.lifo)
-  - FlowProducer child jobs with lifo:true routed to LIFO list (extractLifoFromOpts)
-  - Batch rpopCount for high concurrency (concurrency > 1, gc disabled)
-  - list-active counter balanced: complete/fail/moveActiveToDelayed/moveToWaitingChildren/removeJob all DECR
-  - LIBRARY_VERSION 57 (56: list-active counter; 57: addFlow LIFO children)
-  - 28 LIFO integration tests (standalone + cluster)
-
-- PR #117: Broadcast and BroadcastWorker for pub/sub fan-out - merged 2026-03-07
-  - LIBRARY_VERSION 55 in that PR
-
-- PR #115 (issue #87): LIFO job processing mode - merged 2026-03-07
+- PR #124: Deep audit fixes (62 findings, 7 commits + BaseWorker)
 
 ## Known state
 
 - Valkey must be on `:6379` (standalone) and `:7000-7005` (cluster) for full integration tests.
 - `npm run build` compiles TypeScript to `dist/`.
-- `npm test` runs full suite (1800+ tests expected).
+- `npm test` runs full suite (1915 tests, all passing).
 - `claude-review` CI check can fail with SDK infrastructure errors - not code-related.
 - Fuzzer pre-push hook: ~4 min per push.
+- LIBRARY_VERSION is now '63' - servers with older cached versions will auto-upgrade on connection.
 
 ## Remaining known limitations
 
-- `list-active` counter not self-healing on hard worker crash (documented in docs/MIGRATION.md)
-- Duplicated list-poll logic in worker.ts pollOnce (pre/post XREADGROUP blocks) - refactoring deferred
-- globalConcurrency with batch rpopCount (gc enabled): still pops 1 job at a time (no batch FCALL yet)
-- glidemq_deferActive: no DECR for list jobs (but only called for stream jobs in practice)
+- globalConcurrency with batch rpopCount (gc enabled): still pops 1 job at a time
+- glidemq_deferActive: no DECR for list jobs (stream jobs only in practice)
 
 ## What comes next
 
-- Continue with remaining roadmap issues (#84 etc.)
+- Merge perf branch or open PR
+- Continue with remaining roadmap issues
 - Potential: integrate list-active counter with stall detection for crash self-healing
 - Potential: add batch count param to glidemq_rpopAndReserve for gc+high-concurrency throughput
+- Potential: opt-in `events: false` / `metrics: false` queue config to skip emitEvent/recordMetrics in Lua (~2 fewer redis.calls per job)
