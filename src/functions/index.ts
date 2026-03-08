@@ -16,8 +16,7 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 55: Guard XDEL in glidemq_moveActiveToDelayed with broadcastMode flag.
 // Version 56: glidemq_checkConcurrency includes list-active counter; complete/fail DECR on list jobs; rpopAndReserve.
 // Version 57: glidemq_addFlow routes child jobs with lifo:true to LIFO list.
-// Version 58: XADD to job stream includes 'name' field for subject-based filtering in BroadcastWorker.
-export const LIBRARY_VERSION = '58';
+export const LIBRARY_VERSION = '57';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -135,10 +134,6 @@ local function recordMetrics(metricsKey, timestamp, duration)
   end
 end
 
-local function xaddJob(streamKey, jobId, jobName)
-  redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name', jobName or '')
-end
-
 local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   local gk = hintGroupKey
   if not gk or gk == '' then
@@ -243,8 +238,8 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   for p = 1, available do
     local nextJobId = redis.call('LPOP', waitListKey)
     if not nextJobId then break end
+    redis.call('XADD', streamKey, '*', 'jobId', nextJobId)
     local nextJobKey = prefix .. 'job:' .. nextJobId
-    xaddJob(streamKey, nextJobId, redis.call('HGET', nextJobKey, 'name'))
     redis.call('HSET', nextJobKey, 'state', 'waiting')
   end
 end
@@ -570,7 +565,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
     local lifoKey = prefix .. 'lifo'
     redis.call('RPUSH', lifoKey, jobIdStr)
   else
-    xaddJob(streamKey, jobIdStr, jobName)
+    redis.call('XADD', streamKey, '*', 'jobId', jobIdStr)
   end
   emitEvent(eventsKey, 'added', jobIdStr, {'name', jobName})
   return jobIdStr
@@ -619,7 +614,7 @@ redis.register_function('glidemq_promote', function(keys, args)
           local priorityKey = prefix .. 'priority'
           redis.call('LPUSH', priorityKey, jobId)
         else
-          xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
+          redis.call('XADD', streamKey, '*', 'jobId', jobId)
         end
         redis.call('HSET', jobKey, 'state', 'waiting')
         emitEvent(eventsKey, 'promoted', jobId, nil)
@@ -762,7 +757,7 @@ redis.register_function('glidemq_complete', function(keys, args)
         local parentState = redis.call('HGET', parentJobKey, 'state')
         if parentState == 'waiting-children' then
           redis.call('HSET', parentJobKey, 'state', 'waiting')
-          xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
+          redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
           emitEvent(parentEventsKey, 'active', parentId, nil)
         end
       end
@@ -806,7 +801,7 @@ redis.register_function('glidemq_complete', function(keys, args)
               local pState = redis.call('HGET', pJobKey, 'state')
               if pState == 'waiting-children' then
                 redis.call('HSET', pJobKey, 'state', 'waiting')
-                xaddJob(pStreamKey, pId, redis.call('HGET', pJobKey, 'name'))
+                redis.call('XADD', pStreamKey, '*', 'jobId', pId)
                 emitEvent(pEventsKey, 'active', pId, nil)
               end
             end
@@ -899,7 +894,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         local parentState = redis.call('HGET', parentJobKey, 'state')
         if parentState == 'waiting-children' then
           redis.call('HSET', parentJobKey, 'state', 'waiting')
-          xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
+          redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
           emitEvent(parentEventsKey, 'active', parentId, nil)
         end
       end
@@ -943,7 +938,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
               local pState = redis.call('HGET', pJobKey, 'state')
               if pState == 'waiting-children' then
                 redis.call('HSET', pJobKey, 'state', 'waiting')
-                xaddJob(pStreamKey, pId, redis.call('HGET', pJobKey, 'name'))
+                redis.call('XADD', pStreamKey, '*', 'jobId', pId)
                 emitEvent(pEventsKey, 'active', pId, nil)
               end
             end
@@ -1547,7 +1542,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
     local lifoKey = prefix .. 'lifo'
     redis.call('RPUSH', lifoKey, jobIdStr)
   else
-    xaddJob(streamKey, jobIdStr, jobName)
+    redis.call('XADD', streamKey, '*', 'jobId', jobIdStr)
   end
   redis.call('HSET', dedupKey, dedupId, jobIdStr .. ':' .. tostring(timestamp))
   emitEvent(eventsKey, 'added', jobIdStr, {'name', jobName})
@@ -1653,7 +1648,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
         if not nextJobId then break end
         local nextJobKey = prefix .. 'job:' .. nextJobId
         if not checkExpired(nextJobKey, nextJobId, prefix, now) then
-          xaddJob(streamKey, nextJobId, redis.call('HGET', nextJobKey, 'name'))
+          redis.call('XADD', streamKey, '*', 'jobId', nextJobId)
           redis.call('HSET', nextJobKey, 'state', 'waiting')
           promoted = promoted + 1
         end
@@ -1898,7 +1893,7 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   if exists == 0 then
     return 0
   end
-  xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
+  redis.call('XADD', streamKey, '*', 'jobId', jobId)
   redis.call('HSET', jobKey, 'state', 'waiting')
   return 1
 end)
@@ -2147,7 +2142,7 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     elseif childLifo > 0 then
       redis.call('RPUSH', childPrefix .. 'lifo', childJobIdStr)
     else
-      xaddJob(childStreamKey, childJobIdStr, childName)
+      redis.call('XADD', childStreamKey, '*', 'jobId', childJobIdStr)
     end
     emitEvent(childEventsKey, 'added', childJobIdStr, {'name', childName})
     childIds[#childIds + 1] = childJobIdStr
@@ -2186,7 +2181,7 @@ redis.register_function('glidemq_completeChild', function(keys, args)
     local parentState = redis.call('HGET', parentJobKey, 'state')
     if parentState == 'waiting-children' then
       redis.call('HSET', parentJobKey, 'state', 'waiting')
-      xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
+      redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
       emitEvent(parentEventsKey, 'active', parentId, nil)
     end
   end
@@ -2226,7 +2221,7 @@ redis.register_function('glidemq_registerParent', function(keys, args)
         local parentState = redis.call('HGET', parentJobKey, 'state')
         if parentState == 'waiting-children' then
           redis.call('HSET', parentJobKey, 'state', 'waiting')
-          xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
+          redis.call('XADD', parentStreamKey, '*', 'jobId', parentId)
           emitEvent(parentEventsKey, 'active', parentId, nil)
         end
       end
@@ -2418,7 +2413,7 @@ redis.register_function('glidemq_changePriority', function(keys, args)
   elseif state == 'prioritized' then
     if newPriority == 0 then
       redis.call('ZREM', scheduledKey, jobId)
-      xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
+      redis.call('XADD', streamKey, '*', 'jobId', jobId)
       redis.call('HSET', jobKey, 'state', 'waiting', 'priority', '0')
     else
       redis.call('ZADD', scheduledKey, string.format('%.0f', newPriority * PRIORITY_SHIFT), jobId)
@@ -2474,7 +2469,7 @@ redis.register_function('glidemq_changeDelay', function(keys, args)
         redis.call('HSET', jobKey, 'state', 'prioritized', 'delay', '0')
       else
         redis.call('ZREM', scheduledKey, jobId)
-        xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
+        redis.call('XADD', streamKey, '*', 'jobId', jobId)
         redis.call('HSET', jobKey, 'state', 'waiting', 'delay', '0')
       end
     else
@@ -2568,7 +2563,7 @@ redis.register_function('glidemq_promoteJob', function(keys, args)
   elseif jobPriority > 0 then
     redis.call('LPUSH', prefix .. 'priority', jobId)
   else
-    xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
+    redis.call('XADD', streamKey, '*', 'jobId', jobId)
   end
   redis.call('HSET', jobKey, 'state', 'waiting', 'delay', '0')
   emitEvent(eventsKey, 'promoted', jobId, nil)
@@ -2651,7 +2646,7 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
     local depsCompleted = tonumber(redis.call('HGET', jobKey, 'depsCompleted')) or 0
     if depsCompleted >= totalDeps then
       redis.call('HSET', jobKey, 'state', 'waiting')
-      xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
+      redis.call('XADD', streamKey, '*', 'jobId', jobId)
       emitEvent(eventsKey, 'active', jobId, nil)
       if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
       return 'completed'

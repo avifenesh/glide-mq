@@ -134,24 +134,6 @@ export interface BroadcastWorkerOptions extends WorkerOptions {
    * - '<stream-id>': Start from specific ID
    */
   startFrom?: string;
-  /**
-   * Subject patterns to filter messages. Only messages whose subject matches
-   * at least one pattern are delivered to the processor. Non-matching messages
-   * are auto-acknowledged and skipped (zero wasted HGETALL calls).
-   *
-   * Pattern syntax (dot-separated segments):
-   * - `*` matches exactly one segment
-   * - `>` matches one or more trailing segments (must be last token)
-   * - Literal segments match exactly
-   *
-   * Examples:
-   * - `'projects.>'` matches `'projects.1'`, `'projects.1.issues.2'`
-   * - `'projects.*'` matches `'projects.1'` but not `'projects.1.issues.2'`
-   * - `'projects.*.issues.>'` matches `'projects.1.issues.2'`
-   *
-   * When omitted, all messages are delivered (no filtering).
-   */
-  subjects?: string[];
 }
 
 export interface JobOptions {

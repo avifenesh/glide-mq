@@ -8,7 +8,6 @@ import { Job } from './job';
 import {
   buildKeys,
   calculateBackoff,
-  compileSubjectMatcher,
   computeFollowingSchedulerNextRun,
   keyPrefix,
   nextReconnectDelay,
@@ -94,7 +93,6 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
   private readonly batchSize: number;
   private readonly batchTimeout: number;
   private readonly batchProcessor: BatchProcessor<D, R> | null;
-  private readonly subjectMatcher: ((subject: string) => boolean) | null;
 
   constructor(name: string, processor: Processor<D, R> | BatchProcessor<D, R> | string, opts: BroadcastWorkerOptions) {
     super();
@@ -167,7 +165,6 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     this.stalledInterval = opts.stalledInterval ?? 30000;
     this.maxStalledCount = opts.maxStalledCount ?? 1;
     this.lockDuration = opts.lockDuration ?? 30000;
-    this.subjectMatcher = compileSubjectMatcher(opts.subjects);
 
     // Auto-init: start the worker immediately
     this.initPromise = this.init();
@@ -436,9 +433,6 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       return;
     }
 
-    // If paused while XREADGROUP was blocking, skip processing these entries
-    if (this.paused || this.closing) return;
-
     // Batch mode: collect entries and process as a batch
     if (this.batchMode) {
       await this.collectAndProcessBatch(result);
@@ -454,23 +448,18 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
         const fieldPairs = entries[entryId];
         if (!fieldPairs) continue; // deleted entry
 
-        // Parse the stream entry fields to extract jobId and name
+        // Parse the stream entry fields to extract jobId
         let jobId: string | null = null;
-        let jobName: string | null = null;
         for (let i = 0; i < fieldPairs.length; i++) {
-          const field = String(fieldPairs[i][0]);
-          const value = String(fieldPairs[i][1]);
-          if (field === 'jobId') jobId = value;
-          else if (field === 'name') jobName = value;
+          const field = fieldPairs[i][0];
+          const value = fieldPairs[i][1];
+          if (String(field) === 'jobId') {
+            jobId = String(value);
+            break;
+          }
         }
 
         if (!jobId) continue;
-
-        // Subject filter: auto-ACK and skip non-matching messages
-        if (this.subjectMatcher && jobName !== null && !this.subjectMatcher(jobName)) {
-          await this.commandClient!.xack(this.queueKeys.stream, this.subscription, [String(entryId)]);
-          continue;
-        }
 
         if (this.concurrency === 1) {
           // c=1 fast path: process inline (blocks poll loop).
@@ -537,20 +526,16 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
         if (!fieldPairs) continue;
 
         let jobId: string | null = null;
-        let jobName: string | null = null;
         for (let i = 0; i < fieldPairs.length; i++) {
-          const field = String(fieldPairs[i][0]);
-          const value = String(fieldPairs[i][1]);
-          if (field === 'jobId') jobId = value;
-          else if (field === 'name') jobName = value;
+          if (String(fieldPairs[i][0]) === 'jobId') {
+            jobId = String(fieldPairs[i][1]);
+            break;
+          }
         }
-        if (!jobId) continue;
-        if (this.subjectMatcher && jobName !== null && !this.subjectMatcher(jobName)) {
-          await this.commandClient!.xack(this.queueKeys.stream, this.subscription, [String(entryId)]);
-          continue;
+        if (jobId) {
+          collected.push({ jobId, entryId: String(entryId) });
+          if (collected.length >= this.batchSize) break;
         }
-        collected.push({ jobId, entryId: String(entryId) });
-        if (collected.length >= this.batchSize) break;
       }
       if (collected.length >= this.batchSize) break;
     }
@@ -576,19 +561,13 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
             const fieldPairs = entries[entryId];
             if (!fieldPairs) continue;
             let jobId: string | null = null;
-            let jobName: string | null = null;
             for (let i = 0; i < fieldPairs.length; i++) {
-              const field = String(fieldPairs[i][0]);
-              const value = String(fieldPairs[i][1]);
-              if (field === 'jobId') jobId = value;
-              else if (field === 'name') jobName = value;
+              if (String(fieldPairs[i][0]) === 'jobId') {
+                jobId = String(fieldPairs[i][1]);
+                break;
+              }
             }
-            if (!jobId) continue;
-            if (this.subjectMatcher && jobName !== null && !this.subjectMatcher(jobName)) {
-              await this.commandClient!.xack(this.queueKeys.stream, this.subscription, [String(entryId)]);
-              continue;
-            }
-            collected.push({ jobId, entryId: String(entryId) });
+            if (jobId) collected.push({ jobId, entryId: String(entryId) });
           }
         }
       }
