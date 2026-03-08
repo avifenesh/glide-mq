@@ -412,7 +412,7 @@ describeEachMode('Worker batch validation', (CONNECTION) => {
   });
 
   it('partial batch failure: BatchError.results has correct per-index success/error', async () => {
-    const qName = Q + '-partial';
+    const qName = 'batch-val-partial-' + Date.now();
     const queue = new Queue(qName, { connection: CONNECTION });
 
     // Add 3 jobs
@@ -443,9 +443,6 @@ describeEachMode('Worker batch validation', (CONNECTION) => {
           clearTimeout(timeout);
           worker.close(true).then(async () => {
             await queue.close();
-            await cleanupClient.del(
-              [...Object.values(require('../dist/utils').buildKeys(qName))].filter((k: any) => typeof k === 'string'),
-            );
             try {
               expect(successes).toHaveLength(2);
               expect(failures).toHaveLength(1);
@@ -484,7 +481,7 @@ describeEachMode('Worker batch validation', (CONNECTION) => {
   }, 20000);
 
   it('batch processor returning wrong result count fails all jobs', async () => {
-    const qName = Q + '-wrongcount';
+    const qName = 'batch-val-wrongcount-' + Date.now();
     const queue = new Queue(qName, { connection: CONNECTION });
 
     await queue.add('job', { idx: 0 }, {});

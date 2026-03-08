@@ -599,7 +599,11 @@ describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
   });
 
   afterAll(async () => {
-    cleanupClient.close();
+    try {
+      cleanupClient.close();
+    } catch {
+      /* ignore ClosingError if client was already closed */
+    }
   });
 
   it('list-active counter is decremented when a LIFO job fails permanently', async () => {
@@ -671,7 +675,7 @@ describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
   }, 15000);
 
   it('LIFO processes jobs in last-in-first-out order within a batch', async () => {
-    const qName = Q + '-order';
+    const qName = 'lifo-batch-order-' + Date.now();
     const queue = new Queue(qName, { connection: CONNECTION });
 
     // Add 5 LIFO jobs sequentially so they have a defined insertion order
@@ -708,8 +712,6 @@ describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
             resolve();
           } catch (e) {
             reject(e);
-          } finally {
-            await cleanupClient.del([...Object.keys(require('../dist/utils').buildKeys(qName))]);
           }
         }
       });

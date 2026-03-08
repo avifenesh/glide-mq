@@ -38,6 +38,10 @@ npm install glide-mq
 - **Per-key ordering, global concurrency, and rate limiting** — deterministic ordering with queue-wide and token-bucket controls ([Advanced](docs/ADVANCED.md#ordering-and-group-concurrency), [Advanced](docs/ADVANCED.md#global-concurrency), [Advanced](docs/ADVANCED.md#global-rate-limiting))
 - **Deduplication** — simple, throttle, and debounce modes with TTL ([Advanced](docs/ADVANCED.md#deduplication), [Demo](demo/README.md#demo-scenarios))
 
+### Serverless & edge
+- **Lightweight Producer** - enqueue jobs without EventEmitter or Job instances, returns plain string IDs ([Serverless](docs/SERVERLESS.md))
+- **ServerlessPool** - connection reuse across warm Lambda/Edge invocations ([Serverless](docs/SERVERLESS.md#aws-lambda))
+
 ### Observability, ops, and testing
 - **QueueEvents, metrics, logs, and dashboard** — real-time events + OpenTelemetry + [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) ([Observability](docs/OBSERVABILITY.md), [Dashboard demo API](demo/dashboard-server.ts))
 - **Compression, graceful shutdown, and shared connections** — lower payload size and easier process lifecycle management ([Advanced](docs/ADVANCED.md#transparent-compression), [Usage](docs/USAGE.md#graceful-shutdown), [Advanced](docs/ADVANCED.md#shared-client))
@@ -221,6 +225,7 @@ Call Valkey Server Functions directly from any language that has a Valkey/Redis 
 | [Advanced](docs/ADVANCED.md) | Schedulers, rate limiting, dedup, compression, retries & DLQ | [Comprehensive demo app](demo/index.ts) |
 | [Workflows](docs/WORKFLOWS.md) | FlowProducer, `chain`, `group`, `chord` pipelines | [Workflow scenarios](demo/README.md#demo-scenarios) |
 | [Observability](docs/OBSERVABILITY.md) | OpenTelemetry, job logs, `@glidemq/dashboard` | [Dashboard API server](demo/dashboard-server.ts) |
+| [Serverless](docs/SERVERLESS.md) | Producer, ServerlessPool, Lambda/Edge/Vercel examples | [Producer tests](tests/producer.test.ts) |
 | [Testing](docs/TESTING.md) | In-memory `TestQueue` & `TestWorker` — no Valkey needed | [Testing mode test](tests/testing-mode.test.ts) |
 | [Wire Protocol](docs/WIRE_PROTOCOL.md) | Cross-language FCALL specs, key layout, Python & Go examples | [Proxy tests](tests/proxy.test.ts) |
 | [Architecture](docs/ARCHITECTURE.md) | Key design, Valkey functions, data layout | [Architecture validation tests](tests/review-coverage.test.ts) |
