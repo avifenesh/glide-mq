@@ -36,7 +36,6 @@ import {
   failJob,
   addJob,
   rateLimit as rateLimitFn,
-  checkConcurrency,
   moveToActive,
   moveActiveToDelayed,
   moveToWaitingChildren,
@@ -835,7 +834,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * Worker: reads from job.attemptsMade (shared hash).
    * BroadcastWorker: reads per-subscription counter from :sub: hash.
    */
-  protected async getAttemptsMade(job: Job<D, R>, jobId: string): Promise<number> {
+  protected async getAttemptsMade(job: Job<D, R>, _jobId: string): Promise<number> {
     return job.attemptsMade;
   }
 
