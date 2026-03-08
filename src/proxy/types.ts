@@ -3,6 +3,9 @@ import type { Client } from '../types';
 
 /**
  * Options for the HTTP proxy server.
+ *
+ * No built-in rate limiting is provided. When exposing the proxy to untrusted
+ * networks, deploy behind express-rate-limit or equivalent middleware.
  */
 export interface ProxyOptions {
   /** Connection options for creating internal Queue instances. Required unless `client` is provided. */
@@ -15,6 +18,8 @@ export interface ProxyOptions {
   queues?: string[];
   /** Enable transparent compression for job data. Default: 'none'. */
   compression?: 'none' | 'gzip';
+  /** Callback for queue-level errors. Defaults to console.error if not provided. */
+  onError?: (err: Error, queueName: string) => void;
 }
 
 /**
@@ -40,6 +45,7 @@ export interface AddJobRequest {
     | 'ttl'
     | 'ordering'
     | 'cost'
+    | 'lifo'
   >;
 }
 
@@ -109,6 +115,7 @@ export interface JobCountsResponse {
 export interface HealthResponse {
   status: 'ok';
   uptime: number;
+  queues: number;
 }
 
 /**
