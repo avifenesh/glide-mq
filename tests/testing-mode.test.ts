@@ -9,6 +9,7 @@ import path from 'path';
 import { TestQueue, TestWorker, TestJob } from '../src/testing';
 import { BatchError } from '../src/errors';
 import { MAX_JOB_DATA_SIZE } from '../src/utils';
+import { waitFor } from './helpers/fixture';
 
 const ECHO_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/echo.js');
 
@@ -125,7 +126,7 @@ describe('TestQueue', () => {
     expect(processed).toHaveLength(0);
 
     await queue.resume();
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => processed.length === 1, 5000);
     expect(processed).toHaveLength(1);
 
     await worker.close();
@@ -289,7 +290,7 @@ describe('TestWorker', () => {
     });
 
     await queue.add('task', { data: 1 });
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => completed.length === 1, 5000);
 
     expect(completed).toHaveLength(1);
     expect(completed[0].result).toBe('processed-1');
@@ -313,7 +314,7 @@ describe('TestWorker', () => {
     });
 
     await queue.add('fail-task', {});
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => failures.length === 1, 5000);
 
     expect(failures).toHaveLength(1);
     expect(failures[0].err.message).toBe('boom');
@@ -349,7 +350,7 @@ describe('TestWorker', () => {
     ]);
 
     // Wait for all to complete
-    await new Promise((r) => setTimeout(r, 200));
+    await waitFor(async () => (await queue.getJobCounts()).completed === 4, 5000);
 
     const counts = await queue.getJobCounts();
     expect(counts.completed).toBe(4);
@@ -367,7 +368,7 @@ describe('TestWorker', () => {
     });
 
     await queue.add('retry-task', {}, { attempts: 3 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => callCount === 3, 5000);
 
     expect(callCount).toBe(3);
 
@@ -389,7 +390,7 @@ describe('TestWorker', () => {
     });
 
     await queue.add('exhaust-task', {}, { attempts: 2 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => failures.length === 1, 5000);
 
     // attempts=2 means max 2 tries. 2 failures = exhausted.
     expect(failures).toHaveLength(1);
@@ -409,7 +410,7 @@ describe('TestWorker', () => {
       return 'done';
     });
 
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => completed.length === 1, 5000);
     expect(completed).toHaveLength(1);
     expect(completed[0]).toBe('1');
   });
@@ -441,7 +442,7 @@ describe('TestWorker', () => {
     });
 
     await queue.add('echo-task', { greeting: 'hello' });
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => completed.length === 1, 5000);
 
     expect(completed).toHaveLength(1);
     expect(completed[0].result).toEqual({ greeting: 'hello' });
@@ -539,7 +540,7 @@ describe('TestQueue.retryJobs', () => {
     await queue.add('t2', {});
     await queue.add('t3', {});
 
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => failures.length === 3, 5000);
     expect(failures).toHaveLength(3);
 
     const counts = await queue.getJobCounts();
@@ -575,7 +576,7 @@ describe('TestQueue.retryJobs', () => {
     await queue.add('t2', {});
     await queue.add('t3', {});
 
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(async () => (await queue.getJobCounts()).failed === 3, 5000);
     await worker.close();
     worker = undefined;
 
@@ -605,7 +606,7 @@ describe('TestQueue.retryJobs', () => {
     await queue.add('t1', {}, { priority: 0 });
     await queue.add('t2', {}, { priority: 5 });
 
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(async () => (await queue.getJobCounts()).failed === 2, 5000);
     await worker.close();
     worker = undefined;
 
@@ -629,7 +630,7 @@ describe('TestQueue.retryJobs', () => {
     await queue.add('t1', {});
     await queue.add('t2', {});
 
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(async () => (await queue.getJobCounts()).failed === 2, 5000);
     await worker.close();
     worker = undefined;
 
@@ -653,7 +654,7 @@ describe('TestQueue.retryJobs', () => {
     worker.on('completed', (job) => completed.push(job.id));
 
     await queue.add('t1', {});
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(async () => (await queue.getJobCounts()).failed === 1, 5000);
 
     // Job should have failed (no retries configured)
     expect((await queue.getJobCounts()).failed).toBe(1);
@@ -661,7 +662,7 @@ describe('TestQueue.retryJobs', () => {
     const retried = await queue.retryJobs();
     expect(retried).toBe(1);
 
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => completed.length === 1, 5000);
     expect(completed).toHaveLength(1);
     expect(completed[0]).toBe('1');
   });
@@ -724,14 +725,14 @@ describe('TestQueue.getWorkers', () => {
 
     await queue.add('slow', {});
     // Let the microtask schedule processing
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(async () => (await queue.getWorkers())[0]?.activeJobs === 1, 5000);
 
     const during = await queue.getWorkers();
     expect(during).toHaveLength(1);
     expect(during[0].activeJobs).toBe(1);
 
     finishJob();
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(async () => (await queue.getWorkers())[0]?.activeJobs === 0, 5000);
 
     const after = await queue.getWorkers();
     expect(after).toHaveLength(1);
@@ -995,7 +996,7 @@ describe('TestWorker - TTL', () => {
     worker.on('completed', (j: any) => completed.push(j));
 
     // Wait for processing
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await waitFor(() => failed.length === 1, 5000);
 
     expect(completed).toHaveLength(0);
     expect(failed).toHaveLength(1);
@@ -1016,7 +1017,7 @@ describe('TestWorker - TTL', () => {
     worker = new TestWorker(queue, async () => 'done');
     worker.on('completed', (j: any) => completed.push(j));
 
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await waitFor(() => completed.length === 1, 5000);
 
     expect(completed).toHaveLength(1);
     expect(completed[0].returnvalue).toBe('done');
@@ -1069,7 +1070,7 @@ describe('TestQueue scheduler runtime', () => {
     }
 
     expect(processed).toHaveLength(2);
-    await new Promise<void>((r) => setTimeout(r, 50));
+    await waitFor(async () => (await queue.getJobScheduler('runtime-repeat')) === null, 5000);
     expect(await queue.getJobScheduler('runtime-repeat')).toBeNull();
   });
 
@@ -1469,7 +1470,7 @@ describe('TestWorker batch mode', () => {
     await queue.add('j2', {});
     await queue.add('j3', {});
 
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(async () => (await queue.getJobCounts()).completed === 3, 5000);
 
     const metrics = await queue.getMetrics('completed');
     expect(metrics.count).toBe(3);
@@ -1495,7 +1496,7 @@ describe('TestWorker batch mode', () => {
 
     await queue.add('f1', {});
 
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(async () => (await queue.getJobCounts()).failed === 1, 5000);
 
     const metrics = await queue.getMetrics('failed');
     expect(metrics.count).toBe(1);
@@ -1524,7 +1525,7 @@ describe('TestWorker batch mode', () => {
     const worker = new TestWorker(queue, async () => 'ok');
 
     await queue.add('s1', {});
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(async () => (await queue.getJobCounts()).completed === 1, 5000);
 
     const all = await queue.getMetrics('completed');
     expect(all.data.length).toBeGreaterThanOrEqual(1);
@@ -1559,7 +1560,7 @@ describe('TestWorker - event payloads (T2)', () => {
     await queue.add('job-b', { x: 2 });
     await queue.add('job-c', { x: 3 });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await waitFor(() => completedEvents.length + failedEvents.length === 3, 5000);
 
     expect(activeEvents.length).toBe(3);
     expect(completedEvents.length).toBe(2);
