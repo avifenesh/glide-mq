@@ -13,6 +13,9 @@ Current state of the glide-mq repository as of 2026-03-08.
   - Breaking: `Broadcast.publish(subject, data, opts?)` signature
   - Worktree: `C:/Users/avife/worktrees/subject-filter`
 - `feature/serverless-producer-89`: Serverless Producer (another agent working on it)
+- `worktree-agent-a9528498` (PR #123): Worker state machine refactor (H6 + M10)
+  - Replaces boolean flags with WorkerState enum in Worker and BroadcastWorker
+  - Fixes H6 race (slotFree during close) and M10 (inconsistent flag combos)
 
 ## Recent merges
 
