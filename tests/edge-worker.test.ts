@@ -3,7 +3,7 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, waitFor, ConnectionConfig } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -489,7 +489,7 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
         },
       );
       worker2.on('error', () => {});
-      worker2.on('stalled', (jobId: string) => {});
+      worker2.on('stalled', (_jobId: string) => {});
       await worker2.waitUntilReady();
 
       await new Promise((r) => setTimeout(r, 3500));

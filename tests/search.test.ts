@@ -2,8 +2,8 @@
  * Integration tests for Queue.searchJobs.
  * Runs against both standalone (:6379) and cluster (:7000).
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, waitFor, ConnectionConfig } from './helpers/fixture';
+import { it, expect, beforeAll, afterAll } from 'vitest';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -218,13 +218,13 @@ describeEachMode('Queue.searchJobs', (CONNECTION) => {
     await q.add('fail-me', { val: 1 });
     await q.add('succeed', { val: 2 });
 
-    let processedCount = 0;
+    let _processedCount = 0;
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 10000);
       const worker = new Worker(
         qName,
         async (job) => {
-          processedCount++;
+          _processedCount++;
           if (job.name === 'fail-me') throw new Error('intentional');
           return 'ok';
         },

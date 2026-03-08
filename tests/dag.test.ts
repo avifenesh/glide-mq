@@ -115,7 +115,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
       }, 15000);
 
       // Verify all completed
-      for (const [name, job] of jobs) {
+      for (const [_name, job] of jobs) {
         const state = await cleanupClient.hget(k.job(job.id), 'state');
         expect(String(state)).toBe('completed');
       }

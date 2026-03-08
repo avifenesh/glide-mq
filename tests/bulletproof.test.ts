@@ -621,7 +621,7 @@ describeEachMode('Celery #4354: worker shutdown during processing does not lose 
     // cannot track the in-flight job.
     const worker = new Worker(
       Q,
-      async (job: any) => {
+      async (_job: any) => {
         jobStarted = true;
         // Simulate work that takes a moment
         await new Promise((r) => setTimeout(r, 2000));
@@ -2274,7 +2274,7 @@ describeEachMode('Sidekiq pool exhaustion: rapid create/close does not leak conn
   it('20 Queue + 20 Worker instances created and closed - no connection leak', async () => {
     // Snapshot baseline connections
     const infoBefore = await cleanupClient.info(['CLIENTS']);
-    const connBefore = parseConnectedClients(infoBefore);
+    const _connBefore = parseConnectedClients(infoBefore);
 
     // Create 20 Queue instances rapidly
     const queues: InstanceType<typeof Queue>[] = [];

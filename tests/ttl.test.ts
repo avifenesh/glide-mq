@@ -258,11 +258,11 @@ describeEachMode('Job TTL - retries/backoff', (CONNECTION) => {
     );
     expect(job).not.toBeNull();
 
-    let attempts = 0;
+    let _attempts = 0;
     const worker = new Worker(
       Q,
       async () => {
-        attempts++;
+        _attempts++;
         throw new Error('fail on purpose');
       },
       { connection: CONNECTION, promotionInterval: 200 },

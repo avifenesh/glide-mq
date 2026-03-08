@@ -8,7 +8,6 @@ import { it, expect, beforeAll, afterAll } from 'vitest';
 
 const { Producer } = require('../dist/producer') as typeof import('../src/producer');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
@@ -304,7 +303,7 @@ describeEachMode('Producer - injected client', (CONNECTION) => {
   });
 });
 
-describeEachMode('Producer - constructor validation', (CONNECTION) => {
+describeEachMode('Producer - constructor validation', (_CONNECTION) => {
   it('throws without connection or client', () => {
     expect(() => new Producer('q', {} as any)).toThrow('Either `connection` or `client` must be provided.');
   });

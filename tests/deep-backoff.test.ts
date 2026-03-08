@@ -31,7 +31,7 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
     const strategyArgs: { attempt: number; message: string }[] = [];
 
-    const job = await queue.add(
+    const _job = await queue.add(
       'task',
       { v: 1 },
       {
@@ -291,7 +291,7 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
     const delays: number[] = [];
 
-    const job = await queue.add(
+    const _job = await queue.add(
       'task',
       {},
       {
@@ -358,7 +358,7 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
     const computedDelays: number[] = [];
 
-    const job = await queue.add(
+    const _job = await queue.add(
       'task',
       {},
       {
@@ -478,7 +478,7 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
     let strategyCalled = false;
 
-    const job = await queue.add(
+    const _job = await queue.add(
       'task',
       {},
       {
@@ -542,7 +542,7 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
 
     const usedStrategies: string[] = [];
 
-    const jobA = await queue.add(
+    const _jobA = await queue.add(
       'jobA',
       { strategy: 'alpha' },
       {
@@ -550,7 +550,7 @@ describeEachMode('Custom backoff strategies', (CONNECTION) => {
         backoff: { type: 'alpha', delay: 100 },
       },
     );
-    const jobB = await queue.add(
+    const _jobB = await queue.add(
       'jobB',
       { strategy: 'beta' },
       {

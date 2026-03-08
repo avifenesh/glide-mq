@@ -8,8 +8,6 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
-const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 const { chain, group, chord } = require('../dist/workflows') as typeof import('../src/workflows');
 
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
@@ -87,7 +85,7 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
 
       await queue.add('stall-test', { value: 1 });
 
-      let stalledEmitted = false;
+      let _stalledEmitted = false;
       const stalledPromise = new Promise<void>((resolve) => {
         const worker1 = new Worker(
           Q,
@@ -106,7 +104,7 @@ describeEachMode('Gap Advanced', (CONNECTION) => {
         workers.push(worker1);
 
         worker1.on('stalled', () => {
-          stalledEmitted = true;
+          _stalledEmitted = true;
           resolve();
         });
 

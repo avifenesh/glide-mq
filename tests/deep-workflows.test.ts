@@ -6,7 +6,6 @@
  */
 import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { chain, group, chord } = require('../dist/workflows') as typeof import('../src/workflows');

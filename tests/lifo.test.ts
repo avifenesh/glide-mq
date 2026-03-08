@@ -1,7 +1,7 @@
 /**
  * LIFO (Last-In-First-Out) job processing order tests.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
@@ -404,7 +404,7 @@ describeEachMode('LIFO: FlowProducer child jobs', (CONNECTION) => {
     const Q = 'lifo-flow-children-' + Date.now();
     const flow = new FlowProducer({ connection: CONNECTION });
 
-    const result = await flow.add({
+    await flow.add({
       name: 'parent',
       queueName: Q,
       data: { step: 'root' },

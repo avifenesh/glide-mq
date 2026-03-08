@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { GlideClient } from '@glidemq/speedkey';
 import { LIBRARY_VERSION } from '../src/functions/index';
 

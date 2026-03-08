@@ -6,7 +6,6 @@
  */
 import { it, expect, beforeAll, afterAll } from 'vitest';
 
-const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
@@ -111,7 +110,7 @@ describeEachMode('Edge: Flow child fails all retries', (CONNECTION) => {
     const childId = node.children![0].job.id;
     let failCount = 0;
 
-    const done = new Promise<void>((resolve, reject) => {
+    const done = new Promise<void>((resolve, _reject) => {
       const timeout = setTimeout(() => resolve(), 8000);
       const worker = new Worker(
         Q,
@@ -131,7 +130,7 @@ describeEachMode('Edge: Flow child fails all retries', (CONNECTION) => {
         },
       );
 
-      worker.on('failed', (job: any) => {
+      worker.on('failed', (_job: any) => {
         // After all retries exhausted, check state and resolve
         if (failCount >= 2) {
           clearTimeout(timeout);
@@ -190,7 +189,7 @@ describeEachMode('Edge: Flow getChildrenValues with mixed results', (CONNECTION)
     const parentId = node.job.id;
     let childValuesFromParent: Record<string, any> | null = null;
 
-    const done = new Promise<void>((resolve, reject) => {
+    const done = new Promise<void>((resolve, _reject) => {
       const timeout = setTimeout(() => resolve(), 10000);
       const worker = new Worker(
         Q,

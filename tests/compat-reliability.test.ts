@@ -418,11 +418,11 @@ describeEachMode('Retry exhaustion', (CONNECTION) => {
   it('exponential backoff delay increases correctly between attempts', async () => {
     const Q = uniqueQueue('retry-exp-delay');
     const queue = new Queue(Q, { connection: CONNECTION });
-    const k = buildKeys(Q);
+    const _k = buildKeys(Q);
 
     const processTimestamps: number[] = [];
 
-    const job = await queue.add(
+    const _job = await queue.add(
       'exp-verify',
       { x: 1 },
       {
@@ -960,7 +960,7 @@ describeEachMode('Operational patterns', (CONNECTION) => {
         }, 200);
       });
 
-      worker.on('completed', (j: any) => {
+      worker.on('completed', (_j: any) => {
         clearTimeout(timeout);
         setTimeout(() => worker.close(true).then(resolve), 200);
       });

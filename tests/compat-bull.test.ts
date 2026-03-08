@@ -79,7 +79,7 @@ describeEachMode('Bull compat: Queue processes a job', (CONNECTION) => {
         { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
       );
       worker.on('error', () => {});
-      worker.on('completed', (job: any, result: any) => {
+      worker.on('completed', (_job: any, _result: any) => {
         clearTimeout(timeout);
         worker.close(true).then(resolve);
       });
@@ -310,7 +310,7 @@ describeEachMode('Bull compat: removeOnComplete', (CONNECTION) => {
     });
 
     await new Promise((r) => setTimeout(r, 500));
-    const job = await queue.add('roc-job', { x: 1 }, { removeOnComplete: true });
+    const _job = await queue.add('roc-job', { x: 1 }, { removeOnComplete: true });
     const jobId = await done;
 
     // The job hash should be deleted
@@ -520,7 +520,7 @@ describeEachMode('Bull compat: Delayed jobs', (CONNECTION) => {
 
   it('13. delayed job is not processed until delay expires', async () => {
     const queue = new Queue(Q, { connection: CONNECTION });
-    const k = buildKeys(Q);
+    const _k = buildKeys(Q);
     let processedAt = 0;
 
     const done = new Promise<void>((resolve, reject) => {
@@ -769,7 +769,7 @@ describeEachMode('Bull compat: Job.getState', (CONNECTION) => {
 
   it('19. returns correct state at each lifecycle point', async () => {
     const queue = new Queue(Q, { connection: CONNECTION });
-    const k = buildKeys(Q);
+    const _k = buildKeys(Q);
 
     // Add a job - initial state is "waiting"
     const job = await queue.add('state-test', { x: 1 });
