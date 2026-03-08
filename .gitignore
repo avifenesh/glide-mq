@@ -5,5 +5,8 @@ build/
 .env
 agent-knowledge/
 .jules/
-HANDOVER.md
 .claude/
+.codex/
+HANDOVER.md
+.audit-queue.md
+benchmarks/results/
