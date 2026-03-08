@@ -1013,6 +1013,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     let parentId = job.parentId;
     let parentQueue = job.parentQueue;
 
+    // Fast path: no parent fields at all - skip the Valkey round trip
+    if (!parentId && !parentQueue) return undefined;
+
+    // One field missing: re-fetch from hash to handle partial data
     if ((!parentId || !parentQueue) && this.commandClient) {
       const [refreshedParentId, refreshedParentQueue] = await this.commandClient.hmget(this.queueKeys.job(jobId), [
         'parentId',
