@@ -174,7 +174,7 @@ describe('HTTP Proxy', () => {
     expect(body.error).toBe('Job not found');
   });
 
-  it('POST /queues/:name/pause + resume - returns 204', async () => {
+  it('POST /queues/:name/pause + resume - returns 200 with state', async () => {
     const queueName = uniqueQueue('pause');
 
     // Create queue by adding a job first
@@ -186,7 +186,7 @@ describe('HTTP Proxy', () => {
 
     // Pause
     const pauseRes = await fetch(`${baseUrl}/queues/${queueName}/pause`, { method: 'POST' });
-    expect(pauseRes.status).toBe(204);
+    expect(pauseRes.status).toBe(200);
 
     // Verify paused
     const k = buildKeys(queueName);
@@ -195,7 +195,7 @@ describe('HTTP Proxy', () => {
 
     // Resume
     const resumeRes = await fetch(`${baseUrl}/queues/${queueName}/resume`, { method: 'POST' });
-    expect(resumeRes.status).toBe(204);
+    expect(resumeRes.status).toBe(200);
 
     // Verify resumed
     const resumed = await cleanupClient.hget(k.meta, 'paused');
@@ -227,13 +227,13 @@ describe('HTTP Proxy', () => {
     expect(typeof body.failed).toBe('number');
   });
 
-  it('GET /health - returns 200 with status and uptime, no queues field', async () => {
+  it('GET /health - returns 200 with status, uptime, and queues count', async () => {
     const res = await fetch(`${baseUrl}/health`);
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe('ok');
     expect(typeof body.uptime).toBe('number');
-    expect('queues' in body).toBe(false);
+    expect(typeof body.queues).toBe('number');
   });
 
   it('missing body fields return 400', async () => {

@@ -65,6 +65,7 @@ export class ServerlessPool {
     const producers = [...this.cache.values()];
     this.cache.clear();
     await Promise.allSettled(producers.map((p) => p.close()));
+    this.closing = false;
   }
 
   /** Number of cached producers. */
