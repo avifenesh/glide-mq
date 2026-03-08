@@ -1195,13 +1195,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
       const parentInfo = await this.buildParentInfo(job, currentJobId);
 
+      const now = Date.now();
       const fetchResult = await completeAndFetchNext(
         this.commandClient,
         this.queueKeys,
         currentJobId,
         currentEntryId,
         returnvalue,
-        Date.now(),
+        now,
         this.consumerGroup,
         this.consumerId,
         job.opts.removeOnComplete,
@@ -1211,11 +1212,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       );
 
       job.returnvalue = processResult;
-      job.finishedOn = Date.now();
+      job.finishedOn = now;
       this.emit('completed', job, processResult);
 
       if (job.schedulerName) {
-        await this.updateSchedulerAfterComplete(job.schedulerName, Date.now());
+        await this.updateSchedulerAfterComplete(job.schedulerName, now);
       }
 
       // No next job - return to poll loop

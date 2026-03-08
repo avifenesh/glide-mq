@@ -1,5 +1,5 @@
 import type { WorkerOptions, Processor, BatchProcessor, Client } from './types';
-import { CONSUMER_GROUP, checkConcurrency, rpopAndReserve } from './functions/index';
+import { CONSUMER_GROUP, checkConcurrency, rpopAndReserve, popLists } from './functions/index';
 import { BaseWorker } from './base-worker';
 export type { WorkerEvent } from './base-worker';
 
@@ -115,51 +115,50 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
   private async tryPopFromLists(fetchCount: number): Promise<boolean> {
     if (!this.commandClient) return false;
 
-    for (const [listKey, label] of [
-      [this.queueKeys.priority, 'priority'],
-      [this.queueKeys.lifo, 'LIFO'],
-    ] as [string, string][]) {
-      try {
-        // With gc enabled, use atomic rpopAndReserve (single slot).
-        // Without gc, batch pop up to fetchCount to reduce RTTs at concurrency > 1.
-        const popCount = this.concurrency === 1 ? 1 : fetchCount;
-        let jobIds: string[];
-        if (this.globalConcurrencyEnabled) {
+    try {
+      const popCount = this.concurrency === 1 ? 1 : fetchCount;
+      let jobIds: string[];
+
+      if (this.globalConcurrencyEnabled) {
+        // With gc, must use atomic rpopAndReserve per list (preserves slot accounting)
+        jobIds = [];
+        for (const listKey of [this.queueKeys.priority, this.queueKeys.lifo]) {
           const id = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP);
-          jobIds = id ? [id] : [];
-        } else if (popCount === 1) {
-          const id = await this.commandClient.rpop(listKey);
-          jobIds = id ? [String(id)] : [];
-        } else {
-          const ids = await this.commandClient.rpopCount(listKey, popCount);
-          jobIds = ids ? ids.map(String) : [];
-        }
-        if (jobIds.length > 0) {
-          // Always INCR list-active so complete/fail Lua DECRs stay balanced.
-          // rpopAndReserve already did the INCR atomically; for non-gc paths do it here.
-          if (!this.globalConcurrencyEnabled && jobIds.length > 0) {
-            await this.commandClient.incrBy(this.queueKeys.listActive, jobIds.length);
+          if (id) {
+            jobIds.push(id);
+            break;
           }
-          for (const jobId of jobIds) {
-            if (this.concurrency === 1) {
-              this.activeCount++;
-              const promise = this.processJob(jobId, '');
-              this.activePromises.add(promise);
-              try {
-                await promise;
-              } finally {
-                this.activeCount--;
-                this.activePromises.delete(promise);
-              }
-            } else {
-              this.dispatchJob(jobId, '');
-            }
-          }
-          return true;
         }
-      } catch (err) {
-        this.emit('error', new Error(`${label} fetch error`, { cause: err }));
+      } else {
+        // Single FCALL checks both priority and LIFO lists (1 RTT instead of 2)
+        jobIds = await popLists(this.commandClient, this.queueKeys, popCount);
       }
+
+      if (jobIds.length > 0) {
+        // INCR list-active so complete/fail Lua DECRs stay balanced.
+        // rpopAndReserve already did the INCR atomically; for non-gc paths do it here.
+        if (!this.globalConcurrencyEnabled) {
+          await this.commandClient.incrBy(this.queueKeys.listActive, jobIds.length);
+        }
+        for (const jobId of jobIds) {
+          if (this.concurrency === 1) {
+            this.activeCount++;
+            const promise = this.processJob(jobId, '');
+            this.activePromises.add(promise);
+            try {
+              await promise;
+            } finally {
+              this.activeCount--;
+              this.activePromises.delete(promise);
+            }
+          } else {
+            this.dispatchJob(jobId, '');
+          }
+        }
+        return true;
+      }
+    } catch (err) {
+      this.emit('error', new Error(`List fetch error`, { cause: err }));
     }
     return false;
   }

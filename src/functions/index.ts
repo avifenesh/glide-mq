@@ -18,7 +18,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 57: glidemq_addFlow routes child jobs with lifo:true to LIFO list.
 // Version 58: XADD to job stream includes 'name' field for subject-based filtering in BroadcastWorker.
 // Version 59: glidemq_healListActive - self-healing for list-active counter drift on worker crash.
-export const LIBRARY_VERSION = '60';
+// Version 61: glidemq_popLists - atomic pop from priority + LIFO lists in a single FCALL; timestamp caching in processJob.
+export const LIBRARY_VERSION = '62';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -2900,6 +2901,25 @@ redis.register_function('glidemq_healListActive', function(keys, args)
   end
   return drift
 end)
+
+redis.register_function('glidemq_popLists', function(keys, args)
+  local priorityKey = keys[1]
+  local lifoKey = keys[2]
+  local count = tonumber(args[1]) or 1
+  local results = {}
+  for i = 1, count do
+    local id = redis.call('RPOP', priorityKey)
+    if not id then break end
+    results[#results + 1] = id
+  end
+  if #results > 0 then return results end
+  for i = 1, count do
+    local id = redis.call('RPOP', lifoKey)
+    if not id then break end
+    results[#results + 1] = id
+  end
+  return results
+end)
 `;
 
 // ---- Key set type ----
@@ -3437,6 +3457,20 @@ export async function rpopAndReserve(
   const result = await client.fcall('glidemq_rpopAndReserve', [k.meta, k.stream, k.listActive, listKey], [group]);
   if (!result) return null;
   return String(result);
+}
+
+/**
+ * Pop from priority and LIFO lists in a single FCALL (1 RTT instead of 2).
+ * Returns job IDs popped, or empty array if both lists are empty.
+ */
+export async function popLists(
+  client: Client,
+  k: QueueKeys,
+  count: number,
+): Promise<string[]> {
+  const result = await client.fcall('glidemq_popLists', [k.priority, k.lifo], [count.toString()]);
+  if (!Array.isArray(result) || result.length === 0) return [];
+  return result.map((v) => String(v));
 }
 
 /**
