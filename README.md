@@ -1,8 +1,6 @@
 # glide-mq
 
-**High-performance message queue for Node.js** — powered by Valkey/Redis Streams and a Rust-native NAPI client.
-
-If you find this useful, [give it a ⭐ on GitHub](https://github.com/avifenesh/glide-mq) — it helps the project reach more developers.
+**High-performance message queue for Node.js** - powered by Valkey/Redis Streams and a Rust-native NAPI client.
 
 ```bash
 npm install glide-mq
@@ -10,42 +8,16 @@ npm install glide-mq
 
 ## Why glide-mq
 
-- **1 RTT per job** — `completeAndFetchNext` finishes the current job and fetches the next one in a single round-trip
-- **Rust core, not ioredis** — built on [Valkey GLIDE](https://github.com/valkey-io/valkey-glide)'s native NAPI bindings for lower latency and less GC pressure
-- **1 function library, not 53 scripts** — all queue logic runs as a single Valkey Server Function (no EVAL overhead)
-- **Cluster-native** — hash-tagged keys work out of the box; no manual `{braces}` needed
-- **Cloud-ready** — AZ-affinity routing and IAM auth built in
-
-## Features
-
-### Core queueing
-- **Queues & Workers** — producer/consumer with configurable concurrency ([Usage](docs/USAGE.md#queue), [Demo](demo/README.md#demo-scenarios))
-- **Delayed, priority, and bulk enqueue** — schedule jobs, prioritize critical work, and ingest at high throughput with `addBulk` ([Usage](docs/USAGE.md#queue), [Demo](demo/README.md#demo-scenarios))
-- **Batch processing** — process multiple jobs at once for higher throughput on bulk I/O operations ([Usage](docs/USAGE.md#batch-processing))
-- **Request-reply** — enqueue and await a single job result with `queue.addAndWait(...)` ([Usage](docs/USAGE.md#request-reply-with-addandwait))
-- **Job search & progress tracking** — query by state/name/data and stream progress updates ([Usage](docs/USAGE.md#worker), [Search tests](tests/search.test.ts))
-
-### Reliability & control
-- **Retries, backoff, and DLQ** — exponential/fixed/custom retries with dead-letter queues ([Advanced](docs/ADVANCED.md#retries-and-backoff), [Demo](demo/README.md#demo-scenarios))
-- **Stalled recovery, pause/resume, and drain** — auto-reclaim stuck jobs, pause processing, and server-side drain waiting/delayed jobs ([Usage](docs/USAGE.md#worker), [Demo](demo/README.md#api-endpoints-dashboard-server))
-- **Durability & recovery guide** — persistence modes, crash windows, worker recovery, and failover caveats ([Durability](docs/DURABILITY.md))
-- **Job revocation + sandboxed processors** — cooperative cancellation and isolated file-based processors in worker threads/child processes ([Advanced](docs/ADVANCED.md#job-revocation), [Architecture](docs/ARCHITECTURE.md#typescript-api), [Sandbox example](tests/sandbox-integration.test.ts))
-
-### Orchestration & scheduling
-- **Workflows** — `FlowProducer` parent-child trees, arbitrary DAG topologies, and `chain`/`group`/`chord` helpers ([Workflows](docs/WORKFLOWS.md), [Demo](demo/README.md#demo-scenarios))
-- **Schedulers** — cron and interval repeatable jobs with optional start/end bounds and run limits, persisted across restarts ([Advanced](docs/ADVANCED.md#job-schedulers), [Demo](demo/README.md#demo-scenarios))
-- **Step jobs** — pause an active job and resume it later with `job.moveToDelayed(...)` for multi-step workflows ([Usage](docs/USAGE.md#pause-and-resume-a-job-later-step-jobs))
-- **Per-key ordering, global concurrency, and rate limiting** — deterministic ordering with queue-wide and token-bucket controls ([Advanced](docs/ADVANCED.md#ordering-and-group-concurrency), [Advanced](docs/ADVANCED.md#global-concurrency), [Advanced](docs/ADVANCED.md#global-rate-limiting))
-- **Deduplication** — simple, throttle, and debounce modes with TTL ([Advanced](docs/ADVANCED.md#deduplication), [Demo](demo/README.md#demo-scenarios))
-
-### Serverless & edge
-- **Lightweight Producer** - enqueue jobs without EventEmitter or Job instances, returns plain string IDs ([Serverless](docs/SERVERLESS.md))
-- **ServerlessPool** - connection reuse across warm Lambda/Edge invocations ([Serverless](docs/SERVERLESS.md#aws-lambda))
-
-### Observability, ops, and testing
-- **QueueEvents, metrics, logs, and dashboard** — real-time events + OpenTelemetry + [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) ([Observability](docs/OBSERVABILITY.md), [Dashboard demo API](demo/dashboard-server.ts))
-- **Compression, graceful shutdown, and shared connections** — lower payload size and easier process lifecycle management ([Advanced](docs/ADVANCED.md#transparent-compression), [Usage](docs/USAGE.md#graceful-shutdown), [Advanced](docs/ADVANCED.md#shared-client))
-- **In-memory testing mode** — `TestQueue` and `TestWorker` with zero Valkey dependency ([Testing](docs/TESTING.md), [Testing-mode test](tests/testing-mode.test.ts))
+| | glide-mq | BullMQ | Bee Queue |
+|---|---|---|---|
+| **Network per job** | 1 RTT (`completeAndFetchNext`) | 4-7 RTTs (lock + complete + fetch) | 2-3 RTTs |
+| **Client** | Rust NAPI ([valkey-glide](https://github.com/valkey-io/valkey-glide)) | ioredis (pure JS) | node_redis (pure JS) |
+| **Server logic** | 1 Valkey Function library (persistent, named) | 53 EVAL scripts (cache-miss prone) | Lua scripts |
+| **Cluster** | Hash-tagged keys, zero config | Manual `{braces}` or workarounds | Not supported |
+| **Workflows** | FlowProducer trees, DAG, chain/group/chord | FlowProducer trees | Not supported |
+| **Pub/sub** | Native Broadcast with subject filtering | Not supported | Not supported |
+| **Serverless** | Producer + ServerlessPool | Not supported | Not supported |
+| **Throughput** | 48k jobs/s (c=50) | ~12k jobs/s (c=50) | ~5k jobs/s (c=50) |
 
 ## Quick Start
 
@@ -70,6 +42,158 @@ worker.on('failed', (job, err) => console.error(`Job ${job.id} failed:`, err.mes
 
 Requires Node.js 20+ and a running [Valkey](https://valkey.io) (7.0+) or Redis 7.0+ instance.
 
+## Features
+
+### Core
+
+- **Queues & Workers** - producer/consumer with configurable concurrency, prefetch, and lock duration ([Usage](docs/USAGE.md))
+- **Delayed, priority, and bulk enqueue** - schedule jobs, prioritize critical work, `addBulk` for high throughput ([Usage](docs/USAGE.md))
+- **Batch processing** - process multiple jobs at once via `batch: { size, timeout? }` ([Usage](docs/USAGE.md#batch-processing))
+- **Request-reply** - `queue.addAndWait(name, data, { waitTimeout })` for synchronous RPC ([Usage](docs/USAGE.md#request-reply-with-addandwait))
+- **Custom job IDs** - deterministic, idempotent enqueue; duplicates return `null` ([Advanced](docs/ADVANCED.md#custom-job-ids))
+- **LIFO mode** - `lifo: true` processes newest jobs first; priority > LIFO > FIFO ([Advanced](docs/ADVANCED.md#lifo-mode))
+- **Job TTL** - auto-expire jobs after a time-to-live window ([Advanced](docs/ADVANCED.md#job-ttl))
+- **Pluggable serializers** - swap JSON for any `{ serialize, deserialize }` implementation ([Advanced](docs/ADVANCED.md#pluggable-serializers))
+- **Transparent compression** - gzip payloads at the queue level; 98% reduction on typical JSON ([Advanced](docs/ADVANCED.md#transparent-compression))
+
+### Reliability & control
+
+- **Retries, backoff, and DLQ** - exponential/fixed/custom retries with dead-letter queues ([Advanced](docs/ADVANCED.md#retries-and-backoff))
+- **UnrecoverableError** - throw to skip all retries and fail permanently ([Usage](docs/USAGE.md#unrecoverableerror))
+- **Stalled recovery** - auto-reclaim stuck jobs via consumer group PEL and `XAUTOCLAIM` ([Usage](docs/USAGE.md#worker))
+- **Pause, resume, and drain** - pause processing, drain waiting/delayed jobs server-side ([Usage](docs/USAGE.md#queue))
+- **Job revocation** - cooperative cancellation with `AbortSignal` in the processor ([Advanced](docs/ADVANCED.md#job-revocation))
+- **Sandboxed processors** - run processors in worker threads or child processes ([Architecture](docs/ARCHITECTURE.md))
+- **Durability guide** - persistence modes, crash windows, and failover caveats ([Durability](docs/DURABILITY.md))
+
+### Orchestration & scheduling
+
+- **Workflows** - `FlowProducer` parent-child trees, `chain`/`group`/`chord` helpers ([Workflows](docs/WORKFLOWS.md))
+- **DAG flows** - arbitrary dependency graphs with `FlowProducer.addDAG()` and `dag()` helper; multi-parent fan-in, diamond patterns, cycle detection ([Workflows](docs/WORKFLOWS.md))
+- **Step jobs** - `job.moveToDelayed(timestamp, nextStep)` suspends a job mid-processor and resumes later ([Usage](docs/USAGE.md#pause-and-resume-a-job-later-step-jobs))
+- **Dynamic children** - `job.moveToWaitingChildren()` pauses a parent to add children mid-execution ([Workflows](docs/WORKFLOWS.md))
+- **Cron & interval schedulers** - 5-field cron with timezone, fixed intervals, and `repeatAfterComplete` mode ([Advanced](docs/ADVANCED.md#job-schedulers))
+- **Bounded schedulers** - `limit`, `startDate`, and `endDate` for finite schedules ([Advanced](docs/ADVANCED.md#bounded-schedulers))
+- **Per-key ordering** - sequential processing per ordering key with configurable group concurrency ([Advanced](docs/ADVANCED.md#ordering-and-group-concurrency))
+- **Rate limiting** - per-group sliding window, token bucket, and global queue-wide limits ([Advanced](docs/ADVANCED.md#global-rate-limiting))
+- **Deduplication** - simple, throttle, and debounce modes with configurable TTL ([Advanced](docs/ADVANCED.md#deduplication))
+
+### Pub/sub
+
+- **Broadcast** - fan-out publisher that delivers each message to all subscribers ([Usage](docs/USAGE.md#broadcast--broadcastworker))
+- **BroadcastWorker** - independent consumer groups with own retries, concurrency, and backpressure ([Usage](docs/USAGE.md#broadcast--broadcastworker))
+- **Subject filtering** - NATS-style patterns (`*` one segment, `>` trailing wildcard) for topic-based routing; non-matching messages auto-ACKed at zero cost ([Usage](docs/USAGE.md#broadcast--broadcastworker))
+
+### Serverless & edge
+
+- **Producer** - lightweight enqueue without EventEmitter or Job instances, returns plain string IDs ([Usage](docs/USAGE.md))
+- **ServerlessPool** - connection caching across warm Lambda/Edge invocations ([Usage](docs/USAGE.md))
+
+### Observability & ops
+
+- **QueueEvents** - real-time stream-based lifecycle events ([Observability](docs/OBSERVABILITY.md))
+- **Time-series metrics** - per-minute throughput and latency retained 24h, recorded server-side with zero extra RTTs ([Observability](docs/OBSERVABILITY.md))
+- **OpenTelemetry** - automatic span emission; bring your own tracer or auto-detect `@opentelemetry/api` ([Observability](docs/OBSERVABILITY.md))
+- **Job logs** - append structured log entries per job, retrievable with pagination ([Observability](docs/OBSERVABILITY.md))
+- **Dashboard** - [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) web UI with metrics charts, scheduler management, job mutations ([Observability](docs/OBSERVABILITY.md))
+- **Job mutations** - `changePriority()`, `changeDelay()`, `promote()` after enqueue; `retryJobs()` and `clean()` in bulk ([Usage](docs/USAGE.md))
+- **Graceful shutdown** - `gracefulShutdown()` helper registers SIGTERM/SIGINT handlers ([Usage](docs/USAGE.md#graceful-shutdown))
+- **In-memory testing** - `TestQueue` and `TestWorker` with zero Valkey dependency ([Testing](docs/TESTING.md))
+
+### Cloud & cluster
+
+- **Cluster-native** - hash-tagged keys `glide:{queueName}:*` route all queue data to the same slot ([Usage](docs/USAGE.md#cluster-mode))
+- **IAM authentication** - native SigV4 auth for AWS ElastiCache and MemoryDB, no AWS SDK needed ([Usage](docs/USAGE.md#cluster-mode))
+- **AZ-affinity routing** - `readFrom: 'AZAffinity'` routes reads to same-AZ replicas ([Usage](docs/USAGE.md#cluster-mode))
+- **Cross-language** - HTTP proxy (`glide-mq/proxy`) and wire protocol (`FCALL`) for Python, Go, Java, etc. ([Wire Protocol](docs/WIRE_PROTOCOL.md))
+
+## Feature Highlights
+
+### Broadcast with subject filtering
+
+Deliver messages to multiple subscribers with NATS-style topic routing:
+
+```typescript
+import { Broadcast, BroadcastWorker } from 'glide-mq';
+
+const events = new Broadcast('store-events', { connection });
+
+// All order events
+const orders = new BroadcastWorker('store-events', processOrder, {
+  connection, subscription: 'order-service', subjects: ['orders.>'],
+});
+
+// Only payment failures
+const alerts = new BroadcastWorker('store-events', sendAlert, {
+  connection, subscription: 'payment-alerts', subjects: ['payments.failed'],
+});
+
+await events.publish('orders.placed', { orderId: 'ORD-1', total: 99.99 });
+await events.publish('payments.failed', { txId: 'TX-1', reason: 'declined' });
+// orders receives orders.placed; alerts receives payments.failed
+```
+
+### Serverless Producer
+
+Lightweight enqueue for Lambda, Edge, and serverless functions:
+
+```typescript
+import { serverlessPool } from 'glide-mq';
+
+export async function handler(event) {
+  const producer = serverlessPool.getProducer('tasks', { connection });
+  await producer.add('process', event.body); // returns string ID, not Job
+  return { statusCode: 202 };
+}
+// Connection cached across warm invocations
+```
+
+### DAG workflows
+
+Arbitrary dependency graphs with multi-parent fan-in:
+
+```typescript
+import { dag } from 'glide-mq';
+
+await dag([
+  { name: 'fetch-users',  queueName: 'etl', data: { source: 'users' } },
+  { name: 'fetch-orders', queueName: 'etl', data: { source: 'orders' } },
+  { name: 'join', queueName: 'etl', data: { type: 'inner' },
+    deps: ['fetch-users', 'fetch-orders'] }, // waits for BOTH
+  { name: 'export', queueName: 'etl', data: { dest: 's3' },
+    deps: ['join'] },
+], connection);
+```
+
+### Batch processing
+
+Process multiple jobs at once for higher throughput on bulk I/O:
+
+```typescript
+const worker = new Worker('analytics', async (jobs) => {
+  await db.insertMany(jobs.map(j => j.data));
+  return jobs.map(() => ({ indexed: true }));
+}, { connection, batch: { size: 50, timeout: 100 } });
+```
+
+### Step jobs (state machines)
+
+Pause a job mid-execution and resume later at a different step:
+
+```typescript
+const worker = new Worker('campaign', async (job) => {
+  switch (job.data.step) {
+    case 'welcome':
+      await sendEmail(job.data.email, 'Welcome!');
+      await job.moveToDelayed(Date.now() + 86400000, 'follow-up');
+      break; // unreachable - moveToDelayed throws DelayedError
+    case 'follow-up':
+      await sendEmail(job.data.email, 'How are things?');
+      return { completed: true };
+  }
+}, { connection, promotionInterval: 200 });
+```
+
 ## Benchmarks
 
 | Concurrency | Throughput |
@@ -79,7 +203,7 @@ Requires Node.js 20+ and a running [Valkey](https://valkey.io) (7.0+) or Redis 7
 | c=10 | 15,504 jobs/s |
 | c=50 | 48,077 jobs/s |
 
-`addBulk` batch API: **1,000 jobs in 18 ms** (12.7× faster than serial).
+`addBulk` batch API: **1,000 jobs in 18 ms** (12.7x faster than serial).
 Gzip compression: **98% payload reduction** on 15 KB payloads.
 
 *Valkey 8.0, single node, no-op processor. Run `npm run bench` to reproduce.*
@@ -89,12 +213,12 @@ Gzip compression: **98% payload reduction** on 15 KB payloads.
 | Package | Description |
 |---------|-------------|
 | **glide-mq** | Core queue library (you are here) |
-| [`@glidemq/hono`](https://github.com/avifenesh/glidemq-hono) | Hono middleware - REST API + SSE events for queue management |
-| [`@glidemq/fastify`](https://github.com/avifenesh/glidemq-fastify) | Fastify plugin - REST API + SSE events for queue management |
-| [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) | Express middleware - web UI for monitoring and managing queues |
-| [`@glidemq/nestjs`](https://github.com/avifenesh/glidemq-nestjs) | NestJS module - decorators, DI, lifecycle management |
+| [`@glidemq/hono`](https://github.com/avifenesh/glidemq-hono) | Hono middleware - 20 REST endpoints + SSE + serverless Producer |
+| [`@glidemq/fastify`](https://github.com/avifenesh/glidemq-fastify) | Fastify plugin - 20 REST endpoints + SSE + serverless Producer |
+| [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) | Express middleware - web UI with metrics charts and scheduler management |
+| [`@glidemq/nestjs`](https://github.com/avifenesh/glidemq-nestjs) | NestJS module - decorators for Queue, Worker, FlowProducer, Broadcast, Producer |
 | [`@glidemq/speedkey`](https://github.com/avifenesh/speedkey) | Valkey GLIDE client with native NAPI bindings |
-| [examples](https://github.com/avifenesh/glidemq-examples) | Framework integrations and use-case examples |
+| [examples](https://github.com/avifenesh/glidemq-examples) | 34 runnable examples across frameworks and use cases |
 
 ### Dashboard
 
@@ -111,7 +235,7 @@ app.use('/dashboard', createDashboard([queue1, queue2], {
 }));
 ```
 
-Workers, job schedulers, DLQ, metrics, search, bulk actions (drain, retry, clean) - all from the browser.
+Time-series metrics charts, scheduler CRUD, job mutations, worker monitoring, DLQ, search, bulk actions - all from the browser.
 
 ### Hono
 
@@ -124,16 +248,15 @@ import { Hono } from 'hono';
 import { glideMQ, glideMQApi } from '@glidemq/hono';
 
 const app = new Hono();
-
 app.use(glideMQ({
   connection: { addresses: [{ host: 'localhost', port: 6379 }] },
   queues: { emails: { processor: processEmail, concurrency: 5 } },
+  producers: { tasks: {} }, // lightweight serverless producers
 }));
-
 app.route('/api/queues', glideMQApi());
 ```
 
-11 REST endpoints + SSE events, optional Zod validation, in-memory testing mode.
+20 REST endpoints + SSE events, serverless Producer support, optional Zod validation, in-memory testing mode.
 
 ### Fastify
 
@@ -146,17 +269,14 @@ import Fastify from 'fastify';
 import { glideMQPlugin, glideMQRoutes } from '@glidemq/fastify';
 
 const app = Fastify();
-
 await app.register(glideMQPlugin, {
   connection: { addresses: [{ host: 'localhost', port: 6379 }] },
   queues: { emails: { processor: processEmail, concurrency: 5 } },
 });
-
 await app.register(glideMQRoutes, { prefix: '/api/queues' });
-await app.listen({ port: 3000 });
 ```
 
-11 REST endpoints + SSE events, prefix support, optional Zod validation, in-memory testing mode.
+20 REST endpoints + SSE events, serverless Producer support, optional Zod validation, in-memory testing mode.
 
 ### NestJS
 
@@ -173,12 +293,29 @@ import { GlideMQModule } from '@glidemq/nestjs';
       connection: { addresses: [{ host: 'localhost', port: 6379 }] },
       queues: { emails: { processor: processEmail } },
     }),
+    GlideMQModule.registerBroadcast({ name: 'events' }),
+    GlideMQModule.registerProducer({ name: 'tasks' }),
   ],
 })
 export class AppModule {}
 ```
 
-Decorators, dependency injection, lifecycle management, in-memory testing mode.
+Decorators (`@Processor`, `@BroadcastProcessor`, `@InjectQueue`, `@InjectBroadcast`, `@InjectProducer`), dependency injection, lifecycle management, in-memory testing mode.
+
+## Examples
+
+34 runnable examples in the [examples repo](https://github.com/avifenesh/glidemq-examples):
+
+| Category | Examples |
+|----------|----------|
+| **Core** | [basics](https://github.com/avifenesh/glidemq-examples/tree/main/examples/core-basics), [workflows](https://github.com/avifenesh/glidemq-examples/tree/main/examples/core-workflows), [advanced](https://github.com/avifenesh/glidemq-examples/tree/main/examples/core-advanced) |
+| **Features** | [batch-processing](https://github.com/avifenesh/glidemq-examples/tree/main/examples/batch-processing), [request-reply](https://github.com/avifenesh/glidemq-examples/tree/main/examples/request-reply), [custom-job-ids](https://github.com/avifenesh/glidemq-examples/tree/main/examples/custom-job-ids), [step-jobs](https://github.com/avifenesh/glidemq-examples/tree/main/examples/step-job-move-to-delayed), [waiting-children](https://github.com/avifenesh/glidemq-examples/tree/main/examples/move-to-waiting-children), [serializers](https://github.com/avifenesh/glidemq-examples/tree/main/examples/pluggable-serializers), [exclude-data](https://github.com/avifenesh/glidemq-examples/tree/main/examples/exclude-data), [lifo-mode](https://github.com/avifenesh/glidemq-examples/tree/main/examples/lifo-mode), [dag-workflows](https://github.com/avifenesh/glidemq-examples/tree/main/examples/dag-workflows) |
+| **Pub/sub** | [broadcast](https://github.com/avifenesh/glidemq-examples/tree/main/examples/broadcast), [subject-filter](https://github.com/avifenesh/glidemq-examples/tree/main/examples/subject-filter) |
+| **Scheduling** | [cron-scheduler](https://github.com/avifenesh/glidemq-examples/tree/main/examples/cron-scheduler), [bounded-schedulers](https://github.com/avifenesh/glidemq-examples/tree/main/examples/bounded-schedulers), [repeat-after-complete](https://github.com/avifenesh/glidemq-examples/tree/main/examples/repeat-after-complete) |
+| **Serverless** | [serverless-producer](https://github.com/avifenesh/glidemq-examples/tree/main/examples/serverless-producer) |
+| **Infrastructure** | [valkey-cluster](https://github.com/avifenesh/glidemq-examples/tree/main/examples/valkey-cluster), [iam-auth](https://github.com/avifenesh/glidemq-examples/tree/main/examples/iam-auth), [otel-tracing](https://github.com/avifenesh/glidemq-examples/tree/main/examples/otel-tracing), [http-proxy](https://github.com/avifenesh/glidemq-examples/tree/main/examples/http-proxy) |
+| **Frameworks** | [express](https://github.com/avifenesh/glidemq-examples/tree/main/examples/express-basic), [koa](https://github.com/avifenesh/glidemq-examples/tree/main/examples/koa-basic), [hono](https://github.com/avifenesh/glidemq-examples/tree/main/examples/hono-basic), [next.js](https://github.com/avifenesh/glidemq-examples/tree/main/examples/nextjs-api-routes), [hono-api](https://github.com/avifenesh/glidemq-examples/tree/main/examples/hono-api), [fastify-api](https://github.com/avifenesh/glidemq-examples/tree/main/examples/fastify-api), [dashboard](https://github.com/avifenesh/glidemq-examples/tree/main/examples/express-dashboard), [nestjs](https://github.com/avifenesh/glidemq-examples/tree/main/examples/nestjs-module) |
+| **Use cases** | [email-service](https://github.com/avifenesh/glidemq-examples/tree/main/examples/email-service), [image-pipeline](https://github.com/avifenesh/glidemq-examples/tree/main/examples/image-pipeline), [webhook-delivery](https://github.com/avifenesh/glidemq-examples/tree/main/examples/webhook-delivery) |
 
 ## Cross-Language Integration
 
@@ -186,24 +323,15 @@ Non-Node.js services (Python, Go, Java, etc.) can enqueue jobs into glide-mq que
 
 ### Option 1: HTTP Proxy (recommended for most use cases)
 
-```bash
-npm install express
-```
-
 ```typescript
 import { createProxyServer } from 'glide-mq/proxy';
 
 const proxy = createProxyServer({
   connection: { addresses: [{ host: 'localhost', port: 6379 }] },
-  queues: ['emails', 'reports'],  // optional allowlist
+  queues: ['emails', 'reports'],
 });
-
-// Add your own auth middleware before exposing to the network
-// proxy.app.use(yourAuthMiddleware);
-proxy.app.listen(3000, () => console.log('Proxy on :3000'));
+proxy.app.listen(3000);
 ```
-
-Then enqueue from any language via HTTP:
 
 ```bash
 curl -X POST http://localhost:3000/queues/emails/jobs \
@@ -215,27 +343,27 @@ curl -X POST http://localhost:3000/queues/emails/jobs \
 
 ### Option 2: Direct FCALL (zero overhead, any Valkey client)
 
-Call Valkey Server Functions directly from any language that has a Valkey/Redis client. See [Wire Protocol](docs/WIRE_PROTOCOL.md) for exact FCALL signatures, key layout, and examples in Python and Go.
+Call Valkey Server Functions directly from any language. See [Wire Protocol](docs/WIRE_PROTOCOL.md) for FCALL signatures, key layout, and examples in Python and Go.
 
 ## Documentation
 
-| Guide | What you'll learn | Related examples |
-|-------|-------------------|------------------|
-| [Usage](docs/USAGE.md) | Queue & Worker basics, graceful shutdown, cluster mode | [Demo scenarios](demo/README.md#demo-scenarios) |
-| [Advanced](docs/ADVANCED.md) | Schedulers, rate limiting, dedup, compression, retries & DLQ | [Comprehensive demo app](demo/index.ts) |
-| [Workflows](docs/WORKFLOWS.md) | FlowProducer, `chain`, `group`, `chord` pipelines | [Workflow scenarios](demo/README.md#demo-scenarios) |
-| [Observability](docs/OBSERVABILITY.md) | OpenTelemetry, job logs, `@glidemq/dashboard` | [Dashboard API server](demo/dashboard-server.ts) |
-| [Serverless](docs/SERVERLESS.md) | Producer, ServerlessPool, Lambda/Edge/Vercel examples | [Producer tests](tests/producer.test.ts) |
-| [Testing](docs/TESTING.md) | In-memory `TestQueue` & `TestWorker` — no Valkey needed | [Testing mode test](tests/testing-mode.test.ts) |
-| [Wire Protocol](docs/WIRE_PROTOCOL.md) | Cross-language FCALL specs, key layout, Python & Go examples | [Proxy tests](tests/proxy.test.ts) |
-| [Architecture](docs/ARCHITECTURE.md) | Key design, Valkey functions, data layout | [Architecture validation tests](tests/review-coverage.test.ts) |
-| [Migration](docs/MIGRATION.md) | Coming from BullMQ? API mapping & workarounds | [Compatibility suites](tests/compat-bull.test.ts) |
+| Guide | What you'll learn |
+|-------|-------------------|
+| [Usage](docs/USAGE.md) | Queue, Worker, Broadcast, Producer, batch, request-reply, step jobs, graceful shutdown, cluster mode |
+| [Advanced](docs/ADVANCED.md) | Schedulers, rate limiting, dedup, compression, retries, DLQ, custom IDs, LIFO, TTL, serializers |
+| [Workflows](docs/WORKFLOWS.md) | FlowProducer, DAG, `chain`, `group`, `chord`, dynamic children |
+| [Observability](docs/OBSERVABILITY.md) | OpenTelemetry, time-series metrics, job logs, `@glidemq/dashboard` |
+| [Testing](docs/TESTING.md) | In-memory `TestQueue` & `TestWorker` - no Valkey needed |
+| [Wire Protocol](docs/WIRE_PROTOCOL.md) | Cross-language FCALL specs, key layout, Python & Go examples |
+| [Architecture](docs/ARCHITECTURE.md) | Key design, Valkey functions, LIFO, Broadcast, DAG internals |
+| [Durability](docs/DURABILITY.md) | Persistence modes, crash windows, feature-specific durability |
+| [Migration](docs/MIGRATION.md) | Coming from BullMQ? API mapping & step-by-step guide |
 
 ## Get Involved
 
-- ⭐ [Star on GitHub](https://github.com/avifenesh/glide-mq) — helps others find the project
-- 🐛 [Open an issue](https://github.com/avifenesh/glide-mq/issues) — bug reports & feature requests welcome
-- 💬 [Discussions](https://github.com/avifenesh/glide-mq/discussions) — questions, ideas, show & tell
+- [Star on GitHub](https://github.com/avifenesh/glide-mq) - helps others find the project
+- [Open an issue](https://github.com/avifenesh/glide-mq/issues) - bug reports & feature requests welcome
+- [Discussions](https://github.com/avifenesh/glide-mq/discussions) - questions, ideas, show & tell
 
 ## License
 
