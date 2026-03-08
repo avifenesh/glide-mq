@@ -230,9 +230,12 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
 
     // Register this worker and start periodic heartbeat
     await this.registerWorker();
+    // Floor at 1000ms so even very low stalledInterval values don't fire sub-second heartbeats
     const heartbeatMs = Math.max(1000, Math.floor(this.stalledInterval / 2));
     this.workerHeartbeatTimer = setInterval(() => {
-      void this.registerWorker();
+      this.registerWorker().catch((err) => {
+        if (!this.closing) this.emit('error', err);
+      });
     }, heartbeatMs);
 
     this.running = true;
@@ -365,7 +368,9 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
         await this.registerWorker();
         const hbMs = Math.max(1000, Math.floor(this.stalledInterval / 2));
         this.workerHeartbeatTimer = setInterval(() => {
-          void this.registerWorker();
+          this.registerWorker().catch((err) => {
+            if (!this.closing) this.emit('error', err);
+          });
         }, hbMs);
       },
       () => {
@@ -454,7 +459,6 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     for (const streamEntry of result) {
       const entries = streamEntry.value;
       for (const entryId in entries) {
-        if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
         const fieldPairs = entries[entryId];
         if (!fieldPairs) continue; // deleted entry
 
@@ -553,7 +557,6 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     for (const streamEntry of initialResult) {
       const entries = streamEntry.value;
       for (const entryId in entries) {
-        if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
         const fieldPairs = entries[entryId];
         if (!fieldPairs) continue;
 
@@ -583,7 +586,6 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
         for (const streamEntry of moreResult) {
           const entries = streamEntry.value;
           for (const entryId in entries) {
-            if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
             const fieldPairs = entries[entryId];
             if (!fieldPairs) continue;
             const parsed = this.parseStreamEntry(fieldPairs);
@@ -615,6 +617,16 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       const hash = moveResult as Record<string, string>;
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, entry.jobId, hash, this.serializer);
       job.entryId = entry.entryId;
+
+      if (job.deserializationFailed) {
+        this.emit('error', new Error(`Job ${entry.jobId}: deserialization failed, skipping batch entry`));
+        continue;
+      }
+
+      // Clamp priority to guard against overflow from corrupted data
+      if (job.opts.priority !== undefined && job.opts.priority > 2048) {
+        job.opts.priority = 2048;
+      }
 
       // Check ordering - if not ready, defer and skip
       const orderingReady = await this.isOrderingTurn(job);
@@ -1233,6 +1245,10 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash, this.serializer);
       job.entryId = currentEntryId;
 
+      if (job.opts.priority !== undefined && job.opts.priority > 2048) {
+        job.opts.priority = 2048;
+      }
+
       const orderingReady = await this.isOrderingTurn(job);
       if (!orderingReady) {
         await this.deferOutOfOrderJob(currentJobId, currentEntryId);
@@ -1663,8 +1679,11 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       this.blockingClient.close();
       this.blockingClient = null;
     }
-    void this.pollLoopPromise?.catch(() => {});
+    const loopPromise = this.pollLoopPromise;
     this.pollLoopPromise = null;
+    if (loopPromise) {
+      await loopPromise.catch(() => {});
+    }
 
     if (this.commandClient) {
       const commandClient = this.commandClient;

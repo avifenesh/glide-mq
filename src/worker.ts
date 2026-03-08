@@ -223,9 +223,12 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     // Register this worker and start periodic heartbeat
     await this.registerWorker();
+    // Floor at 1000ms so even very low stalledInterval values don't fire sub-second heartbeats
     const heartbeatMs = Math.max(1000, Math.floor(this.stalledInterval / 2));
     this.workerHeartbeatTimer = setInterval(() => {
-      void this.registerWorker();
+      this.registerWorker().catch((err) => {
+        if (!this.closing) this.emit('error', err);
+      });
     }, heartbeatMs);
 
     this.running = true;
@@ -341,7 +344,9 @@ export class Worker<D = any, R = any> extends EventEmitter {
         await this.registerWorker();
         const hbMs = Math.max(1000, Math.floor(this.stalledInterval / 2));
         this.workerHeartbeatTimer = setInterval(() => {
-          void this.registerWorker();
+          this.registerWorker().catch((err) => {
+            if (!this.closing) this.emit('error', err);
+          });
         }, hbMs);
       },
       () => {
@@ -371,6 +376,62 @@ export class Worker<D = any, R = any> extends EventEmitter {
     });
   }
 
+  /**
+   * Try to pop jobs from priority and LIFO lists.
+   * Returns true if at least one job was found and dispatched.
+   */
+  private async tryPopFromLists(fetchCount: number): Promise<boolean> {
+    if (!this.commandClient) return false;
+
+    for (const [listKey, label] of [
+      [this.queueKeys.priority, 'priority'],
+      [this.queueKeys.lifo, 'LIFO'],
+    ] as [string, string][]) {
+      try {
+        // With gc enabled, use atomic rpopAndReserve (single slot).
+        // Without gc, batch pop up to fetchCount to reduce RTTs at concurrency > 1.
+        const popCount = this.concurrency === 1 ? 1 : fetchCount;
+        let jobIds: string[];
+        if (this.globalConcurrencyEnabled) {
+          const id = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP);
+          jobIds = id ? [id] : [];
+        } else if (popCount === 1) {
+          const id = await this.commandClient.rpop(listKey);
+          jobIds = id ? [String(id)] : [];
+        } else {
+          const ids = await this.commandClient.rpopCount(listKey, popCount);
+          jobIds = ids ? ids.map(String) : [];
+        }
+        if (jobIds.length > 0) {
+          // Always INCR list-active so complete/fail Lua DECRs stay balanced.
+          // rpopAndReserve already did the INCR atomically; for non-gc paths do it here.
+          if (!this.globalConcurrencyEnabled) {
+            await this.commandClient.incrBy(this.queueKeys.listActive, jobIds.length);
+          }
+          for (const jobId of jobIds) {
+            if (this.concurrency === 1) {
+              this.activeCount++;
+              const promise = this.processJob(jobId, '');
+              this.activePromises.add(promise);
+              try {
+                await promise;
+              } finally {
+                this.activeCount--;
+                this.activePromises.delete(promise);
+              }
+            } else {
+              this.dispatchJob(jobId, '');
+            }
+          }
+          return true;
+        }
+      } catch (err) {
+        this.emit('error', new Error(`${label} fetch error`, { cause: err }));
+      }
+    }
+    return false;
+  }
+
   private async pollOnce(): Promise<void> {
     if (!this.blockingClient || !this.commandClient) return;
 
@@ -398,52 +459,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
     }
 
     // Check priority list first (priority > LIFO > FIFO), then LIFO, before blocking on stream
-    for (const [listKey, label] of [
-      [this.queueKeys.priority, 'priority'],
-      [this.queueKeys.lifo, 'LIFO'],
-    ] as [string, string][]) {
-      try {
-        // With gc enabled, use atomic rpopAndReserve (single slot).
-        // Without gc, batch pop up to fetchCount to reduce RTTs at concurrency > 1.
-        const popCount = this.concurrency === 1 ? 1 : fetchCount;
-        let jobIds: string[];
-        if (this.globalConcurrencyEnabled) {
-          const id = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP);
-          jobIds = id ? [id] : [];
-        } else if (popCount === 1) {
-          const id = await this.commandClient.rpop(listKey);
-          jobIds = id ? [String(id)] : [];
-        } else {
-          const ids = await this.commandClient.rpopCount(listKey, popCount);
-          jobIds = ids ? ids.map(String) : [];
-        }
-        if (jobIds.length > 0) {
-          // Always INCR list-active so complete/fail Lua DECRs stay balanced.
-          // rpopAndReserve already did the INCR atomically; for non-gc paths do it here.
-          if (!this.globalConcurrencyEnabled && jobIds.length > 0) {
-            await this.commandClient.incrBy(this.queueKeys.listActive, jobIds.length);
-          }
-          for (const jobId of jobIds) {
-            if (this.concurrency === 1) {
-              this.activeCount++;
-              const promise = this.processJob(jobId, '');
-              this.activePromises.add(promise);
-              try {
-                await promise;
-              } finally {
-                this.activeCount--;
-                this.activePromises.delete(promise);
-              }
-            } else {
-              this.dispatchJob(jobId, '');
-            }
-          }
-          return;
-        }
-      } catch (err) {
-        this.emit('error', new Error(`${label} fetch error`, { cause: err }));
-      }
-    }
+    if (await this.tryPopFromLists(fetchCount)) return;
 
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
     // STREAMS {streamKey} >
@@ -454,50 +470,7 @@ export class Worker<D = any, R = any> extends EventEmitter {
 
     if (!result) {
       // Stream empty - check priority and LIFO lists for jobs added while we were blocking
-      if (this.commandClient) {
-        for (const [listKey, label] of [
-          [this.queueKeys.priority, 'priority'],
-          [this.queueKeys.lifo, 'LIFO'],
-        ] as [string, string][]) {
-          try {
-            const popCount = this.concurrency === 1 ? 1 : fetchCount;
-            let jobIds: string[];
-            if (this.globalConcurrencyEnabled) {
-              const id = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP);
-              jobIds = id ? [id] : [];
-            } else if (popCount === 1) {
-              const id = await this.commandClient.rpop(listKey);
-              jobIds = id ? [String(id)] : [];
-            } else {
-              const ids = await this.commandClient.rpopCount(listKey, popCount);
-              jobIds = ids ? ids.map(String) : [];
-            }
-            if (jobIds.length > 0) {
-              if (!this.globalConcurrencyEnabled && jobIds.length > 0) {
-                await this.commandClient.incrBy(this.queueKeys.listActive, jobIds.length);
-              }
-              for (const jobId of jobIds) {
-                if (this.concurrency === 1) {
-                  this.activeCount++;
-                  const promise = this.processJob(jobId, '');
-                  this.activePromises.add(promise);
-                  try {
-                    await promise;
-                  } finally {
-                    this.activeCount--;
-                    this.activePromises.delete(promise);
-                  }
-                } else {
-                  this.dispatchJob(jobId, '');
-                }
-              }
-              return;
-            }
-          } catch (err) {
-            this.emit('error', new Error(`${label} fetch error`, { cause: err }));
-          }
-        }
-      }
+      if (await this.tryPopFromLists(fetchCount)) return;
 
       if (!this.isDrained && this.activeCount === 0) {
         this.isDrained = true;
@@ -517,7 +490,6 @@ export class Worker<D = any, R = any> extends EventEmitter {
     for (const streamEntry of result) {
       const entries = streamEntry.value;
       for (const entryId in entries) {
-        if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
         const fieldPairs = entries[entryId];
         if (!fieldPairs) continue; // deleted entry
 
@@ -594,7 +566,6 @@ export class Worker<D = any, R = any> extends EventEmitter {
     for (const streamEntry of initialResult) {
       const entries = streamEntry.value;
       for (const entryId in entries) {
-        if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
         const fieldPairs = entries[entryId];
         if (!fieldPairs) continue;
 
@@ -630,7 +601,6 @@ export class Worker<D = any, R = any> extends EventEmitter {
         for (const streamEntry of moreResult) {
           const entries = streamEntry.value;
           for (const entryId in entries) {
-            if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
             const fieldPairs = entries[entryId];
             if (!fieldPairs) continue;
             let jobId: string | null = null;
@@ -665,6 +635,16 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const hash = moveResult as Record<string, string>;
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, entry.jobId, hash, this.serializer);
       job.entryId = entry.entryId;
+
+      if (job.deserializationFailed) {
+        this.emit('error', new Error(`Job ${entry.jobId}: deserialization failed, skipping batch entry`));
+        continue;
+      }
+
+      // Clamp priority to guard against overflow from corrupted data
+      if (job.opts.priority !== undefined && job.opts.priority > 2048) {
+        job.opts.priority = 2048;
+      }
 
       // Check ordering - if not ready, defer and skip
       const orderingReady = await this.isOrderingTurn(job);
@@ -1253,6 +1233,10 @@ export class Worker<D = any, R = any> extends EventEmitter {
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash, this.serializer);
       job.entryId = currentEntryId;
 
+      if (job.opts.priority !== undefined && job.opts.priority > 2048) {
+        job.opts.priority = 2048;
+      }
+
       const orderingReady = await this.isOrderingTurn(job);
       if (!orderingReady) {
         await this.deferOutOfOrderJob(currentJobId, currentEntryId);
@@ -1676,8 +1660,11 @@ export class Worker<D = any, R = any> extends EventEmitter {
       this.blockingClient.close();
       this.blockingClient = null;
     }
-    void this.pollLoopPromise?.catch(() => {});
+    const loopPromise = this.pollLoopPromise;
     this.pollLoopPromise = null;
+    if (loopPromise) {
+      await loopPromise.catch(() => {});
+    }
 
     if (this.commandClient) {
       const commandClient = this.commandClient;
