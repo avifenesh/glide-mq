@@ -44,7 +44,7 @@ export class ServerlessPool {
 
     const key = fingerprint(name, opts);
     let producer = this.cache.get(key);
-    if (!producer) {
+    if (!producer || producer.isClosed) {
       producer = new Producer(name, opts);
       this.cache.set(key, producer);
     }
@@ -58,7 +58,7 @@ export class ServerlessPool {
   async closeAll(): Promise<void> {
     const producers = [...this.cache.values()];
     this.cache.clear();
-    await Promise.all(producers.map((p) => p.close()));
+    await Promise.allSettled(producers.map((p) => p.close()));
   }
 
   /** Number of cached producers. */

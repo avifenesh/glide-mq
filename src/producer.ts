@@ -478,6 +478,11 @@ export class Producer<D = any> {
     return results;
   }
 
+  /** Returns true if close() has been called. */
+  get isClosed(): boolean {
+    return this.closing;
+  }
+
   /**
    * Close the producer. If the client was created by this producer, it is destroyed.
    * If an external client was provided, it is not closed.
