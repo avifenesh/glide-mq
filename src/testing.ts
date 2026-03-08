@@ -38,7 +38,6 @@ import {
   validateSchedulerBounds,
   validateSchedulerEvery,
   validateTimezone,
-  INVALID_JOB_ID_CHARS,
   validateJobId,
 } from './utils';
 

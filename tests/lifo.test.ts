@@ -714,7 +714,9 @@ describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
         }
       });
 
-      worker.on('error', (err: Error) => { reject(err); });
+      worker.on('error', (err: Error) => {
+        reject(err);
+      });
     });
   }, 15000);
 });

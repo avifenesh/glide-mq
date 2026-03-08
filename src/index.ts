@@ -66,3 +66,5 @@ export type { WorkflowJobDef } from './workflows';
 export { validateDAG, topoSort, CycleError } from './dag-utils';
 
 export { setTracer, isTracingEnabled } from './telemetry';
+
+export { matchSubject, compileSubjectMatcher } from './utils';

@@ -8,6 +8,7 @@ import { Job } from './job';
 import {
   buildKeys,
   calculateBackoff,
+  compileSubjectMatcher,
   computeFollowingSchedulerNextRun,
   keyPrefix,
   nextReconnectDelay,
@@ -93,6 +94,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
   private readonly batchSize: number;
   private readonly batchTimeout: number;
   private readonly batchProcessor: BatchProcessor<D, R> | null;
+  private readonly subjectMatcher: ((subject: string) => boolean) | null;
 
   constructor(name: string, processor: Processor<D, R> | BatchProcessor<D, R> | string, opts: BroadcastWorkerOptions) {
     super();
@@ -165,6 +167,7 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
     this.stalledInterval = opts.stalledInterval ?? 30000;
     this.maxStalledCount = opts.maxStalledCount ?? 1;
     this.lockDuration = opts.lockDuration ?? 30000;
+    this.subjectMatcher = compileSubjectMatcher(opts.subjects);
 
     // Auto-init: start the worker immediately
     this.initPromise = this.init();
@@ -433,6 +436,13 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       return;
     }
 
+    // If closing while XREADGROUP was blocking, skip processing
+    // (entries are reclaimed by stall recovery on the next worker).
+    // Note: do NOT skip on pause - entries are already claimed in PEL and must
+    // be processed, otherwise they're stuck. The pollLoop while-condition
+    // stops after this iteration.
+    if (this.closing) return;
+
     // Batch mode: collect entries and process as a batch
     if (this.batchMode) {
       await this.collectAndProcessBatch(result);
@@ -448,24 +458,15 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
         const fieldPairs = entries[entryId];
         if (!fieldPairs) continue; // deleted entry
 
-        // Parse the stream entry fields to extract jobId
-        let jobId: string | null = null;
-        for (let i = 0; i < fieldPairs.length; i++) {
-          const field = fieldPairs[i][0];
-          const value = fieldPairs[i][1];
-          if (String(field) === 'jobId') {
-            jobId = String(value);
-            break;
-          }
-        }
-
-        if (!jobId) continue;
+        const parsed = this.parseStreamEntry(fieldPairs);
+        if (!parsed) continue;
+        if (!(await this.passesSubjectFilter(parsed.name, String(entryId)))) continue;
 
         if (this.concurrency === 1) {
           // c=1 fast path: process inline (blocks poll loop).
           // Track in activePromises so close(false) can wait for it.
           this.activeCount++;
-          const promise = this.processJob(jobId, String(entryId));
+          const promise = this.processJob(parsed.jobId, String(entryId));
           this.activePromises.add(promise);
           try {
             await promise;
@@ -474,10 +475,41 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
             this.activePromises.delete(promise);
           }
         } else {
-          this.dispatchJob(jobId, String(entryId));
+          this.dispatchJob(parsed.jobId, String(entryId));
         }
       }
     }
+  }
+
+  /**
+   * Parse jobId and name from stream entry field pairs.
+   * Returns null if jobId is missing.
+   */
+  private parseStreamEntry(fieldPairs: [unknown, unknown][]): { jobId: string; name: string | null } | null {
+    let jobId: string | null = null;
+    let name: string | null = null;
+    for (let i = 0; i < fieldPairs.length; i++) {
+      const field = String(fieldPairs[i][0]);
+      const value = String(fieldPairs[i][1]);
+      if (field === 'jobId') jobId = value;
+      else if (field === 'name') name = value;
+    }
+    if (!jobId) return null;
+    return { jobId, name };
+  }
+
+  /**
+   * Check if a message passes the subject filter. Auto-ACKs non-matching messages.
+   * Returns true if the message should be processed.
+   */
+  private async passesSubjectFilter(name: string | null, entryId: string): Promise<boolean> {
+    // When name is null (pre-v58 stream entries without name field), pass through
+    // to processJob which reads the name from the job hash - no filtering possible.
+    if (this.subjectMatcher && name !== null && !this.subjectMatcher(name)) {
+      await this.commandClient!.xack(this.queueKeys.stream, this.subscription, [entryId]);
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -525,17 +557,11 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
         const fieldPairs = entries[entryId];
         if (!fieldPairs) continue;
 
-        let jobId: string | null = null;
-        for (let i = 0; i < fieldPairs.length; i++) {
-          if (String(fieldPairs[i][0]) === 'jobId') {
-            jobId = String(fieldPairs[i][1]);
-            break;
-          }
-        }
-        if (jobId) {
-          collected.push({ jobId, entryId: String(entryId) });
-          if (collected.length >= this.batchSize) break;
-        }
+        const parsed = this.parseStreamEntry(fieldPairs);
+        if (!parsed) continue;
+        if (!(await this.passesSubjectFilter(parsed.name, String(entryId)))) continue;
+        collected.push({ jobId: parsed.jobId, entryId: String(entryId) });
+        if (collected.length >= this.batchSize) break;
       }
       if (collected.length >= this.batchSize) break;
     }
@@ -560,14 +586,10 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
             if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
             const fieldPairs = entries[entryId];
             if (!fieldPairs) continue;
-            let jobId: string | null = null;
-            for (let i = 0; i < fieldPairs.length; i++) {
-              if (String(fieldPairs[i][0]) === 'jobId') {
-                jobId = String(fieldPairs[i][1]);
-                break;
-              }
-            }
-            if (jobId) collected.push({ jobId, entryId: String(entryId) });
+            const parsed = this.parseStreamEntry(fieldPairs);
+            if (!parsed) continue;
+            if (!(await this.passesSubjectFilter(parsed.name, String(entryId)))) continue;
+            collected.push({ jobId: parsed.jobId, entryId: String(entryId) });
           }
         }
       }
