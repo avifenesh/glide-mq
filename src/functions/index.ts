@@ -19,7 +19,7 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 58: XADD to job stream includes 'name' field for subject-based filtering in BroadcastWorker.
 // Version 59: glidemq_healListActive - self-healing for list-active counter drift on worker crash.
 // Version 61: glidemq_popLists - atomic pop from priority + LIFO lists in a single FCALL; timestamp caching in processJob.
-export const LIBRARY_VERSION = '62';
+export const LIBRARY_VERSION = '63';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -839,9 +839,16 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local currentOrderingSeq = args[13] or ''
   local currentGroupKey = args[14] or ''
   local broadcastMode = args[15] or '0'
+  local hintProcessedOn = args[16] or ''
+  local hasParents = args[17] or '0'
 
   -- Phase 1: Complete current job (same as glidemq_complete)
-  local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
+  local processedOn
+  if hintProcessedOn ~= '' then
+    processedOn = tonumber(hintProcessedOn) or timestamp
+  else
+    processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
+  end
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   redis.call('ZADD', completedKey, timestamp, jobId)
@@ -850,8 +857,12 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     'returnvalue', returnvalue,
     'finishedOn', tostring(timestamp)
   )
-  markOrderingDone(jobKey, jobId, currentOrderingKey, currentOrderingSeq)
-  releaseGroupSlotAndPromote(jobKey, jobId, timestamp, currentGroupKey)
+  if currentOrderingKey ~= '__' then
+    markOrderingDone(jobKey, jobId, currentOrderingKey, currentOrderingSeq)
+  end
+  if currentGroupKey ~= '__' then
+    releaseGroupSlotAndPromote(jobKey, jobId, timestamp, currentGroupKey)
+  end
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   recordMetrics(metricsKey, timestamp, timestamp - processedOn)
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
@@ -904,40 +915,36 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       end
     end
   end
-  -- DAG multi-parent: notify additional same-queue parents via parents SET
-  local parentsKey = prefix .. 'parents:' .. jobId
-  local dagParents = redis.call('SMEMBERS', parentsKey)
-  if dagParents and #dagParents > 0 then
-    local childQueuePrefix = string.sub(prefix, 1, #prefix - 1)
-    local dagDepsMember = childQueuePrefix .. ':' .. jobId
-    for pi = 1, #dagParents do
-      local pEntry = dagParents[pi]
-      -- Format: "parentQueuePrefix:parentId" where prefix is glide:{qname}
-      -- Must find LAST colon (not first, since prefix contains colons in {})
-      local pSep = pEntry:find(':([^:]+)$')
-      if pSep then
-        local pQueue = string.sub(pEntry, 1, pSep - 1)
-        local pId = string.sub(pEntry, pSep + 1)
-        -- Only handle same-queue parents atomically in Lua.
-        -- Cross-queue parents are skipped here because their keys use a different
-        -- hash tag (different prefix), which may route to a different cluster slot.
-        -- The TypeScript layer handles cross-queue parent notification separately.
-        if pQueue == childQueuePrefix then
-          local pPrefix = prefix
-          local pJobKey = pPrefix .. 'job:' .. pId
-          local pDepsKey = pPrefix .. 'deps:' .. pId
-          local pStreamKey = pPrefix .. 'stream'
-          local pEventsKey = pPrefix .. 'events'
-          local pDepMarker = 'depdone:' .. dagDepsMember
-          if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
-            local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
-            local pTotalDeps = redis.call('SCARD', pDepsKey)
-            if pTotalDeps - pDoneCount <= 0 then
-              local pState = redis.call('HGET', pJobKey, 'state')
-              if pState == 'waiting-children' then
-                redis.call('HSET', pJobKey, 'state', 'waiting')
-                xaddJob(pStreamKey, pId, redis.call('HGET', pJobKey, 'name'))
-                emitEvent(pEventsKey, 'active', pId, nil)
+  -- DAG multi-parent: skip SMEMBERS when caller confirms no parents
+  if hasParents ~= '0' then
+    local parentsKey = prefix .. 'parents:' .. jobId
+    local dagParents = redis.call('SMEMBERS', parentsKey)
+    if dagParents and #dagParents > 0 then
+      local childQueuePrefix = string.sub(prefix, 1, #prefix - 1)
+      local dagDepsMember = childQueuePrefix .. ':' .. jobId
+      for pi = 1, #dagParents do
+        local pEntry = dagParents[pi]
+        local pSep = pEntry:find(':([^:]+)$')
+        if pSep then
+          local pQueue = string.sub(pEntry, 1, pSep - 1)
+          local pId = string.sub(pEntry, pSep + 1)
+          if pQueue == childQueuePrefix then
+            local pPrefix = prefix
+            local pJobKey = pPrefix .. 'job:' .. pId
+            local pDepsKey = pPrefix .. 'deps:' .. pId
+            local pStreamKey = pPrefix .. 'stream'
+            local pEventsKey = pPrefix .. 'events'
+            local pDepMarker = 'depdone:' .. dagDepsMember
+            if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
+              local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
+              local pTotalDeps = redis.call('SCARD', pDepsKey)
+              if pTotalDeps - pDoneCount <= 0 then
+                local pState = redis.call('HGET', pJobKey, 'state')
+                if pState == 'waiting-children' then
+                  redis.call('HSET', pJobKey, 'state', 'waiting')
+                  xaddJob(pStreamKey, pId, redis.call('HGET', pJobKey, 'name'))
+                  emitEvent(pEventsKey, 'active', pId, nil)
+                end
               end
             end
           end
@@ -3245,6 +3252,8 @@ export async function completeAndFetchNext(
   parentInfo?: { depsMember: string; parentId: string; parentKeys: QueueKeys },
   hints?: CompleteAndFetchHints,
   broadcastMode?: boolean,
+  processedOn?: number,
+  hasParents?: boolean,
 ): Promise<CompleteAndFetchResult> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
@@ -3271,8 +3280,11 @@ export async function completeAndFetchNext(
 
   const orderingSeqHint =
     hints?.orderingSeq != null && Number.isFinite(hints.orderingSeq) ? Math.trunc(hints.orderingSeq).toString() : '';
-  args.push(hints?.orderingKey ?? '', orderingSeqHint, hints?.groupKey ?? '');
-  if (broadcastMode) args.push('1');
+  // '__' sentinel = confirmed absent (skip HGET in Lua); '' = unknown (Lua does HGET)
+  args.push(hints?.orderingKey === undefined ? '__' : hints.orderingKey, orderingSeqHint, hints?.groupKey === undefined ? '__' : hints.groupKey);
+  args.push(broadcastMode ? '1' : '0');
+  args.push(processedOn != null ? processedOn.toString() : '');
+  args.push(hasParents ? '1' : '0');
 
   const raw = await client.fcall('glidemq_completeAndFetchNext', keys, args);
 

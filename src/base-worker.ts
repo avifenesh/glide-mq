@@ -1209,6 +1209,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         parentInfo,
         completionHints,
         this.broadcastMode ? true : undefined,
+        job.processedOn,
+        !!(job.parentId || job.parentIds),
       );
 
       job.returnvalue = processResult;
