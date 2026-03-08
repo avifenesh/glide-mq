@@ -436,8 +436,12 @@ export class BroadcastWorker<D = any, R = any> extends EventEmitter {
       return;
     }
 
-    // If paused while XREADGROUP was blocking, skip processing these entries
-    if (this.paused || this.closing) return;
+    // If closing while XREADGROUP was blocking, skip processing
+    // (entries are reclaimed by stall recovery on the next worker).
+    // Note: do NOT skip on pause - entries are already claimed in PEL and must
+    // be processed, otherwise they're stuck. The pollLoop while-condition
+    // stops after this iteration.
+    if (this.closing) return;
 
     // Batch mode: collect entries and process as a batch
     if (this.batchMode) {

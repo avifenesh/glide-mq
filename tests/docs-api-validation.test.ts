@@ -16,7 +16,8 @@ const DOC_FILES = [
 ];
 
 const CODE_BLOCK_REGEX = /```(?:ts|typescript|js|javascript)\n([\s\S]*?)```/g;
-const IMPORT_REGEX = /^\s*import\s+(?:type\s+)?([\s\S]*?)\s+from\s+['"]([^'"]+)['"];?\s*$/gm;
+// Skip `import type` (type-only imports aren't in Object.keys at runtime)
+const IMPORT_REGEX = /^\s*import\s+(?!type\s)([\s\S]*?)\s+from\s+['"]([^'"]+)['"];?\s*$/gm;
 
 const RECEIVER_PROTOTYPES: Record<string, object> = {
   queue: Queue.prototype,
