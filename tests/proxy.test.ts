@@ -314,6 +314,464 @@ describe('HTTP Proxy', () => {
   });
 });
 
+describe('HTTP Proxy - Endpoint Coverage', () => {
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+  const queueNames: string[] = [];
+
+  function uniqueQueue(label: string): string {
+    const name = `proxy-cov-${Date.now()}-${label}`;
+    queueNames.push(name);
+    return name;
+  }
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+
+    const proxy = createProxyServer({ connection: CONNECTION });
+    proxyClose = proxy.close;
+
+    await new Promise<void>((resolve) => {
+      server = proxy.app.listen(0, () => {
+        const addr = server.address();
+        if (typeof addr === 'object' && addr) {
+          baseUrl = `http://127.0.0.1:${addr.port}`;
+        }
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    await proxyClose();
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+    for (const name of queueNames) {
+      await flushQueue(cleanupClient, name);
+    }
+    await cleanupClient.close();
+  });
+
+  // --- GET /queues/:name/jobs/:id - response structure validation ---
+
+  it('GET /queues/:name/jobs/:id - response contains all expected fields', async () => {
+    const queueName = uniqueQueue('fields');
+
+    const addRes = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'field-check', data: { x: 1 } }),
+    });
+    const added = await addRes.json();
+
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs/${added.id}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    // Verify all fields from GetJobResponse
+    expect(body).toHaveProperty('id');
+    expect(body).toHaveProperty('name');
+    expect(body).toHaveProperty('data');
+    expect(body).toHaveProperty('opts');
+    expect(body).toHaveProperty('timestamp');
+    expect(body).toHaveProperty('attemptsMade');
+    expect(body).toHaveProperty('state');
+    expect(body).toHaveProperty('progress');
+    // Optional fields may be absent (undefined values are stripped by JSON.stringify)
+    // but the route always includes them in the response object, so if they
+    // have a value (null counts), they will appear. For a waiting job these are
+    // typically undefined/null, so we just verify no unexpected extra keys exist.
+    const knownFields = new Set([
+      'id', 'name', 'data', 'opts', 'timestamp', 'attemptsMade',
+      'state', 'progress', 'returnvalue', 'failedReason',
+      'finishedOn', 'processedOn', 'parentId',
+    ]);
+    for (const key of Object.keys(body)) {
+      expect(knownFields.has(key)).toBe(true);
+    }
+
+    // Type checks
+    expect(typeof body.id).toBe('string');
+    expect(typeof body.name).toBe('string');
+    expect(typeof body.timestamp).toBe('number');
+    expect(typeof body.attemptsMade).toBe('number');
+    expect(typeof body.state).toBe('string');
+  });
+
+  // --- GET /queues/:name/jobs - list jobs with state filter ---
+
+  it('GET /queues/:name/jobs - lists waiting jobs by default', async () => {
+    const queueName = uniqueQueue('list-default');
+
+    // Add two jobs
+    await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'list-a', data: { i: 0 } }),
+    });
+    await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'list-b', data: { i: 1 } }),
+    });
+
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body.jobs)).toBe(true);
+    expect(body.jobs.length).toBeGreaterThanOrEqual(2);
+
+    // Each item should have standard fields
+    for (const job of body.jobs) {
+      expect(job).toHaveProperty('id');
+      expect(job).toHaveProperty('name');
+      expect(job).toHaveProperty('data');
+      expect(job).toHaveProperty('timestamp');
+      expect(job).toHaveProperty('attemptsMade');
+    }
+  });
+
+  it('GET /queues/:name/jobs?state=delayed - lists delayed jobs', async () => {
+    const queueName = uniqueQueue('list-delayed');
+
+    // Add a delayed job
+    await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'delayed-job', data: {}, opts: { delay: 60000 } }),
+    });
+
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs?state=delayed`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body.jobs)).toBe(true);
+    expect(body.jobs.length).toBeGreaterThanOrEqual(1);
+    expect(body.jobs[0].name).toBe('delayed-job');
+  });
+
+  it('GET /queues/:name/jobs?state=invalid - returns 400', async () => {
+    const queueName = uniqueQueue('list-invalid');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs?state=bogus`);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('Invalid state');
+  });
+
+  it('GET /queues/:name/jobs - empty queue returns empty array', async () => {
+    const queueName = uniqueQueue('list-empty');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.jobs).toEqual([]);
+  });
+
+  // --- DELETE /queues/:name/jobs/:id ---
+
+  it('DELETE /queues/:name/jobs/:id - removes a job and returns 204', async () => {
+    const queueName = uniqueQueue('delete');
+
+    // Add a job
+    const addRes = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'to-delete', data: { tmp: true } }),
+    });
+    const added = await addRes.json();
+
+    // Delete it
+    const delRes = await fetch(`${baseUrl}/queues/${queueName}/jobs/${added.id}`, {
+      method: 'DELETE',
+    });
+    expect(delRes.status).toBe(204);
+
+    // Verify it is gone
+    const getRes = await fetch(`${baseUrl}/queues/${queueName}/jobs/${added.id}`);
+    expect(getRes.status).toBe(404);
+  });
+
+  it('DELETE /queues/:name/jobs/:id - unknown job returns 404', async () => {
+    const queueName = uniqueQueue('delete-404');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs/nonexistent-job`, {
+      method: 'DELETE',
+    });
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe('Job not found');
+  });
+
+  // --- Malformed requests ---
+
+  it('POST /queues/:name/jobs - missing body returns 400', async () => {
+    const queueName = uniqueQueue('no-body');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('name');
+  });
+
+  it('POST /queues/:name/jobs - invalid JSON returns 400', async () => {
+    const queueName = uniqueQueue('bad-json');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{not valid json!!!}',
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBeTruthy();
+  });
+
+  it('POST /queues/:name/jobs - wrong content-type returns 400', async () => {
+    const queueName = uniqueQueue('wrong-ct');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ name: 'test', data: {} }),
+    });
+    // Express json() middleware ignores non-JSON content-type, body will be undefined
+    expect(res.status).toBe(400);
+  });
+
+  // --- Opts validation ---
+
+  it('POST /queues/:name/jobs - NaN delay returns 400', async () => {
+    const queueName = uniqueQueue('nan-delay');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'task', data: {}, opts: { delay: 'not-a-number' } }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('delay');
+  });
+
+  it('POST /queues/:name/jobs - negative priority returns 400', async () => {
+    const queueName = uniqueQueue('neg-prio');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'task', data: {}, opts: { priority: -1 } }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('priority');
+  });
+
+  it('POST /queues/:name/jobs - zero timeout returns 400', async () => {
+    const queueName = uniqueQueue('zero-timeout');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'task', data: {}, opts: { timeout: 0 } }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('timeout');
+  });
+
+  it('POST /queues/:name/jobs - zero cost returns 400', async () => {
+    const queueName = uniqueQueue('zero-cost');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'task', data: {}, opts: { cost: 0 } }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('cost');
+  });
+
+  it('POST /queues/:name/jobs - zero attempts returns 400', async () => {
+    const queueName = uniqueQueue('zero-attempts');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'task', data: {}, opts: { attempts: 0 } }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('attempts');
+  });
+
+  // --- Bulk endpoint edge cases ---
+
+  it('POST /queues/:name/jobs/bulk - empty jobs array succeeds with 200', async () => {
+    const queueName = uniqueQueue('bulk-empty');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobs: [] }),
+    });
+    // Empty array - no jobs created so anyCreated is false -> 200
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.jobs).toEqual([]);
+  });
+
+  it('POST /queues/:name/jobs/bulk - jobs is not an array returns 400', async () => {
+    const queueName = uniqueQueue('bulk-notarr');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobs: 'not-an-array' }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('jobs');
+  });
+
+  it('POST /queues/:name/jobs/bulk - job with empty string name returns 400', async () => {
+    const queueName = uniqueQueue('bulk-emptyname');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobs: [{ name: '', data: {} }] }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('jobs[0]');
+  });
+
+  // --- AddJob response structure ---
+
+  it('POST /queues/:name/jobs - response contains id, name, timestamp', async () => {
+    const queueName = uniqueQueue('resp-struct');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'struct-test', data: { v: 42 } }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(Object.keys(body).sort()).toEqual(['id', 'name', 'timestamp'].sort());
+    expect(typeof body.id).toBe('string');
+    expect(body.name).toBe('struct-test');
+    expect(typeof body.timestamp).toBe('number');
+  });
+
+  it('POST /queues/:name/jobs/bulk - response jobs have correct structure', async () => {
+    const queueName = uniqueQueue('bulk-struct');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jobs: [{ name: 'bulk-s1', data: {} }, { name: 'bulk-s2', data: {} }],
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.jobs).toHaveLength(2);
+    for (const job of body.jobs) {
+      expect(Object.keys(job).sort()).toEqual(['id', 'name', 'timestamp'].sort());
+      expect(typeof job.id).toBe('string');
+      expect(typeof job.name).toBe('string');
+      expect(typeof job.timestamp).toBe('number');
+    }
+  });
+
+  // --- Counts response structure ---
+
+  it('GET /queues/:name/counts - response contains all state fields as numbers', async () => {
+    const queueName = uniqueQueue('counts-struct');
+    const res = await fetch(`${baseUrl}/queues/${queueName}/counts`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    for (const field of ['waiting', 'active', 'delayed', 'completed', 'failed']) {
+      expect(typeof body[field]).toBe('number');
+    }
+  });
+});
+
+describe('HTTP Proxy - Allowlist Edge Cases', () => {
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+
+    // Empty allowlist - no queues permitted
+    const proxy = createProxyServer({
+      connection: CONNECTION,
+      queues: [],
+    });
+    proxyClose = proxy.close;
+
+    await new Promise<void>((resolve) => {
+      server = proxy.app.listen(0, () => {
+        const addr = server.address();
+        if (typeof addr === 'object' && addr) {
+          baseUrl = `http://127.0.0.1:${addr.port}`;
+        }
+        resolve();
+      });
+    });
+  });
+
+  afterAll(async () => {
+    await proxyClose();
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+    await cleanupClient.close();
+  });
+
+  it('empty allowlist blocks all queue access with 403', async () => {
+    const res = await fetch(`${baseUrl}/queues/any-queue/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'task', data: {} }),
+    });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toContain('not in the allowlist');
+  });
+
+  it('empty allowlist blocks GET job by id', async () => {
+    const res = await fetch(`${baseUrl}/queues/any-queue/jobs/some-id`);
+    expect(res.status).toBe(403);
+  });
+
+  it('empty allowlist blocks DELETE job', async () => {
+    const res = await fetch(`${baseUrl}/queues/any-queue/jobs/some-id`, {
+      method: 'DELETE',
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('empty allowlist blocks GET jobs list', async () => {
+    const res = await fetch(`${baseUrl}/queues/any-queue/jobs`);
+    expect(res.status).toBe(403);
+  });
+
+  it('empty allowlist blocks pause', async () => {
+    const res = await fetch(`${baseUrl}/queues/any-queue/pause`, { method: 'POST' });
+    expect(res.status).toBe(403);
+  });
+
+  it('empty allowlist blocks resume', async () => {
+    const res = await fetch(`${baseUrl}/queues/any-queue/resume`, { method: 'POST' });
+    expect(res.status).toBe(403);
+  });
+
+  it('empty allowlist blocks counts', async () => {
+    const res = await fetch(`${baseUrl}/queues/any-queue/counts`);
+    expect(res.status).toBe(403);
+  });
+
+  it('empty allowlist does not block /health', async () => {
+    const res = await fetch(`${baseUrl}/health`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe('ok');
+  });
+});
+
 describe('HTTP Proxy - createProxyServer validation', () => {
   it('throws when neither connection nor client provided', () => {
     expect(() => createProxyServer({} as any)).toThrow('connection');
@@ -377,6 +835,18 @@ describe('HTTP Proxy - Queue Allowlist', () => {
 
   it('blocked queue GET also returns 403', async () => {
     const res = await fetch(`${baseUrl}/queues/${blockedQueue}/jobs/1`);
+    expect(res.status).toBe(403);
+  });
+
+  it('blocked queue DELETE returns 403', async () => {
+    const res = await fetch(`${baseUrl}/queues/${blockedQueue}/jobs/1`, {
+      method: 'DELETE',
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('blocked queue GET list returns 403', async () => {
+    const res = await fetch(`${baseUrl}/queues/${blockedQueue}/jobs`);
     expect(res.status).toBe(403);
   });
 

@@ -4,6 +4,7 @@ import type { ProxyOptions, AddJobRequest, AddJobResponse, AddJobSkippedResponse
 import { validateQueueName } from '../utils';
 
 const MAX_BULK_SIZE = 1000;
+const VALID_JOB_STATES = ['waiting', 'active', 'delayed', 'completed', 'failed'] as const;
 
 /** Extract a single string from a route param (Express 5 params can be string | string[]). */
 function param(req: Request, key: string): string {
@@ -204,6 +205,40 @@ export function createRoutes(
     }
   });
 
+  router.get('/queues/:name/jobs', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+
+      const state = (req.query.state as string) || 'waiting';
+      if (!(VALID_JOB_STATES as readonly string[]).includes(state)) {
+        res.status(400).json({ error: `Invalid state: ${state}. Must be one of: ${VALID_JOB_STATES.join(', ')}` });
+        return;
+      }
+
+      const queue = getQueue(param(req, 'name'));
+      const start = parseInt(req.query.start as string, 10) || 0;
+      const end = parseInt(req.query.end as string, 10);
+      const jobs = await queue.getJobs(
+        state as 'waiting' | 'active' | 'delayed' | 'completed' | 'failed',
+        start,
+        Number.isNaN(end) ? -1 : end,
+      );
+
+      res.status(200).json({
+        jobs: jobs.map((j) => ({
+          id: j.id,
+          name: j.name,
+          data: j.data,
+          timestamp: j.timestamp,
+          attemptsMade: j.attemptsMade,
+        })),
+      });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
   router.get('/queues/:name/jobs/:id', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
@@ -231,6 +266,26 @@ export function createRoutes(
         processedOn: job.processedOn,
         parentId: job.parentId,
       });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  router.delete('/queues/:name/jobs/:id', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+
+      const queue = getQueue(param(req, 'name'));
+      const job = await queue.getJob(param(req, 'id'));
+
+      if (!job) {
+        res.status(404).json({ error: 'Job not found' });
+        return;
+      }
+
+      await job.remove();
+      res.status(204).send();
     } catch (err) {
       const { status, message } = errorResponse(err);
       res.status(status).json({ error: message });
