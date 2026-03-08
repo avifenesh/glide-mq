@@ -17,7 +17,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 56: glidemq_checkConcurrency includes list-active counter; complete/fail DECR on list jobs; rpopAndReserve.
 // Version 57: glidemq_addFlow routes child jobs with lifo:true to LIFO list.
 // Version 58: XADD to job stream includes 'name' field for subject-based filtering in BroadcastWorker.
-export const LIBRARY_VERSION = '58';
+// Version 59: glidemq_healListActive - self-healing for list-active counter drift on worker crash.
+export const LIBRARY_VERSION = '60';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -90,6 +91,7 @@ local function tbRefill(groupHashKey, g, now)
   local tbCapacity = tonumber(g.tbCapacity) or 0
   if tbCapacity <= 0 then return 0 end
   local tbTokens = tonumber(g.tbTokens) or tbCapacity
+  if tbTokens >= tbCapacity then return tbCapacity end
   local tbRefillRate = tonumber(g.tbRefillRate) or 0
   local tbLastRefill = tonumber(g.tbLastRefill) or now
   local tbRefillRemainder = tonumber(g.tbRefillRemainder) or 0
@@ -115,7 +117,7 @@ local function recordMetrics(metricsKey, timestamp, duration)
   if duration > 0 then
     redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':d', duration)
   end
-  if newCount and (newCount % 100 == 0) then
+  if newCount and (newCount % 1000 == 0) then
     local cutoff = minuteTs - 86400000
     local fields = redis.call('HKEYS', metricsKey)
     local toDelete = {}
@@ -391,6 +393,7 @@ end)
 
 redis.register_function('glidemq_addJob', function(keys, args)
   local idKey = keys[1]
+  assert(string.sub(idKey, -3) == ':id', 'unexpected key format: ' .. idKey)
   local streamKey = keys[2]
   local scheduledKey = keys[3]
   local eventsKey = keys[4]
@@ -699,6 +702,7 @@ redis.register_function('glidemq_complete', function(keys, args)
   local jobKey = keys[4]
   local metricsKey = keys[5]
   local jobId = args[1]
+  assert(string.sub(jobKey, -(4 + #jobId)) == 'job:' .. jobId, 'unexpected key format: ' .. jobKey)
   local entryId = args[2]
   local returnvalue = args[3]
   local timestamp = tonumber(args[4])
@@ -778,13 +782,7 @@ redis.register_function('glidemq_complete', function(keys, args)
       local pEntry = dagParents[pi]
       -- Format: "parentQueuePrefix:parentId" where prefix is glide:{qname}
       -- Must find LAST colon (not first, since prefix contains colons in {})
-      local pSep = nil
-      for i = #pEntry, 1, -1 do
-        if string.sub(pEntry, i, i) == ':' then
-          pSep = i
-          break
-        end
-      end
+      local pSep = pEntry:find(':([^:]+)$')
       if pSep then
         local pQueue = string.sub(pEntry, 1, pSep - 1)
         local pId = string.sub(pEntry, pSep + 1)
@@ -915,13 +913,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       local pEntry = dagParents[pi]
       -- Format: "parentQueuePrefix:parentId" where prefix is glide:{qname}
       -- Must find LAST colon (not first, since prefix contains colons in {})
-      local pSep = nil
-      for i = #pEntry, 1, -1 do
-        if string.sub(pEntry, i, i) == ':' then
-          pSep = i
-          break
-        end
-      end
+      local pSep = pEntry:find(':([^:]+)$')
       if pSep then
         local pQueue = string.sub(pEntry, 1, pSep - 1)
         local pId = string.sub(pEntry, pSep + 1)
@@ -1160,6 +1152,7 @@ redis.register_function('glidemq_fail', function(keys, args)
   local jobKey = keys[5]
   local metricsKey = keys[6]
   local jobId = args[1]
+  assert(string.sub(jobKey, -(4 + #jobId)) == 'job:' .. jobId, 'unexpected key format: ' .. jobKey)
   local entryId = args[2]
   local failedReason = args[3]
   local timestamp = tonumber(args[4])
@@ -2866,6 +2859,47 @@ redis.register_function('glidemq_retryJobs', function(keys, args)
   end
   return retried
 end)
+
+redis.register_function('glidemq_healListActive', function(keys, args)
+  local idKey = keys[1]
+  local prefix = string.sub(idKey, 1, #idKey - 2)
+  local listActiveKey = prefix .. 'list-active'
+  local counter = tonumber(redis.call('GET', listActiveKey)) or 0
+  if counter <= 0 then
+    return 0
+  end
+  local pattern = prefix .. 'job:*'
+  local cursor = '0'
+  local actual = 0
+  local maxIter = 500
+  local iter = 0
+  repeat
+    iter = iter + 1
+    local scanResult = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 100)
+    cursor = scanResult[1]
+    local scannedKeys = scanResult[2]
+    for i = 1, #scannedKeys do
+      local jk = scannedKeys[i]
+      local state = redis.call('HGET', jk, 'state')
+      if state == 'active' then
+        local lifo = redis.call('HGET', jk, 'lifo')
+        if lifo == '1' then
+          actual = actual + 1
+        else
+          local pri = tonumber(redis.call('HGET', jk, 'priority')) or 0
+          if pri > 0 then
+            actual = actual + 1
+          end
+        end
+      end
+    end
+  until cursor == '0' or iter >= maxIter
+  local drift = counter - actual
+  if drift > 0 then
+    redis.call('DECRBY', listActiveKey, drift)
+  end
+  return drift
+end)
 `;
 
 // ---- Key set type ----
@@ -3829,4 +3863,14 @@ export async function registerParent(
     [childJobId, parentId, parentQueue, depsMember],
   );
   return result as string;
+}
+
+/**
+ * Self-heal the list-active counter by comparing its value against
+ * the actual count of active list-sourced jobs (LIFO or priority).
+ * Returns the drift amount corrected (0 if no correction was needed).
+ */
+export async function healListActive(client: Client, keys: QueueKeys): Promise<number> {
+  const result = await client.fcall('glidemq_healListActive', [keys.id], []);
+  return Number(result) || 0;
 }
