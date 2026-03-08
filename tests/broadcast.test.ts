@@ -338,19 +338,19 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
       async (job: any) => {
         received.push(job.data);
       },
-      { connection: CONNECTION, subscription: 'sub-pause' },
+      { connection: CONNECTION, subscription: 'sub-pause', blockTimeout: 200 },
     );
 
-    // Wait for worker to be ready
-    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    await worker.waitUntilReady();
 
-    // Pause the worker
+    // Pause the worker and wait for the current XREADGROUP BLOCK to expire
     await worker.pause(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 400));
 
     // Publish a message while paused
     await broadcast.publish('message', { msg: 'while-paused' });
 
-    // Wait briefly to confirm message is NOT processed
+    // Wait to confirm message is NOT processed while paused
     await new Promise<void>((resolve) => setTimeout(resolve, 500));
     expect(received).toHaveLength(0);
 
