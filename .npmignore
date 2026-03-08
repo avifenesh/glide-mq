@@ -1,9 +1,12 @@
+dist/**/*.js.map
+dist/**/*.d.ts.map
 src/
 tests/
 benchmarks/
 docs/
 agent-knowledge/
 .github/
+.codex/
 .claude/
 .jules/
 demo/
