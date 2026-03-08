@@ -1,7 +1,7 @@
 import type { FlowProducerOptions, FlowJob, DAGFlow, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
-import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE } from './utils';
+import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE, validateJobId, validateQueueName } from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
 import { LIBRARY_SOURCE, addFlow, addJob, completeChild, registerParent } from './functions/index';
@@ -11,21 +11,6 @@ import { validateDAG, topoSort } from './dag-utils';
 export interface JobNode {
   job: Job;
   children?: JobNode[];
-}
-
-const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
-function validateJobId(jobId: string): void {
-  if (jobId.length > 256) throw new Error('jobId must be at most 256 characters');
-  if (INVALID_JOB_ID_CHARS.test(jobId)) {
-    throw new Error('jobId must not contain control characters, curly braces, or colons');
-  }
-}
-
-const INVALID_QUEUE_NAME_CHARS = /[{}:]/;
-function validateQueueName(queueName: string): void {
-  if (INVALID_QUEUE_NAME_CHARS.test(queueName)) {
-    throw new Error('queueName must not contain curly braces or colons (reserved for Redis hash tags and delimiters)');
-  }
 }
 
 /**

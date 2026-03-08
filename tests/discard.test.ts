@@ -33,7 +33,7 @@ describeEachMode('job.discard() and UnrecoverableError', (CONNECTION) => {
     const queue = new Queue(Q, { connection: CONNECTION });
     let attemptCount = 0;
 
-    const job = await queue.add('task', { v: 1 }, { attempts: 5, backoff: { type: 'fixed', delay: 100 } });
+    const _job = await queue.add('task', { v: 1 }, { attempts: 5, backoff: { type: 'fixed', delay: 100 } });
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 15000);

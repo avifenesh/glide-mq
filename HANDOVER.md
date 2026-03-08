@@ -4,15 +4,15 @@ Current state of the glide-mq repository as of 2026-03-08.
 
 ## Branch
 
-`main` - up to date.
+`fix/deep-audit-fixes` - deep audit PR #124 open. Includes all Round 1/2 fixes + H1 BaseWorker.
 
-### Active feature branches
+### Active PRs
 
-- `feature/broadcast-subject-filter` (PR #119): NATS-style subject filtering for Broadcast/BroadcastWorker
-  - LIBRARY_VERSION 58 (adds `name` field to all XADD stream entries)
-  - Breaking: `Broadcast.publish(subject, data, opts?)` signature
-  - Worktree: `C:/Users/avife/worktrees/subject-filter`
-- `feature/serverless-producer-89`: Serverless Producer (another agent working on it)
+- PR #124: Deep audit fixes (62 findings, 7 commits + BaseWorker)
+- PR #120: Lua HMGET optimization (M9)
+- PR #121: Job state query tests (H10)
+- PR #122: Proxy endpoint tests + routes (M27)
+- PR #123: Worker state machine (H6+M10) - superseded by BaseWorker in #124
 
 ## Recent merges
 

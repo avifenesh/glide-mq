@@ -72,6 +72,7 @@ export class Producer<D = any> {
   private clientOwned = true;
   private _clusterMode: boolean | undefined;
   private closing = false;
+  private closed = false;
   private keys: QueueKeys;
   private serializer: Serializer;
   private initPromise: Promise<Client> | null = null;
@@ -133,7 +134,8 @@ export class Producer<D = any> {
             this.client = client;
             return client;
           });
-      // Clear the promise on failure so callers can retry after transient errors
+      // Callers must retry with their own backoff strategy.
+      // The Producer clears initPromise on failure so the next call will re-attempt.
       this.initPromise = init.catch((err) => {
         this.initPromise = null;
         throw err;
@@ -150,7 +152,13 @@ export class Producer<D = any> {
     const parentKeys = buildKeys(parentQueue, this.opts.prefix);
     const pfx = keyPrefix(this.opts.prefix ?? 'glide', this.name);
     const depsMember = `${pfx}:${jobId}`;
-    await client.sadd(parentKeys.deps(parentId), [depsMember]);
+    try {
+      await client.sadd(parentKeys.deps(parentId), [depsMember]);
+    } catch (err) {
+      throw new GlideMQError(
+        `Failed to register cross-queue parent dependency (parent: ${parentQueue}/${parentId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -162,6 +170,9 @@ export class Producer<D = any> {
     if (priority > 2048) throw new GlideMQError('priority must be between 0 and 2048');
     const parentId = opts?.parent ? opts.parent.id : '';
     const parentQueue = opts?.parent ? opts.parent.queue : '';
+    if (parentQueue) {
+      validateQueueName(parentQueue);
+    }
     const maxAttempts = opts?.attempts ?? 0;
     const orderingKey = opts?.ordering?.key ?? '';
     const groupRateMax = opts?.ordering?.rateLimit?.max ?? 0;
@@ -470,10 +481,15 @@ export class Producer<D = any> {
         parentBatch.sadd(parentKeys.deps(parentId), [depsMember]);
       }
 
-      const executeBatch = isCluster
-        ? (client as GlideClusterClient).exec(parentBatch as ClusterBatch, true)
-        : (client as GlideClient).exec(parentBatch as Batch, true);
-      await executeBatch;
+      try {
+        await (isCluster
+          ? (client as GlideClusterClient).exec(parentBatch as ClusterBatch, true)
+          : (client as GlideClient).exec(parentBatch as Batch, true));
+      } catch (err) {
+        throw new GlideMQError(
+          `Failed to register cross-queue parent dependencies in bulk: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     if (bulkError) throw bulkError;
@@ -482,7 +498,7 @@ export class Producer<D = any> {
 
   /** Returns true if close() has been called. */
   get isClosed(): boolean {
-    return this.closing;
+    return this.closed || this.closing;
   }
 
   /**
@@ -490,11 +506,15 @@ export class Producer<D = any> {
    * If an external client was provided, it is not closed.
    */
   async close(): Promise<void> {
-    if (this.closing) return;
+    if (this.closed || this.closing) return;
     this.closing = true;
-    if (this.client && this.clientOwned) {
-      this.client.close();
+    try {
+      if (this.clientOwned && this.client) {
+        await this.client.close();
+      }
+    } finally {
+      this.client = null;
+      this.closed = true;
     }
-    this.client = null;
   }
 }

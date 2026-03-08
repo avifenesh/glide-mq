@@ -567,7 +567,7 @@ describe('SandboxPool', () => {
 describe('createSandboxedProcessor', () => {
   it('should throw for non-existent processor file', () => {
     expect(() => createSandboxedProcessor('/nonexistent/path.js', undefined, 1)).toThrow(
-      'Processor file not found or not readable',
+      'Processor file not found or inaccessible',
     );
   });
 

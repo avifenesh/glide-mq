@@ -12,7 +12,6 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { QueueEvents } = require('../dist/queue-events') as typeof import('../src/queue-events');
-const { GlideMQError } = require('../dist/errors') as typeof import('../src/errors');
 
 import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 

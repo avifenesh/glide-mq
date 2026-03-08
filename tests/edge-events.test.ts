@@ -3,7 +3,7 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue, ConnectionConfig } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -157,7 +157,7 @@ describeEachMode('Edge: QueueEvents', (CONNECTION) => {
       let attemptCount = 0;
       const worker = new Worker(
         Q,
-        async (job: any) => {
+        async (_job: any) => {
           attemptCount++;
           if (attemptCount <= 1) {
             throw new Error('retry me');
@@ -232,7 +232,7 @@ describeEachMode('Edge: QueueEvents', (CONNECTION) => {
       const stalledIds: string[] = [];
       const recoveryWorker = new Worker(
         Q,
-        async (j: any) => {
+        async (_j: any) => {
           return 'recovered';
         },
         {

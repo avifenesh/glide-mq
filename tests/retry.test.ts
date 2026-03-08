@@ -45,7 +45,7 @@ describeEachMode('Retry lifecycle', (CONNECTION) => {
 
       const worker = new Worker(
         Q,
-        async (j: any) => {
+        async (_j: any) => {
           attemptCount++;
           if (attemptCount <= 2) {
             throw new Error(`fail-attempt-${attemptCount}`);

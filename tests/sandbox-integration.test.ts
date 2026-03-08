@@ -111,7 +111,7 @@ describeEachMode('Sandboxed Processor', (CONNECTION) => {
     });
 
     // Also listen for errors to aid debugging
-    worker.on('error', (err: any) => {
+    worker.on('error', (_err: any) => {
       // Expected: pool.run() rejection bubbles here after crash
     });
 

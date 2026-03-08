@@ -116,7 +116,7 @@ describeEachMode('Worker with rate limiter', (CONNECTION) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
       const worker = new Worker(
         Q,
-        async (job: any) => {
+        async (_job: any) => {
           timestamps.push(Date.now());
           return 'ok';
         },
@@ -170,7 +170,7 @@ describeEachMode('Worker.rateLimit() manual method', (CONNECTION) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
       const worker = new Worker(
         Q,
-        async (job: any) => {
+        async (_job: any) => {
           timestamps.push(Date.now());
           if (timestamps.length === 1) {
             await worker.rateLimit(2000);
@@ -225,7 +225,7 @@ describeEachMode('Worker.RateLimitError in processor', (CONNECTION) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
       const worker = new Worker(
         Q,
-        async (job: any) => {
+        async (_job: any) => {
           attempts++;
           if (attempts === 1) {
             throw new Worker.RateLimitError();

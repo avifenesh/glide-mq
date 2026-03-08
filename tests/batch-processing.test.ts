@@ -495,7 +495,7 @@ describeEachMode('Worker batch validation', (CONNECTION) => {
 
       const worker = new Worker(
         qName,
-        async (jobs: any[]) => {
+        async (_jobs: any[]) => {
           // Return only 1 result for 3 jobs - should fail all
           return ['only-one-result'];
         },

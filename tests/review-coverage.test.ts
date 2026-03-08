@@ -14,7 +14,6 @@ import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fix
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { Job } = require('../dist/job') as typeof import('../src/job');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 // ---------------------------------------------------------------------------
@@ -474,7 +473,7 @@ describeEachMode('Payload size validation', (CONNECTION) => {
     // Verify nothing was stored - queue ID counter should not have been incremented
     // (The error is thrown before the FCALL, so no job should exist)
     const k = buildKeys(Q);
-    const idVal = await cleanupClient.exists([k.id]);
+    await cleanupClient.exists([k.id]);
     // id key might not exist at all, or it might exist from getClient init -
     // the important thing is no job hash was created
     // We just verify the add threw

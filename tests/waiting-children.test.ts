@@ -271,7 +271,7 @@ describeEachMode('moveToWaitingChildren', (CONNECTION) => {
     );
     await worker.waitUntilReady();
 
-    const node = await flow.add({
+    await flow.add({
       name: 'mixed-parent',
       queueName: Q,
       data: { type: 'mixed' },

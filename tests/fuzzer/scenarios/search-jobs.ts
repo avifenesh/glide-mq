@@ -38,7 +38,7 @@ export async function searchJobs(ctx: ScenarioContext): Promise<ScenarioResult> 
   // Create worker to process all jobs
   ctx.createWorker(
     queueName,
-    async (job: any) => {
+    async (_job: any) => {
       counter.value++;
       return 'done';
     },

@@ -78,7 +78,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     const worker = new Worker(
       Q,
-      async (job: any) => {
+      async (_job: any) => {
         await new Promise((r) => setTimeout(r, 3000));
         return 'done';
       },
@@ -167,13 +167,13 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     queues.push(queue);
     const k = buildKeys(Q);
 
-    let jobId: string | undefined;
+    let _jobId: string | undefined;
     const timestamps: number[] = [];
 
     const worker = new Worker(
       Q,
       async (job: any) => {
-        jobId = job.id;
+        _jobId = job.id;
         for (let i = 0; i < 8; i++) {
           await new Promise((r) => setTimeout(r, 200));
           const val = await cleanupClient.hget(k.job(job.id), 'lastActive');
@@ -525,7 +525,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
       workers.push(w);
     });
 
-    const job = await queue.add('task', { data: 1 });
+    const _job = await queue.add('task', { data: 1 });
     const jobId = await jobStarted;
 
     await cleanupClient.hset(k.job(jobId), { lastActive: Date.now().toString() });
@@ -534,7 +534,7 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     const reclaimClient = await createCleanupClient(CONNECTION);
     try {
-      const reclaimed = await reclaimStalled(reclaimClient, k, 'test-consumer', 1000, 1, Date.now(), CONSUMER_GROUP);
+      const _reclaimed = await reclaimStalled(reclaimClient, k, 'test-consumer', 1000, 1, Date.now(), CONSUMER_GROUP);
 
       const failScore = await cleanupClient.zscore(k.failed, jobId);
       expect(failScore).toBeNull();

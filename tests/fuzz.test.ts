@@ -8,8 +8,6 @@ import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './he
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { QueueEvents } = require('../dist/queue-events') as typeof import('../src/queue-events');
-const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 function uid() {
   return 'fuzz-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);

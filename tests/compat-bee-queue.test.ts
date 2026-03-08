@@ -39,7 +39,7 @@ describeEachMode('Bee-Queue: Stall detection', (CONNECTION) => {
     const Q = `bee-stall-recovery-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
-    const k = buildKeys(Q);
+    const _k = buildKeys(Q);
 
     const JOB_COUNT = 50;
 
@@ -621,7 +621,7 @@ describeEachMode('Bee-Queue: Job progress events', (CONNECTION) => {
     // Small delay to ensure QueueEvents is actively polling
     await new Promise((r) => setTimeout(r, 300));
 
-    const job = await queue.add('progress-task', { v: 1 });
+    const _job = await queue.add('progress-task', { v: 1 });
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
@@ -751,7 +751,7 @@ describeEachMode('node-resque: Competing consumers - no duplicates', (CONNECTION
       const makeWorker = (workerId: string) => {
         const w = new Worker(
           Q,
-          async (job: any) => {
+          async (_job: any) => {
             // Small random delay to increase chance of contention
             await new Promise((r) => setTimeout(r, Math.random() * 50));
             return { workerId };
@@ -813,7 +813,7 @@ describeEachMode('node-resque: Stalled worker heartbeat', (CONNECTION) => {
     const Q = `bee-heartbeat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
-    const k = buildKeys(Q);
+    const _k = buildKeys(Q);
 
     const job = await queue.add('heartbeat-task', { v: 1 });
 

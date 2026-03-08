@@ -12,6 +12,7 @@ import {
   tryLock,
   renewLock,
   unlock,
+  healListActive,
 } from './functions/index';
 import type { buildKeys } from './utils';
 import { computeFollowingSchedulerNextRun, isValidSchedulerEvery, MAX_JOB_DATA_SIZE } from './utils';
@@ -64,6 +65,7 @@ export class Scheduler {
   private promotionInFlight = false;
   private promotionQueued = false;
   private pendingRuns = new Set<Promise<unknown>>();
+  private tickCount = 0;
 
   constructor(client: Client, queueKeys: ReturnType<typeof buildKeys>, opts: SchedulerOptions = {}) {
     this.client = client;
@@ -120,7 +122,11 @@ export class Scheduler {
 
   async waitForIdle(): Promise<void> {
     while (this.pendingRuns.size > 0) {
-      await Promise.allSettled(Array.from(this.pendingRuns));
+      const results = await Promise.allSettled(this.pendingRuns);
+      const errors = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map((r) => r.reason);
+      if (errors.length > 0) {
+        throw errors[0];
+      }
     }
   }
 
@@ -146,6 +152,7 @@ export class Scheduler {
         .then(() => {
           this.onPromotionTick?.();
         })
+        .then(() => this.healListActiveCounter())
         .then(() => this.scheduleNextPromotionWake())
         .catch((err) => {
           // Scheduler has no EventEmitter - errors are transient connection issues
@@ -231,6 +238,20 @@ export class Scheduler {
    */
   async promoteRateLimitedGroups(): Promise<number> {
     return promoteRateLimited(this.client, this.queueKeys, Date.now());
+  }
+
+  /**
+   * Every 10th promotion tick, verify the list-active counter against the actual
+   * count of active list-sourced jobs. Corrects upward drift caused by worker crashes.
+   */
+  private async healListActiveCounter(): Promise<void> {
+    this.tickCount++;
+    if (this.tickCount % 10 !== 0) return;
+    try {
+      await healListActive(this.client, this.queueKeys);
+    } catch (err) {
+      this.reportError(err);
+    }
   }
 
   /**

@@ -9,7 +9,6 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { Job } = require('../dist/job') as typeof import('../src/job');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
@@ -211,7 +210,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       const Q = uniqueQueue('failover-reconnect');
       const queue = new Queue(Q, { connection: CONNECTION });
 
-      const job = await queue.add('pre-fail', { x: 1 });
+      await queue.add('pre-fail', { x: 1 });
 
       let completedCount = 0;
       const errors: Error[] = [];
@@ -485,7 +484,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-function parseConnectedClients(info: string | Record<string, string>): number {
+function _parseConnectedClients(info: string | Record<string, string>): number {
   if (typeof info === 'string') {
     const match = info.match(/connected_clients:(\d+)/);
     return match ? parseInt(match[1], 10) : 0;
