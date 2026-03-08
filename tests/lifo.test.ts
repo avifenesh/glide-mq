@@ -709,7 +709,10 @@ describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
           } catch (e) {
             reject(e);
           } finally {
-            await cleanupClient.del([...Object.values(require('../dist/utils').buildKeys(qName))]);
+            const keys = Object.values(require('../dist/utils').buildKeys(qName)).filter(
+              (k: any) => typeof k === 'string',
+            );
+            if (keys.length > 0) await cleanupClient.del(keys);
           }
         }
       });
