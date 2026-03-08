@@ -1,10 +1,18 @@
 # HANDOVER
 
-Current state of the glide-mq repository as of 2026-03-07.
+Current state of the glide-mq repository as of 2026-03-08.
 
 ## Branch
 
-`main` - up to date. No active feature branches.
+`main` - up to date.
+
+### Active feature branches
+
+- `feature/broadcast-subject-filter` (PR #119): NATS-style subject filtering for Broadcast/BroadcastWorker
+  - LIBRARY_VERSION 58 (adds `name` field to all XADD stream entries)
+  - Breaking: `Broadcast.publish(subject, data, opts?)` signature
+  - Worktree: `C:/Users/avife/worktrees/subject-filter`
+- `feature/serverless-producer-89`: Serverless Producer (another agent working on it)
 
 ## Recent merges
 
