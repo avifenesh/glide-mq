@@ -34,6 +34,9 @@ export function validateQueueName(name: string): void {
   if (!name || typeof name !== 'string') {
     throw new Error('Queue name must be a non-empty string');
   }
+  if (name.length > 256) {
+    throw new Error('Queue name must be at most 256 characters');
+  }
   if (INVALID_QUEUE_NAME_CHARS.test(name)) {
     throw new Error('Queue name must not contain curly braces or colons');
   }
@@ -370,15 +373,20 @@ function parseCronField(field: string, min: number, max: number): CronField {
 // 10 years covers century non-leap-year gaps (e.g. Feb 29 after 2097 -> 2104)
 const MAX_SEARCH_YEARS = 10;
 
+const validTzCache = new Set<string>();
+
 /**
  * Validate an IANA timezone string. Throws if invalid.
+ * Results are memoized to avoid repeated Intl.DateTimeFormat construction.
  */
 export function validateTimezone(tz: string): void {
+  if (validTzCache.has(tz)) return;
   try {
     Intl.DateTimeFormat('en-US', { timeZone: tz });
   } catch {
     throw new Error(`Invalid timezone: ${tz}`);
   }
+  validTzCache.add(tz);
 }
 
 export function isValidSchedulerEvery(every: unknown): every is number {
