@@ -23,7 +23,7 @@ import type { QueueKeys } from './functions/index';
  *   // Process message
  * }, { connection, subscription: 'email-service' });
  *
- * await broadcast.publish({ event: 'order.placed', data: {...} });
+ * await broadcast.publish('order.placed', { orderId: 42 });
  * // Both workers receive the message
  * ```
  */

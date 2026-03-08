@@ -822,7 +822,9 @@ export function matchSubject(pattern: string, subject: string): boolean {
   for (let i = 0; i < patParts.length; i++) {
     const token = patParts[i];
     if (token === '>') {
-      // `>` must be the last token and matches one or more remaining segments
+      if (i !== patParts.length - 1) {
+        throw new Error('`>` wildcard must be the last token in a subject pattern');
+      }
       return i < subParts.length;
     }
     if (i >= subParts.length) return false;
