@@ -52,9 +52,7 @@ describe('matchSubject', () => {
     expect(matchSubject('projects.*.issues.>', 'projects.1.issues')).toBe(false);
   });
   it('> must be the last token', () => {
-    expect(() => matchSubject('projects.>.issues', 'projects.1.issues')).toThrow(
-      '`>` wildcard must be the last token',
-    );
+    expect(() => matchSubject('projects.>.issues', 'projects.1.issues')).toThrow('`>` wildcard must be the last token');
   });
 });
 
