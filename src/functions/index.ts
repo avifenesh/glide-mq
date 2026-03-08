@@ -17,7 +17,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 56: glidemq_checkConcurrency includes list-active counter; complete/fail DECR on list jobs; rpopAndReserve.
 // Version 57: glidemq_addFlow routes child jobs with lifo:true to LIFO list.
 // Version 58: XADD to job stream includes 'name' field for subject-based filtering in BroadcastWorker.
-export const LIBRARY_VERSION = '58';
+// Version 59: completeAndFetchNext uses HMGET instead of HGETALL for next job (NEXT_HMGET marker).
+export const LIBRARY_VERSION = '59';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -27,6 +28,15 @@ export const CONSUMER_GROUP = 'workers';
 export const LIBRARY_SOURCE = `#!lua name=glidemq
 
 local PRIORITY_SHIFT = 4398046511104
+
+-- Fields returned by HMGET in completeAndFetchNext (must match HMGET_JOB_FIELDS in TypeScript)
+local HMGET_FIELDS = {
+  'name', 'data', 'opts', 'timestamp', 'returnvalue', 'failedReason',
+  'attemptsMade', 'processedOn', 'finishedOn',
+  'parentId', 'parentQueue', 'orderingKey', 'orderingSeq',
+  'groupKey', 'cost', 'expireAt', 'schedulerName',
+  'parentIds', 'parentQueues', 'progress'
+}
 
 local function emitEvent(eventsKey, eventType, jobId, extraFields)
   local fields = {'event', eventType, 'jobId', tostring(jobId)}
@@ -961,7 +971,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   -- Return protocol (array-based to avoid cjson encode/decode per job):
   -- {'NEXT_NONE', completedJobId}
   -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId}
-  -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ...}
+  -- {'NEXT_HMGET', completedJobId, nextJobId, nextEntryId, val1, val2, ...}  (positional, matching HMGET_FIELDS)
 
   -- Phase 1.0: Try priority list first (highest priority: priority > LIFO > FIFO)
   local priorityKey = prefix .. 'priority'
@@ -977,9 +987,9 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       if priRevoked ~= '1' and not checkExpired(priJobKey, priJobId, prefix, timestamp) then
         redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
         emitEvent(eventsKey, 'active', priJobId, nil)
-        local priJobFields = redis.call('HGETALL', priJobKey)
+        local priJobFields = redis.call('HMGET', priJobKey, unpack(HMGET_FIELDS))
         redis.call('INCR', prefix .. 'list-active')
-        return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
+        return {'NEXT_HMGET', jobId, priJobId, '', unpack(priJobFields)}
       end
     end
   end
@@ -996,13 +1006,13 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     if redis.call('EXISTS', lifoJobKey) == 1 then
       local lifoRevoked = redis.call('HGET', lifoJobKey, 'revoked')
       if lifoRevoked ~= '1' and not checkExpired(lifoJobKey, lifoJobId, prefix, timestamp) then
-        -- Activate: set state, processedOn, lastActive before HGETALL so returned hash is current
+        -- Activate: set state, processedOn, lastActive before HMGET so returned hash is current
         redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
         emitEvent(eventsKey, 'active', lifoJobId, nil)
-        local lifoJobFields = redis.call('HGETALL', lifoJobKey)
+        local lifoJobFields = redis.call('HMGET', lifoJobKey, unpack(HMGET_FIELDS))
         redis.call('INCR', prefix .. 'list-active')
         -- Return LIFO job (no entryId for LIFO jobs, use empty string)
-        return {'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}
+        return {'NEXT_HMGET', jobId, lifoJobId, '', unpack(lifoJobFields)}
       end
     end
   end
@@ -1144,12 +1154,8 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     redis.call('HINCRBY', nextGroupHashKey, 'active', 1)
   end
   redis.call('HSET', nextJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
-  local nextHash = redis.call('HGETALL', nextJobKey)
-  local out = {'NEXT_HASH', jobId, nextJobId, nextEntryId}
-  for i = 1, #nextHash do
-    out[#out + 1] = nextHash[i]
-  end
-  return out
+  local nextFields = redis.call('HMGET', nextJobKey, unpack(HMGET_FIELDS))
+  return {'NEXT_HMGET', jobId, nextJobId, nextEntryId, unpack(nextFields)}
 end)
 
 redis.register_function('glidemq_fail', function(keys, args)
@@ -3178,6 +3184,16 @@ export interface CompleteAndFetchHints {
   groupKey?: string;
 }
 
+// Positional field names matching HMGET_FIELDS in the Lua library.
+// Order must stay in sync with the Lua HMGET_FIELDS table.
+const HMGET_JOB_FIELDS = [
+  'name', 'data', 'opts', 'timestamp', 'returnvalue', 'failedReason',
+  'attemptsMade', 'processedOn', 'finishedOn',
+  'parentId', 'parentQueue', 'orderingKey', 'orderingSeq',
+  'groupKey', 'cost', 'expireAt', 'schedulerName',
+  'parentIds', 'parentQueues', 'progress',
+] as const;
+
 export async function completeAndFetchNext(
   client: Client,
   k: QueueKeys,
@@ -3224,20 +3240,33 @@ export async function completeAndFetchNext(
 
   // Fast path: array protocol from Lua function
   if (Array.isArray(raw)) {
-    const arr = raw.map((v) => String(v));
-    const tag = arr[0];
+    const tag = String(raw[0]);
     if (tag === 'NEXT_NONE') {
-      return { completed: arr[1] ?? jobId, next: false };
+      return { completed: raw[1] != null ? String(raw[1]) : jobId, next: false };
     }
     if (tag === 'NEXT_REVOKED') {
       return {
-        completed: arr[1] ?? jobId,
+        completed: raw[1] != null ? String(raw[1]) : jobId,
         next: 'REVOKED',
-        nextJobId: arr[2],
-        nextEntryId: arr[3],
+        nextJobId: String(raw[2]),
+        nextEntryId: String(raw[3]),
+      };
+    }
+    if (tag === 'NEXT_HMGET') {
+      const hash: Record<string, string> = Object.create(null);
+      for (let i = 0; i < HMGET_JOB_FIELDS.length; i++) {
+        const val = raw[4 + i];
+        if (val != null) hash[HMGET_JOB_FIELDS[i]] = String(val);
+      }
+      return {
+        completed: raw[1] != null ? String(raw[1]) : jobId,
+        next: hash,
+        nextJobId: String(raw[2]),
+        nextEntryId: String(raw[3]),
       };
     }
     if (tag === 'NEXT_HASH') {
+      const arr = raw.map((v) => String(v));
       const hash: Record<string, string> = Object.create(null);
       for (let i = 4; i + 1 < arr.length; i += 2) {
         hash[arr[i]] = arr[i + 1];
