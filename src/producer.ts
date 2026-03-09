@@ -26,6 +26,9 @@ function validateOrderingKey(orderingKey: string): void {
   if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
     throw new GlideMQError(`Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`);
   }
+  if (orderingKey === '__') {
+    throw new GlideMQError("Ordering key '__' is reserved as an internal sentinel.");
+  }
 }
 
 export interface ProducerOptions {

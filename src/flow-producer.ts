@@ -390,6 +390,9 @@ export class FlowProducer {
           const orderingKey = opts.ordering?.key;
           if (orderingKey) {
             validateQueueName(orderingKey);
+            if (orderingKey === '__') {
+              throw new GlideMQError("Ordering key '__' is reserved as an internal sentinel.");
+            }
           }
 
           // Extract rate-limit and token bucket params

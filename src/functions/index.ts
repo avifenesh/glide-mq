@@ -17,8 +17,13 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 56: glidemq_checkConcurrency includes list-active counter; complete/fail DECR on list jobs; rpopAndReserve.
 // Version 57: glidemq_addFlow routes child jobs with lifo:true to LIFO list.
 // Version 58: XADD to job stream includes 'name' field for subject-based filtering in BroadcastWorker.
-// Version 59: glidemq_healListActive - self-healing for list-active counter drift on worker crash.
-export const LIBRARY_VERSION = '60';
+// Version 59: tbRefill early exit, DAG pattern match, key assertions, metrics scan 1000.
+// Version 60: glidemq_healListActive - self-healing for list-active counter drift on worker crash.
+// Version 61: glidemq_popLists - atomic pop from priority + LIFO lists in a single FCALL; timestamp caching in processJob.
+// Version 62: buildParentInfo fast path - skip HMGET for non-parent jobs.
+// Version 63: completeAndFetchNext accepts processedOn hint, '__' sentinels for ordering/group keys, hasParents flag.
+// Version 64: completeAndFetchNext skipEvents/skipMetrics args - opt-out XADD events + HINCRBY metrics on hot path.
+export const LIBRARY_VERSION = '64';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -838,9 +843,18 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local currentOrderingSeq = args[13] or ''
   local currentGroupKey = args[14] or ''
   local broadcastMode = args[15] or '0'
+  local hintProcessedOn = args[16] or ''
+  local hasParents = args[17] or '0'
+  local skipEvents = args[18] or '0'
+  local skipMetrics = args[19] or '0'
 
   -- Phase 1: Complete current job (same as glidemq_complete)
-  local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
+  local processedOn
+  if hintProcessedOn ~= '' then
+    processedOn = tonumber(hintProcessedOn) or timestamp
+  else
+    processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
+  end
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   redis.call('ZADD', completedKey, timestamp, jobId)
@@ -849,10 +863,14 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     'returnvalue', returnvalue,
     'finishedOn', tostring(timestamp)
   )
-  markOrderingDone(jobKey, jobId, currentOrderingKey, currentOrderingSeq)
-  releaseGroupSlotAndPromote(jobKey, jobId, timestamp, currentGroupKey)
-  emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
-  recordMetrics(metricsKey, timestamp, timestamp - processedOn)
+  if currentOrderingKey ~= '__' then
+    markOrderingDone(jobKey, jobId, currentOrderingKey, currentOrderingSeq)
+  end
+  if currentGroupKey ~= '__' then
+    releaseGroupSlotAndPromote(jobKey, jobId, timestamp, currentGroupKey)
+  end
+  if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
+  if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
 
@@ -903,40 +921,36 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       end
     end
   end
-  -- DAG multi-parent: notify additional same-queue parents via parents SET
-  local parentsKey = prefix .. 'parents:' .. jobId
-  local dagParents = redis.call('SMEMBERS', parentsKey)
-  if dagParents and #dagParents > 0 then
-    local childQueuePrefix = string.sub(prefix, 1, #prefix - 1)
-    local dagDepsMember = childQueuePrefix .. ':' .. jobId
-    for pi = 1, #dagParents do
-      local pEntry = dagParents[pi]
-      -- Format: "parentQueuePrefix:parentId" where prefix is glide:{qname}
-      -- Must find LAST colon (not first, since prefix contains colons in {})
-      local pSep = pEntry:find(':([^:]+)$')
-      if pSep then
-        local pQueue = string.sub(pEntry, 1, pSep - 1)
-        local pId = string.sub(pEntry, pSep + 1)
-        -- Only handle same-queue parents atomically in Lua.
-        -- Cross-queue parents are skipped here because their keys use a different
-        -- hash tag (different prefix), which may route to a different cluster slot.
-        -- The TypeScript layer handles cross-queue parent notification separately.
-        if pQueue == childQueuePrefix then
-          local pPrefix = prefix
-          local pJobKey = pPrefix .. 'job:' .. pId
-          local pDepsKey = pPrefix .. 'deps:' .. pId
-          local pStreamKey = pPrefix .. 'stream'
-          local pEventsKey = pPrefix .. 'events'
-          local pDepMarker = 'depdone:' .. dagDepsMember
-          if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
-            local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
-            local pTotalDeps = redis.call('SCARD', pDepsKey)
-            if pTotalDeps - pDoneCount <= 0 then
-              local pState = redis.call('HGET', pJobKey, 'state')
-              if pState == 'waiting-children' then
-                redis.call('HSET', pJobKey, 'state', 'waiting')
-                xaddJob(pStreamKey, pId, redis.call('HGET', pJobKey, 'name'))
-                emitEvent(pEventsKey, 'active', pId, nil)
+  -- DAG multi-parent: skip SMEMBERS when caller confirms no parents
+  if hasParents ~= '0' then
+    local parentsKey = prefix .. 'parents:' .. jobId
+    local dagParents = redis.call('SMEMBERS', parentsKey)
+    if dagParents and #dagParents > 0 then
+      local childQueuePrefix = string.sub(prefix, 1, #prefix - 1)
+      local dagDepsMember = childQueuePrefix .. ':' .. jobId
+      for pi = 1, #dagParents do
+        local pEntry = dagParents[pi]
+        local pSep = pEntry:find(':([^:]+)$')
+        if pSep then
+          local pQueue = string.sub(pEntry, 1, pSep - 1)
+          local pId = string.sub(pEntry, pSep + 1)
+          if pQueue == childQueuePrefix then
+            local pPrefix = prefix
+            local pJobKey = pPrefix .. 'job:' .. pId
+            local pDepsKey = pPrefix .. 'deps:' .. pId
+            local pStreamKey = pPrefix .. 'stream'
+            local pEventsKey = pPrefix .. 'events'
+            local pDepMarker = 'depdone:' .. dagDepsMember
+            if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
+              local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
+              local pTotalDeps = redis.call('SCARD', pDepsKey)
+              if pTotalDeps - pDoneCount <= 0 then
+                local pState = redis.call('HGET', pJobKey, 'state')
+                if pState == 'waiting-children' then
+                  redis.call('HSET', pJobKey, 'state', 'waiting')
+                  xaddJob(pStreamKey, pId, redis.call('HGET', pJobKey, 'name'))
+                  emitEvent(pEventsKey, 'active', pId, nil)
+                end
               end
             end
           end
@@ -968,7 +982,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       local priRevoked = redis.call('HGET', priJobKey, 'revoked')
       if priRevoked ~= '1' and not checkExpired(priJobKey, priJobId, prefix, timestamp) then
         redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
-        emitEvent(eventsKey, 'active', priJobId, nil)
+        if skipEvents ~= '1' then emitEvent(eventsKey, 'active', priJobId, nil) end
         local priJobFields = redis.call('HGETALL', priJobKey)
         redis.call('INCR', prefix .. 'list-active')
         return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
@@ -990,7 +1004,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       if lifoRevoked ~= '1' and not checkExpired(lifoJobKey, lifoJobId, prefix, timestamp) then
         -- Activate: set state, processedOn, lastActive before HGETALL so returned hash is current
         redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
-        emitEvent(eventsKey, 'active', lifoJobId, nil)
+        if skipEvents ~= '1' then emitEvent(eventsKey, 'active', lifoJobId, nil) end
         local lifoJobFields = redis.call('HGETALL', lifoJobKey)
         redis.call('INCR', prefix .. 'list-active')
         -- Return LIFO job (no entryId for LIFO jobs, use empty string)
@@ -1083,8 +1097,8 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
           'state', 'failed',
           'failedReason', 'cost exceeds token bucket capacity',
           'finishedOn', tostring(timestamp))
-        emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'})
-        recordMetrics(metricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn)
+        if skipEvents ~= '1' then emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
+        if skipMetrics ~= '1' then recordMetrics(metricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn) end
         return {'NEXT_NONE', jobId}
       end
       if nextTbTokens < nextJobCostVal then
@@ -2900,6 +2914,25 @@ redis.register_function('glidemq_healListActive', function(keys, args)
   end
   return drift
 end)
+
+redis.register_function('glidemq_popLists', function(keys, args)
+  local priorityKey = keys[1]
+  local lifoKey = keys[2]
+  local count = tonumber(args[1]) or 1
+  local results = {}
+  for i = 1, count do
+    local id = redis.call('RPOP', priorityKey)
+    if not id then break end
+    results[#results + 1] = id
+  end
+  if #results > 0 then return results end
+  for i = 1, count do
+    local id = redis.call('RPOP', lifoKey)
+    if not id then break end
+    results[#results + 1] = id
+  end
+  return results
+end)
 `;
 
 // ---- Key set type ----
@@ -3225,6 +3258,10 @@ export async function completeAndFetchNext(
   parentInfo?: { depsMember: string; parentId: string; parentKeys: QueueKeys },
   hints?: CompleteAndFetchHints,
   broadcastMode?: boolean,
+  processedOn?: number,
+  hasParents?: boolean,
+  skipEvents?: boolean,
+  skipMetrics?: boolean,
 ): Promise<CompleteAndFetchResult> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
@@ -3251,8 +3288,17 @@ export async function completeAndFetchNext(
 
   const orderingSeqHint =
     hints?.orderingSeq != null && Number.isFinite(hints.orderingSeq) ? Math.trunc(hints.orderingSeq).toString() : '';
-  args.push(hints?.orderingKey ?? '', orderingSeqHint, hints?.groupKey ?? '');
-  if (broadcastMode) args.push('1');
+  // '__' sentinel = confirmed absent (skip Lua call entirely); '' = unknown (Lua may HGET internally)
+  args.push(
+    hints?.orderingKey === undefined ? '__' : hints.orderingKey,
+    orderingSeqHint,
+    hints?.groupKey === undefined ? '__' : hints.groupKey,
+  );
+  args.push(broadcastMode ? '1' : '0');
+  args.push(processedOn != null ? processedOn.toString() : '');
+  args.push(hasParents ? '1' : '0');
+  args.push(skipEvents ? '1' : '0');
+  args.push(skipMetrics ? '1' : '0');
 
   const raw = await client.fcall('glidemq_completeAndFetchNext', keys, args);
 
@@ -3437,6 +3483,16 @@ export async function rpopAndReserve(
   const result = await client.fcall('glidemq_rpopAndReserve', [k.meta, k.stream, k.listActive, listKey], [group]);
   if (!result) return null;
   return String(result);
+}
+
+/**
+ * Pop from priority and LIFO lists in a single FCALL (1 RTT instead of 2).
+ * Returns job IDs popped, or empty array if both lists are empty.
+ */
+export async function popLists(client: Client, k: QueueKeys, count: number): Promise<string[]> {
+  const result = await client.fcall('glidemq_popLists', [k.priority, k.lifo], [count.toString()]);
+  if (!Array.isArray(result) || result.length === 0) return [];
+  return result.map((v) => String(v));
 }
 
 /**

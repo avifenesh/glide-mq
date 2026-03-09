@@ -118,6 +118,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected readonly consumerGroup: string;
   protected readonly broadcastMode: boolean;
   protected readonly startFrom: string;
+  protected readonly skipEvents: boolean;
+  protected readonly skipMetrics: boolean;
 
   protected constructor(
     name: string,
@@ -147,6 +149,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     this.consumerGroup = config.consumerGroup;
     this.broadcastMode = config.broadcastMode;
     this.startFrom = config.startFrom;
+    this.skipEvents = opts.events === false;
+    this.skipMetrics = opts.metrics === false;
 
     // Batch mode validation
     this.batchMode = !!opts.batch;
@@ -1013,6 +1017,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     let parentId = job.parentId;
     let parentQueue = job.parentQueue;
 
+    // Fast path: no parent fields at all - skip the Valkey round trip
+    if (!parentId && !parentQueue) return undefined;
+
+    // One field missing: re-fetch from hash to handle partial data
     if ((!parentId || !parentQueue) && this.commandClient) {
       const [refreshedParentId, refreshedParentQueue] = await this.commandClient.hmget(this.queueKeys.job(jobId), [
         'parentId',
@@ -1191,27 +1199,32 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
       const parentInfo = await this.buildParentInfo(job, currentJobId);
 
+      const now = Date.now();
       const fetchResult = await completeAndFetchNext(
         this.commandClient,
         this.queueKeys,
         currentJobId,
         currentEntryId,
         returnvalue,
-        Date.now(),
+        now,
         this.consumerGroup,
         this.consumerId,
         job.opts.removeOnComplete,
         parentInfo,
         completionHints,
         this.broadcastMode ? true : undefined,
+        job.processedOn,
+        !!job.parentIds,
+        this.skipEvents,
+        this.skipMetrics,
       );
 
       job.returnvalue = processResult;
-      job.finishedOn = Date.now();
+      job.finishedOn = now;
       this.emit('completed', job, processResult);
 
       if (job.schedulerName) {
-        await this.updateSchedulerAfterComplete(job.schedulerName, Date.now());
+        await this.updateSchedulerAfterComplete(job.schedulerName, now);
       }
 
       // No next job - return to poll loop

@@ -266,11 +266,80 @@ describe('Worker', () => {
     );
     expect(completeAndFetchNextCall).toBeDefined();
     const completionArgs = completeAndFetchNextCall[2] as string[];
-    expect(completionArgs.slice(-3)).toEqual(['tenant-a', '1', 'group-1']);
+    expect(completionArgs.slice(-8, -5)).toEqual(['tenant-a', '1', 'group-1']);
 
     // Event should have been emitted
     expect(completedJobs).toHaveLength(1);
     expect(completedJobs[0].result).toEqual({ result: 42 });
+
+    await worker.close(true);
+  });
+
+  it('should pass skipEvents/skipMetrics args when events/metrics disabled', async () => {
+    const processor = vi.fn().mockResolvedValue('ok');
+
+    let xreadCalls = 0;
+    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(() => {
+      xreadCalls++;
+      if (xreadCalls === 1) {
+        return Promise.resolve([
+          {
+            key: keys.stream,
+            value: {
+              '1234567890-0': [['jobId', '1']],
+            },
+          },
+        ]);
+      }
+      return new Promise(() => {});
+    });
+
+    const jobHash = JSON.stringify([
+      'id',
+      '1',
+      'name',
+      'test-job',
+      'data',
+      '{}',
+      'opts',
+      '{}',
+      'timestamp',
+      '1000',
+      'attemptsMade',
+      '0',
+      'state',
+      'active',
+    ]);
+
+    mockCommandClient.fcall = vi.fn().mockImplementation((func: string, _keys?: string[], args?: string[]) => {
+      if (func === 'glidemq_version') return Promise.resolve(LIBRARY_VERSION);
+      if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
+      if (func === 'glidemq_promote') return Promise.resolve(0);
+      if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
+      if (func === 'glidemq_moveToActive') return Promise.resolve(jobHash);
+      if (func === 'glidemq_completeAndFetchNext') {
+        const jobId = args?.[0] ?? '0';
+        return Promise.resolve(JSON.stringify({ completed: jobId, next: false }));
+      }
+      return Promise.resolve(LIBRARY_VERSION);
+    });
+
+    const worker = new Worker('test-queue', processor, {
+      ...defaultWorkerOpts,
+      events: false,
+      metrics: false,
+    });
+
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(100);
+
+    const call = (mockCommandClient.fcall as any).mock.calls.find(
+      (c: any[]) => c[0] === 'glidemq_completeAndFetchNext',
+    );
+    expect(call).toBeDefined();
+    const completionArgs = call[2] as string[];
+    // Last two args are skipEvents and skipMetrics
+    expect(completionArgs.slice(-2)).toEqual(['1', '1']);
 
     await worker.close(true);
   });

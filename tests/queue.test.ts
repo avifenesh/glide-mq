@@ -168,6 +168,15 @@ describe('Queue', () => {
       );
       expect(mockClient.fcall).toHaveBeenCalledTimes(1);
     });
+
+    it('should reject reserved sentinel ordering key', async () => {
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION);
+      const queue = new Queue('test-queue', connOpts);
+
+      await expect(queue.add('sentinel', { x: 1 }, { ordering: { key: '__' } })).rejects.toThrow(
+        'reserved as an internal sentinel',
+      );
+    });
   });
 
   describe('addAndWait', () => {

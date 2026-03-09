@@ -117,6 +117,13 @@ export interface WorkerOptions extends QueueOptions {
   sandbox?: SandboxOptions;
   /** Enable batch processing. When set, the processor receives an array of jobs. */
   batch?: BatchOptions;
+  /** Emit events to Valkey event stream on job completion/activation. Default: true.
+   *  Set to false to skip XADD events in hot path (~1 fewer redis.call per job).
+   *  TS-side EventEmitter ('completed', 'failed', etc.) is unaffected. */
+  events?: boolean;
+  /** Record per-minute timing metrics in Valkey on job completion. Default: true.
+   *  Set to false to skip HINCRBY metrics recording (~1-2 fewer redis.call per job). */
+  metrics?: boolean;
 }
 
 export interface BroadcastOptions extends QueueOptions {
