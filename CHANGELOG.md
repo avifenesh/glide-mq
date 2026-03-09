@@ -6,6 +6,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.10.0] - 2026-03-09
+
+### Performance
+
+- **~108% throughput improvement at c=1** (~1,300 -> ~2,700 jobs/s) by eliminating wasted HMGET round-trip in `buildParentInfo` for non-parent jobs (#126).
+- **~9-16% throughput improvement at c=10** (~12,900 -> ~14,000-15,000 jobs/s) via combined hot-path optimizations (#126).
+- New `glidemq_popLists` server function: checks priority + LIFO lists in a single FCALL instead of 2 separate RPOPs.
+- `completeAndFetchNext` Lua fast-path hints: `processedOn` timestamp passed from TS (skip HGET), `'__'` sentinels for ordering/group keys (skip entire Lua call when confirmed absent), `hasParents` flag (skip SMEMBERS for non-DAG jobs).
+- `Date.now()` cached once per job completion, shared across completeAndFetchNext, finishedOn, and scheduler callbacks.
+
+### Added
+
+- Worker options `events: false` / `metrics: false` to skip XADD event stream writes and HINCRBY metrics recording in Lua on the hot path. TS-side EventEmitter (`'completed'`, `'failed'`, etc.) is unaffected. Reduces Valkey memory and CPU for high-throughput deployments that don't consume server-side events or metrics (#126).
+
+### Fixed
+
+- Ordering key `'__'` is now rejected as reserved (internal sentinel collision guard).
+- `hasParents` flag narrowed to DAG-only `parentIds` - saves one SMEMBERS call for single-parent flow jobs.
+- Version changelog comments in Lua library corrected (v59-v64 entries).
+
+### Changed
+
+- Function library version bumped from 60 to 64 (auto-upgrades on connection).
+- Benchmark durations increased (ADD_DURATION 5s->15s, PROCESS_SIZES [500,2000]->[5000,20000]) for more stable measurements.
+
+---
+
 ## [0.9.0] - 2026-03-08
 
 ### Added
