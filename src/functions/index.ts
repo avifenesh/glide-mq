@@ -3286,7 +3286,11 @@ export async function completeAndFetchNext(
   const orderingSeqHint =
     hints?.orderingSeq != null && Number.isFinite(hints.orderingSeq) ? Math.trunc(hints.orderingSeq).toString() : '';
   // '__' sentinel = confirmed absent (skip HGET in Lua); '' = unknown (Lua does HGET)
-  args.push(hints?.orderingKey === undefined ? '__' : hints.orderingKey, orderingSeqHint, hints?.groupKey === undefined ? '__' : hints.groupKey);
+  args.push(
+    hints?.orderingKey === undefined ? '__' : hints.orderingKey,
+    orderingSeqHint,
+    hints?.groupKey === undefined ? '__' : hints.groupKey,
+  );
   args.push(broadcastMode ? '1' : '0');
   args.push(processedOn != null ? processedOn.toString() : '');
   args.push(hasParents ? '1' : '0');
@@ -3482,11 +3486,7 @@ export async function rpopAndReserve(
  * Pop from priority and LIFO lists in a single FCALL (1 RTT instead of 2).
  * Returns job IDs popped, or empty array if both lists are empty.
  */
-export async function popLists(
-  client: Client,
-  k: QueueKeys,
-  count: number,
-): Promise<string[]> {
+export async function popLists(client: Client, k: QueueKeys, count: number): Promise<string[]> {
   const result = await client.fcall('glidemq_popLists', [k.priority, k.lifo], [count.toString()]);
   if (!Array.isArray(result) || result.length === 0) return [];
   return result.map((v) => String(v));
