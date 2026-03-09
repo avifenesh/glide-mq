@@ -295,8 +295,20 @@ describe('Worker', () => {
     });
 
     const jobHash = JSON.stringify([
-      'id', '1', 'name', 'test-job', 'data', '{}', 'opts', '{}',
-      'timestamp', '1000', 'attemptsMade', '0', 'state', 'active',
+      'id',
+      '1',
+      'name',
+      'test-job',
+      'data',
+      '{}',
+      'opts',
+      '{}',
+      'timestamp',
+      '1000',
+      'attemptsMade',
+      '0',
+      'state',
+      'active',
     ]);
 
     mockCommandClient.fcall = vi.fn().mockImplementation((func: string, _keys?: string[], args?: string[]) => {
