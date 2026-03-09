@@ -19,6 +19,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 58: XADD to job stream includes 'name' field for subject-based filtering in BroadcastWorker.
 // Version 59: glidemq_healListActive - self-healing for list-active counter drift on worker crash.
 // Version 61: glidemq_popLists - atomic pop from priority + LIFO lists in a single FCALL; timestamp caching in processJob.
+// Version 62: buildParentInfo fast path - skip HMGET for non-parent jobs.
+// Version 63: completeAndFetchNext accepts processedOn hint, '__' sentinels for ordering/group keys, hasParents flag.
 // Version 64: completeAndFetchNext skipEvents/skipMetrics args - opt-out XADD events + HINCRBY metrics on hot path.
 export const LIBRARY_VERSION = '64';
 

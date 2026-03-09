@@ -123,10 +123,15 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
         // With gc, must use atomic rpopAndReserve per list (preserves slot accounting)
         jobIds = [];
         for (const listKey of [this.queueKeys.priority, this.queueKeys.lifo]) {
-          const id = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP);
-          if (id) {
-            jobIds.push(id);
-            break;
+          try {
+            const id = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP);
+            if (id) {
+              jobIds.push(id);
+              break;
+            }
+          } catch (err) {
+            const listType = listKey === this.queueKeys.priority ? 'priority' : 'LIFO';
+            this.emit('error', new Error(`${listType} fetch error`, { cause: err }));
           }
         }
       } else {
@@ -158,7 +163,7 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
         return true;
       }
     } catch (err) {
-      this.emit('error', new Error(`List fetch error`, { cause: err }));
+      this.emit('error', new Error(`popLists fetch error`, { cause: err }));
     }
     return false;
   }

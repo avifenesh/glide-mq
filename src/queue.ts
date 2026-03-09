@@ -77,6 +77,9 @@ function validateOrderingKey(orderingKey: string): void {
   if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
     throw new Error(`Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`);
   }
+  if (orderingKey === '__') {
+    throw new Error("Ordering key '__' is reserved as an internal sentinel.");
+  }
 }
 
 /** Check if all key-value pairs in filter exist in data (shallow match). */
