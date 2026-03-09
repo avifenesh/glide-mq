@@ -112,7 +112,7 @@ describeEachMode('Per-key ordering', (CONNECTION) => {
 
     const result = await cleanupClient.fcall(
       'glidemq_deferActive',
-      [k.stream, k.job(missingJobId)],
+      [k.stream, k.job(missingJobId), k.listActive],
       [missingJobId, String(entryId), 'workers'],
     );
 
