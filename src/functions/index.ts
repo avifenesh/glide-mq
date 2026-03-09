@@ -17,7 +17,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 56: glidemq_checkConcurrency includes list-active counter; complete/fail DECR on list jobs; rpopAndReserve.
 // Version 57: glidemq_addFlow routes child jobs with lifo:true to LIFO list.
 // Version 58: XADD to job stream includes 'name' field for subject-based filtering in BroadcastWorker.
-// Version 59: glidemq_healListActive - self-healing for list-active counter drift on worker crash.
+// Version 59: tbRefill early exit, DAG pattern match, key assertions, metrics scan 1000.
+// Version 60: glidemq_healListActive - self-healing for list-active counter drift on worker crash.
 // Version 61: glidemq_popLists - atomic pop from priority + LIFO lists in a single FCALL; timestamp caching in processJob.
 // Version 62: buildParentInfo fast path - skip HMGET for non-parent jobs.
 // Version 63: completeAndFetchNext accepts processedOn hint, '__' sentinels for ordering/group keys, hasParents flag.
@@ -3287,7 +3288,7 @@ export async function completeAndFetchNext(
 
   const orderingSeqHint =
     hints?.orderingSeq != null && Number.isFinite(hints.orderingSeq) ? Math.trunc(hints.orderingSeq).toString() : '';
-  // '__' sentinel = confirmed absent (skip HGET in Lua); '' = unknown (Lua does HGET)
+  // '__' sentinel = confirmed absent (skip Lua call entirely); '' = unknown (Lua may HGET internally)
   args.push(
     hints?.orderingKey === undefined ? '__' : hints.orderingKey,
     orderingSeqHint,

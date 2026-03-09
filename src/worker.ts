@@ -163,7 +163,7 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
         return true;
       }
     } catch (err) {
-      this.emit('error', new Error(`popLists fetch error`, { cause: err }));
+      this.emit('error', new Error(`popLists fetch error (priority or LIFO)`, { cause: err }));
     }
     return false;
   }

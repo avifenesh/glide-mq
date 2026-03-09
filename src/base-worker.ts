@@ -1214,7 +1214,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         completionHints,
         this.broadcastMode ? true : undefined,
         job.processedOn,
-        !!(job.parentId || job.parentIds),
+        !!job.parentIds,
         this.skipEvents,
         this.skipMetrics,
       );

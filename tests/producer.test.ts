@@ -124,6 +124,12 @@ describeEachMode('Producer - add()', (CONNECTION) => {
     );
   });
 
+  it('rejects reserved sentinel ordering key', async () => {
+    await expect(producer.add('sentinel', {}, { ordering: { key: '__' } })).rejects.toThrow(
+      'reserved as an internal sentinel',
+    );
+  });
+
   it('throws after close()', async () => {
     const ephemeral = new Producer(Q, { connection: CONNECTION });
     await ephemeral.add('before-close', { ok: true });
