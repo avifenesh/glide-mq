@@ -23,7 +23,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 62: buildParentInfo fast path - skip HMGET for non-parent jobs.
 // Version 63: completeAndFetchNext accepts processedOn hint, '__' sentinels for ordering/group keys, hasParents flag.
 // Version 64: completeAndFetchNext skipEvents/skipMetrics args - opt-out XADD events + HINCRBY metrics on hot path.
-export const LIBRARY_VERSION = '64';
+// Version 65: rpopAndReserve accepts count arg for batch popping under globalConcurrency; deferActive DECRs list-active for list-sourced jobs.
+export const LIBRARY_VERSION = '65';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1689,29 +1690,41 @@ redis.register_function('glidemq_checkConcurrency', function(keys, args)
   return remaining
 end)
 
--- Atomically check global concurrency capacity, then RPOP from a list and INCR list-active counter.
--- Returns the popped jobId if a slot was available, or false/nil if at capacity or list is empty.
+-- Atomically check global concurrency capacity, then RPOP up to count jobs from a list and INCRBY list-active counter.
+-- Returns an array of popped jobIds (may be empty if at capacity or list is empty).
 -- KEYS: [metaKey, streamKey, listActiveKey, listKey]
--- ARGS: [group]
+-- ARGS: [group, count]
 redis.register_function('glidemq_rpopAndReserve', function(keys, args)
   local metaKey = keys[1]
   local streamKey = keys[2]
   local listActiveKey = keys[3]
   local listKey = keys[4]
   local group = args[1]
+  local requested = tonumber(args[2]) or 1
+  local maxPop = requested
   local gc = tonumber(redis.call('HGET', metaKey, 'globalConcurrency')) or 0
   if gc > 0 then
     local ok_ra, pending = pcall(redis.call, 'XPENDING', streamKey, group)
     local pendingCount = (ok_ra and pending and tonumber(pending[1])) or 0
     local listActive = tonumber(redis.call('GET', listActiveKey)) or 0
-    if pendingCount + listActive >= gc then
-      return false
+    local available = gc - pendingCount - listActive
+    if available <= 0 then
+      return {}
+    end
+    if available < maxPop then
+      maxPop = available
     end
   end
-  local jobId = redis.call('RPOP', listKey)
-  if not jobId then return false end
-  redis.call('INCR', listActiveKey)
-  return jobId
+  local results = {}
+  for i = 1, maxPop do
+    local jobId = redis.call('RPOP', listKey)
+    if not jobId then break end
+    results[#results + 1] = jobId
+  end
+  if #results > 0 then
+    redis.call('INCRBY', listActiveKey, #results)
+  end
+  return results
 end)
 
 redis.register_function('glidemq_moveToActive', function(keys, args)
@@ -1895,6 +1908,7 @@ end)
 redis.register_function('glidemq_deferActive', function(keys, args)
   local streamKey = keys[1]
   local jobKey = keys[2]
+  local listActiveKey = keys[3]
   local jobId = args[1]
   local entryId = args[2]
   local group = args[3]
@@ -1902,6 +1916,13 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   local exists = redis.call('EXISTS', jobKey)
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
+  -- List-sourced jobs (entryId='') were counted in list-active; DECR to stay balanced.
+  if entryId == '' and listActiveKey ~= '' then
+    local la = tonumber(redis.call('GET', listActiveKey)) or 0
+    if la > 0 then
+      redis.call('DECR', listActiveKey)
+    end
+  end
   if exists == 0 then
     return 0
   end
@@ -3471,18 +3492,20 @@ export async function checkConcurrency(client: Client, k: QueueKeys, group: stri
 }
 
 /**
- * Atomically check global concurrency capacity, RPOP from a list, and INCR list-active counter.
- * Returns the jobId if a slot was available and the list was non-empty, or null otherwise.
+ * Atomically check global concurrency capacity, RPOP up to `count` jobs from a list,
+ * and INCRBY list-active counter by the number popped.
+ * Returns an array of popped jobIds (may be empty).
  */
 export async function rpopAndReserve(
   client: Client,
   k: QueueKeys,
   listKey: string,
   group: string = CONSUMER_GROUP,
-): Promise<string | null> {
-  const result = await client.fcall('glidemq_rpopAndReserve', [k.meta, k.stream, k.listActive, listKey], [group]);
-  if (!result) return null;
-  return String(result);
+  count: number = 1,
+): Promise<string[]> {
+  const result = await client.fcall('glidemq_rpopAndReserve', [k.meta, k.stream, k.listActive, listKey], [group, count.toString()]);
+  if (!Array.isArray(result) || result.length === 0) return [];
+  return result.map((v) => String(v));
 }
 
 /**
@@ -3589,7 +3612,7 @@ export async function deferActive(
 ): Promise<void> {
   const args = [jobId, entryId, group];
   if (broadcastMode) args.push('1');
-  await client.fcall('glidemq_deferActive', [k.stream, k.job(jobId)], args);
+  await client.fcall('glidemq_deferActive', [k.stream, k.job(jobId), k.listActive], args);
 }
 
 /**
