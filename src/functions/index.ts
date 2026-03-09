@@ -3503,7 +3503,11 @@ export async function rpopAndReserve(
   group: string = CONSUMER_GROUP,
   count: number = 1,
 ): Promise<string[]> {
-  const result = await client.fcall('glidemq_rpopAndReserve', [k.meta, k.stream, k.listActive, listKey], [group, count.toString()]);
+  const result = await client.fcall(
+    'glidemq_rpopAndReserve',
+    [k.meta, k.stream, k.listActive, listKey],
+    [group, count.toString()],
+  );
   if (!Array.isArray(result) || result.length === 0) return [];
   return result.map((v) => String(v));
 }
