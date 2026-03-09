@@ -266,7 +266,7 @@ describe('Worker', () => {
     );
     expect(completeAndFetchNextCall).toBeDefined();
     const completionArgs = completeAndFetchNextCall[2] as string[];
-    expect(completionArgs.slice(-6, -3)).toEqual(['tenant-a', '1', 'group-1']);
+    expect(completionArgs.slice(-8, -5)).toEqual(['tenant-a', '1', 'group-1']);
 
     // Event should have been emitted
     expect(completedJobs).toHaveLength(1);

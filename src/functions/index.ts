@@ -19,7 +19,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 58: XADD to job stream includes 'name' field for subject-based filtering in BroadcastWorker.
 // Version 59: glidemq_healListActive - self-healing for list-active counter drift on worker crash.
 // Version 61: glidemq_popLists - atomic pop from priority + LIFO lists in a single FCALL; timestamp caching in processJob.
-export const LIBRARY_VERSION = '63';
+// Version 64: completeAndFetchNext skipEvents/skipMetrics args - opt-out XADD events + HINCRBY metrics on hot path.
+export const LIBRARY_VERSION = '64';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -841,6 +842,8 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local broadcastMode = args[15] or '0'
   local hintProcessedOn = args[16] or ''
   local hasParents = args[17] or '0'
+  local skipEvents = args[18] or '0'
+  local skipMetrics = args[19] or '0'
 
   -- Phase 1: Complete current job (same as glidemq_complete)
   local processedOn
@@ -863,8 +866,8 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   if currentGroupKey ~= '__' then
     releaseGroupSlotAndPromote(jobKey, jobId, timestamp, currentGroupKey)
   end
-  emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
-  recordMetrics(metricsKey, timestamp, timestamp - processedOn)
+  if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
+  if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
 
@@ -976,7 +979,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       local priRevoked = redis.call('HGET', priJobKey, 'revoked')
       if priRevoked ~= '1' and not checkExpired(priJobKey, priJobId, prefix, timestamp) then
         redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
-        emitEvent(eventsKey, 'active', priJobId, nil)
+        if skipEvents ~= '1' then emitEvent(eventsKey, 'active', priJobId, nil) end
         local priJobFields = redis.call('HGETALL', priJobKey)
         redis.call('INCR', prefix .. 'list-active')
         return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
@@ -998,7 +1001,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       if lifoRevoked ~= '1' and not checkExpired(lifoJobKey, lifoJobId, prefix, timestamp) then
         -- Activate: set state, processedOn, lastActive before HGETALL so returned hash is current
         redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
-        emitEvent(eventsKey, 'active', lifoJobId, nil)
+        if skipEvents ~= '1' then emitEvent(eventsKey, 'active', lifoJobId, nil) end
         local lifoJobFields = redis.call('HGETALL', lifoJobKey)
         redis.call('INCR', prefix .. 'list-active')
         -- Return LIFO job (no entryId for LIFO jobs, use empty string)
@@ -1091,8 +1094,8 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
           'state', 'failed',
           'failedReason', 'cost exceeds token bucket capacity',
           'finishedOn', tostring(timestamp))
-        emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'})
-        recordMetrics(metricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn)
+        if skipEvents ~= '1' then emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
+        if skipMetrics ~= '1' then recordMetrics(metricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn) end
         return {'NEXT_NONE', jobId}
       end
       if nextTbTokens < nextJobCostVal then
@@ -3254,6 +3257,8 @@ export async function completeAndFetchNext(
   broadcastMode?: boolean,
   processedOn?: number,
   hasParents?: boolean,
+  skipEvents?: boolean,
+  skipMetrics?: boolean,
 ): Promise<CompleteAndFetchResult> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
@@ -3285,6 +3290,8 @@ export async function completeAndFetchNext(
   args.push(broadcastMode ? '1' : '0');
   args.push(processedOn != null ? processedOn.toString() : '');
   args.push(hasParents ? '1' : '0');
+  args.push(skipEvents ? '1' : '0');
+  args.push(skipMetrics ? '1' : '0');
 
   const raw = await client.fcall('glidemq_completeAndFetchNext', keys, args);
 

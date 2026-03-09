@@ -118,6 +118,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected readonly consumerGroup: string;
   protected readonly broadcastMode: boolean;
   protected readonly startFrom: string;
+  protected readonly skipEvents: boolean;
+  protected readonly skipMetrics: boolean;
 
   protected constructor(
     name: string,
@@ -147,6 +149,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     this.consumerGroup = config.consumerGroup;
     this.broadcastMode = config.broadcastMode;
     this.startFrom = config.startFrom;
+    this.skipEvents = opts.events === false;
+    this.skipMetrics = opts.metrics === false;
 
     // Batch mode validation
     this.batchMode = !!opts.batch;
@@ -1211,6 +1215,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.broadcastMode ? true : undefined,
         job.processedOn,
         !!(job.parentId || job.parentIds),
+        this.skipEvents,
+        this.skipMetrics,
       );
 
       job.returnvalue = processResult;
