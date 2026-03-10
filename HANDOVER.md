@@ -34,13 +34,8 @@ Current state of the glide-mq repository as of 2026-03-09.
 - `npm test` runs full suite (~1915 tests, all passing).
 - `claude-review` CI check can fail with SDK infrastructure errors - not code-related.
 - Fuzzer pre-push hook: ~4 min per push.
-- LIBRARY_VERSION is now '65' - servers with older cached versions will auto-upgrade on connection.
-
-## Remaining known limitations
-
-- Stall detection does not integrate with list-active counter (healListActive on scheduler ticks is the only correction path)
+- LIBRARY_VERSION is now '66' - servers with older cached versions will auto-upgrade on connection.
 
 ## What comes next
 
 - Continue with remaining roadmap issues
-- Potential: integrate list-active counter with stall detection for crash self-healing

@@ -7,6 +7,7 @@ import {
   promote,
   promoteRateLimited,
   reclaimStalled,
+  reclaimStalledListJobs,
   addJobArgs,
   nextDueAt,
   tryLock,
@@ -216,9 +217,7 @@ export class Scheduler {
 
   private runStalledRecovery(): void {
     this.trackRun(
-      this.reclaimStalledJobs().catch((err) => {
-        // Scheduler has no EventEmitter - errors are transient connection issues
-        // that self-heal on the next interval tick. Worker reconnect handles the rest.
+      Promise.all([this.reclaimStalledJobs(), this.reclaimStalledListJobsFn()]).catch((err) => {
         this.reportError(err);
       }),
     );
@@ -269,6 +268,14 @@ export class Scheduler {
       this.consumerGroup,
       this.broadcastMode,
     );
+  }
+
+  /**
+   * Reclaim stalled list-sourced jobs (LIFO/priority) invisible to XAUTOCLAIM.
+   * Uses bounded SCAN to detect active list jobs with stale lastActive.
+   */
+  private async reclaimStalledListJobsFn(): Promise<number> {
+    return reclaimStalledListJobs(this.client, this.queueKeys, this.stalledInterval, this.maxStalledCount, Date.now());
   }
 
   private schedulerLockKey(name: string): string {

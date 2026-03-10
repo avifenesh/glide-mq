@@ -6,6 +6,7 @@ import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fix
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
+const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 describeEachMode('LIFO: Basic ordering', (CONNECTION) => {
   let cleanupClient: any;
@@ -721,4 +722,120 @@ describeEachMode('LIFO: list-active counter on failure', (CONNECTION) => {
       });
     });
   }, 15000);
+});
+
+describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    // Ensure version 66 library is loaded
+    const tmpQ = new Queue(`stall-lib-load-${Date.now()}`, { connection: CONNECTION });
+    await tmpQ.close();
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('reclaimStalledListJobs detects stalled LIFO job and moves to failed with list-active DECR', async () => {
+    const Q = `stall-lifo-reclaim-${Date.now()}`;
+    const k = buildKeys(Q);
+
+    // Simulate a stalled list-sourced job (library already loaded in beforeAll): create job hash with state=active, lifo=1, stale lastActive
+    const jobId = 'stalled-lifo-1';
+    const staleTime = Date.now() - 60000; // 60s ago
+    await cleanupClient.hset(k.job(jobId), {
+      name: 'stalled-task',
+      data: '{}',
+      opts: '{}',
+      state: 'active',
+      lifo: '1',
+      processedOn: staleTime.toString(),
+      lastActive: staleTime.toString(),
+      stalledCount: '0',
+      attemptsMade: '0',
+    });
+
+    // Set list-active to 1 (simulating the INCR from rpopAndReserve)
+    await cleanupClient.set(k.listActive, '1');
+
+    // Call reclaimStalledListJobs directly via FCALL
+    // minIdleMs=5000, maxStalledCount=1, timestamp=now
+    const now = Date.now();
+    const count = await cleanupClient.fcall(
+      'glidemq_reclaimStalledListJobs',
+      [k.stream, k.events],
+      ['5000', '1', now.toString(), k.failed],
+    );
+
+    // First call: stalledCount goes from 0 to 1 (== maxStalledCount), job stays active (stalled event)
+    expect(Number(count)).toBe(1);
+    const state1 = await cleanupClient.hget(k.job(jobId), 'state');
+    expect(state1).toBe('active');
+    const sc1 = await cleanupClient.hget(k.job(jobId), 'stalledCount');
+    expect(sc1).toBe('1');
+    // list-active should NOT be decremented yet (job is re-activated, not failed)
+    const la1 = await cleanupClient.get(k.listActive);
+    expect(la1).toBe('1');
+
+    // Second call: stalledCount goes from 1 to 2 (> maxStalledCount), job moves to failed
+    const count2 = await cleanupClient.fcall(
+      'glidemq_reclaimStalledListJobs',
+      [k.stream, k.events],
+      ['5000', '1', (now + 1).toString(), k.failed],
+    );
+    expect(Number(count2)).toBe(1);
+    const state2 = await cleanupClient.hget(k.job(jobId), 'state');
+    expect(state2).toBe('failed');
+    const reason = await cleanupClient.hget(k.job(jobId), 'failedReason');
+    expect(reason).toBe('job stalled more than maxStalledCount');
+
+    // list-active should be decremented to 0
+    const la2 = await cleanupClient.get(k.listActive);
+    expect(Number(la2)).toBe(0);
+
+    // Job should be in the failed ZSet
+    const failedScore = await cleanupClient.zscore(k.failed, jobId);
+    expect(failedScore).not.toBeNull();
+
+    await flushQueue(cleanupClient, Q);
+  });
+
+  it('reclaimStalledListJobs does not touch non-stalled list jobs', async () => {
+    const Q = `stall-lifo-notouch-${Date.now()}`;
+    const k = buildKeys(Q);
+
+    // Create a fresh active list-sourced job (lastActive is recent)
+    const jobId = 'fresh-lifo-1';
+    const recentTime = Date.now();
+    await cleanupClient.hset(k.job(jobId), {
+      name: 'fresh-task',
+      data: '{}',
+      opts: '{}',
+      state: 'active',
+      lifo: '1',
+      processedOn: recentTime.toString(),
+      lastActive: recentTime.toString(),
+      stalledCount: '0',
+      attemptsMade: '0',
+    });
+
+    await cleanupClient.set(k.listActive, '1');
+
+    // Call with minIdleMs=30000 - job is fresh, should not be touched
+    const count = await cleanupClient.fcall(
+      'glidemq_reclaimStalledListJobs',
+      [k.stream, k.events],
+      ['30000', '1', recentTime.toString(), k.failed],
+    );
+
+    expect(Number(count)).toBe(0);
+    const state = await cleanupClient.hget(k.job(jobId), 'state');
+    expect(state).toBe('active');
+    const la = await cleanupClient.get(k.listActive);
+    expect(la).toBe('1');
+
+    await flushQueue(cleanupClient, Q);
+  });
 });
