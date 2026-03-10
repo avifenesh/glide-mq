@@ -84,14 +84,12 @@ export class FlowProducer {
 
   /**
    * Add multiple independent flows.
+   * Uses Promise.all to process independent flow trees concurrently,
+   * eliminating sequential I/O bottlenecks when adding many flows.
    */
   async addBulk(flows: FlowJob[]): Promise<JobNode[]> {
     const client = await this.getClient();
-    const results: JobNode[] = [];
-    for (const flow of flows) {
-      results.push(await this.addFlowRecursive(client, flow));
-    }
-    return results;
+    return Promise.all(flows.map((flow) => this.addFlowRecursive(client, flow)));
   }
 
   /**
