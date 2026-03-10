@@ -19,16 +19,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - Worker options `events: false` / `metrics: false` to skip XADD event stream writes and HINCRBY metrics recording in Lua on the hot path. TS-side EventEmitter (`'completed'`, `'failed'`, etc.) is unaffected. Reduces Valkey memory and CPU for high-throughput deployments that don't consume server-side events or metrics (#126).
+- `glidemq_reclaimStalledListJobs` - stall detection for LIFO/priority list-sourced jobs via bounded SCAN. Detects orphaned active list jobs when workers crash (#129).
 
 ### Fixed
 
+- `rpopAndReserve` now accepts a `count` argument for batch popping under globalConcurrency - fixes the limitation of popping 1 job at a time (#128).
+- `deferActive` now DECRs `list-active` counter for list-sourced jobs, preventing counter drift on defer (#128).
 - Ordering key `'__'` is now rejected as reserved (internal sentinel collision guard).
 - `hasParents` flag narrowed to DAG-only `parentIds` - saves one SMEMBERS call for single-parent flow jobs.
 - Version changelog comments in Lua library corrected (v59-v64 entries).
 
 ### Changed
 
-- Function library version bumped from 60 to 64 (auto-upgrades on connection).
+- Function library version bumped from 60 to 66 (auto-upgrades on connection).
 - Benchmark durations increased (ADD_DURATION 5s->15s, PROCESS_SIZES [500,2000]->[5000,20000]) for more stable measurements.
 
 ---
