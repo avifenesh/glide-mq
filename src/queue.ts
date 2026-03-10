@@ -1174,15 +1174,16 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async getJobCounts(): Promise<JobCounts> {
     const client = await this.getClient();
 
-    const [streamLen, completedCount, failedCount, scheduledCount, listActiveRaw, lifoLen, priorityLen] = await Promise.all([
-      client.xlen(this.keys.stream),
-      client.zcard(this.keys.completed),
-      client.zcard(this.keys.failed),
-      client.zcard(this.keys.scheduled),
-      client.get(this.keys.listActive),
-      client.llen(this.keys.lifo),
-      client.llen(this.keys.priority),
-    ]);
+    const [streamLen, completedCount, failedCount, scheduledCount, listActiveRaw, lifoLen, priorityLen] =
+      await Promise.all([
+        client.xlen(this.keys.stream),
+        client.zcard(this.keys.completed),
+        client.zcard(this.keys.failed),
+        client.zcard(this.keys.scheduled),
+        client.get(this.keys.listActive),
+        client.llen(this.keys.lifo),
+        client.llen(this.keys.priority),
+      ]);
 
     const listActive = Number(listActiveRaw) || 0;
 
