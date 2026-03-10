@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.11.0] - 2026-03-10
+
+### Added
+
+- Subject-based filtering in `BroadcastWorker` via `opts.subjects` glob patterns. Non-matching messages are auto-ACKed and skipped.
+
+### Fixed
+
+- Timer leak in `runProcessor`: `setTimeout` handle is now cleared when the processor resolves before the timeout, preventing orphaned timers under high throughput.
+- `glidemq_revoke` and `glidemq_searchByName` now paginate XRANGE with COUNT 1000 instead of loading the entire stream into Lua memory. Prevents memory pressure and event loop blocking on large streams.
+- `getJobCounts()` now accounts for list-sourced active jobs (via `list-active` counter) and LIFO/priority list lengths in the waiting count. Previously under-reported active and over-reported waiting when LIFO/priority jobs were in flight.
+- `isPaused()` now handles `GlideString` (Buffer) returns correctly via `String()` conversion. Previously could always return `false` when the client returned Buffer values.
+
+---
+
 ## [0.10.0] - 2026-03-09
 
 ### Performance

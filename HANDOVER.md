@@ -36,7 +36,7 @@ Current state of the glide-mq repository as of 2026-03-10.
 - `npm test` runs full suite (~1915 tests, all passing).
 - `claude-review` CI check can fail with SDK infrastructure errors - not code-related.
 - Fuzzer pre-push hook: ~4 min per push.
-- LIBRARY_VERSION is now '67' - servers with older cached versions will auto-upgrade on connection.
+- Version: 0.11.0, LIBRARY_VERSION = '67'
 
 ## What comes next
 
