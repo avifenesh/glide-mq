@@ -7,7 +7,7 @@ import {
   promote,
   promoteRateLimited,
   reclaimStalled,
-  reclaimStalledListJobs,
+  reclaimStalledListJobs as reclaimStalledListJobsCmd,
   addJobArgs,
   nextDueAt,
   tryLock,
@@ -24,8 +24,6 @@ export interface SchedulerOptions {
   stalledInterval?: number;
   maxStalledCount?: number;
   consumerId?: string;
-  /** @deprecated No longer needed - prefix is derived from Valkey keys server-side. */
-  queuePrefix?: string;
   /** Called at the end of each promotion tick to refresh cached meta flags. */
   onPromotionTick?: () => void;
   /** Surface scheduler errors through the parent worker instead of swallowing them silently. */
@@ -217,7 +215,7 @@ export class Scheduler {
 
   private runStalledRecovery(): void {
     this.trackRun(
-      Promise.all([this.reclaimStalledJobs(), this.reclaimStalledListJobsFn()]).catch((err) => {
+      Promise.all([this.reclaimStalledJobs(), this.reclaimStalledListJobs()]).catch((err) => {
         this.reportError(err);
       }),
     );
@@ -274,8 +272,14 @@ export class Scheduler {
    * Reclaim stalled list-sourced jobs (LIFO/priority) invisible to XAUTOCLAIM.
    * Uses bounded SCAN to detect active list jobs with stale lastActive.
    */
-  private async reclaimStalledListJobsFn(): Promise<number> {
-    return reclaimStalledListJobs(this.client, this.queueKeys, this.stalledInterval, this.maxStalledCount, Date.now());
+  private async reclaimStalledListJobs(): Promise<number> {
+    return reclaimStalledListJobsCmd(
+      this.client,
+      this.queueKeys,
+      this.stalledInterval,
+      this.maxStalledCount,
+      Date.now(),
+    );
   }
 
   private schedulerLockKey(name: string): string {

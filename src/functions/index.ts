@@ -25,7 +25,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 64: completeAndFetchNext skipEvents/skipMetrics args - opt-out XADD events + HINCRBY metrics on hot path.
 // Version 65: rpopAndReserve accepts count arg for batch popping under globalConcurrency; deferActive DECRs list-active for list-sourced jobs.
 // Version 66: glidemq_reclaimStalledListJobs - stall detection for list-sourced jobs via bounded SCAN.
-export const LIBRARY_VERSION = '66';
+// Version 67: reclaimStalledListJobs - increase SCAN bounds (maxIter 100->1000, COUNT 50->500) for large DBs.
+export const LIBRARY_VERSION = '67';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -383,6 +384,32 @@ local function extractTtlFromOpts(optsJson)
   return tonumber(decoded['ttl']) or 0
 end
 
+-- Apply stall logic to a job: increment stalledCount, fail if over max, else emit stalled event.
+-- Returns true if the job was moved to failed, false if only stalled.
+local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp)
+  local stalledCount = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
+  if stalledCount > maxStalledCount then
+    local metricsKey = prefix .. 'metrics:failed'
+    local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
+    redis.call('ZADD', failedKey, timestamp, jobId)
+    redis.call('HSET', jobKey,
+      'state', 'failed',
+      'failedReason', 'job stalled more than maxStalledCount',
+      'finishedOn', tostring(timestamp)
+    )
+    markOrderingDone(jobKey, jobId)
+    releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
+    emitEvent(eventsKey, 'failed', jobId, {
+      'failedReason', 'job stalled more than maxStalledCount'
+    })
+    recordMetrics(metricsKey, timestamp, timestamp - processedOn)
+    return true
+  else
+    emitEvent(eventsKey, 'stalled', jobId, nil)
+    return false
+  end
+end
+
 -- Remove excess jobs from a sorted set in capped, stack-safe batches.
 -- Deletes job hashes and removes from the set in chunks of 1000.
 local function removeExcessJobs(setKey, prefix, ids)
@@ -496,7 +523,6 @@ redis.register_function('glidemq_addJob', function(keys, args)
           'tbLastRefill', tostring(timestamp),
           'tbRefillRemainder', '0')
       end
-      -- Validate cost <= capacity at enqueue
       -- Validate cost (explicit or default 1000 millitokens) against capacity
       local effectiveCost = (jobCost > 0) and jobCost or 1000
       if effectiveCost > tbCapacity then
@@ -1293,27 +1319,12 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       if lastActive and (timestamp - lastActive) < minIdleMs then
         count = count + 1
       else
-      local stalledCount = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
-      if stalledCount > maxStalledCount then
-        local metricsKey = prefix .. 'metrics:failed'
-        local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
+      local failed = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp)
+      if failed then
         if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
         if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
-        redis.call('ZADD', failedKey, timestamp, jobId)
-        redis.call('HSET', jobKey,
-          'state', 'failed',
-          'failedReason', 'job stalled more than maxStalledCount',
-          'finishedOn', tostring(timestamp)
-        )
-        markOrderingDone(jobKey, jobId)
-        releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
-        emitEvent(eventsKey, 'failed', jobId, {
-          'failedReason', 'job stalled more than maxStalledCount'
-        })
-        recordMetrics(metricsKey, timestamp, timestamp - processedOn)
       else
         redis.call('HSET', jobKey, 'state', 'active')
-        emitEvent(eventsKey, 'stalled', jobId, nil)
       end
       count = count + 1
       end
@@ -1333,17 +1344,20 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
   local minIdleMs = tonumber(args[1])
   local maxStalledCount = tonumber(args[2]) or 1
   local timestamp = tonumber(args[3])
+  if not minIdleMs or not timestamp then return 0 end
   local failedKey = args[4]
   local prefix = string.sub(streamKey, 1, #streamKey - 6)
   local listActiveKey = prefix .. 'list-active'
+  local currentActive = tonumber(redis.call('GET', listActiveKey)) or 0
+  if currentActive <= 0 then return 0 end
   local pattern = prefix .. 'job:*'
   local cursor = '0'
-  local maxIter = 100
+  local maxIter = 1000
   local iter = 0
   local count = 0
   repeat
     iter = iter + 1
-    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 50)
+    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 500)
     cursor = sr[1]
     local scannedKeys = sr[2]
     for i = 1, #scannedKeys do
@@ -1359,25 +1373,8 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
           if checkExpired(jk, jobId, prefix, timestamp) then
             shouldDecr = true
           else
-            local stalledCount = redis.call('HINCRBY', jk, 'stalledCount', 1)
-            if stalledCount > maxStalledCount then
-              local metricsKey = prefix .. 'metrics:failed'
-              local processedOn = tonumber(redis.call('HGET', jk, 'processedOn')) or timestamp
-              redis.call('ZADD', failedKey, timestamp, jobId)
-              redis.call('HSET', jk,
-                'state', 'failed',
-                'failedReason', 'job stalled more than maxStalledCount',
-                'finishedOn', tostring(timestamp)
-              )
-              markOrderingDone(jk, jobId)
-              releaseGroupSlotAndPromote(jk, jobId, timestamp)
-              emitEvent(eventsKey, 'failed', jobId, {
-                'failedReason', 'job stalled more than maxStalledCount'
-              })
-              recordMetrics(metricsKey, timestamp, timestamp - processedOn)
+            if applyStalledLogic(jk, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp) then
               shouldDecr = true
-            else
-              emitEvent(eventsKey, 'stalled', jobId, nil)
             end
           end
           if shouldDecr then
@@ -1546,7 +1543,6 @@ redis.register_function('glidemq_dedup', function(keys, args)
           'tbLastRefill', tostring(timestamp),
           'tbRefillRemainder', '0')
       end
-      -- Validate cost <= capacity at enqueue
       -- Validate cost (explicit or default 1000 millitokens) against capacity
       local effectiveCost = (jobCost > 0) and jobCost or 1000
       if effectiveCost > tbCapacity then
@@ -3033,10 +3029,6 @@ export type QueueKeys = ReturnType<typeof import('../utils').buildKeys>;
 
 // ---- Typed FCALL wrappers ----
 
-/**
- * Add a job to the queue atomically.
- * Returns the new job ID (string).
- */
 /**
  * Build the keys and args arrays for glidemq_addJob, shared by addJob() and Batch callers.
  */

@@ -1,6 +1,6 @@
 # HANDOVER
 
-Current state of the glide-mq repository as of 2026-03-09.
+Current state of the glide-mq repository as of 2026-03-10.
 
 ## Branch
 
@@ -8,11 +8,13 @@ Current state of the glide-mq repository as of 2026-03-09.
 
 ## Recent merges
 
+- PR #129: feat: stall detection for list-sourced jobs via `glidemq_reclaimStalledListJobs` bounded SCAN
+- PR #128: fix: `rpopAndReserve` batch count for globalConcurrency, `deferActive` list-active DECR
 - PR #126: perf: hot-path optimizations (squash-merged to main)
   - ~108% c=1 throughput improvement (~1,300 -> ~2,700 j/s)
   - ~9-16% c=10 throughput improvement (~12,900 -> ~14,000-15,000 j/s)
   - Key changes: skip HMGET for non-parent buildParentInfo, popLists Lua FCALL, completeAndFetchNext hints (processedOn, ordering/group sentinels, hasParents), events/metrics opt-out
-  - LIBRARY_VERSION = '64'
+  - LIBRARY_VERSION = '66'
   - Sentinel validation: ordering key '__' is rejected as reserved
   - hasParents flag narrowed to DAG-only parentIds (saves SMEMBERS for single-parent flow jobs)
 - PR #124: Deep audit fixes (62 findings, 7 commits + BaseWorker)
@@ -34,7 +36,7 @@ Current state of the glide-mq repository as of 2026-03-09.
 - `npm test` runs full suite (~1915 tests, all passing).
 - `claude-review` CI check can fail with SDK infrastructure errors - not code-related.
 - Fuzzer pre-push hook: ~4 min per push.
-- LIBRARY_VERSION is now '66' - servers with older cached versions will auto-upgrade on connection.
+- LIBRARY_VERSION is now '67' - servers with older cached versions will auto-upgrade on connection.
 
 ## What comes next
 

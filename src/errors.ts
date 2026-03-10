@@ -12,13 +12,6 @@ export class ConnectionError extends GlideMQError {
   }
 }
 
-export class ScriptError extends GlideMQError {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ScriptError';
-  }
-}
-
 export class UnrecoverableError extends GlideMQError {
   constructor(message: string) {
     super(message);

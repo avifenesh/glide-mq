@@ -802,6 +802,98 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
     await flushQueue(cleanupClient, Q);
   });
 
+  it('reclaimStalledListJobs detects stalled priority-sourced job and moves to failed with list-active DECR', async () => {
+    const Q = `stall-priority-reclaim-${Date.now()}`;
+    const k = buildKeys(Q);
+
+    // Simulate a stalled priority-sourced job: state=active, priority='5', NO lifo field, stale lastActive
+    const jobId = 'stalled-priority-1';
+    const staleTime = Date.now() - 60000; // 60s ago
+    await cleanupClient.hset(k.job(jobId), {
+      name: 'priority-task',
+      data: '{}',
+      opts: '{}',
+      state: 'active',
+      priority: '5',
+      processedOn: staleTime.toString(),
+      lastActive: staleTime.toString(),
+      stalledCount: '0',
+      attemptsMade: '0',
+    });
+
+    // Set list-active to 1 (simulating the INCR from rpopAndReserve)
+    await cleanupClient.set(k.listActive, '1');
+
+    const now = Date.now();
+
+    // First call: stalledCount 0 -> 1 (== maxStalledCount), job stays active (stalled event)
+    const count1 = await cleanupClient.fcall(
+      'glidemq_reclaimStalledListJobs',
+      [k.stream, k.events],
+      ['5000', '1', now.toString(), k.failed],
+    );
+    expect(Number(count1)).toBe(1);
+    const state1 = await cleanupClient.hget(k.job(jobId), 'state');
+    expect(state1).toBe('active');
+    const sc1 = await cleanupClient.hget(k.job(jobId), 'stalledCount');
+    expect(sc1).toBe('1');
+    // list-active should NOT be decremented yet
+    const la1 = await cleanupClient.get(k.listActive);
+    expect(la1).toBe('1');
+
+    // Second call: stalledCount 1 -> 2 (> maxStalledCount), job moves to failed
+    const count2 = await cleanupClient.fcall(
+      'glidemq_reclaimStalledListJobs',
+      [k.stream, k.events],
+      ['5000', '1', (now + 1).toString(), k.failed],
+    );
+    expect(Number(count2)).toBe(1);
+    const state2 = await cleanupClient.hget(k.job(jobId), 'state');
+    expect(state2).toBe('failed');
+    const reason = await cleanupClient.hget(k.job(jobId), 'failedReason');
+    expect(reason).toBe('job stalled more than maxStalledCount');
+
+    // list-active should be decremented to 0
+    const la2 = await cleanupClient.get(k.listActive);
+    expect(Number(la2)).toBe(0);
+
+    // Job should be in the failed ZSet
+    const failedScore = await cleanupClient.zscore(k.failed, jobId);
+    expect(failedScore).not.toBeNull();
+
+    await flushQueue(cleanupClient, Q);
+  });
+
+  it('deferActive DECRs list-active when entryId is empty (list-sourced job)', async () => {
+    const Q = `defer-active-decr-${Date.now()}`;
+    const k = buildKeys(Q);
+
+    const jobId = 'defer-lifo-1';
+    await cleanupClient.hset(k.job(jobId), {
+      name: 'defer-task',
+      data: '{}',
+      opts: '{}',
+      state: 'active',
+      lifo: '1',
+    });
+
+    // Set list-active to 1
+    await cleanupClient.set(k.listActive, '1');
+
+    // Call glidemq_deferActive with entryId='' (list-sourced job, no stream entry)
+    await cleanupClient.fcall('glidemq_deferActive', [k.stream, k.job(jobId), k.listActive], [jobId, '', 'workers']);
+
+    // list-active should be decremented to 0
+    const la = await cleanupClient.get(k.listActive);
+    expect(Number(la)).toBe(0);
+
+    // Job should be moved back to waiting
+    const state = await cleanupClient.hget(k.job(jobId), 'state');
+    expect(state).toBe('waiting');
+
+    await flushQueue(cleanupClient, Q);
+  });
+
   it('reclaimStalledListJobs does not touch non-stalled list jobs', async () => {
     const Q = `stall-lifo-notouch-${Date.now()}`;
     const k = buildKeys(Q);
@@ -836,6 +928,88 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
     const la = await cleanupClient.get(k.listActive);
     expect(la).toBe('1');
 
+    await flushQueue(cleanupClient, Q);
+  });
+});
+
+describeEachMode('LIFO: rpopAndReserve batch', (CONNECTION) => {
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    // Ensure function library is loaded
+    const tmpQ = new Queue(`rpop-batch-lib-load-${Date.now()}`, { connection: CONNECTION });
+    await tmpQ.close();
+  });
+
+  afterAll(async () => {
+    cleanupClient.close();
+  });
+
+  it('rpopAndReserve pops multiple LIFO jobs in a single FCALL when count > 1', async () => {
+    const Q = `rpop-batch-${Date.now()}`;
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    // Set globalConcurrency=5 so the function does not clamp below 3
+    await queue.setGlobalConcurrency(5);
+
+    // Push 3 LIFO jobs
+    const j1 = await queue.add('batch1', { seq: 1 }, { lifo: true });
+    const j2 = await queue.add('batch2', { seq: 2 }, { lifo: true });
+    const j3 = await queue.add('batch3', { seq: 3 }, { lifo: true });
+
+    // Call rpopAndReserve with count=3
+    const result = await cleanupClient.fcall(
+      'glidemq_rpopAndReserve',
+      [k.meta, k.stream, k.listActive, k.lifo],
+      ['workers', '3'],
+    );
+
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(3);
+
+    // All 3 job IDs returned in LIFO order (last pushed = first popped)
+    const ids = result.map((v: any) => String(v));
+    expect(ids).toEqual([j3!.id, j2!.id, j1!.id]);
+
+    // list-active should be incremented to 3
+    const la = await cleanupClient.get(k.listActive);
+    expect(Number(la)).toBe(3);
+
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+  });
+
+  it('rpopAndReserve clamps to globalConcurrency minus active', async () => {
+    const Q = `rpop-gc-clamp-${Date.now()}`;
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    // Set globalConcurrency=2
+    await queue.setGlobalConcurrency(2);
+
+    // Push 3 LIFO jobs
+    await queue.add('clamp1', { seq: 1 }, { lifo: true });
+    await queue.add('clamp2', { seq: 2 }, { lifo: true });
+    await queue.add('clamp3', { seq: 3 }, { lifo: true });
+
+    // Call rpopAndReserve with count=5 (more than gc allows)
+    const result = await cleanupClient.fcall(
+      'glidemq_rpopAndReserve',
+      [k.meta, k.stream, k.listActive, k.lifo],
+      ['workers', '5'],
+    );
+
+    expect(Array.isArray(result)).toBe(true);
+    // gc=2, no pending stream jobs, no list-active -> available=2, so only 2 returned
+    expect(result).toHaveLength(2);
+
+    // list-active should be 2
+    const la = await cleanupClient.get(k.listActive);
+    expect(Number(la)).toBe(2);
+
+    await queue.close();
     await flushQueue(cleanupClient, Q);
   });
 });
