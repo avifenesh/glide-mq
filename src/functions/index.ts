@@ -1355,10 +1355,9 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
         local isListSourced = vals[2] == '1' or (tonumber(vals[3]) or 0) > 0
         if isListSourced and lastActive and (timestamp - lastActive) >= minIdleMs then
           local jobId = string.sub(jk, #prefix + 5)
+          local shouldDecr = false
           if checkExpired(jk, jobId, prefix, timestamp) then
-            local la = tonumber(redis.call('GET', listActiveKey)) or 0
-            if la > 0 then redis.call('DECR', listActiveKey) end
-            count = count + 1
+            shouldDecr = true
           else
             local stalledCount = redis.call('HINCRBY', jk, 'stalledCount', 1)
             if stalledCount > maxStalledCount then
@@ -1376,14 +1375,16 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
                 'failedReason', 'job stalled more than maxStalledCount'
               })
               recordMetrics(metricsKey, timestamp, timestamp - processedOn)
-              local la = tonumber(redis.call('GET', listActiveKey)) or 0
-              if la > 0 then redis.call('DECR', listActiveKey) end
+              shouldDecr = true
             else
-              redis.call('HSET', jk, 'state', 'active')
               emitEvent(eventsKey, 'stalled', jobId, nil)
             end
-            count = count + 1
           end
+          if shouldDecr then
+            local la = tonumber(redis.call('GET', listActiveKey)) or 0
+            if la > 0 then redis.call('DECR', listActiveKey) end
+          end
+          count = count + 1
         end
       end
     end
