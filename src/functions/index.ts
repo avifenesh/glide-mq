@@ -1908,7 +1908,7 @@ end)
 redis.register_function('glidemq_deferActive', function(keys, args)
   local streamKey = keys[1]
   local jobKey = keys[2]
-  local listActiveKey = keys[3]
+  local listActiveKey = keys[3] or ''
   local jobId = args[1]
   local entryId = args[2]
   local group = args[3]
@@ -1917,9 +1917,12 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   -- List-sourced jobs (entryId='') were counted in list-active; DECR to stay balanced.
-  -- No guard on value > 0: healListActive corrects any negative drift.
+  -- Guard > 0: healListActive does not correct negative drift.
   if entryId == '' and listActiveKey ~= '' then
-    redis.call('DECR', listActiveKey)
+    local la = tonumber(redis.call('GET', listActiveKey)) or 0
+    if la > 0 then
+      redis.call('DECR', listActiveKey)
+    end
   end
   if exists == 0 then
     return 0
