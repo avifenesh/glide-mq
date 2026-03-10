@@ -120,15 +120,17 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
       let jobIds: string[];
 
       if (this.globalConcurrencyEnabled) {
-        // With gc, must use atomic rpopAndReserve per list (preserves slot accounting)
+        // Atomic rpopAndReserve: pops up to popCount jobs while respecting gc slots
         jobIds = [];
+        let remaining = popCount;
         for (const listKey of [this.queueKeys.priority, this.queueKeys.lifo]) {
+          if (remaining <= 0) break;
           try {
-            const id = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP);
-            if (id) {
+            const ids = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP, remaining);
+            for (const id of ids) {
               jobIds.push(id);
-              break;
             }
+            remaining -= ids.length;
           } catch (err) {
             const listType = listKey === this.queueKeys.priority ? 'priority' : 'LIFO';
             this.emit('error', new Error(`${listType} fetch error`, { cause: err }));
