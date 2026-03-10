@@ -4,6 +4,7 @@
 [![license](https://img.shields.io/npm/l/glide-mq)](https://github.com/avifenesh/glide-mq/blob/main/LICENSE)
 [![CI](https://github.com/avifenesh/glide-mq/actions/workflows/ci.yml/badge.svg)](https://github.com/avifenesh/glide-mq/actions/workflows/ci.yml)
 [![node](https://img.shields.io/node/v/glide-mq)](https://nodejs.org/)
+[![changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](CHANGELOG.md)
 
 High-performance message queue for Node.js built on Valkey/Redis Streams with 1-RTT job operations and cluster-native design.
 
@@ -60,18 +61,17 @@ Gzip compression: **98% payload reduction** on 15 KB payloads.
 
 *Valkey 8.0, single node, no-op processor. Run `npm run bench` to reproduce.*
 
-## Comparison
+## How it's different
 
-| | glide-mq | BullMQ | Bee Queue |
-|---|---|---|---|
-| **Network per job** | 1 RTT (`completeAndFetchNext`) | 4-7 RTTs (lock + complete + fetch) | 2-3 RTTs |
-| **Client** | Rust NAPI ([valkey-glide](https://github.com/valkey-io/valkey-glide)) | ioredis (pure JS) | node_redis (pure JS) |
-| **Server logic** | 1 Valkey Function library (persistent, named) | 53 EVAL scripts (cache-miss prone) | Lua scripts |
-| **Cluster** | Hash-tagged keys, zero config | Manual `{braces}` or workarounds | Not supported |
-| **Workflows** | FlowProducer trees, DAG, chain/group/chord | FlowProducer trees | Not supported |
-| **Pub/sub** | Native Broadcast with subject filtering | Not supported | Not supported |
-| **Serverless** | Producer + ServerlessPool | Not supported | Not supported |
-| **Throughput** | 48k jobs/s (c=50) | ~12k jobs/s (c=50) | ~5k jobs/s (c=50) |
+| Aspect | glide-mq approach |
+|--------|-------------------|
+| **Network per job** | 1 RTT -- `completeAndFetchNext` completes the current job and fetches the next in a single FCALL |
+| **Client** | Rust NAPI bindings ([valkey-glide](https://github.com/valkey-io/valkey-glide)) -- no JS protocol parsing |
+| **Server logic** | 1 persistent Valkey Function library (FUNCTION LOAD + FCALL) -- no per-call EVAL recompilation |
+| **Cluster** | Hash-tagged keys (`glide:{queueName}:*`) -- all queue data routes to the same slot automatically |
+| **Workflows** | FlowProducer trees, DAGs with fan-in, chain/group/chord, step jobs, dynamic children |
+| **Pub/sub** | Broadcast with NATS-style subject filtering, independent subscriber retries |
+| **Serverless** | Lightweight `Producer` + `ServerlessPool` for Lambda/Edge with connection reuse |
 
 ## Core concepts
 
@@ -156,7 +156,7 @@ Gzip compression: **98% payload reduction** on 15 KB payloads.
 | [`@glidemq/fastify`](https://github.com/avifenesh/glidemq-fastify) | `npm i @glidemq/fastify` | `app.register(glideMQPlugin, { connection, queues: { ... } })` |
 | [`@glidemq/nestjs`](https://github.com/avifenesh/glidemq-nestjs) | `npm i @glidemq/nestjs` | `GlideMQModule.forRoot({ connection, queues: { ... } })` |
 | [`@glidemq/dashboard`](https://github.com/avifenesh/glidemq-dashboard) | `npm i @glidemq/dashboard` | `app.use('/dashboard', createDashboard([queue1, queue2]))` |
-| @glidemq/hapi | coming soon | Hapi plugin with the same REST + SSE surface |
+| [`@glidemq/hapi`](https://github.com/avifenesh/glidemq-hapi) | `npm i @glidemq/hapi` | `await server.register({ plugin: glideMQPlugin, options: { connection, queues } })` |
 
 All framework packages provide REST endpoints, SSE events, and serverless Producer support. See each package's README for full documentation.
 
@@ -188,7 +188,9 @@ For zero-overhead integration, call Valkey Server Functions directly from any la
 
 | Guide | Topics |
 |-------|--------|
-| [Usage](docs/USAGE.md) | Queue, Worker, Broadcast, Producer, batch, request-reply, step jobs, graceful shutdown, cluster mode |
+| [Usage](docs/USAGE.md) | Queue, Worker, Producer, batch, request-reply, graceful shutdown, cluster mode |
+| [Broadcast](docs/BROADCAST.md) | Pub/sub fan-out, BroadcastWorker, subject filtering |
+| [Step Jobs](docs/STEP_JOBS.md) | `moveToDelayed`, `moveToWaitingChildren`, multi-step processors |
 | [Advanced](docs/ADVANCED.md) | Schedulers, rate limiting, dedup, compression, retries, DLQ, custom IDs, LIFO, TTL, serializers |
 | [Workflows](docs/WORKFLOWS.md) | FlowProducer, DAG, `chain`, `group`, `chord`, dynamic children |
 | [Observability](docs/OBSERVABILITY.md) | OpenTelemetry, time-series metrics, job logs, dashboard |
