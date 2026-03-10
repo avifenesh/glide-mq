@@ -881,11 +881,7 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
     await cleanupClient.set(k.listActive, '1');
 
     // Call glidemq_deferActive with entryId='' (list-sourced job, no stream entry)
-    await cleanupClient.fcall(
-      'glidemq_deferActive',
-      [k.stream, k.job(jobId), k.listActive],
-      [jobId, '', 'workers'],
-    );
+    await cleanupClient.fcall('glidemq_deferActive', [k.stream, k.job(jobId), k.listActive], [jobId, '', 'workers']);
 
     // list-active should be decremented to 0
     const la = await cleanupClient.get(k.listActive);
