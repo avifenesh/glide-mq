@@ -2433,16 +2433,28 @@ redis.register_function('glidemq_revoke', function(keys, args)
   end
   if state == 'waiting' or state == 'delayed' or state == 'prioritized' then
     redis.call('ZREM', scheduledKey, jobId)
-    local entries = redis.call('XRANGE', streamKey, '-', '+')
-    for i = 1, #entries do
-      local entryId = entries[i][1]
-      local fields = entries[i][2]
-      for j = 1, #fields, 2 do
-        if fields[j] == 'jobId' and fields[j+1] == jobId then
-          if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
-          if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
-          break
+    local cursor = '-'
+    local found = false
+    while not found do
+      local entries = redis.call('XRANGE', streamKey, cursor, '+', 'COUNT', 1000)
+      if #entries == 0 then break end
+      for i = 1, #entries do
+        local entryId = entries[i][1]
+        local fields = entries[i][2]
+        for j = 1, #fields, 2 do
+          if fields[j] == 'jobId' and fields[j+1] == jobId then
+            if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+            if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
+            found = true
+            break
+          end
         end
+        if found then break end
+      end
+      if not found then
+        local lastId = entries[#entries][1]
+        local dashPos = lastId:find('-')
+        cursor = lastId:sub(1, dashPos) .. tostring(tonumber(lastId:sub(dashPos + 1)) + 1)
       end
     end
     redis.call('ZADD', failedKey, timestamp, jobId)
@@ -2777,24 +2789,31 @@ redis.register_function('glidemq_searchByName', function(keys, args)
       end
     end
   elseif stateType == 'stream' then
-    local entries = redis.call('XRANGE', stateKey, '-', '+')
-    for i = 1, #entries do
-      if #matched >= limit then break end
-      local fields = entries[i][2]
-      local jobId = nil
-      for j = 1, #fields, 2 do
-        if fields[j] == 'jobId' then
-          jobId = fields[j + 1]
-          break
+    local cursor = '-'
+    while #matched < limit do
+      local entries = redis.call('XRANGE', stateKey, cursor, '+', 'COUNT', 1000)
+      if #entries == 0 then break end
+      for i = 1, #entries do
+        if #matched >= limit then break end
+        local fields = entries[i][2]
+        local jobId = nil
+        for j = 1, #fields, 2 do
+          if fields[j] == 'jobId' then
+            jobId = fields[j + 1]
+            break
+          end
+        end
+        if jobId then
+          local jobKey = prefix .. 'job:' .. jobId
+          local name = redis.call('HGET', jobKey, 'name')
+          if name == nameFilter then
+            matched[#matched + 1] = jobId
+          end
         end
       end
-      if jobId then
-        local jobKey = prefix .. 'job:' .. jobId
-        local name = redis.call('HGET', jobKey, 'name')
-        if name == nameFilter then
-          matched[#matched + 1] = jobId
-        end
-      end
+      local lastId = entries[#entries][1]
+      local dashPos = lastId:find('-')
+      cursor = lastId:sub(1, dashPos) .. tostring(tonumber(lastId:sub(dashPos + 1)) + 1)
     end
   end
   return matched
