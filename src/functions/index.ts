@@ -1917,11 +1917,9 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   -- List-sourced jobs (entryId='') were counted in list-active; DECR to stay balanced.
+  -- No guard on value > 0: healListActive corrects any negative drift.
   if entryId == '' and listActiveKey ~= '' then
-    local la = tonumber(redis.call('GET', listActiveKey)) or 0
-    if la > 0 then
-      redis.call('DECR', listActiveKey)
-    end
+    redis.call('DECR', listActiveKey)
   end
   if exists == 0 then
     return 0
@@ -3503,10 +3501,11 @@ export async function rpopAndReserve(
   group: string = CONSUMER_GROUP,
   count: number = 1,
 ): Promise<string[]> {
+  const safeCount = Math.max(1, Math.min(Math.floor(count) || 1, 1000));
   const result = await client.fcall(
     'glidemq_rpopAndReserve',
     [k.meta, k.stream, k.listActive, listKey],
-    [group, count.toString()],
+    [group, safeCount.toString()],
   );
   if (!Array.isArray(result) || result.length === 0) return [];
   return result.map((v) => String(v));
