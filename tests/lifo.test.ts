@@ -969,11 +969,9 @@ describeEachMode('LIFO: rpopAndReserve batch', (CONNECTION) => {
     expect(Array.isArray(result)).toBe(true);
     expect(result).toHaveLength(3);
 
-    // All 3 job IDs should be returned (LIFO order: j3, j2, j1)
+    // All 3 job IDs returned in LIFO order (last pushed = first popped)
     const ids = result.map((v: any) => String(v));
-    expect(ids).toContain(j1!.id);
-    expect(ids).toContain(j2!.id);
-    expect(ids).toContain(j3!.id);
+    expect(ids).toEqual([j3!.id, j2!.id, j1!.id]);
 
     // list-active should be incremented to 3
     const la = await cleanupClient.get(k.listActive);

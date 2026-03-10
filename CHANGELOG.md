@@ -31,7 +31,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- Function library version bumped from 60 to 66 (auto-upgrades on connection).
+- Function library version bumped from 60 to 67 (auto-upgrades on connection).
 - Benchmark durations increased (ADD_DURATION 5s->15s, PROCESS_SIZES [500,2000]->[5000,20000]) for more stable measurements.
 
 ---
