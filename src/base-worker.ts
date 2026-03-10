@@ -245,7 +245,6 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       consumerId: this.consumerId,
       consumerGroup: this.consumerGroup,
       broadcastMode: this.broadcastMode,
-      queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
       onPromotionTick: () => this.refreshMetaFlags(),
       onError: (err) => {
         if (!this.closing) {
@@ -365,7 +364,6 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           consumerId: this.consumerId,
           consumerGroup: this.consumerGroup,
           broadcastMode: this.broadcastMode,
-          queuePrefix: keyPrefix(this.opts.prefix ?? 'glide', this.name),
           onPromotionTick: () => this.refreshMetaFlags(),
           onError: (err) => {
             if (!this.closing) {

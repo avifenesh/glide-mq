@@ -127,9 +127,7 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
           if (remaining <= 0) break;
           try {
             const ids = await rpopAndReserve(this.commandClient, this.queueKeys, listKey, CONSUMER_GROUP, remaining);
-            for (const id of ids) {
-              jobIds.push(id);
-            }
+            jobIds.push(...ids);
             remaining -= ids.length;
           } catch (err) {
             const listType = listKey === this.queueKeys.priority ? 'priority' : 'LIFO';
