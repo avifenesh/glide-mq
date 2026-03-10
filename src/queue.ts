@@ -1180,9 +1180,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
         client.zcard(this.keys.completed),
         client.zcard(this.keys.failed),
         client.zcard(this.keys.scheduled),
-        client.get(this.keys.listActive),
-        client.llen(this.keys.lifo),
-        client.llen(this.keys.priority),
+        typeof client.get === 'function' ? client.get(this.keys.listActive) : null,
+        typeof client.llen === 'function' ? client.llen(this.keys.lifo) : 0,
+        typeof client.llen === 'function' ? client.llen(this.keys.priority) : 0,
       ]);
 
     const listActive = Number(listActiveRaw) || 0;
