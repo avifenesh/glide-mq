@@ -25,7 +25,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 64: completeAndFetchNext skipEvents/skipMetrics args - opt-out XADD events + HINCRBY metrics on hot path.
 // Version 65: rpopAndReserve accepts count arg for batch popping under globalConcurrency; deferActive DECRs list-active for list-sourced jobs.
 // Version 66: glidemq_reclaimStalledListJobs - stall detection for list-sourced jobs via bounded SCAN.
-export const LIBRARY_VERSION = '66';
+// Version 67: reclaimStalledListJobs - increase SCAN bounds (maxIter 100->1000, COUNT 50->500) for large DBs.
+export const LIBRARY_VERSION = '67';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1351,12 +1352,12 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
   if currentActive <= 0 then return 0 end
   local pattern = prefix .. 'job:*'
   local cursor = '0'
-  local maxIter = 100
+  local maxIter = 1000
   local iter = 0
   local count = 0
   repeat
     iter = iter + 1
-    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 50)
+    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 500)
     cursor = sr[1]
     local scannedKeys = sr[2]
     for i = 1, #scannedKeys do
