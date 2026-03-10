@@ -817,10 +817,17 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     try {
       const timeoutMs = job.opts.timeout;
       if (timeoutMs && timeoutMs > 0) {
-        result = await Promise.race([
-          this.processor(job),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs)),
-        ]);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          result = await Promise.race([
+            this.processor(job),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs);
+            }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
       } else {
         result = await this.processor(job);
       }
