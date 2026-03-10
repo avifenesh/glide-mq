@@ -24,7 +24,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 63: completeAndFetchNext accepts processedOn hint, '__' sentinels for ordering/group keys, hasParents flag.
 // Version 64: completeAndFetchNext skipEvents/skipMetrics args - opt-out XADD events + HINCRBY metrics on hot path.
 // Version 65: rpopAndReserve accepts count arg for batch popping under globalConcurrency; deferActive DECRs list-active for list-sourced jobs.
-export const LIBRARY_VERSION = '65';
+// Version 66: glidemq_reclaimStalledListJobs - stall detection for list-sourced jobs via bounded SCAN.
+export const LIBRARY_VERSION = '66';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1319,6 +1320,74 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       end
     end
   end
+  return count
+end)
+
+-- Reclaim stalled list-sourced jobs (LIFO/priority) that are invisible to XAUTOCLAIM.
+-- Uses bounded SCAN to find active list jobs with stale lastActive, then applies stall logic.
+-- KEYS: [streamKey, eventsKey]
+-- ARGS: [minIdleMs, maxStalledCount, timestamp, failedKey]
+redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
+  local streamKey = keys[1]
+  local eventsKey = keys[2]
+  local minIdleMs = tonumber(args[1])
+  local maxStalledCount = tonumber(args[2]) or 1
+  local timestamp = tonumber(args[3])
+  local failedKey = args[4]
+  local prefix = string.sub(streamKey, 1, #streamKey - 6)
+  local listActiveKey = prefix .. 'list-active'
+  local pattern = prefix .. 'job:*'
+  local cursor = '0'
+  local maxIter = 100
+  local iter = 0
+  local count = 0
+  repeat
+    iter = iter + 1
+    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 50)
+    cursor = sr[1]
+    local scannedKeys = sr[2]
+    for i = 1, #scannedKeys do
+      local jk = scannedKeys[i]
+      local state = redis.call('HGET', jk, 'state')
+      if state == 'active' then
+        local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority')
+        local lastActive = tonumber(vals[1])
+        local isListSourced = vals[2] == '1' or (tonumber(vals[3]) or 0) > 0
+        if isListSourced and lastActive and (timestamp - lastActive) >= minIdleMs then
+          local jobId = string.sub(jk, #prefix + 5)
+          if checkExpired(jk, jobId, prefix, timestamp) then
+            local la = tonumber(redis.call('GET', listActiveKey)) or 0
+            if la > 0 then redis.call('DECR', listActiveKey) end
+            count = count + 1
+          else
+            local stalledCount = redis.call('HINCRBY', jk, 'stalledCount', 1)
+            if stalledCount > maxStalledCount then
+              local metricsKey = prefix .. 'metrics:failed'
+              local processedOn = tonumber(redis.call('HGET', jk, 'processedOn')) or timestamp
+              redis.call('ZADD', failedKey, timestamp, jobId)
+              redis.call('HSET', jk,
+                'state', 'failed',
+                'failedReason', 'job stalled more than maxStalledCount',
+                'finishedOn', tostring(timestamp)
+              )
+              markOrderingDone(jk, jobId)
+              releaseGroupSlotAndPromote(jk, jobId, timestamp)
+              emitEvent(eventsKey, 'failed', jobId, {
+                'failedReason', 'job stalled more than maxStalledCount'
+              })
+              recordMetrics(metricsKey, timestamp, timestamp - processedOn)
+              local la = tonumber(redis.call('GET', listActiveKey)) or 0
+              if la > 0 then redis.call('DECR', listActiveKey) end
+            else
+              redis.call('HSET', jk, 'state', 'active')
+              emitEvent(eventsKey, 'stalled', jobId, nil)
+            end
+            count = count + 1
+          end
+        end
+      end
+    end
+  until cursor == '0' or iter >= maxIter
   return count
 end)
 
@@ -3445,6 +3514,25 @@ export async function reclaimStalled(
       k.failed,
       ...(broadcastMode ? ['1'] : []),
     ],
+  );
+  return result as number;
+}
+
+/**
+ * Reclaim stalled list-sourced jobs (LIFO/priority) that are invisible to XAUTOCLAIM.
+ * Uses bounded SCAN to find active list jobs with stale lastActive, then applies stall logic.
+ */
+export async function reclaimStalledListJobs(
+  client: Client,
+  k: QueueKeys,
+  minIdleMs: number,
+  maxStalledCount: number,
+  timestamp: number,
+): Promise<number> {
+  const result = await client.fcall(
+    'glidemq_reclaimStalledListJobs',
+    [k.stream, k.events],
+    [minIdleMs.toString(), maxStalledCount.toString(), timestamp.toString(), k.failed],
   );
   return result as number;
 }
