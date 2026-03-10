@@ -1165,8 +1165,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   /**
    * Get job counts by state.
-   * - waiting: stream length minus active (pending) entries
-   * - active: PEL count from XPENDING
+   * - waiting: stream length minus stream-active entries, plus LIFO and priority list lengths
+   * - active: stream PEL count (XPENDING) plus list-active counter
    * - delayed: scheduled ZSet cardinality (includes both delayed and prioritized)
    * - completed: completed ZSet cardinality
    * - failed: failed ZSet cardinality
@@ -1174,23 +1174,29 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async getJobCounts(): Promise<JobCounts> {
     const client = await this.getClient();
 
-    const [streamLen, completedCount, failedCount, scheduledCount] = await Promise.all([
+    const [streamLen, completedCount, failedCount, scheduledCount, listActiveRaw, lifoLen, priorityLen] = await Promise.all([
       client.xlen(this.keys.stream),
       client.zcard(this.keys.completed),
       client.zcard(this.keys.failed),
       client.zcard(this.keys.scheduled),
+      client.get(this.keys.listActive),
+      client.llen(this.keys.lifo),
+      client.llen(this.keys.priority),
     ]);
 
+    const listActive = Number(listActiveRaw) || 0;
+
     // XPENDING returns [pendingCount, minId, maxId, consumers[]]
-    let activeCount = 0;
+    let streamActive = 0;
     try {
       const pendingInfo = await client.xpending(this.keys.stream, CONSUMER_GROUP);
-      activeCount = Number(pendingInfo[0]) || 0;
+      streamActive = Number(pendingInfo[0]) || 0;
     } catch {
       // Consumer group may not exist yet
     }
 
-    const waiting = Math.max(0, streamLen - activeCount);
+    const activeCount = streamActive + listActive;
+    const waiting = Math.max(0, streamLen - streamActive) + lifoLen + priorityLen;
 
     return {
       waiting,
@@ -1612,7 +1618,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async isPaused(): Promise<boolean> {
     const client = await this.getClient();
     const val = await client.hget(this.keys.meta, 'paused');
-    return val === '1';
+    return String(val) === '1';
   }
 
   /**
