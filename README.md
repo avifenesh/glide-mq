@@ -14,7 +14,7 @@ glide-mq is for anyone building background jobs, task queues, or workflow orches
 
 ## Why glide-mq
 
-- Use this when you need **throughput**: 48k jobs/s at concurrency=50, 4x faster than BullMQ on the same hardware.
+- Use this when you need **throughput**: 25,000+ jobs/s single-node with 1 RTT per job via Valkey Server Functions.
 - Use this when you run **Valkey/Redis clusters**: all keys hash-tagged out of the box, no `{braces}` workarounds.
 - Use this when you need **workflows**: parent-child trees, DAGs with fan-in, step jobs, batch processing, and cron scheduling in one library.
 - Use this when you deploy to **serverless**: lightweight `Producer` and `ServerlessPool` cache connections across warm invocations.
@@ -47,25 +47,20 @@ worker.on('completed', (job) => console.log(`Job ${job.id} done`));
 worker.on('failed', (job, err) => console.error(`Job ${job.id} failed:`, err.message));
 ```
 
-## Benchmarks
+## Performance
 
-| Concurrency | Throughput |
-|-------------|-----------|
-| c=1 | 4,376 jobs/s |
-| c=5 | 14,925 jobs/s |
-| c=10 | 15,504 jobs/s |
-| c=50 | 48,077 jobs/s |
+- **1 RTT per job** -- `completeAndFetchNext` completes the current job and fetches the next in a single FCALL
+- **25,000+ jobs/s** single-node floor (bare-metal Linux, localhost); scales higher with network pipelining
+- **addBulk**: 10,000 jobs in 350 ms
+- **Gzip compression**: 98% payload reduction on 15 KB payloads
 
-`addBulk` batch API: **1,000 jobs in 18 ms** (12.7x faster than serial).
-Gzip compression: **98% payload reduction** on 15 KB payloads.
-
-*Valkey 8.0, single node, no-op processor. Run `npm run bench` to reproduce.*
+Throughput scales with concurrency up to the Valkey single-thread FCALL execution ceiling. Deployments with network latency between app and Valkey benefit from glide's auto-pipelining -- higher concurrency batches more commands per wire write. Run `npm run bench` to measure your environment.
 
 ## How it's different
 
 | Aspect | glide-mq approach |
 |--------|-------------------|
-| **Network per job** | 1 RTT -- `completeAndFetchNext` completes the current job and fetches the next in a single FCALL |
+| **Network per job** | 1 RTT -- complete current job + fetch next in a single FCALL |
 | **Client** | Rust NAPI bindings ([valkey-glide](https://github.com/valkey-io/valkey-glide)) -- no JS protocol parsing |
 | **Server logic** | 1 persistent Valkey Function library (FUNCTION LOAD + FCALL) -- no per-call EVAL recompilation |
 | **Cluster** | Hash-tagged keys (`glide:{queueName}:*`) -- all queue data routes to the same slot automatically |
