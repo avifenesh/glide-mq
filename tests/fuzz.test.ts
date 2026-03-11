@@ -27,7 +27,7 @@ describeEachMode('Fuzz: concurrent producers and consumers', (CONNECTION) => {
   });
   afterAll(async () => {
     await flushQueue(cleanup, Q);
-    cleanup.close();
+    if (cleanup) cleanup.close();
   });
 
   it('3 producers + 3 workers + 300 jobs - no job lost or duplicated', async () => {
@@ -113,7 +113,7 @@ describeEachMode('Fuzz: worker close during active processing', (CONNECTION) => 
   });
   afterAll(async () => {
     await flushQueue(cleanup, Q);
-    cleanup.close();
+    if (cleanup) cleanup.close();
   });
 
   it('force-close worker while 10 jobs are processing - no crash', async () => {
@@ -147,7 +147,7 @@ describeEachMode('Fuzz: random processor failures', (CONNECTION) => {
   });
   afterAll(async () => {
     await flushQueue(cleanup, Q);
-    cleanup.close();
+    if (cleanup) cleanup.close();
   });
 
   it('50% failure rate - all jobs end in completed or failed', async () => {
@@ -208,7 +208,7 @@ describeEachMode('Fuzz: interleaved add and process', (CONNECTION) => {
   });
   afterAll(async () => {
     await flushQueue(cleanup, Q);
-    cleanup.close();
+    if (cleanup) cleanup.close();
   });
 
   it('add jobs while worker is processing - no race', async () => {
@@ -261,7 +261,7 @@ describeEachMode('Fuzz: adversarial job data', (CONNECTION) => {
   });
   afterAll(async () => {
     await flushQueue(cleanup, Q);
-    cleanup.close();
+    if (cleanup) cleanup.close();
   });
 
   it('handles special characters, unicode, null bytes, huge strings', async () => {
@@ -322,7 +322,7 @@ describeEachMode('Fuzz: pause/resume storm during processing', (CONNECTION) => {
   });
   afterAll(async () => {
     await flushQueue(cleanup, Q);
-    cleanup.close();
+    if (cleanup) cleanup.close();
   });
 
   it('rapid pause/resume while jobs are being processed', async () => {
@@ -374,7 +374,7 @@ describeEachMode('Fuzz: dedup stress test', (CONNECTION) => {
   });
   afterAll(async () => {
     await flushQueue(cleanup, Q);
-    cleanup.close();
+    if (cleanup) cleanup.close();
   });
 
   it('100 rapid adds with same dedup ID - only 1 processed', async () => {
@@ -426,7 +426,7 @@ describeEachMode('Fuzz: worker restart mid-batch', (CONNECTION) => {
   });
   afterAll(async () => {
     await flushQueue(cleanup, Q);
-    cleanup.close();
+    if (cleanup) cleanup.close();
   });
 
   it('kill and restart worker - all 50 jobs eventually complete', async () => {
@@ -497,7 +497,7 @@ describeEachMode('Fuzz: mixed operations storm', (CONNECTION) => {
   });
   afterAll(async () => {
     await flushQueue(cleanup, Q);
-    cleanup.close();
+    if (cleanup) cleanup.close();
   });
 
   it('simultaneous add, getJob, getJobCounts, pause, resume - no crash', async () => {
