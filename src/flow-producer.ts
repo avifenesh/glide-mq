@@ -87,10 +87,8 @@ export class FlowProducer {
    */
   async addBulk(flows: FlowJob[]): Promise<JobNode[]> {
     const client = await this.getClient();
-    const results: JobNode[] = [];
-    for (const flow of flows) {
-      results.push(await this.addFlowRecursive(client, flow));
-    }
+    // Use Promise.all to process independent flow creations concurrently, eliminating sequential I/O bottlenecks.
+    const results: JobNode[] = await Promise.all(flows.map((flow) => this.addFlowRecursive(client, flow)));
     return results;
   }
 
