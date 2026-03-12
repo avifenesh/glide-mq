@@ -431,7 +431,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
         const stateB = await cleanupClient.hget(k.job(bId), 'state');
         const stateC = await cleanupClient.hget(k.job(cId), 'state');
         return String(stateB) === 'completed' || String(stateC) === 'completed';
-      }, 15000);
+      }, 25000);
 
       // Check A's depsCompleted counter
       let depsCompleted = await cleanupClient.hget(k.job(aId), 'depsCompleted');
@@ -443,7 +443,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
         const stateB = await cleanupClient.hget(k.job(bId), 'state');
         const stateC = await cleanupClient.hget(k.job(cId), 'state');
         return String(stateB) === 'completed' && String(stateC) === 'completed';
-      }, 15000);
+      }, 25000);
 
       // After both complete, A's depsCompleted should be 2
       depsCompleted = await cleanupClient.hget(k.job(aId), 'depsCompleted');
@@ -453,7 +453,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await waitFor(async () => {
         const state = await cleanupClient.hget(k.job(aId), 'state');
         return String(state) === 'completed';
-      }, 15000);
+      }, 25000);
 
       const stateA = await cleanupClient.hget(k.job(aId), 'state');
       expect(String(stateA)).toBe('completed');

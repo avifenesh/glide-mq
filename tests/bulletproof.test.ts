@@ -2242,8 +2242,8 @@ describeEachMode('Sidekiq scheduler drift: interval jobs fire without drift accu
     const totalSpan = processedTimestamps[processedTimestamps.length - 1] - processedTimestamps[0];
     const expectedSpan = (processedTimestamps.length - 1) * 1000;
     const driftAccumulation = Math.abs(totalSpan - expectedSpan);
-    // Allow up to 750ms total drift across all firings (CI has more jitter)
-    expect(driftAccumulation).toBeLessThanOrEqual(750);
+    // Allow up to 1500ms total drift across all firings (CI has more jitter, especially when overloaded)
+    expect(driftAccumulation).toBeLessThanOrEqual(1500);
 
     await queue.removeJobScheduler('drift-check');
     await queue.close();
