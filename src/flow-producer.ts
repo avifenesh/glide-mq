@@ -93,9 +93,7 @@ export class FlowProducer {
     const CHUNK_SIZE = 100;
     for (let i = 0; i < flows.length; i += CHUNK_SIZE) {
       const chunk = flows.slice(i, i + CHUNK_SIZE);
-      const chunkResults = await Promise.all(
-        chunk.map((flow) => this.addFlowRecursive(client, flow))
-      );
+      const chunkResults = await Promise.all(chunk.map((flow) => this.addFlowRecursive(client, flow)));
       results.push(...chunkResults);
     }
     return results;
