@@ -84,13 +84,22 @@ export class FlowProducer {
 
   /**
    * Add multiple independent flows.
+   * Uses chunked Promise.all to process multiple flows concurrently
+   * while safeguarding the Redis connection pool.
    */
   async addBulk(flows: FlowJob[]): Promise<JobNode[]> {
     const client = await this.getClient();
     const results: JobNode[] = [];
-    for (const flow of flows) {
-      results.push(await this.addFlowRecursive(client, flow));
+    const CHUNK_SIZE = 100;
+
+    for (let offset = 0; offset < flows.length; offset += CHUNK_SIZE) {
+      const chunk = flows.slice(offset, offset + CHUNK_SIZE);
+      const chunkResults = await Promise.all(
+        chunk.map((flow) => this.addFlowRecursive(client, flow))
+      );
+      results.push(...chunkResults);
     }
+
     return results;
   }
 

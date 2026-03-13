@@ -1,0 +1,3 @@
+## 2024-05-24 - Chunked Promise.all for IO bound iteration optimizations in glidemq
+**Learning:** Sequential `await` calls inside loops for independent I/O operations (like adding multiple independent flows in `FlowProducer.addBulk`) create a significant performance bottleneck in Node.js. Simply replacing `for...of` with an unbounded `Promise.all` can exhaust the Redis connection pool and cause network timeouts when processing a large number of items.
+**Action:** When optimizing N+1 query bottlenecks with batching or concurrent processing across the codebase, apply a chunked `Promise.all` execution strategy (e.g., 100 items per chunk). This processes independent job flows concurrently, eliminating sequential I/O bottlenecks while safeguarding the Redis connection pool.
