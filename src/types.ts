@@ -248,7 +248,13 @@ export interface Serializer {
 /** Default JSON serializer used when no custom serializer is provided. */
 export const JSON_SERIALIZER: Serializer = {
   serialize: (data) => JSON.stringify(data),
-  deserialize: (raw) => JSON.parse(raw),
+  deserialize: (raw) =>
+    JSON.parse(raw, (key, value) => {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        return undefined;
+      }
+      return value;
+    }),
 };
 
 export interface JobData {
