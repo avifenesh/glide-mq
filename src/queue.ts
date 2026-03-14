@@ -626,6 +626,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.customJobId,
           String(p.lifo ? 1 : 0),
           p.parentQueue,
+          '',
+          this.skipEvents ? '1' : '0',
         ]);
       }
     }
