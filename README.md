@@ -14,7 +14,7 @@ glide-mq is for anyone building background jobs, task queues, or workflow orches
 
 ## Why glide-mq
 
-- Use this when you need **throughput**: 25,000+ jobs/s single-node with 1 RTT per job via Valkey Server Functions.
+- Use this when you need **throughput**: 18,000+ jobs/s on production infrastructure with TLS -- up to 36% faster than alternatives at typical concurrency, 1 RTT per job via Valkey Server Functions.
 - Use this when you run **Valkey/Redis clusters**: all keys hash-tagged out of the box, no `{braces}` workarounds.
 - Use this when you need **workflows**: parent-child trees, DAGs with fan-in, step jobs, batch processing, and cron scheduling in one library.
 - Use this when you deploy to **serverless**: lightweight `Producer` and `ServerlessPool` cache connections across warm invocations.
@@ -49,12 +49,27 @@ worker.on('failed', (job, err) => console.error(`Job ${job.id} failed:`, err.mes
 
 ## Performance
 
-- **1 RTT per job** -- `completeAndFetchNext` completes the current job and fetches the next in a single FCALL
-- **25,000+ jobs/s** single-node floor (bare-metal Linux, localhost); scales higher with network pipelining
+Benchmarked on production infrastructure -- not localhost, where all queues look similar.
+
+**Setup**: AWS ElastiCache Valkey 8.2 (r7g.large), TLS enabled, EC2 client in the same region. No-op processor, warmup jobs excluded from measurement.
+
+| Concurrency | glide-mq    | Leading alternative | Delta       |
+|:-----------:|------------:|--------------------:|:-----------:|
+| c=1         | 2,457 j/s   | 2,451 j/s           | even        |
+| c=10        | **18,152 j/s** | 13,371 j/s       | **+35.8%**  |
+| c=20        | 17,553 j/s  | 16,251 j/s          | +8.0%       |
+| c=50        | 20,155 j/s  | 19,376 j/s          | +4.0%       |
+
+Most production deployments run workers with concurrency between 5 and 20 -- exactly where glide-mq's architecture pays off the most. The advantage comes from completing and fetching the next job in a single server-side function call (1 RTT per job). When the network between your application and Valkey/Redis is real -- as it is in every production deployment where app servers and data stores run on separate machines -- that round-trip savings compounds across concurrent workers.
+
+At higher concurrency levels both libraries converge toward the Valkey single-thread execution ceiling, which is the expected behavior.
+
+Other highlights:
+
 - **addBulk**: 10,000 jobs in 350 ms
 - **Gzip compression**: 98% payload reduction on 15 KB payloads
 
-Throughput scales with concurrency up to the Valkey single-thread FCALL execution ceiling. Deployments with network latency between app and Valkey benefit from glide's auto-pipelining -- higher concurrency batches more commands per wire write. Run `npm run bench` to measure your environment.
+Run `npm run bench` locally or `npx tsx benchmarks/elasticache-head-to-head.ts` against your own infrastructure to reproduce.
 
 ## How it's different
 
