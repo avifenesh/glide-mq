@@ -293,11 +293,12 @@ local function checkExpired(jobKey, jobId, prefix, now)
 end
 
 local function advanceIdCounter(idKey, customId)
+  if not string.match(customId, '^%d+$') then return end
   local numericId = tonumber(customId)
   if numericId and numericId > 0 then
     local cur = tonumber(redis.call('GET', idKey)) or 0
     if numericId > cur then
-      redis.call('SET', idKey, tostring(numericId))
+      redis.call('SET', idKey, customId)
     end
   end
 end
@@ -1493,7 +1494,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
           redis.call('ZREM', scheduledKey, existingJobId)
           markOrderingDone(jobKey, existingJobId)
           redis.call('DEL', jobKey)
-          emitEvent(eventsKey, 'removed', existingJobId, nil)
+          if skipEvents ~= '1' then emitEvent(eventsKey, 'removed', existingJobId, nil) end
         elseif state and state ~= 'completed' and state ~= 'failed' then
           return 'skipped'
         end
