@@ -3407,29 +3407,28 @@ export async function completeAndFetchNext(
 
   // Fast path: array protocol from Lua function
   if (Array.isArray(raw)) {
-    const arr = raw.map((v) => String(v));
-    const tag = arr[0];
+    const tag = String(raw[0]);
     if (tag === 'NEXT_NONE') {
-      return { completed: arr[1] ?? jobId, next: false };
+      return { completed: raw[1] != null ? String(raw[1]) : jobId, next: false };
     }
     if (tag === 'NEXT_REVOKED') {
       return {
-        completed: arr[1] ?? jobId,
+        completed: raw[1] != null ? String(raw[1]) : jobId,
         next: 'REVOKED',
-        nextJobId: arr[2],
-        nextEntryId: arr[3],
+        nextJobId: String(raw[2]),
+        nextEntryId: String(raw[3]),
       };
     }
     if (tag === 'NEXT_HASH') {
       const hash: Record<string, string> = Object.create(null);
-      for (let i = 4; i + 1 < arr.length; i += 2) {
-        hash[arr[i]] = arr[i + 1];
+      for (let i = 4; i + 1 < raw.length; i += 2) {
+        hash[String(raw[i])] = String(raw[i + 1]);
       }
       return {
-        completed: arr[1] ?? jobId,
+        completed: raw[1] != null ? String(raw[1]) : jobId,
         next: hash,
-        nextJobId: arr[2],
-        nextEntryId: arr[3],
+        nextJobId: String(raw[2]),
+        nextEntryId: String(raw[3]),
       };
     }
     throw new Error(`Unexpected glidemq_completeAndFetchNext tag: ${tag}`);

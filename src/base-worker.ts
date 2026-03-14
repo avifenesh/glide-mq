@@ -121,6 +121,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected readonly skipEvents: boolean;
   protected readonly skipMetrics: boolean;
 
+  // Cached listener flags to avoid EventEmitter dispatch overhead on hot path
+  private hasCompletedListeners = false;
+  private hasActiveListeners = false;
+  private hasFailedListeners = false;
+
   protected constructor(
     name: string,
     processor: Processor<D, R> | BatchProcessor<D, R> | string,
@@ -197,6 +202,20 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     this.stalledInterval = opts.stalledInterval ?? 30000;
     this.maxStalledCount = opts.maxStalledCount ?? 1;
     this.lockDuration = opts.lockDuration ?? 30000;
+
+    // Track listener additions/removals to avoid hot-path emit overhead.
+    // newListener fires before the listener is added, so set the flag directly.
+    // removeListener fires after removal, so listenerCount is accurate.
+    this.on('newListener', (event: string) => {
+      if (event === 'completed') this.hasCompletedListeners = true;
+      else if (event === 'active') this.hasActiveListeners = true;
+      else if (event === 'failed') this.hasFailedListeners = true;
+    });
+    this.on('removeListener', (event: string) => {
+      if (event === 'completed') this.hasCompletedListeners = this.listenerCount('completed') > 0;
+      else if (event === 'active') this.hasActiveListeners = this.listenerCount('active') > 0;
+      else if (event === 'failed') this.hasFailedListeners = this.listenerCount('failed') > 0;
+    });
 
     // Auto-init: start the worker immediately
     this.initPromise = this.init();
@@ -539,8 +558,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
     // Emit 'active' for each job
     this.isDrained = false;
-    for (const entry of batch) {
-      this.emit('active', entry.job, entry.jobId);
+    if (this.hasActiveListeners) {
+      for (const entry of batch) {
+        this.emit('active', entry.job, entry.jobId);
+      }
     }
 
     // Rate limit check (once per batch)
@@ -656,7 +677,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
         entry.job.returnvalue = result;
         entry.job.finishedOn = Date.now();
-        this.emit('completed', entry.job, result);
+        if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
       }
     } else if (batchError) {
       // Partial failure: process each result individually
@@ -709,7 +730,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
           entry.job.returnvalue = result as R;
           entry.job.finishedOn = Date.now();
-          this.emit('completed', entry.job, result);
+          if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
         }
       }
     } else if (thrownError) {
@@ -857,7 +878,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected async handleJobFailure(job: Job<D, R>, jobId: string, entryId: string, error: Error): Promise<boolean> {
     if (!this.commandClient) {
       job.failedReason = error.message;
-      this.emit('failed', job, error);
+      if (this.hasFailedListeners) this.emit('failed', job, error);
       return true;
     }
 
@@ -915,7 +936,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       await this.moveToDLQ(job, error);
     }
     job.failedReason = error.message;
-    this.emit('failed', job, error);
+    if (this.hasFailedListeners) this.emit('failed', job, error);
 
     // Terminal failure: schedule next run for repeatAfterComplete schedulers
     if (failResult === 'failed' && job.schedulerName) {
@@ -1114,10 +1135,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash, this.serializer);
       job.entryId = currentEntryId;
 
-      const orderingReady = await this.isOrderingTurn(job);
-      if (!orderingReady) {
-        await this.deferOutOfOrderJob(currentJobId, currentEntryId);
-        return;
+      // Fast path: skip async isOrderingTurn when no ordering configured
+      if (this.orderingMetaField(job)) {
+        const orderingReady = await this.isOrderingTurn(job);
+        if (!orderingReady) {
+          await this.deferOutOfOrderJob(currentJobId, currentEntryId);
+          return;
+        }
       }
       const completionHints = {
         orderingKey: job.orderingKey,
@@ -1126,7 +1150,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       };
 
       this.isDrained = false;
-      this.emit('active', job, currentJobId);
+      if (this.hasActiveListeners) this.emit('active', job, currentJobId);
 
       const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
 
@@ -1202,7 +1226,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         );
         return;
       }
-      const parentInfo = await this.buildParentInfo(job, currentJobId);
+      // Fast path: skip async buildParentInfo when no parent fields present
+      const parentInfo = (job.parentId || job.parentQueue)
+        ? await this.buildParentInfo(job, currentJobId)
+        : undefined;
 
       const now = Date.now();
       const fetchResult = await completeAndFetchNext(
@@ -1226,7 +1253,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       job.returnvalue = processResult;
       job.finishedOn = now;
-      this.emit('completed', job, processResult);
+      if (this.hasCompletedListeners) this.emit('completed', job, processResult);
 
       if (job.schedulerName) {
         await this.updateSchedulerAfterComplete(job.schedulerName, now);
