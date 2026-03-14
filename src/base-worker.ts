@@ -1143,11 +1143,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           return;
         }
       }
-      const completionHints = {
+      const completionHints = (job.orderingKey || job.groupKey) ? {
         orderingKey: job.orderingKey,
         orderingSeq: job.orderingSeq,
         groupKey: job.groupKey,
-      };
+      } : undefined;
 
       this.isDrained = false;
       if (this.hasActiveListeners) this.emit('active', job, currentJobId);
@@ -1214,17 +1214,20 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         );
         return;
       }
-      const byteLen = Buffer.byteLength(returnvalue, 'utf8');
-      if (byteLen > MAX_JOB_DATA_SIZE) {
-        await this.handleJobFailure(
-          job,
-          currentJobId,
-          currentEntryId,
-          new Error(
-            `Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller return values or store large data externally.`,
-          ),
-        );
-        return;
+      // UTF-8 worst case: 4 bytes per char. Skip Buffer.byteLength for small strings.
+      if (returnvalue.length > MAX_JOB_DATA_SIZE / 4) {
+        const byteLen = Buffer.byteLength(returnvalue, 'utf8');
+        if (byteLen > MAX_JOB_DATA_SIZE) {
+          await this.handleJobFailure(
+            job,
+            currentJobId,
+            currentEntryId,
+            new Error(
+              `Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller return values or store large data externally.`,
+            ),
+          );
+          return;
+        }
       }
       // Fast path: skip async buildParentInfo when no parent fields present
       const parentInfo = (job.parentId || job.parentQueue)
