@@ -216,11 +216,13 @@ export class Producer<D = any> {
     }
 
     let serialized = this.serializer.serialize(data);
-    const byteLen = Buffer.byteLength(serialized, 'utf8');
-    if (byteLen > MAX_JOB_DATA_SIZE) {
-      throw new GlideMQError(
-        `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
-      );
+    if (serialized.length > MAX_JOB_DATA_SIZE / 4) {
+      const byteLen = Buffer.byteLength(serialized, 'utf8');
+      if (byteLen > MAX_JOB_DATA_SIZE) {
+        throw new GlideMQError(
+          `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
+        );
+      }
     }
 
     if (this.opts.compression === 'gzip') {
@@ -242,7 +244,7 @@ export class Producer<D = any> {
     return {
       jobName,
       serializedData: serialized,
-      optsJson: JSON.stringify(opts ?? {}),
+      optsJson: opts != null ? JSON.stringify(opts) : '{}',
       timestamp: Date.now(),
       delay,
       priority,

@@ -332,6 +332,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             lifo ? 1 : 0,
             parentQueue,
             parentDepsKey,
+            this.skipEvents,
           );
           if (result === 'skipped' || result === 'duplicate') {
             return null;

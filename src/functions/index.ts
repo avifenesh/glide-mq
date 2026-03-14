@@ -292,6 +292,16 @@ local function checkExpired(jobKey, jobId, prefix, now)
   return expireJob(jobKey, jobId, prefix, now, curState, nil, nil, nil)
 end
 
+local function advanceIdCounter(idKey, customId)
+  local numericId = tonumber(customId)
+  if numericId and numericId > 0 then
+    local cur = tonumber(redis.call('GET', idKey)) or 0
+    if numericId > cur then
+      redis.call('SET', idKey, tostring(numericId))
+    end
+  end
+end
+
 local function extractOrderingKeyFromOpts(optsJson)
   if not optsJson or optsJson == '' then
     return ''
@@ -463,16 +473,8 @@ redis.register_function('glidemq_addJob', function(keys, args)
       return 'duplicate'
     end
     jobIdStr = customJobId
-    -- Advance counter past custom numeric IDs to prevent future auto-ID collisions
-    local numericId = tonumber(customJobId)
-    if numericId then
-      local cur = tonumber(redis.call('GET', idKey)) or 0
-      if numericId >= cur then
-        redis.call('SET', idKey, tostring(numericId))
-      end
-    end
+    advanceIdCounter(idKey, customJobId)
   else
-    -- Auto-increment IDs are monotonic: no collision possible, skip EXISTS check
     local jobId = redis.call('INCR', idKey)
     jobIdStr = tostring(jobId)
     jobKey = prefix .. 'job:' .. jobIdStr
@@ -1453,6 +1455,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local ttl = tonumber(args[19]) or 0
   local customJobId = args[20] or ''
   local parentQueue = args[22] or ''
+  local skipEvents = args[23] or '0'
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local existing = redis.call('HGET', dedupKey, dedupId)
   if mode == 'simple' then
@@ -1503,13 +1506,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
       return 'duplicate'
     end
     jobIdStr = customJobId
-    local numericId = tonumber(customJobId)
-    if numericId then
-      local cur = tonumber(redis.call('GET', idKey)) or 0
-      if numericId >= cur then
-        redis.call('SET', idKey, tostring(numericId))
-      end
-    end
+    advanceIdCounter(idKey, customJobId)
   else
     local jobId = redis.call('INCR', idKey)
     jobIdStr = tostring(jobId)
@@ -1643,7 +1640,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
     xaddJob(streamKey, jobIdStr, jobName)
   end
   redis.call('HSET', dedupKey, dedupId, jobIdStr .. ':' .. tostring(timestamp))
-  emitEvent(eventsKey, 'added', jobIdStr, {'name', jobName})
+  if skipEvents ~= '1' then emitEvent(eventsKey, 'added', jobIdStr, {'name', jobName}) end
   return jobIdStr
 end)
 
@@ -2040,13 +2037,7 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       return cjson.encode({'duplicate'})
     end
     parentJobIdStr = parentCustomId
-    local numericId = tonumber(parentCustomId)
-    if numericId then
-      local cur = tonumber(redis.call('GET', parentIdKey)) or 0
-      if numericId >= cur then
-        redis.call('SET', parentIdKey, tostring(numericId))
-      end
-    end
+    advanceIdCounter(parentIdKey, parentCustomId)
   else
     local parentJobId = redis.call('INCR', parentIdKey)
     parentJobIdStr = tostring(parentJobId)
@@ -2168,6 +2159,7 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     if childCustomId ~= '' then
       childJobKey = childPrefix .. 'job:' .. childCustomId
       childJobIdStr = childCustomId
+      advanceIdCounter(childIdKey, childCustomId)
     else
       local childJobId = redis.call('INCR', childIdKey)
       childJobIdStr = tostring(childJobId)
@@ -3203,6 +3195,7 @@ export async function dedup(
   lifo: number = 0,
   parentQueue: string = '',
   parentDepsKey: string = '',
+  skipEvents: boolean = false,
 ): Promise<string> {
   const keys = [k.dedup, k.id, k.stream, k.scheduled, k.events];
   if (parentDepsKey) {
@@ -3231,6 +3224,7 @@ export async function dedup(
     customJobId,
     lifo.toString(),
     parentQueue,
+    skipEvents ? '1' : '0',
   ]);
   return result as string;
 }
