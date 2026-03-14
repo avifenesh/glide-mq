@@ -25,6 +25,7 @@ function parseBenchPort(rawPort: string | undefined): number {
 }
 
 const BENCH_PORT = parseBenchPort(process.env.BENCH_PORT);
+const BENCH_TLS = process.env.BENCH_TLS === 'true';
 
 export interface RedisStatsSnapshot {
   keyspaceHits: number;
@@ -62,7 +63,7 @@ function parseInfoNumber(info: string, key: string): number {
  * Flush the entire database between benchmark runs.
  */
 export async function flushDB(): Promise<void> {
-  const client = new Redis({ host: BENCH_HOST, port: BENCH_PORT, lazyConnect: true });
+  const client = new Redis({ ...BULL_CONNECTION, lazyConnect: true });
   await client.connect();
 
   try {
@@ -76,7 +77,7 @@ export async function flushDB(): Promise<void> {
  * Snapshot selected Redis stats counters.
  */
 export async function readRedisStats(): Promise<RedisStatsSnapshot> {
-  const client = new Redis({ host: BENCH_HOST, port: BENCH_PORT, lazyConnect: true });
+  const client = new Redis({ ...BULL_CONNECTION, lazyConnect: true });
   await client.connect();
 
   try {
@@ -161,12 +162,15 @@ export function sleep(ms: number): Promise<void> {
  */
 export const GLIDE_CONNECTION = {
   addresses: [{ host: BENCH_HOST, port: BENCH_PORT }],
+  ...(BENCH_TLS && { useTLS: true }),
 };
 
 /**
  * Connection config for BullMQ.
  */
-export const BULL_CONNECTION = {
+export const BULL_CONNECTION: Record<string, any> = {
   host: BENCH_HOST,
   port: BENCH_PORT,
+  maxRetriesPerRequest: null,
+  ...(BENCH_TLS && { tls: {} }),
 };
