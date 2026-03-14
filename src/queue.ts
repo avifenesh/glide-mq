@@ -632,10 +632,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
     // Handle cross-queue parent deps registration (non-atomic, after batch)
     for (let i = 0; i < prepared.length; i++) {
       const p = prepared[i];
-      if (p.parentId && p.parentQueue && p.parentQueue !== this.name && builtJobs[i]) {
+      const builtJob = builtJobs[i];
+      if (p.parentId && p.parentQueue && p.parentQueue !== this.name && builtJob) {
         const parentKeys = buildKeys(p.parentQueue, this.opts.prefix);
         const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
-        const depsMember = `${prefix}:${builtJobs[i].id}`;
+        const depsMember = `${prefix}:${builtJob.id}`;
         await client.sadd(parentKeys.deps(p.parentId), [depsMember]);
       }
     }
