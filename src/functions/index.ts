@@ -1087,7 +1087,9 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' + HGET 'groupKey' (4 → 1)
     local nextMeta = redis.call('HMGET', nextJobKey, 'state', 'revoked', 'expireAt', 'groupKey')
     if not nextMeta[1] then
-      -- state is nil: job hash does not exist
+      -- state is nil: job hash does not exist. Clean up orphaned PEL entry.
+      redis.call('XACK', streamKey, group, nextEntryId)
+      redis.call('XDEL', streamKey, nextEntryId)
       return {'NEXT_NONE', jobId}
     end
     if nextMeta[2] == '1' then
