@@ -475,7 +475,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * Uses GLIDE's Batch API to pipeline all addJob FCALL commands in a single round trip.
    * Non-atomic: each job is independent, but all are sent together for efficiency.
    */
-  async addBulk(jobs: { name: string; data: D; opts?: JobOptions }[]): Promise<Job<D, R>[]> {
+  async addBulk(jobs: { name: string; data: D; opts?: JobOptions }[]): Promise<(Job<D, R> | null)[]> {
     if (jobs.length === 0) return [];
 
     const client = await this.getClient();
@@ -798,13 +798,13 @@ export class Queue<D = any, R = any> extends EventEmitter {
     prepared: { entry: { name: string; data: D; opts?: JobOptions }; opts: JobOptions; parentId: string }[],
     rawResults: unknown[] | null,
     timestamp: number,
-  ): Job<D, R>[] {
+  ): (Job<D, R> | null)[] {
     if (!rawResults || rawResults.length !== prepared.length) {
       throw new Error(`addBulk batch returned ${rawResults?.length ?? 'null'} results, expected ${prepared.length}`);
     }
-    return prepared.flatMap((p, i) => {
+    return prepared.map((p, i) => {
       const raw = String(rawResults[i]);
-      if (raw === 'skipped' || raw === 'duplicate') return [];
+      if (raw === 'skipped' || raw === 'duplicate') return null;
       if (raw === 'ERR:COST_EXCEEDS_CAPACITY') {
         throw new Error('Job cost exceeds token bucket capacity');
       }
@@ -815,7 +815,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const job = new Job<D, R>(client, this.keys, jobId, p.entry.name, p.entry.data, p.opts, this.serializer);
       job.timestamp = timestamp;
       job.parentId = p.parentId || undefined;
-      return [job];
+      return job;
     });
   }
 
