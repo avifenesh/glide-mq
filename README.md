@@ -55,10 +55,12 @@ Benchmarked on production infrastructure -- not localhost, where all queues look
 
 | Concurrency | glide-mq    | Leading alternative | Delta       |
 |:-----------:|------------:|--------------------:|:-----------:|
-| c=1         | 2,457 j/s   | 2,451 j/s           | even        |
-| c=10        | **18,152 j/s** | 13,371 j/s       | **+35.8%**  |
-| c=20        | 17,553 j/s  | 16,251 j/s          | +8.0%       |
-| c=50        | 20,155 j/s  | 19,376 j/s          | +4.0%       |
+| c=1         | 2,479 j/s   | 2,535 j/s           | -2%         |
+| c=5         | 10,754 j/s  | 9,866 j/s           | +9%         |
+| c=10        | **18,218 j/s** | 13,541 j/s       | **+35%**    |
+| c=15        | **19,583 j/s** | 14,162 j/s       | **+38%**    |
+| c=20        | 19,408 j/s  | 16,085 j/s          | +21%        |
+| c=50        | 19,768 j/s  | 19,159 j/s          | +3%         |
 
 Most production deployments run workers with concurrency between 5 and 20 -- exactly where glide-mq's architecture pays off the most. The advantage comes from completing and fetching the next job in a single server-side function call (1 RTT per job). When the network between your application and Valkey/Redis is real -- as it is in every production deployment where app servers and data stores run on separate machines -- that round-trip savings compounds across concurrent workers.
 

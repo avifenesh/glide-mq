@@ -4,54 +4,51 @@ Current state of the glide-mq repository as of 2026-03-14.
 
 ## Branch
 
-`main` - all work merged. Uncommitted changes on working tree: TS-side micro-optimizations (+5% localhost).
+`main` - all committed work pushed. Uncommitted changes on working tree: Lua HMGET optimization + TS-side micro-optimizations.
 
 ## Uncommitted changes (ready to commit)
 
-- `src/base-worker.ts`: EventEmitter cached listener flags, skip async isOrderingTurn/buildParentInfo when not needed
-- `src/functions/index.ts`: Remove `.map(v => String(v))` allocation in completeAndFetchNext result parsing
-- `benchmarks/elasticache-head-to-head.ts`: Standalone ElastiCache head-to-head benchmark
-- Measured +5.1% on localhost Docker (c=10 20k: 13,107 -> 13,775 j/s)
+- `src/functions/index.ts`: HMGET optimization in completeAndFetchNext - merge 4 separate hash lookups (EXISTS, HGET revoked, HGET expireAt, HGET groupKey) into 1 HMGET. Reduces redis.call()s from 13 to 10 on hot path. Same optimization applied to priority/LIFO list paths. LIBRARY_VERSION = '68'. Also cached encodeRetention default return objects.
+- `src/telemetry.ts`: withSpan overload - accepts callback without attributes param. Callers set attributes via span.setAttribute() inside callback (free when tracing disabled via NOOP_SPAN).
+- `src/queue.ts`: Move withSpan attributes to callback body (avoids object allocation when tracing off). Skip Buffer.byteLength for small payloads (< 262KB). Avoid creating empty object for JSON.stringify(opts ?? {}).
+- `src/base-worker.ts`: Skip Buffer.byteLength for small return values. Skip completionHints allocation when no ordering/group configured.
 
 ## Recent merges
 
-- PR #129: feat: stall detection for list-sourced jobs via `glidemq_reclaimStalledListJobs` bounded SCAN
-- PR #128: fix: `rpopAndReserve` batch count for globalConcurrency, `deferActive` list-active DECR
-- PR #126: perf: hot-path optimizations (squash-merged to main)
-  - ~108% c=1 throughput improvement (~1,300 -> ~2,700 j/s)
-  - ~9-16% c=10 throughput improvement (~12,900 -> ~14,000-15,000 j/s)
-  - Key changes: skip HMGET for non-parent buildParentInfo, popLists Lua FCALL, completeAndFetchNext hints (processedOn, ordering/group sentinels, hasParents), events/metrics opt-out
-  - LIBRARY_VERSION = '66'
-  - Sentinel validation: ordering key '__' is rejected as reserved
-  - hasParents flag narrowed to DAG-only parentIds (saves SMEMBERS for single-parent flow jobs)
-- PR #124: Deep audit fixes (62 findings, 7 commits + BaseWorker)
+- `903b366` fix: benchmark scripts import shared connections, remove dead code
+- `caac4cb` docs: performance claims with ElastiCache numbers
+- `d639010` bench: ElastiCache head-to-head + TLS support
+- `a1577a2` perf: hot-path micro-optimizations (cached listener flags, completeAndFetchNext array protocol, processedOn hints, skipEvents/skipMetrics)
 
 ## ElastiCache benchmark results (2026-03-14)
 
-Valkey 8.2, r7g.large, TLS, EC2 in same AZ, standalone mode:
+Valkey 8.2, r7g.large, TLS, EC2 in same AZ, standalone mode.
+30k jobs, 2k warmup excluded, optimized build (LIBRARY_VERSION 68):
 
-| Library  | c=1      | c=10      |
-|----------|----------|-----------|
-| glide-mq | 2,455 j/s | 18,356 j/s |
-| BullMQ   | 2,436 j/s | 13,216 j/s |
-| Delta    | +0.8%    | **+38.9%** |
+| c | glide-mq | BullMQ | Delta |
+|---|----------|--------|-------|
+| 1 | 2,479 j/s | 2,535 j/s | -2.2% |
+| 5 | 10,754 j/s | 9,866 j/s | +9.0% |
+| 8 | 16,275 j/s | 11,845 j/s | **+37.4%** |
+| 10 | 18,218 j/s | 13,541 j/s | **+34.5%** |
+| 15 | 19,583 j/s | 14,162 j/s | **+38.3%** |
+| 20 | 19,408 j/s | 16,085 j/s | +20.7% |
+| 30 | 19,922 j/s | 17,124 j/s | +16.3% |
+| 50 | 19,768 j/s | 19,159 j/s | +3.2% |
 
-Key insight: the localhost Docker gap (glide-mq ~18% slower at c=10) was a mirage. GLIDE's NAPI overhead (0.037ms/call) is significant when loopback RTT is ~0.05ms but becomes noise when real network RTT is ~0.4ms. Over a real network, glide-mq's fewer FCALLs (13 vs 23 redis.call()s) and 1-RTT completeAndFetchNext design dominates.
+HMGET optimization impact: c=1 gap narrowed from ~12% to ~2%. Sweet spot c=8-15 at 34-38% faster.
 
-## Performance optimization learnings (from PR #126 + c=10 investigation)
+Key insight: on production infra with real network latency, GLIDE's 1-RTT completeAndFetchNext design dominates. Both libraries converge at high concurrency as Valkey single-thread becomes the bottleneck.
 
-- In Valkey Lua, individual redis.call() with single returns beats HMGET/HGETALL batch calls (Lua-C bridge array conversion overhead)
-- SKIPPING redis.call()s via hints/sentinels works; CONSOLIDATING them into batch calls does not
+## Performance optimization learnings
+
+- **HMGET consolidation within same key works**: Merging EXISTS + HGET + HGET + HGET on the same hash key into 1 HMGET saves 3 redis.call()s (measurable at scale). Previous finding about HMGET being slower was about reads from different keys or HGETALL overhead on large hashes.
+- SKIPPING redis.call()s via hints/sentinels works; CONSOLIDATING cross-key calls does not
 - Steady-state: 1 RTT per job (completeAndFetchNext returns next job's hash inline)
-- 13 internal redis.call()s per completeAndFetchNext on happy path - all mandatory
-- Glide auto-pipelines concurrent async calls via NAPI/Rust core - explicit Batch only helps lightweight commands
-- Any micro-batching scheme (queueMicrotask collector) regresses due to scheduling latency
-- All batch/pipeline approaches exhausted
-- XDEL cannot be skipped (stream growth degrades XREADGROUP)
+- 10 internal redis.call()s per completeAndFetchNext on happy path (down from 13 via HMGET optimization)
 - GLIDE NAPI overhead: 0.037ms/call vs ioredis (measured via raw FCALL vs EVALSHA)
-- Warmup inflates reported gaps: glide-mq improves 37% from cold to warm vs BullMQ's 24%
-- TS-side overhead per job: 0.009ms (negligible)
 - Localhost benchmarks are misleading for production - always validate on real infra with TLS
+- TS-side micro-optimizations (withSpan, Buffer.byteLength, JSON.stringify) save ~3-5us per call - meaningful in aggregate but not game-changing
 
 ## Known state
 
@@ -60,12 +57,14 @@ Key insight: the localhost Docker gap (glide-mq ~18% slower at c=10) was a mirag
 - `npm test` runs full suite (~1915 tests, all passing).
 - `claude-review` CI check can fail with SDK infrastructure errors - not code-related.
 - Fuzzer pre-push hook: ~4 min per push.
-- Version: 0.11.1, LIBRARY_VERSION = '67'
+- Version: 0.11.1, LIBRARY_VERSION = '68' (uncommitted)
 - ElastiCache standalone: `testing-standalone-0227215229` (us-east-2, Valkey 8.2, r7g.large, TLS)
-- EC2 test host: `GlideEc2` (SSH alias, ubuntu@ec2-52-14-77-103.us-east-2.compute.amazonaws.com)
+- EC2 test host: SSH via `ssh -i ~/.ssh/GlideEc2.pem ubuntu@ec2-52-14-77-103.us-east-2.compute.amazonaws.com`, repo at `~/glide-mq`
 
 ## What comes next
 
-- Commit the TS-side micro-optimizations and benchmark script
-- Update README performance claims with ElastiCache numbers
-- Continue with remaining roadmap issues
+- Commit and push the HMGET + TS micro-optimizations
+- Update README performance table with latest numbers (c=1 through c=50 sweep)
+- Sequential add throughput: glide-mq ~2% slower at c=1 (was 12%). Caused by NAPI per-call overhead on the add path. Could improve via addBulk batching or speedkey NAPI optimizations.
+- Cluster mode benchmarks (untested)
+- Memory footprint comparison (untested)
