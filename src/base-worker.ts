@@ -1143,11 +1143,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           return;
         }
       }
-      const completionHints = (job.orderingKey || job.groupKey) ? {
-        orderingKey: job.orderingKey,
-        orderingSeq: job.orderingSeq,
-        groupKey: job.groupKey,
-      } : undefined;
+      const completionHints =
+        job.orderingKey || job.groupKey
+          ? {
+              orderingKey: job.orderingKey,
+              orderingSeq: job.orderingSeq,
+              groupKey: job.groupKey,
+            }
+          : undefined;
 
       this.isDrained = false;
       if (this.hasActiveListeners) this.emit('active', job, currentJobId);
@@ -1230,9 +1233,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         }
       }
       // Fast path: skip async buildParentInfo when no parent fields present
-      const parentInfo = (job.parentId || job.parentQueue)
-        ? await this.buildParentInfo(job, currentJobId)
-        : undefined;
+      const parentInfo = job.parentId || job.parentQueue ? await this.buildParentInfo(job, currentJobId) : undefined;
 
       const now = Date.now();
       const fetchResult = await completeAndFetchNext(

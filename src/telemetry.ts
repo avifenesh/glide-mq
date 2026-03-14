@@ -98,10 +98,7 @@ export type SpanAttributes = Record<string, string | number | boolean>;
  * directly inside the callback via span.setAttribute(). This avoids allocating
  * an attributes object on every call when tracing is disabled (NOOP_SPAN.setAttribute is free).
  */
-export async function withSpan<T>(
-  name: string,
-  fn: (span: OTelSpan) => Promise<T>,
-): Promise<T>;
+export async function withSpan<T>(name: string, fn: (span: OTelSpan) => Promise<T>): Promise<T>;
 export async function withSpan<T>(
   name: string,
   attributes: SpanAttributes,
