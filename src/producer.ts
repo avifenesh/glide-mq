@@ -303,6 +303,7 @@ export class Producer<D = any> {
         p.lifo,
         p.parentQueue,
         p.parentDepsKey,
+        this.skipEvents,
       );
       if (result === 'skipped' || result === 'duplicate') {
         return null;
@@ -417,6 +418,7 @@ export class Producer<D = any> {
           p.customJobId,
           p.lifo.toString(),
           p.parentQueue,
+          this.skipEvents ? '1' : '0',
         ]);
       } else {
         let jobKeys = keys;
