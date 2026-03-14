@@ -2,7 +2,7 @@
  * Shared utilities for benchmark suite.
  */
 
-import Redis from 'ioredis';
+import Redis, { type RedisOptions } from 'ioredis';
 
 const BENCH_HOST = process.env.BENCH_HOST || '127.0.0.1';
 
@@ -168,7 +168,7 @@ export const GLIDE_CONNECTION = {
 /**
  * Connection config for BullMQ.
  */
-export const BULL_CONNECTION: Record<string, any> = {
+export const BULL_CONNECTION: RedisOptions = {
   host: BENCH_HOST,
   port: BENCH_PORT,
   maxRetriesPerRequest: null,

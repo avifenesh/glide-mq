@@ -3,11 +3,7 @@
  */
 
 import { Queue as BullQueue, Worker as BullWorker } from 'bullmq';
-import { flushDB } from './utils';
-
-const BENCH_HOST = process.env.BENCH_HOST || '127.0.0.1';
-const BENCH_PORT = Number(process.env.BENCH_PORT) || 6379;
-const BULL_CONNECTION = { host: BENCH_HOST, port: BENCH_PORT };
+import { flushDB, BULL_CONNECTION } from './utils';
 
 const N = 10000;
 const CONCURRENCY = 10;

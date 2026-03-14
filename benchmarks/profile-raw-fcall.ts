@@ -6,16 +6,13 @@
 
 import { GlideClient } from '@glidemq/speedkey';
 import Redis from 'ioredis';
+import { GLIDE_CONNECTION, BULL_CONNECTION } from './utils';
 
-const BENCH_HOST = process.env.BENCH_HOST || '127.0.0.1';
-const BENCH_PORT = Number(process.env.BENCH_PORT) || 6379;
 const N = 10000;
 const CONCURRENCY = 10;
 
 async function measureGlideFcall() {
-  const client = await GlideClient.createClient({
-    addresses: [{ host: BENCH_HOST, port: BENCH_PORT }],
-  });
+  const client = await GlideClient.createClient(GLIDE_CONNECTION);
 
   // glidemq_version is already loaded - trivial function that returns a string
   // Warm up
@@ -55,7 +52,7 @@ async function measureGlideFcall() {
 }
 
 async function measureIoredisScript() {
-  const client = new Redis({ host: BENCH_HOST, port: BENCH_PORT, lazyConnect: true });
+  const client = new Redis({ ...BULL_CONNECTION, lazyConnect: true });
   await client.connect();
 
   // Define and load a trivial script via SCRIPT LOAD, then call with EVALSHA

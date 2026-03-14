@@ -36,7 +36,6 @@ async function run() {
     );
 
     // Patch commandClient.fcall to measure latency
-    const origInit = (worker as any).__proto__.__proto__; // BaseWorker
     let patched = false;
 
     worker.on('completed', () => {
