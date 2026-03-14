@@ -1227,9 +1227,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         return;
       }
       // Fast path: skip async buildParentInfo when no parent fields present
-      const parentInfo = (job.parentId || job.parentQueue)
-        ? await this.buildParentInfo(job, currentJobId)
-        : undefined;
+      const parentInfo = job.parentId || job.parentQueue ? await this.buildParentInfo(job, currentJobId) : undefined;
 
       const now = Date.now();
       const fetchResult = await completeAndFetchNext(
