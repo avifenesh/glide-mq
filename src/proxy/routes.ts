@@ -260,11 +260,13 @@ export function createRoutes(
       // 📊 Impact: O(1) Redis round trips instead of O(N). Vastly reduces network latency and avoids event loop blocking, significantly improving bulk add throughput.
       const results = await queue.addBulk(jobs.map((j) => ({ name: j.name, data: j.data ?? null, opts: j.opts })));
 
-      const responseJobs: (AddJobResponse | AddJobSkippedResponse)[] = results.map((job) =>
-        job ? { id: job.id, name: job.name, timestamp: job.timestamp } : { skipped: true },
-      );
+      const responseJobs: (AddJobResponse | AddJobSkippedResponse)[] = results.map((job) => ({
+        id: job.id,
+        name: job.name,
+        timestamp: job.timestamp,
+      }));
 
-      const anyCreated = results.some((j) => j !== null);
+      const anyCreated = results.length > 0;
       res.status(anyCreated ? 201 : 200).json({ jobs: responseJobs });
     } catch (err) {
       const { status, message } = errorResponse(err);
