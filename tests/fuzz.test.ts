@@ -531,6 +531,10 @@ describeEachMode('Fuzz: mixed operations storm', (CONNECTION) => {
 
     // No unexpected errors (closing errors are acceptable)
     const realErrors = errors.filter((e) => !e.message.includes('closing') && !e.message.includes('closed'));
+    if (realErrors.length > 0) {
+      const msgs = realErrors.map((e) => e.message).slice(0, 5);
+      console.error(`[FUZZ] ${realErrors.length} real errors. First 5:`, msgs);
+    }
     expect(realErrors.length).toBe(0);
   }, 15000);
 });
