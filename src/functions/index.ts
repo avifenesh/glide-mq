@@ -26,7 +26,9 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 65: rpopAndReserve accepts count arg for batch popping under globalConcurrency; deferActive DECRs list-active for list-sourced jobs.
 // Version 66: glidemq_reclaimStalledListJobs - stall detection for list-sourced jobs via bounded SCAN.
 // Version 67: reclaimStalledListJobs - increase SCAN bounds (maxIter 100->1000, COUNT 50->500) for large DBs.
-export const LIBRARY_VERSION = '67';
+// Version 68: completeAndFetchNext HMGET optimization - merge 4 separate hash lookups into 1 HMGET (13→10 redis.call()s on hot path).
+// Version 69: Remove auto-ID EXISTS check - monotonic INCR can't collide; custom numeric IDs advance counter to prevent future conflicts.
+export const LIBRARY_VERSION = '69';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -290,6 +292,17 @@ local function checkExpired(jobKey, jobId, prefix, now)
   return expireJob(jobKey, jobId, prefix, now, curState, nil, nil, nil)
 end
 
+local function advanceIdCounter(idKey, customId)
+  if not string.match(customId, '^%d+$') then return end
+  local numericId = tonumber(customId)
+  if numericId and numericId > 0 then
+    local cur = tonumber(redis.call('GET', idKey)) or 0
+    if numericId > cur then
+      redis.call('SET', idKey, customId)
+    end
+  end
+end
+
 local function extractOrderingKeyFromOpts(optsJson)
   if not optsJson or optsJson == '' then
     return ''
@@ -451,6 +464,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local lifo = tonumber(args[18]) or 0
   local parentQueue = args[19] or ''
   local schedulerName = args[20] or ''
+  local skipEvents = args[21] or '0'
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local jobIdStr
   local jobKey
@@ -460,18 +474,11 @@ redis.register_function('glidemq_addJob', function(keys, args)
       return 'duplicate'
     end
     jobIdStr = customJobId
+    advanceIdCounter(idKey, customJobId)
   else
     local jobId = redis.call('INCR', idKey)
     jobIdStr = tostring(jobId)
     jobKey = prefix .. 'job:' .. jobIdStr
-    local retries = 0
-    while redis.call('EXISTS', jobKey) == 1 do
-      retries = retries + 1
-      if retries >= 1000 then return 'ERR:ID_EXHAUSTED' end
-      jobId = redis.call('INCR', idKey)
-      jobIdStr = tostring(jobId)
-      jobKey = prefix .. 'job:' .. jobIdStr
-    end
   end
   local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0 or tbCapacity > 0))
   local orderingSeq = 0
@@ -608,7 +615,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   else
     xaddJob(streamKey, jobIdStr, jobName)
   end
-  emitEvent(eventsKey, 'added', jobIdStr, {'name', jobName})
+  if skipEvents ~= '1' then emitEvent(eventsKey, 'added', jobIdStr, {'name', jobName}) end
   return jobIdStr
 end)
 
@@ -1006,14 +1013,20 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     end
 
     local priJobKey = prefix .. 'job:' .. priJobId
-    if redis.call('EXISTS', priJobKey) == 1 then
-      local priRevoked = redis.call('HGET', priJobKey, 'revoked')
-      if priRevoked ~= '1' and not checkExpired(priJobKey, priJobId, prefix, timestamp) then
-        redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
-        if skipEvents ~= '1' then emitEvent(eventsKey, 'active', priJobId, nil) end
-        local priJobFields = redis.call('HGETALL', priJobKey)
-        redis.call('INCR', prefix .. 'list-active')
-        return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
+    -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' (3 → 1)
+    local priMeta = redis.call('HMGET', priJobKey, 'state', 'revoked', 'expireAt')
+    if priMeta[1] then
+      if priMeta[2] ~= '1' then
+        local priExpireAt = tonumber(priMeta[3])
+        if not priExpireAt or priExpireAt <= 0 or timestamp <= priExpireAt then
+          redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
+          if skipEvents ~= '1' then emitEvent(eventsKey, 'active', priJobId, nil) end
+          local priJobFields = redis.call('HGETALL', priJobKey)
+          redis.call('INCR', prefix .. 'list-active')
+          return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
+        else
+          expireJob(priJobKey, priJobId, prefix, timestamp, priMeta[1], nil, nil, nil)
+        end
       end
     end
   end
@@ -1027,22 +1040,27 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     end
 
     local lifoJobKey = prefix .. 'job:' .. lifoJobId
-    if redis.call('EXISTS', lifoJobKey) == 1 then
-      local lifoRevoked = redis.call('HGET', lifoJobKey, 'revoked')
-      if lifoRevoked ~= '1' and not checkExpired(lifoJobKey, lifoJobId, prefix, timestamp) then
-        -- Activate: set state, processedOn, lastActive before HGETALL so returned hash is current
-        redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
-        if skipEvents ~= '1' then emitEvent(eventsKey, 'active', lifoJobId, nil) end
-        local lifoJobFields = redis.call('HGETALL', lifoJobKey)
-        redis.call('INCR', prefix .. 'list-active')
-        -- Return LIFO job (no entryId for LIFO jobs, use empty string)
-        return {'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}
+    -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' (3 → 1)
+    local lifoMeta = redis.call('HMGET', lifoJobKey, 'state', 'revoked', 'expireAt')
+    if lifoMeta[1] then
+      if lifoMeta[2] ~= '1' then
+        local lifoExpireAt = tonumber(lifoMeta[3])
+        if not lifoExpireAt or lifoExpireAt <= 0 or timestamp <= lifoExpireAt then
+          redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
+          if skipEvents ~= '1' then emitEvent(eventsKey, 'active', lifoJobId, nil) end
+          local lifoJobFields = redis.call('HGETALL', lifoJobKey)
+          redis.call('INCR', prefix .. 'list-active')
+          return {'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}
+        else
+          expireJob(lifoJobKey, lifoJobId, prefix, timestamp, lifoMeta[1], nil, nil, nil)
+        end
       end
     end
   end
 
   -- Phase 2: Fetch next job (non-blocking XREADGROUP), skip expired (up to 3 attempts)
   local nextJobId, nextEntryId, nextJobKey
+  local nextGroupKey = nil
   for _fetchAttempt = 1, 3 do
     local nextEntries = redis.call('XREADGROUP', 'GROUP', group, consumer, 'COUNT', 1, 'STREAMS', streamKey, '>')
     if not nextEntries or #nextEntries == 0 then
@@ -1067,19 +1085,25 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       return {'NEXT_NONE', jobId}
     end
     nextJobKey = prefix .. 'job:' .. nextJobId
-    local nextExists = redis.call('EXISTS', nextJobKey)
-    if nextExists == 0 then
+    -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' + HGET 'groupKey' (4 → 1)
+    local nextMeta = redis.call('HMGET', nextJobKey, 'state', 'revoked', 'expireAt', 'groupKey')
+    if not nextMeta[1] then
+      -- state is nil: job hash does not exist
       return {'NEXT_NONE', jobId}
     end
-    local revoked = redis.call('HGET', nextJobKey, 'revoked')
-    if revoked == '1' then
+    if nextMeta[2] == '1' then
       return {'NEXT_REVOKED', jobId, nextJobId, nextEntryId}
     end
-    if checkExpired(nextJobKey, nextJobId, prefix, timestamp) then
+    -- Inline expiry check (avoids checkExpired's redundant HGET)
+    local nextExpireAt = tonumber(nextMeta[3])
+    if nextExpireAt and nextExpireAt > 0 and timestamp > nextExpireAt then
+      local curState = nextMeta[1]
+      expireJob(nextJobKey, nextJobId, prefix, timestamp, curState, nil, nil, nil)
       redis.call('XACK', streamKey, group, nextEntryId)
       redis.call('XDEL', streamKey, nextEntryId)
       nextJobId = nil
     else
+      nextGroupKey = nextMeta[4]
       break
     end
   end
@@ -1088,7 +1112,6 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   end
 
   -- Phase 3: Activate next job (same as moveToActive)
-  local nextGroupKey = redis.call('HGET', nextJobKey, 'groupKey')
   if nextGroupKey and nextGroupKey ~= '' then
     local nextGroupHashKey = prefix .. 'group:' .. nextGroupKey
     -- Load all group fields in one call
@@ -1433,6 +1456,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local ttl = tonumber(args[19]) or 0
   local customJobId = args[20] or ''
   local parentQueue = args[22] or ''
+  local skipEvents = args[23] or '0'
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local existing = redis.call('HGET', dedupKey, dedupId)
   if mode == 'simple' then
@@ -1468,7 +1492,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
           redis.call('ZREM', scheduledKey, existingJobId)
           markOrderingDone(jobKey, existingJobId)
           redis.call('DEL', jobKey)
-          emitEvent(eventsKey, 'removed', existingJobId, nil)
+          if skipEvents ~= '1' then emitEvent(eventsKey, 'removed', existingJobId, nil) end
         elseif state and state ~= 'completed' and state ~= 'failed' then
           return 'skipped'
         end
@@ -1483,18 +1507,11 @@ redis.register_function('glidemq_dedup', function(keys, args)
       return 'duplicate'
     end
     jobIdStr = customJobId
+    advanceIdCounter(idKey, customJobId)
   else
     local jobId = redis.call('INCR', idKey)
     jobIdStr = tostring(jobId)
     jobKey = prefix .. 'job:' .. jobIdStr
-    local retries = 0
-    while redis.call('EXISTS', jobKey) == 1 do
-      retries = retries + 1
-      if retries >= 1000 then return 'ERR:ID_EXHAUSTED' end
-      jobId = redis.call('INCR', idKey)
-      jobIdStr = tostring(jobId)
-      jobKey = prefix .. 'job:' .. jobIdStr
-    end
   end
   local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0 or tbCapacity > 0))
   local orderingSeq = 0
@@ -1624,7 +1641,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
     xaddJob(streamKey, jobIdStr, jobName)
   end
   redis.call('HSET', dedupKey, dedupId, jobIdStr .. ':' .. tostring(timestamp))
-  emitEvent(eventsKey, 'added', jobIdStr, {'name', jobName})
+  if skipEvents ~= '1' then emitEvent(eventsKey, 'added', jobIdStr, {'name', jobName}) end
   return jobIdStr
 end)
 
@@ -2021,18 +2038,11 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       return cjson.encode({'duplicate'})
     end
     parentJobIdStr = parentCustomId
+    advanceIdCounter(parentIdKey, parentCustomId)
   else
     local parentJobId = redis.call('INCR', parentIdKey)
     parentJobIdStr = tostring(parentJobId)
     parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
-    local retries = 0
-    while redis.call('EXISTS', parentJobKey) == 1 do
-      retries = retries + 1
-      if retries >= 1000 then return cjson.encode({'ERR:ID_EXHAUSTED'}) end
-      parentJobId = redis.call('INCR', parentIdKey)
-      parentJobIdStr = tostring(parentJobId)
-      parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
-    end
   end
   -- Pre-validate all children's custom IDs for duplicates before any writes
   local seenChildKeys = {}
@@ -2150,18 +2160,11 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     if childCustomId ~= '' then
       childJobKey = childPrefix .. 'job:' .. childCustomId
       childJobIdStr = childCustomId
+      advanceIdCounter(childIdKey, childCustomId)
     else
       local childJobId = redis.call('INCR', childIdKey)
       childJobIdStr = tostring(childJobId)
       childJobKey = childPrefix .. 'job:' .. childJobIdStr
-      local cRetries = 0
-      while redis.call('EXISTS', childJobKey) == 1 do
-        cRetries = cRetries + 1
-        if cRetries >= 1000 then return cjson.encode({'ERR:ID_EXHAUSTED'}) end
-        childJobId = redis.call('INCR', childIdKey)
-        childJobIdStr = tostring(childJobId)
-        childJobKey = childPrefix .. 'job:' .. childJobIdStr
-      end
     end
     local childOrderingKey = extractOrderingKeyFromOpts(childOpts)
     local childLifo = extractLifoFromOpts(childOpts)
@@ -3074,6 +3077,7 @@ export function addJobArgs(
   parentQueue: string = '',
   parentDepsKey: string = '',
   schedulerName: string = '',
+  skipEvents: boolean = false,
 ): { keys: string[]; args: string[] } {
   const keys = [k.id, k.stream, k.scheduled, k.events];
   if (parentDepsKey) {
@@ -3102,6 +3106,7 @@ export function addJobArgs(
       lifo.toString(),
       parentQueue,
       schedulerName,
+      skipEvents ? '1' : '0',
     ],
   };
 }
@@ -3130,6 +3135,7 @@ export async function addJob(
   parentQueue: string = '',
   parentDepsKey: string = '',
   schedulerName: string = '',
+  skipEvents: boolean = false,
 ): Promise<string> {
   const { keys, args } = addJobArgs(
     k,
@@ -3154,6 +3160,7 @@ export async function addJob(
     parentQueue,
     parentDepsKey,
     schedulerName,
+    skipEvents,
   );
   const result = await client.fcall('glidemq_addJob', keys, args);
   return result as string;
@@ -3189,6 +3196,7 @@ export async function dedup(
   lifo: number = 0,
   parentQueue: string = '',
   parentDepsKey: string = '',
+  skipEvents: boolean = false,
 ): Promise<string> {
   const keys = [k.dedup, k.id, k.stream, k.scheduled, k.events];
   if (parentDepsKey) {
@@ -3217,6 +3225,7 @@ export async function dedup(
     customJobId,
     lifo.toString(),
     parentQueue,
+    skipEvents ? '1' : '0',
   ]);
   return result as string;
 }
@@ -3264,13 +3273,16 @@ export async function renewLock(client: Client, lockKey: string, token: string, 
 /**
  * Encode a removeOnComplete/removeOnFail option into Lua args.
  */
+const RETENTION_NONE = { mode: '0', count: 0, age: 0 } as const;
+const RETENTION_TRUE = { mode: 'true', count: 0, age: 0 } as const;
+
 function encodeRetention(opt?: boolean | number | { age: number; count: number }): {
   mode: string;
   count: number;
   age: number;
 } {
   if (opt === true) {
-    return { mode: 'true', count: 0, age: 0 };
+    return RETENTION_TRUE;
   }
   if (typeof opt === 'number') {
     return { mode: 'count', count: opt, age: 0 };
@@ -3278,7 +3290,7 @@ function encodeRetention(opt?: boolean | number | { age: number; count: number }
   if (opt && typeof opt === 'object') {
     return { mode: 'age_count', count: opt.count ?? 0, age: opt.age ?? 0 };
   }
-  return { mode: '0', count: 0, age: 0 };
+  return RETENTION_NONE;
 }
 
 /**

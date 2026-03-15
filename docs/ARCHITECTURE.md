@@ -70,6 +70,7 @@ added --> stream (ready) --> PEL (active) --> completed (ZSet)
 Jobs with `lifo: true` are placed onto a dedicated Valkey LIST key `glide:{queueName}:list` via RPUSH, and consumed via RPOP. When the worker's `moveToActive` function checks for the next job, priority jobs in the scheduled ZSet are checked first, then the LIFO list, then the FIFO stream. A `list-active` counter in the queue metadata hash enforces global concurrency across both the LIFO list and the main stream.
 
 States map to Valkey structures:
+
 - **waiting**: In stream, not yet claimed by consumer group
 - **active**: In PEL (Pending Entries List) - claimed via XREADGROUP
 - **delayed**: In scheduled ZSet with future timestamp as score
@@ -92,6 +93,7 @@ Score format: `(priority * 2^42) + timestamp_ms`
 Use Valkey Functions (FUNCTION LOAD / FCALL) instead of EVAL/EVALSHA scripts.
 
 ### Why Functions over Scripts
+
 - **Persistent**: Loaded once, survive server restarts (stored in RDB/AOF). EVAL scripts are ephemeral.
 - **Named**: Called by name (`FCALL addJob`) not SHA hash. Readable, debuggable.
 - **Library namespaced**: All glide-mq functions in one library (`#!lua name=glidemq`). Load once, get all functions.
@@ -100,6 +102,7 @@ Use Valkey Functions (FUNCTION LOAD / FCALL) instead of EVAL/EVALSHA scripts.
 - **Differentiator**: BullMQ uses 53 EVAL scripts. We use a single function library.
 
 ### Loading Strategy
+
 1. On Queue/Worker creation, check if library exists: `FUNCTION LIST LIBRARYNAME glidemq`
 2. If missing, load via `FUNCTION LOAD` with the full library source
 3. If version mismatch (we track a version field in the library via `LIBRARY_VERSION` in `src/functions/index.ts`), reload with `FUNCTION LOAD REPLACE`
@@ -120,36 +123,37 @@ redis.register_function('glidemq_promote', function(keys, args) ... end)
 
 ### Functions (26 in 1 library, not 53 scripts)
 
-| Function | Keys | Purpose |
-|----------|------|---------|
-| glidemq_version | 0 | Return library version |
-| glidemq_addJob | 4 | INCR id, HSET job, XADD stream or ZADD scheduled, XADD event |
-| glidemq_promote | 3 | ZRANGEBYSCORE scheduled, XADD to stream, ZREM from scheduled |
-| glidemq_complete | 5 | XACK stream, ZADD completed, HSET job, XADD event, check parent deps |
-| glidemq_completeAndFetchNext | 6 | Complete current + fetch next in single RTT |
-| glidemq_fail | 5 | XACK stream, ZADD failed or ZADD scheduled (retry), HSET job, XADD event |
-| glidemq_reclaimStalled | 3 | XAUTOCLAIM on stream, HSET stalled count, move to failed if exceeded |
-| glidemq_pause | 2 | HSET meta paused=1, XADD event |
-| glidemq_resume | 2 | HSET meta paused=0, XADD event |
-| glidemq_dedup | 3 | Check dedup hash, skip or add based on mode (simple/throttle/debounce) |
-| glidemq_rateLimit | 3 | Check/increment rate counter, return delay if exceeded |
-| glidemq_promoteRateLimited | 2 | Move rate-limited jobs back to stream |
-| glidemq_checkConcurrency | 2 | Check global concurrency limit before processing |
-| glidemq_moveToActive | 4 | XREADGROUP + set state to active |
-| glidemq_deferActive | 3 | Return active job to stream for reprocessing |
-| glidemq_addFlow | N | Atomic: create parent + children, set deps, add children to stream/scheduled |
-| glidemq_completeChild | 4 | Remove from parent deps set, if deps empty -> re-queue parent |
-| glidemq_removeJob | 4 | Clean job hash, remove from all sets/streams |
-| glidemq_clean | 3 | Bulk-remove old completed/failed jobs by age |
-| glidemq_revoke | 2 | Revoke a job by ID |
-| glidemq_changePriority | 3 | Re-prioritize a waiting/delayed job |
-| glidemq_changeDelay | 3 | Change delay of a delayed job |
-| glidemq_promoteJob | 3 | Move a delayed job to waiting immediately |
-| glidemq_searchByName | 2 | Search jobs by name pattern |
-| glidemq_drain | 3 | Remove all waiting (and optionally delayed) jobs |
-| glidemq_retryJobs | 3 | Bulk-retry failed jobs |
+| Function                     | Keys | Purpose                                                                                 |
+| ---------------------------- | ---- | --------------------------------------------------------------------------------------- |
+| glidemq_version              | 0    | Return library version                                                                  |
+| glidemq_addJob               | 4    | INCR id, HSET job, XADD stream or ZADD scheduled, XADD event (skippable via skipEvents) |
+| glidemq_promote              | 3    | ZRANGEBYSCORE scheduled, XADD to stream, ZREM from scheduled                            |
+| glidemq_complete             | 5    | XACK stream, ZADD completed, HSET job, XADD event, check parent deps                    |
+| glidemq_completeAndFetchNext | 6    | Complete current + fetch next in single RTT                                             |
+| glidemq_fail                 | 5    | XACK stream, ZADD failed or ZADD scheduled (retry), HSET job, XADD event                |
+| glidemq_reclaimStalled       | 3    | XAUTOCLAIM on stream, HSET stalled count, move to failed if exceeded                    |
+| glidemq_pause                | 2    | HSET meta paused=1, XADD event                                                          |
+| glidemq_resume               | 2    | HSET meta paused=0, XADD event                                                          |
+| glidemq_dedup                | 3    | Check dedup hash, skip or add based on mode (simple/throttle/debounce)                  |
+| glidemq_rateLimit            | 3    | Check/increment rate counter, return delay if exceeded                                  |
+| glidemq_promoteRateLimited   | 2    | Move rate-limited jobs back to stream                                                   |
+| glidemq_checkConcurrency     | 2    | Check global concurrency limit before processing                                        |
+| glidemq_moveToActive         | 4    | XREADGROUP + set state to active                                                        |
+| glidemq_deferActive          | 3    | Return active job to stream for reprocessing                                            |
+| glidemq_addFlow              | N    | Atomic: create parent + children, set deps, add children to stream/scheduled            |
+| glidemq_completeChild        | 4    | Remove from parent deps set, if deps empty -> re-queue parent                           |
+| glidemq_removeJob            | 4    | Clean job hash, remove from all sets/streams                                            |
+| glidemq_clean                | 3    | Bulk-remove old completed/failed jobs by age                                            |
+| glidemq_revoke               | 2    | Revoke a job by ID                                                                      |
+| glidemq_changePriority       | 3    | Re-prioritize a waiting/delayed job                                                     |
+| glidemq_changeDelay          | 3    | Change delay of a delayed job                                                           |
+| glidemq_promoteJob           | 3    | Move a delayed job to waiting immediately                                               |
+| glidemq_searchByName         | 2    | Search jobs by name pattern                                                             |
+| glidemq_drain                | 3    | Remove all waiting (and optionally delayed) jobs                                        |
+| glidemq_retryJobs            | 3    | Bulk-retry failed jobs                                                                  |
 
 ### speedkey API for Functions
+
 ```typescript
 // Load library (once, on init)
 await client.functionLoad(librarySource, { replace: true });
@@ -197,47 +201,52 @@ Workers share commandClient for all non-blocking ops. blockingClient is dedicate
 
 ```typescript
 class Queue<D = any, R = any> extends EventEmitter {
-  constructor(name: string, opts: QueueOptions)
-  add(name: string, data: D, opts?: JobOptions): Promise<Job<D, R> | null>
-  addAndWait(name: string, data: D, opts?: AddAndWaitOptions): Promise<R>
-  addBulk(jobs: { name: string; data: D; opts?: JobOptions }[]): Promise<Job<D, R>[]>
-  getJob(id: string, opts?: GetJobsOptions): Promise<Job<D, R> | null>
-  getJobs(type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed', start?: number, end?: number, opts?: GetJobsOptions): Promise<Job<D, R>[]>
-  getJobCounts(): Promise<JobCounts>
-  getJobCountByTypes(): Promise<JobCounts>
-  count(): Promise<number>
-  pause(): Promise<void>
-  resume(): Promise<void>
-  isPaused(): Promise<boolean>
-  revoke(jobId: string): Promise<string>
-  getMetrics(type: 'completed' | 'failed', opts?: MetricsOptions): Promise<Metrics>
-  obliterate(opts?: { force: boolean }): Promise<void>
-  close(): Promise<void>
+  constructor(name: string, opts: QueueOptions);
+  add(name: string, data: D, opts?: JobOptions): Promise<Job<D, R> | null>;
+  addAndWait(name: string, data: D, opts?: AddAndWaitOptions): Promise<R>;
+  addBulk(jobs: { name: string; data: D; opts?: JobOptions }[]): Promise<Job<D, R>[]>;
+  getJob(id: string, opts?: GetJobsOptions): Promise<Job<D, R> | null>;
+  getJobs(
+    type: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed',
+    start?: number,
+    end?: number,
+    opts?: GetJobsOptions,
+  ): Promise<Job<D, R>[]>;
+  getJobCounts(): Promise<JobCounts>;
+  getJobCountByTypes(): Promise<JobCounts>;
+  count(): Promise<number>;
+  pause(): Promise<void>;
+  resume(): Promise<void>;
+  isPaused(): Promise<boolean>;
+  revoke(jobId: string): Promise<string>;
+  getMetrics(type: 'completed' | 'failed', opts?: MetricsOptions): Promise<Metrics>;
+  obliterate(opts?: { force: boolean }): Promise<void>;
+  close(): Promise<void>;
 
   // Bulk operations
-  clean(grace: number, limit: number, type: 'completed' | 'failed'): Promise<string[]>
-  drain(delayed?: boolean): Promise<void>
-  retryJobs(opts?: { count?: number }): Promise<number>
+  clean(grace: number, limit: number, type: 'completed' | 'failed'): Promise<string[]>;
+  drain(delayed?: boolean): Promise<void>;
+  retryJobs(opts?: { count?: number }): Promise<number>;
 
   // Global concurrency and rate limiting
-  setGlobalConcurrency(n: number): Promise<void>
-  setGlobalRateLimit(config: RateLimitConfig): Promise<void>
-  getGlobalRateLimit(): Promise<RateLimitConfig | null>
-  removeGlobalRateLimit(): Promise<void>
+  setGlobalConcurrency(n: number): Promise<void>;
+  setGlobalRateLimit(config: RateLimitConfig): Promise<void>;
+  getGlobalRateLimit(): Promise<RateLimitConfig | null>;
+  removeGlobalRateLimit(): Promise<void>;
 
   // Workers
-  getWorkers(): Promise<WorkerInfo[]>
+  getWorkers(): Promise<WorkerInfo[]>;
 
   // Logs and DLQ
-  getJobLogs(id: string, start?: number, end?: number): Promise<{ logs: string[]; count: number }>
-  getDeadLetterJobs(start?: number, end?: number, opts?: GetJobsOptions): Promise<Job<D, R>[]>
-  searchJobs(opts: SearchJobsOptions): Promise<Job<D, R>[]>
+  getJobLogs(id: string, start?: number, end?: number): Promise<{ logs: string[]; count: number }>;
+  getDeadLetterJobs(start?: number, end?: number, opts?: GetJobsOptions): Promise<Job<D, R>[]>;
+  searchJobs(opts: SearchJobsOptions): Promise<Job<D, R>[]>;
 
   // Job schedulers (repeatable/cron)
-  upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void>
-  getJobScheduler(name: string): Promise<SchedulerEntry | null>
-  getRepeatableJobs(): Promise<{ name: string; entry: SchedulerEntry }[]>
-  removeJobScheduler(name: string): Promise<void>
+  upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void>;
+  getJobScheduler(name: string): Promise<SchedulerEntry | null>;
+  getRepeatableJobs(): Promise<{ name: string; entry: SchedulerEntry }[]>;
+  removeJobScheduler(name: string): Promise<void>;
 }
 ```
 
@@ -245,37 +254,37 @@ class Queue<D = any, R = any> extends EventEmitter {
 
 ```typescript
 class Worker<D = any, R = any> extends EventEmitter {
-  constructor(name: string, processor: Processor<D, R> | string, opts: WorkerOptions)
-  waitUntilReady(): Promise<void>
-  pause(force?: boolean): Promise<void>
-  resume(): Promise<void>
-  drain(): Promise<void>
-  close(force?: boolean): Promise<void>
-  abortJob(jobId: string): boolean
-  isRunning(): boolean
-  isPaused(): boolean
-  rateLimit(ms: number): Promise<void>
-  on(event: WorkerEvent, handler: Function): void
-  static RateLimitError: typeof RateLimitError
+  constructor(name: string, processor: Processor<D, R> | string, opts: WorkerOptions);
+  waitUntilReady(): Promise<void>;
+  pause(force?: boolean): Promise<void>;
+  resume(): Promise<void>;
+  drain(): Promise<void>;
+  close(force?: boolean): Promise<void>;
+  abortJob(jobId: string): boolean;
+  isRunning(): boolean;
+  isPaused(): boolean;
+  rateLimit(ms: number): Promise<void>;
+  on(event: WorkerEvent, handler: Function): void;
+  static RateLimitError: typeof RateLimitError;
 }
 
-type Processor<D, R> = (job: Job<D, R>) => Promise<R>
-type BatchProcessor<D, R> = (jobs: Job<D, R>[]) => Promise<R[]>
-type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained'
+type Processor<D, R> = (job: Job<D, R>) => Promise<R>;
+type BatchProcessor<D, R> = (jobs: Job<D, R>[]) => Promise<R[]>;
+type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained';
 
 interface WorkerOptions {
-  concurrency?: number           // per-worker, default 1
-  globalConcurrency?: number     // across all workers
-  prefetch?: number              // XREADGROUP COUNT
-  blockTimeout?: number          // XREADGROUP BLOCK ms
-  lockDuration?: number          // stall detection window
-  stalledInterval?: number       // XAUTOCLAIM frequency
-  maxStalledCount?: number       // max reclaims before fail
-  promotionInterval?: number     // delayed job promotion interval
-  limiter?: { max: number; duration: number }
-  backoffStrategies?: Record<string, (attemptsMade: number, err: Error) => number>
-  sandbox?: SandboxOptions       // run processor in child process/thread
-  batch?: { size: number; timeout?: number }  // batch processing mode
+  concurrency?: number; // per-worker, default 1
+  globalConcurrency?: number; // across all workers
+  prefetch?: number; // XREADGROUP COUNT
+  blockTimeout?: number; // XREADGROUP BLOCK ms
+  lockDuration?: number; // stall detection window
+  stalledInterval?: number; // XAUTOCLAIM frequency
+  maxStalledCount?: number; // max reclaims before fail
+  promotionInterval?: number; // delayed job promotion interval
+  limiter?: { max: number; duration: number };
+  backoffStrategies?: Record<string, (attemptsMade: number, err: Error) => number>;
+  sandbox?: SandboxOptions; // run processor in child process/thread
+  batch?: { size: number; timeout?: number }; // batch processing mode
 }
 ```
 
@@ -283,60 +292,60 @@ interface WorkerOptions {
 
 ```typescript
 class Job<D = any, R = any> {
-  readonly id: string
-  readonly name: string
-  data: D
-  readonly opts: JobOptions
-  attemptsMade: number
-  returnvalue: R | undefined
-  failedReason: string | undefined
-  progress: number | object
-  timestamp: number
-  finishedOn: number | undefined
-  processedOn: number | undefined
-  parentId?: string
-  parentQueue?: string
-  orderingKey?: string
-  groupKey?: string
-  cost?: number
-  abortSignal?: AbortSignal
-  discarded: boolean
+  readonly id: string;
+  readonly name: string;
+  data: D;
+  readonly opts: JobOptions;
+  attemptsMade: number;
+  returnvalue: R | undefined;
+  failedReason: string | undefined;
+  progress: number | object;
+  timestamp: number;
+  finishedOn: number | undefined;
+  processedOn: number | undefined;
+  parentId?: string;
+  parentQueue?: string;
+  orderingKey?: string;
+  groupKey?: string;
+  cost?: number;
+  abortSignal?: AbortSignal;
+  discarded: boolean;
 
   // Lifecycle
-  log(message: string): Promise<void>
-  updateProgress(progress: number | object): Promise<void>
-  updateData(data: D): Promise<void>
-  discard(): void
-  moveToFailed(err: Error): Promise<void>
-  remove(): Promise<void>
-  retry(): Promise<void>
-  changePriority(newPriority: number): Promise<void>
-  changeDelay(newDelay: number): Promise<void>
-  moveToDelayed(timestampMs: number, nextStep?: string): Promise<never>
-  promote(): Promise<void>
-  waitUntilFinished(pollIntervalMs?: number, timeoutMs?: number): Promise<'completed' | 'failed'>
+  log(message: string): Promise<void>;
+  updateProgress(progress: number | object): Promise<void>;
+  updateData(data: D): Promise<void>;
+  discard(): void;
+  moveToFailed(err: Error): Promise<void>;
+  remove(): Promise<void>;
+  retry(): Promise<void>;
+  changePriority(newPriority: number): Promise<void>;
+  changeDelay(newDelay: number): Promise<void>;
+  moveToDelayed(timestampMs: number, nextStep?: string): Promise<never>;
+  promote(): Promise<void>;
+  waitUntilFinished(pollIntervalMs?: number, timeoutMs?: number): Promise<'completed' | 'failed'>;
 
   // Queries
-  getChildrenValues(): Promise<Record<string, R>>
-  getState(): Promise<string>
-  isCompleted(): Promise<boolean>
-  isFailed(): Promise<boolean>
-  isDelayed(): Promise<boolean>
-  isActive(): Promise<boolean>
-  isWaiting(): Promise<boolean>
-  isRevoked(): Promise<boolean>
+  getChildrenValues(): Promise<Record<string, R>>;
+  getState(): Promise<string>;
+  isCompleted(): Promise<boolean>;
+  isFailed(): Promise<boolean>;
+  isDelayed(): Promise<boolean>;
+  isActive(): Promise<boolean>;
+  isWaiting(): Promise<boolean>;
+  isRevoked(): Promise<boolean>;
 }
 
 interface JobOptions {
-  delay?: number
-  priority?: number              // 0 (highest) to 2^21
-  attempts?: number
-  backoff?: { type: 'fixed' | 'exponential' | string; delay: number; jitter?: number }
-  timeout?: number
-  removeOnComplete?: boolean | number | { age: number; count: number }
-  removeOnFail?: boolean | number | { age: number; count: number }
-  deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' }
-  parent?: { queue: string; id: string }
+  delay?: number;
+  priority?: number; // 0 (highest) to 2^21
+  attempts?: number;
+  backoff?: { type: 'fixed' | 'exponential' | string; delay: number; jitter?: number };
+  timeout?: number;
+  removeOnComplete?: boolean | number | { age: number; count: number };
+  removeOnFail?: boolean | number | { age: number; count: number };
+  deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
+  parent?: { queue: string; id: string };
 }
 ```
 
@@ -344,12 +353,12 @@ interface JobOptions {
 
 ```typescript
 class QueueEvents {
-  constructor(name: string, opts?: QueueEventsOptions)
-  on(event: 'completed', handler: (args: { jobId: string; returnvalue: string }) => void): void
-  on(event: 'failed', handler: (args: { jobId: string; failedReason: string }) => void): void
-  on(event: 'progress', handler: (args: { jobId: string; data: any }) => void): void
-  on(event: 'added' | 'stalled' | 'paused' | 'resumed', handler: Function): void
-  close(): Promise<void>
+  constructor(name: string, opts?: QueueEventsOptions);
+  on(event: 'completed', handler: (args: { jobId: string; returnvalue: string }) => void): void;
+  on(event: 'failed', handler: (args: { jobId: string; failedReason: string }) => void): void;
+  on(event: 'progress', handler: (args: { jobId: string; data: any }) => void): void;
+  on(event: 'added' | 'stalled' | 'paused' | 'resumed', handler: Function): void;
+  close(): Promise<void>;
 }
 ```
 
@@ -357,18 +366,18 @@ class QueueEvents {
 
 ```typescript
 class FlowProducer {
-  constructor(opts?: FlowProducerOptions)
-  add(flow: FlowJob): Promise<JobNode>
-  addBulk(flows: FlowJob[]): Promise<JobNode[]>
-  close(): Promise<void>
+  constructor(opts?: FlowProducerOptions);
+  add(flow: FlowJob): Promise<JobNode>;
+  addBulk(flows: FlowJob[]): Promise<JobNode[]>;
+  close(): Promise<void>;
 }
 
 interface FlowJob {
-  name: string
-  queueName: string
-  data: any
-  opts?: JobOptions
-  children?: FlowJob[]
+  name: string;
+  queueName: string;
+  data: any;
+  opts?: JobOptions;
+  children?: FlowJob[];
 }
 ```
 
@@ -456,6 +465,7 @@ Complex workflows with arbitrary dependency graphs are submitted via `FlowProduc
 ## Implementation Phases
 
 ### Phase 1: Core (Queue + Worker + Job)
+
 - Connection factory (blocking vs non-blocking clients)
 - Key builder utilities
 - Lua scripts: addJob, promote, complete, fail, reclaimStalled
@@ -465,6 +475,7 @@ Complex workflows with arbitrary dependency graphs are submitted via `FlowProduc
 - Tests for all above
 
 ### Phase 2: Advanced Features
+
 - Delayed jobs (scheduled ZSet + promotion loop)
 - Priorities (encoded scores)
 - Retries with backoff (fixed, exponential, custom, jitter)
@@ -474,12 +485,14 @@ Complex workflows with arbitrary dependency graphs are submitted via `FlowProduc
 - Global concurrency
 
 ### Phase 3: Flows + Events
+
 - FlowProducer: parent-child job trees
 - QueueEvents: stream-based event subscription
 - Job schedulers (repeatable/cron jobs)
 - Metrics collection
 
 ### Phase 4: Production Hardening
+
 - Graceful shutdown
 - Connection error recovery
 - OpenTelemetry integration

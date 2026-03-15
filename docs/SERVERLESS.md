@@ -6,13 +6,13 @@ Lightweight enqueueing for AWS Lambda, Cloudflare Workers, Vercel Edge Functions
 
 The `Queue` class extends `EventEmitter`, creates `Job` instances, and is designed for long-running processes. In serverless environments this overhead is wasted:
 
-| | Queue | Producer |
-|---|---|---|
-| EventEmitter | Yes | No |
-| Job instances | Returns `Job<D,R>` | Returns `string` ID |
-| State tracking | Yes | No |
-| Connection reuse | Manual | Built-in via `ServerlessPool` |
-| Overhead | ~2KB per instance | Minimal |
+|                  | Queue              | Producer                      |
+| ---------------- | ------------------ | ----------------------------- |
+| EventEmitter     | Yes                | No                            |
+| Job instances    | Returns `Job<D,R>` | Returns `string` ID           |
+| State tracking   | Yes                | No                            |
+| Connection reuse | Manual             | Built-in via `ServerlessPool` |
+| Overhead         | ~2KB per instance  | Minimal                       |
 
 Both use the **same FCALL functions** on the server - jobs created by `Producer` are identical to those created by `Queue` and are processed by the same `Worker`.
 
@@ -23,6 +23,7 @@ import { Producer } from 'glide-mq';
 
 const producer = new Producer('emails', {
   connection: { addresses: [{ host: 'localhost', port: 6379 }] },
+  events: false, // skip XADD event emission - saves 1 redis.call() per add
 });
 
 const jobId = await producer.add('send-welcome', {
@@ -167,14 +168,15 @@ const compressed = new Producer('q', {
 
 ### `new Producer(name, opts)`
 
-| Parameter | Type | Description |
-|---|---|---|
-| `name` | `string` | Queue name |
-| `opts.connection` | `ConnectionOptions` | Connection config (required unless `client` provided) |
-| `opts.client` | `Client` | Pre-existing GLIDE client (not owned by Producer) |
-| `opts.prefix` | `string` | Key prefix (default: `'glide'`) |
-| `opts.compression` | `'none' \| 'gzip'` | Compression mode (default: `'none'`) |
-| `opts.serializer` | `Serializer` | Custom serializer (default: JSON) |
+| Parameter          | Type                | Description                                           |
+| ------------------ | ------------------- | ----------------------------------------------------- |
+| `name`             | `string`            | Queue name                                            |
+| `opts.connection`  | `ConnectionOptions` | Connection config (required unless `client` provided) |
+| `opts.client`      | `Client`            | Pre-existing GLIDE client (not owned by Producer)     |
+| `opts.prefix`      | `string`            | Key prefix (default: `'glide'`)                       |
+| `opts.compression` | `'none' \| 'gzip'`  | Compression mode (default: `'none'`)                  |
+| `opts.serializer`  | `Serializer`        | Custom serializer (default: JSON)                     |
+| `opts.events`      | `boolean`           | Emit 'added' events on add (default: `true`)          |
 
 ### `producer.add(name, data, opts?)`
 

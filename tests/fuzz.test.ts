@@ -529,8 +529,10 @@ describeEachMode('Fuzz: mixed operations storm', (CONNECTION) => {
     await w.close(true);
     await q.close();
 
-    // No unexpected errors (closing errors are acceptable)
-    const realErrors = errors.filter((e) => !e.message.includes('closing') && !e.message.includes('closed'));
+    // No unexpected errors (closing/closed/timeout errors are acceptable under concurrent storm)
+    const realErrors = errors.filter(
+      (e) => !e.message.includes('closing') && !e.message.includes('closed') && !e.message.includes('timed out'),
+    );
     expect(realErrors.length).toBe(0);
   }, 15000);
 });

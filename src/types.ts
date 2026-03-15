@@ -83,6 +83,8 @@ export interface QueueOptions {
    * `deserializationFailed` flag will be `true`.
    */
   serializer?: Serializer;
+  /** Emit events (e.g., 'added') on the events stream when adding jobs. Default: true. */
+  events?: boolean;
 }
 
 export interface SandboxOptions {

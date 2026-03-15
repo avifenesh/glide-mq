@@ -6,6 +6,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Performance
+
+- **HMGET consolidation in `completeAndFetchNext`**: merge 4 separate hash lookups (EXISTS, HGET revoked, HGET expireAt, HGET groupKey) into 1 HMGET. Reduces redis.call()s from 13 to 10 on hot path. Same optimization applied to priority/LIFO list paths.
+- **Remove auto-ID EXISTS check**: monotonic INCR cannot collide. Custom numeric IDs advance the counter via `advanceIdCounter` helper to prevent future conflicts. Saves 1 redis.call() per add.
+- TS-side micro-optimizations: `withSpan` lazy attributes overload, `Buffer.byteLength` skip for small payloads, cached retention objects, `completionHints` skip for non-ordered jobs, avoid `JSON.stringify({})` allocation.
+- ElastiCache results: c=1 gap eliminated (was -12%, now +0.5%), c=10 +32-40%.
+
+### Added
+
+- Queue/Producer option `events: false` to skip XADD 'added' event emission on job add. Saves 1 redis.call() per add. Applies to `add()`, `addBulk()`, and deduplication paths.
+
+### Fixed
+
+- `addBulk` and `Producer.addBulk` dedup batch paths now correctly pass `skipEvents` to `glidemq_dedup`.
+- `advanceIdCounter` only matches pure decimal strings and uses the original string (not `tostring()`) to avoid Lua float precision loss on large IDs.
+- Dedup debounce 'removed' event now gated behind `skipEvents` flag.
+- Fuzz test: filter transient client timeouts under concurrent storm on cluster.
+
+---
+
 ## [0.11.0] - 2026-03-10
 
 ### Added

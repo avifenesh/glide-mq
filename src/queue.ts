@@ -102,6 +102,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   private keys: QueueKeys;
 
   private serializer: Serializer;
+  private skipEvents: boolean;
 
   constructor(name: string, opts: QueueOptions) {
     super();
@@ -112,6 +113,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     this.name = name;
     this.opts = opts;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
+    this.skipEvents = opts.events === false;
     this.keys = buildKeys(name, opts.prefix);
     if (opts.connection) {
       this._clusterMode = opts.connection.clusterMode ?? false;
@@ -225,183 +227,183 @@ export class Queue<D = any, R = any> extends EventEmitter {
       throw new Error('Priority must be <= 2048');
     }
 
-    return withSpan(
-      'glide-mq.queue.add',
-      {
-        'glide-mq.queue': this.name,
-        'glide-mq.job.name': name,
-        'glide-mq.job.delay': delay,
-        'glide-mq.job.priority': priority,
-      },
-      async (span) => {
-        const client = await this.getClient();
-        const timestamp = Date.now();
-        const parentId = opts?.parent ? opts.parent.id : '';
-        const parentQueue = opts?.parent ? opts.parent.queue : '';
-        const maxAttempts = opts?.attempts ?? 0;
-        const orderingKey = opts?.ordering?.key ?? '';
-        const groupRateMax = opts?.ordering?.rateLimit?.max ?? 0;
-        const groupRateDuration = opts?.ordering?.rateLimit?.duration ?? 0;
-        const tb = opts?.ordering?.tokenBucket;
-        let tbCapacity = 0;
-        let tbRefillRate = 0;
-        if (tb) {
-          if (!Number.isFinite(tb.capacity) || tb.capacity <= 0)
-            throw new Error('tokenBucket.capacity must be a positive finite number');
-          if (!Number.isFinite(tb.refillRate) || tb.refillRate <= 0)
-            throw new Error('tokenBucket.refillRate must be a positive finite number');
-          tbCapacity = Math.round(tb.capacity * 1000);
-          tbRefillRate = Math.round(tb.refillRate * 1000);
-        }
-        let jobCost = 0;
-        if (opts?.cost != null) {
-          if (!Number.isFinite(opts.cost) || opts.cost < 0)
-            throw new Error('cost must be a non-negative finite number');
-          jobCost = Math.round(opts.cost * 1000);
-        }
-        let groupConcurrency = opts?.ordering?.concurrency ?? 0;
-        // Force group path when rate limit or token bucket is set
-        if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
-          groupConcurrency = 1;
-        }
-        validateOrderingKey(orderingKey);
+    return withSpan('glide-mq.queue.add', async (span) => {
+      span.setAttribute('glide-mq.queue', this.name);
+      span.setAttribute('glide-mq.job.name', name);
+      span.setAttribute('glide-mq.job.delay', delay);
+      span.setAttribute('glide-mq.job.priority', priority);
+      const client = await this.getClient();
+      const timestamp = Date.now();
+      const parentId = opts?.parent ? opts.parent.id : '';
+      const parentQueue = opts?.parent ? opts.parent.queue : '';
+      const maxAttempts = opts?.attempts ?? 0;
+      const orderingKey = opts?.ordering?.key ?? '';
+      const groupRateMax = opts?.ordering?.rateLimit?.max ?? 0;
+      const groupRateDuration = opts?.ordering?.rateLimit?.duration ?? 0;
+      const tb = opts?.ordering?.tokenBucket;
+      let tbCapacity = 0;
+      let tbRefillRate = 0;
+      if (tb) {
+        if (!Number.isFinite(tb.capacity) || tb.capacity <= 0)
+          throw new Error('tokenBucket.capacity must be a positive finite number');
+        if (!Number.isFinite(tb.refillRate) || tb.refillRate <= 0)
+          throw new Error('tokenBucket.refillRate must be a positive finite number');
+        tbCapacity = Math.round(tb.capacity * 1000);
+        tbRefillRate = Math.round(tb.refillRate * 1000);
+      }
+      let jobCost = 0;
+      if (opts?.cost != null) {
+        if (!Number.isFinite(opts.cost) || opts.cost < 0) throw new Error('cost must be a non-negative finite number');
+        jobCost = Math.round(opts.cost * 1000);
+      }
+      let groupConcurrency = opts?.ordering?.concurrency ?? 0;
+      // Force group path when rate limit or token bucket is set
+      if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
+        groupConcurrency = 1;
+      }
+      validateOrderingKey(orderingKey);
 
-        if (opts?.lifo && orderingKey) {
-          throw new Error('lifo and ordering.key cannot be used together');
-        }
-        const lifo = opts?.lifo ?? false;
+      if (opts?.lifo && orderingKey) {
+        throw new Error('lifo and ordering.key cannot be used together');
+      }
+      const lifo = opts?.lifo ?? false;
 
-        const customJobId = opts?.jobId ?? '';
-        if (customJobId !== '') validateJobId(customJobId);
+      const customJobId = opts?.jobId ?? '';
+      if (customJobId !== '') validateJobId(customJobId);
 
-        if (opts?.ttl != null) {
-          if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
-        }
+      if (opts?.ttl != null) {
+        if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
+      }
 
-        // Payload size validation - prevent DoS via oversized jobs
-        let serialized = this.serializer.serialize(data);
+      // Payload size validation - prevent DoS via oversized jobs
+      let serialized = this.serializer.serialize(data);
+      // UTF-8 worst case: 4 bytes per char. Skip Buffer.byteLength for small strings.
+      if (serialized.length > MAX_JOB_DATA_SIZE / 4) {
         const byteLen = Buffer.byteLength(serialized, 'utf8');
         if (byteLen > MAX_JOB_DATA_SIZE) {
           throw new Error(
             `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
           );
         }
+      }
 
-        if (this.opts.compression === 'gzip') {
-          serialized = compress(serialized);
+      if (this.opts.compression === 'gzip') {
+        serialized = compress(serialized);
+      }
+
+      let jobId: string;
+
+      const ttl = opts?.ttl ?? 0;
+
+      // Compute parent deps key for same-queue parent (atomic SADD in Lua)
+      let parentDepsKey = '';
+      if (parentId && parentQueue && parentQueue === this.name) {
+        parentDepsKey = this.keys.deps(parentId);
+      }
+
+      if (opts?.deduplication) {
+        const dedupOpts = opts.deduplication;
+        const result = await dedup(
+          client,
+          this.keys,
+          dedupOpts.id,
+          dedupOpts.ttl ?? 0,
+          dedupOpts.mode ?? 'simple',
+          name,
+          serialized,
+          JSON.stringify(opts),
+          timestamp,
+          delay,
+          priority,
+          parentId,
+          maxAttempts,
+          orderingKey,
+          groupConcurrency,
+          groupRateMax,
+          groupRateDuration,
+          tbCapacity,
+          tbRefillRate,
+          jobCost,
+          ttl,
+          customJobId,
+          lifo ? 1 : 0,
+          parentQueue,
+          parentDepsKey,
+          this.skipEvents,
+        );
+        if (result === 'skipped' || result === 'duplicate') {
+          return null;
         }
-
-        let jobId: string;
-
-        const ttl = opts?.ttl ?? 0;
-
-        // Compute parent deps key for same-queue parent (atomic SADD in Lua)
-        let parentDepsKey = '';
-        if (parentId && parentQueue && parentQueue === this.name) {
-          parentDepsKey = this.keys.deps(parentId);
+        if (result === 'ERR:COST_EXCEEDS_CAPACITY') {
+          throw new Error('Job cost exceeds token bucket capacity');
         }
-
-        if (opts?.deduplication) {
-          const dedupOpts = opts.deduplication;
-          const result = await dedup(
-            client,
-            this.keys,
-            dedupOpts.id,
-            dedupOpts.ttl ?? 0,
-            dedupOpts.mode ?? 'simple',
-            name,
-            serialized,
-            JSON.stringify(opts),
-            timestamp,
-            delay,
-            priority,
-            parentId,
-            maxAttempts,
-            orderingKey,
-            groupConcurrency,
-            groupRateMax,
-            groupRateDuration,
-            tbCapacity,
-            tbRefillRate,
-            jobCost,
-            ttl,
-            customJobId,
-            lifo ? 1 : 0,
-            parentQueue,
-            parentDepsKey,
-          );
-          if (result === 'skipped' || result === 'duplicate') {
-            return null;
-          }
-          if (result === 'ERR:COST_EXCEEDS_CAPACITY') {
-            throw new Error('Job cost exceeds token bucket capacity');
-          }
-          if (result === 'ERR:ID_EXHAUSTED') {
-            throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
-          }
-          jobId = result;
-
-          // Cross-queue parent: register dedup child in parent deps separately
-          if (parentId && parentQueue && parentQueue !== this.name) {
-            const parentKeys = buildKeys(parentQueue, this.opts.prefix);
-            const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
-            const depsMember = `${prefix}:${jobId}`;
-            await client.sadd(parentKeys.deps(parentId), [depsMember]);
-          }
-        } else {
-          const result = await addJob(
-            client,
-            this.keys,
-            name,
-            serialized,
-            JSON.stringify(opts ?? {}),
-            timestamp,
-            delay,
-            priority,
-            parentId,
-            maxAttempts,
-            orderingKey,
-            groupConcurrency,
-            groupRateMax,
-            groupRateDuration,
-            tbCapacity,
-            tbRefillRate,
-            jobCost,
-            ttl,
-            customJobId,
-            lifo ? 1 : 0,
-            parentQueue,
-            parentDepsKey,
-          );
-          if (result === 'duplicate') {
-            return null;
-          }
-          if (result === 'ERR:COST_EXCEEDS_CAPACITY') {
-            throw new Error('Job cost exceeds token bucket capacity');
-          }
-          if (result === 'ERR:ID_EXHAUSTED') {
-            throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
-          }
-          jobId = result;
-
-          // Cross-queue parent: register child in parent deps separately
-          if (parentId && parentQueue && parentQueue !== this.name) {
-            const parentKeys = buildKeys(parentQueue, this.opts.prefix);
-            const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
-            const depsMember = `${prefix}:${jobId}`;
-            await client.sadd(parentKeys.deps(parentId), [depsMember]);
-          }
+        if (result === 'ERR:ID_EXHAUSTED') {
+          throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
         }
+        jobId = result;
 
-        span.setAttribute('glide-mq.job.id', String(jobId));
+        // Cross-queue parent: register dedup child in parent deps separately
+        if (parentId && parentQueue && parentQueue !== this.name) {
+          const parentKeys = buildKeys(parentQueue, this.opts.prefix);
+          const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+          const depsMember = `${prefix}:${jobId}`;
+          await client.sadd(parentKeys.deps(parentId), [depsMember]);
+        }
+      } else {
+        const result = await addJob(
+          client,
+          this.keys,
+          name,
+          serialized,
+          opts != null ? JSON.stringify(opts) : '{}',
+          timestamp,
+          delay,
+          priority,
+          parentId,
+          maxAttempts,
+          orderingKey,
+          groupConcurrency,
+          groupRateMax,
+          groupRateDuration,
+          tbCapacity,
+          tbRefillRate,
+          jobCost,
+          ttl,
+          customJobId,
+          lifo ? 1 : 0,
+          parentQueue,
+          parentDepsKey,
+          '',
+          this.skipEvents,
+        );
+        if (result === 'duplicate') {
+          return null;
+        }
+        if (result === 'ERR:COST_EXCEEDS_CAPACITY') {
+          throw new Error('Job cost exceeds token bucket capacity');
+        }
+        if (result === 'ERR:ID_EXHAUSTED') {
+          throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
+        }
+        jobId = result;
 
-        const job = new Job<D, R>(client, this.keys, String(jobId), name, data, opts ?? {}, this.serializer);
-        job.timestamp = timestamp;
-        job.parentId = parentId || undefined;
-        job.parentQueue = parentQueue || undefined;
-        return job;
-      },
-    );
+        // Cross-queue parent: register child in parent deps separately
+        if (parentId && parentQueue && parentQueue !== this.name) {
+          const parentKeys = buildKeys(parentQueue, this.opts.prefix);
+          const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+          const depsMember = `${prefix}:${jobId}`;
+          await client.sadd(parentKeys.deps(parentId), [depsMember]);
+        }
+      }
+
+      span.setAttribute('glide-mq.job.id', String(jobId));
+
+      const job = new Job<D, R>(client, this.keys, String(jobId), name, data, opts ?? {}, this.serializer);
+      job.timestamp = timestamp;
+      job.parentId = parentId || undefined;
+      job.parentQueue = parentQueue || undefined;
+      return job;
+    });
   }
 
   /**
@@ -504,11 +506,13 @@ export class Queue<D = any, R = any> extends EventEmitter {
       if (customJobId !== '') validateJobId(customJobId);
 
       let serializedData = this.serializer.serialize(entry.data);
-      const byteLen = Buffer.byteLength(serializedData, 'utf8');
-      if (byteLen > MAX_JOB_DATA_SIZE) {
-        throw new Error(
-          `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
-        );
+      if (serializedData.length > MAX_JOB_DATA_SIZE / 4) {
+        const byteLen = Buffer.byteLength(serializedData, 'utf8');
+        if (byteLen > MAX_JOB_DATA_SIZE) {
+          throw new Error(
+            `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
+          );
+        }
       }
       if (this.opts.compression === 'gzip') {
         serializedData = compress(serializedData);
@@ -593,6 +597,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.customJobId,
           String(p.lifo ? 1 : 0),
           p.parentQueue,
+          this.skipEvents ? '1' : '0',
         ]);
       } else {
         let jobKeys = keys;
@@ -619,6 +624,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.customJobId,
           String(p.lifo ? 1 : 0),
           p.parentQueue,
+          '',
+          this.skipEvents ? '1' : '0',
         ]);
       }
     }

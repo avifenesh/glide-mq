@@ -108,6 +108,34 @@ describe('Queue', () => {
       expect(args[5]).toBe('3'); // priority
     });
 
+    it('should pass skipEvents=1 when events:false is set on queue', async () => {
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('10');
+      const queue = new Queue('test-queue', { ...connOpts, events: false });
+
+      await queue.add('job', { x: 1 });
+
+      const addJobCall = mockClient.fcall.mock.calls[1];
+      expect(addJobCall[0]).toBe('glidemq_addJob');
+      const args = addJobCall[2];
+      // skipEvents is the last arg (arg index 20, after schedulerName at 19)
+      expect(args[args.length - 1]).toBe('1');
+
+      await queue.close();
+    });
+
+    it('should pass skipEvents=0 when events option is not set', async () => {
+      mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('11');
+      const queue = new Queue('test-queue', connOpts);
+
+      await queue.add('job', { x: 1 });
+
+      const addJobCall = mockClient.fcall.mock.calls[1];
+      const args = addJobCall[2];
+      expect(args[args.length - 1]).toBe('0');
+
+      await queue.close();
+    });
+
     it('should pass parent ID when parent option is set', async () => {
       mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('3');
       const queue = new Queue('test-queue', connOpts);

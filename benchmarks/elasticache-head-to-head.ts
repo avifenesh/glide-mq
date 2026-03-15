@@ -113,7 +113,7 @@ interface RunResult {
 
 async function runGlideMQ(n: number, concurrency: number): Promise<RunResult> {
   const queueName = `ec-bench-glide-c${concurrency}`;
-  const queue = new Queue(queueName, { connection: GLIDE_CONN });
+  const queue = new Queue(queueName, { connection: GLIDE_CONN, events: false });
 
   // Add warmup jobs
   console.log(`    Adding ${WARMUP_N} warmup + ${n} measured jobs...`);

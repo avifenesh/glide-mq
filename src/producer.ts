@@ -42,6 +42,8 @@ export interface ProducerOptions {
   compression?: 'none' | 'gzip';
   /** Custom serializer for job data. Default: JSON. */
   serializer?: Serializer;
+  /** Emit 'added' events on the events stream when adding jobs. Default: true. */
+  events?: boolean;
 }
 
 interface PreparedJob {
@@ -78,6 +80,7 @@ export class Producer<D = any> {
   private closed = false;
   private keys: QueueKeys;
   private serializer: Serializer;
+  private skipEvents: boolean;
   private initPromise: Promise<Client> | null = null;
 
   constructor(name: string, opts: ProducerOptions) {
@@ -88,6 +91,7 @@ export class Producer<D = any> {
     this.name = name;
     this.opts = opts;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
+    this.skipEvents = opts.events === false;
     this.keys = buildKeys(name, opts.prefix);
     // Only cache cluster mode from connection config if no injected client;
     // when a client is injected, isClusterClient() is called lazily on first use.
@@ -212,11 +216,13 @@ export class Producer<D = any> {
     }
 
     let serialized = this.serializer.serialize(data);
-    const byteLen = Buffer.byteLength(serialized, 'utf8');
-    if (byteLen > MAX_JOB_DATA_SIZE) {
-      throw new GlideMQError(
-        `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
-      );
+    if (serialized.length > MAX_JOB_DATA_SIZE / 4) {
+      const byteLen = Buffer.byteLength(serialized, 'utf8');
+      if (byteLen > MAX_JOB_DATA_SIZE) {
+        throw new GlideMQError(
+          `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
+        );
+      }
     }
 
     if (this.opts.compression === 'gzip') {
@@ -238,7 +244,7 @@ export class Producer<D = any> {
     return {
       jobName,
       serializedData: serialized,
-      optsJson: JSON.stringify(opts ?? {}),
+      optsJson: opts != null ? JSON.stringify(opts) : '{}',
       timestamp: Date.now(),
       delay,
       priority,
@@ -297,6 +303,7 @@ export class Producer<D = any> {
         p.lifo,
         p.parentQueue,
         p.parentDepsKey,
+        this.skipEvents,
       );
       if (result === 'skipped' || result === 'duplicate') {
         return null;
@@ -337,6 +344,8 @@ export class Producer<D = any> {
         p.lifo,
         p.parentQueue,
         p.parentDepsKey,
+        '',
+        this.skipEvents,
       );
       if (result === 'duplicate') {
         return null;
@@ -409,6 +418,7 @@ export class Producer<D = any> {
           p.customJobId,
           p.lifo.toString(),
           p.parentQueue,
+          this.skipEvents ? '1' : '0',
         ]);
       } else {
         let jobKeys = keys;
@@ -435,6 +445,8 @@ export class Producer<D = any> {
           p.customJobId,
           p.lifo.toString(),
           p.parentQueue,
+          '',
+          this.skipEvents ? '1' : '0',
         ]);
       }
     }

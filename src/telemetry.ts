@@ -93,12 +93,25 @@ export type SpanAttributes = Record<string, string | number | boolean>;
 /**
  * Start a span, execute the callback, and end the span when done.
  * On error the exception is recorded on the span and re-thrown.
+ *
+ * When called without attributes, callers should set attributes on the span
+ * directly inside the callback via span.setAttribute(). This avoids allocating
+ * an attributes object on every call when tracing is disabled (NOOP_SPAN.setAttribute is free).
  */
+export async function withSpan<T>(name: string, fn: (span: OTelSpan) => Promise<T>): Promise<T>;
 export async function withSpan<T>(
   name: string,
   attributes: SpanAttributes,
   fn: (span: OTelSpan) => Promise<T>,
+): Promise<T>;
+export async function withSpan<T>(
+  name: string,
+  attributesOrFn: SpanAttributes | ((span: OTelSpan) => Promise<T>),
+  maybeFn?: (span: OTelSpan) => Promise<T>,
 ): Promise<T> {
+  const fn = maybeFn ?? (attributesOrFn as (span: OTelSpan) => Promise<T>);
+  const attributes = maybeFn ? (attributesOrFn as SpanAttributes) : undefined;
+
   if (!isTracingEnabled()) {
     return fn(NOOP_SPAN);
   }
@@ -106,8 +119,10 @@ export async function withSpan<T>(
   const tracer = getTracer();
   const span = tracer.startSpan(name);
 
-  for (const [key, value] of Object.entries(attributes)) {
-    span.setAttribute(key, value);
+  if (attributes) {
+    for (const [key, value] of Object.entries(attributes)) {
+      span.setAttribute(key, value);
+    }
   }
 
   try {
