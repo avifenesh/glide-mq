@@ -92,7 +92,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - DAG workflows - `FlowProducer.addDAG()` and `dag()` helper for arbitrary DAG topologies (#86).
 - Serverless usage guide (`docs/SERVERLESS.md`) - Lambda, Cloudflare Workers, Vercel Edge examples.
 - List-active counter self-healing via `glidemq_healListActive` Lua function. Automatically corrects counter drift caused by worker crashes during scheduler promotion ticks (#124).
-- Proxy endpoints: `GET /queues/:name/jobs` (list/filter), `DELETE /queues/:name/jobs/:id` (#124).
+- Proxy endpoint: `GET /queues/:name/jobs/:id` (fetch single job by ID) (#124). Note: `GET /queues/:name/jobs` (list/filter) and `DELETE /queues/:name/jobs/:id` (remove) were planned but not implemented.
 - CI: `npm audit` security scanning, `timeout-minutes` on all jobs, `npm ci` with cache in publish workflow (#124).
 
 ### Fixed
