@@ -24,7 +24,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `addBulk` and `Producer.addBulk` dedup batch paths now correctly pass `skipEvents` to `glidemq_dedup`.
 - `advanceIdCounter` only matches pure decimal strings and uses the original string (not `tostring()`) to avoid Lua float precision loss on large IDs.
 - Dedup debounce 'removed' event now gated behind `skipEvents` flag.
-- Clean up orphaned PEL entries (XACK+XDEL) when job hash is missing in `completeAndFetchNext`.
+- Fuzz test: filter transient client timeouts under concurrent storm on cluster.
 
 ---
 
