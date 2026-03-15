@@ -116,41 +116,52 @@ Use Valkey Functions (FUNCTION LOAD / FCALL) instead of EVAL/EVALSHA scripts.
 
 -- All functions registered in one library
 redis.register_function('glidemq_addJob', function(keys, args) ... end)
-redis.register_function('glidemq_addBulk', function(keys, args) ... end)
 redis.register_function('glidemq_promote', function(keys, args) ... end)
+redis.register_function('glidemq_complete', function(keys, args) ... end)
 ...
 ```
 
-### Functions (26 in 1 library, not 53 scripts)
+### Functions (37 in 1 library, not 53 scripts)
 
-| Function                     | Keys | Purpose                                                                                 |
-| ---------------------------- | ---- | --------------------------------------------------------------------------------------- |
-| glidemq_version              | 0    | Return library version                                                                  |
-| glidemq_addJob               | 4    | INCR id, HSET job, XADD stream or ZADD scheduled, XADD event (skippable via skipEvents) |
-| glidemq_promote              | 3    | ZRANGEBYSCORE scheduled, XADD to stream, ZREM from scheduled                            |
-| glidemq_complete             | 5    | XACK stream, ZADD completed, HSET job, XADD event, check parent deps                    |
-| glidemq_completeAndFetchNext | 6    | Complete current + fetch next in single RTT                                             |
-| glidemq_fail                 | 5    | XACK stream, ZADD failed or ZADD scheduled (retry), HSET job, XADD event                |
-| glidemq_reclaimStalled       | 3    | XAUTOCLAIM on stream, HSET stalled count, move to failed if exceeded                    |
-| glidemq_pause                | 2    | HSET meta paused=1, XADD event                                                          |
-| glidemq_resume               | 2    | HSET meta paused=0, XADD event                                                          |
-| glidemq_dedup                | 3    | Check dedup hash, skip or add based on mode (simple/throttle/debounce)                  |
-| glidemq_rateLimit            | 3    | Check/increment rate counter, return delay if exceeded                                  |
-| glidemq_promoteRateLimited   | 2    | Move rate-limited jobs back to stream                                                   |
-| glidemq_checkConcurrency     | 2    | Check global concurrency limit before processing                                        |
-| glidemq_moveToActive         | 4    | XREADGROUP + set state to active                                                        |
-| glidemq_deferActive          | 3    | Return active job to stream for reprocessing                                            |
-| glidemq_addFlow              | N    | Atomic: create parent + children, set deps, add children to stream/scheduled            |
-| glidemq_completeChild        | 4    | Remove from parent deps set, if deps empty -> re-queue parent                           |
-| glidemq_removeJob            | 4    | Clean job hash, remove from all sets/streams                                            |
-| glidemq_clean                | 3    | Bulk-remove old completed/failed jobs by age                                            |
-| glidemq_revoke               | 2    | Revoke a job by ID                                                                      |
-| glidemq_changePriority       | 3    | Re-prioritize a waiting/delayed job                                                     |
-| glidemq_changeDelay          | 3    | Change delay of a delayed job                                                           |
-| glidemq_promoteJob           | 3    | Move a delayed job to waiting immediately                                               |
-| glidemq_searchByName         | 2    | Search jobs by name pattern                                                             |
-| glidemq_drain                | 3    | Remove all waiting (and optionally delayed) jobs                                        |
-| glidemq_retryJobs            | 3    | Bulk-retry failed jobs                                                                  |
+| Function                         | Keys | Purpose                                                                                 |
+| -------------------------------- | ---- | --------------------------------------------------------------------------------------- |
+| glidemq_version                  | 0    | Return library version                                                                  |
+| glidemq_addJob                   | 4    | INCR id, HSET job, XADD stream or ZADD scheduled, XADD event (skippable via skipEvents) |
+| glidemq_promote                  | 3    | ZRANGEBYSCORE scheduled, XADD to stream, ZREM from scheduled                            |
+| glidemq_nextDue                  | 2    | Return next due timestamp from scheduled and rate-limited ZSets                         |
+| glidemq_tryLock                  | 1    | Acquire a distributed lock (SET NX PX)                                                  |
+| glidemq_unlock                   | 1    | Release a distributed lock (compare-and-delete)                                         |
+| glidemq_renewLock                | 1    | Renew a distributed lock TTL (compare-and-expire)                                       |
+| glidemq_complete                 | 5    | XACK stream, ZADD completed, HSET job, XADD event, check parent deps                    |
+| glidemq_completeAndFetchNext     | 5    | Complete current + fetch next in single RTT                                             |
+| glidemq_fail                     | 6    | XACK stream, ZADD failed or ZADD scheduled (retry), HSET job, XADD event                |
+| glidemq_reclaimStalled           | 2    | XAUTOCLAIM on stream, HSET stalled count, move to failed if exceeded                    |
+| glidemq_reclaimStalledListJobs   | 2    | Stall detection for LIFO/priority list-sourced jobs via bounded SCAN                    |
+| glidemq_pause                    | 2    | HSET meta paused=1, XADD event                                                          |
+| glidemq_resume                   | 2    | HSET meta paused=0, XADD event                                                          |
+| glidemq_dedup                    | 5    | Check dedup hash, skip or add based on mode (simple/throttle/debounce)                  |
+| glidemq_rateLimit                | 2    | Check/increment rate counter, return delay if exceeded                                  |
+| glidemq_promoteRateLimited       | 2    | Move rate-limited jobs back to stream                                                   |
+| glidemq_checkConcurrency         | 3    | Check global concurrency limit before processing                                        |
+| glidemq_rpopAndReserve           | 4    | Atomic RPOP from LIFO/priority list with global concurrency enforcement                 |
+| glidemq_moveToActive             | 2    | Set job state to active, record processedOn timestamp                                   |
+| glidemq_deferActive              | 3    | Return active job to stream for reprocessing                                            |
+| glidemq_addFlow                  | N    | Atomic: create parent + children, set deps, add children to stream/scheduled            |
+| glidemq_completeChild            | 4    | Remove from parent deps set, if deps empty -> re-queue parent                           |
+| glidemq_registerParent           | 6    | Register additional parent for DAG multi-parent jobs                                    |
+| glidemq_removeJob                | 7    | Clean job hash, remove from all sets/streams                                            |
+| glidemq_clean                    | 3    | Bulk-remove old completed/failed jobs by age                                            |
+| glidemq_revoke                   | 5    | Revoke a job by ID                                                                      |
+| glidemq_changePriority           | 4    | Re-prioritize a waiting/delayed job                                                     |
+| glidemq_changeDelay              | 4    | Change delay of a delayed job                                                           |
+| glidemq_promoteJob               | 4    | Move a delayed job to waiting immediately                                               |
+| glidemq_moveActiveToDelayed      | 4    | Move active job to delayed state for step-job workflows                                 |
+| glidemq_moveToWaitingChildren    | 3    | Move active job to waiting-children state                                               |
+| glidemq_searchByName             | 1    | Search jobs by name pattern across state sets/streams                                   |
+| glidemq_drain                    | 6    | Remove all waiting (and optionally delayed) jobs                                        |
+| glidemq_retryJobs                | 4    | Bulk-retry failed jobs                                                                  |
+| glidemq_healListActive           | 1    | Self-heal list-active counter drift caused by worker crashes                            |
+| glidemq_popLists                 | 2    | Check priority + LIFO lists in a single FCALL instead of 2 separate RPOPs               |
 
 ### speedkey API for Functions
 
@@ -389,12 +400,19 @@ glide-mq/
 │   ├── index.ts                # Public exports
 │   ├── queue.ts                # Queue class
 │   ├── worker.ts               # Worker class
+│   ├── base-worker.ts          # BaseWorker abstract class (shared Worker/BroadcastWorker logic)
+│   ├── broadcast.ts            # Broadcast class (pub/sub queue wrapper)
+│   ├── broadcast-worker.ts     # BroadcastWorker class (per-subscription consumer)
 │   ├── job.ts                  # Job class
 │   ├── queue-events.ts         # QueueEvents class
 │   ├── flow-producer.ts        # FlowProducer class
+│   ├── producer.ts             # Producer class (lightweight serverless enqueuer)
+│   ├── serverless-pool.ts      # ServerlessPool - connection pooling for serverless
 │   ├── connection.ts           # Client factory (blocking vs non-blocking)
+│   ├── dag-utils.ts            # DAG validation, topological sort, cycle detection
 │   ├── functions/
-│   │   └── index.ts            # Lua library source (embedded as string) + FCALL wrappers
+│   │   ├── index.ts            # Lua library source (embedded as string) + FCALL wrappers
+│   │   └── glidemq.lua         # Lua source for the glidemq function library
 │   ├── proxy/
 │   │   ├── index.ts            # createProxyServer factory (glide-mq/proxy)
 │   │   ├── routes.ts           # Express route handlers for all endpoints
@@ -406,14 +424,14 @@ glide-mq/
 │   │   ├── sandbox-job.ts      # IPC-proxied job for sandbox context
 │   │   └── types.ts            # Sandbox type definitions
 │   ├── types.ts                # Shared type definitions
-│   ├── errors.ts               # Error classes (UnrecoverableError)
-│   ├── utils.ts                # Key builders, score encoding, backoff calc
+│   ├── errors.ts               # Error classes (UnrecoverableError, DelayedError, BatchError)
+│   ├── utils.ts                # Key builders, score encoding, backoff calc, subject matching
 │   ├── scheduler.ts            # Internal: promote delayed, reclaim stalled, job schedulers
 │   ├── testing.ts              # In-memory TestQueue and TestWorker
-│   ├── workflows.ts            # chain, group, chord helpers
+│   ├── workflows.ts            # chain, group, chord, dag helpers
 │   ├── telemetry.ts            # OpenTelemetry integration
 │   └── graceful-shutdown.ts    # Process signal handling
-├── tests/                      # 80+ test files (vitest)
+├── tests/                      # 82 test files (vitest)
 │   ├── integration.test.ts     # Full integration tests
 │   ├── testing-mode.test.ts    # In-memory mode tests (no Valkey)
 │   ├── search.test.ts          # Search feature tests
@@ -423,6 +441,10 @@ glide-mq/
 │   ├── USAGE.md                # Queue & Worker basics
 │   ├── ADVANCED.md             # Schedulers, rate limiting, DLQ
 │   ├── WORKFLOWS.md            # FlowProducer, chain, group, chord
+│   ├── BROADCAST.md            # Broadcast pub/sub messaging
+│   ├── SERVERLESS.md           # Lambda, Cloudflare Workers, Vercel Edge
+│   ├── STEP_JOBS.md            # Step-job workflows with moveToDelayed
+│   ├── DURABILITY.md           # Durability and delivery guarantees
 │   ├── OBSERVABILITY.md        # OpenTelemetry, job logs
 │   ├── TESTING.md              # TestQueue & TestWorker
 │   ├── MIGRATION.md            # BullMQ migration guide
@@ -430,10 +452,11 @@ glide-mq/
 │   └── ARCHITECTURE.md         # This file
 ├── package.json
 ├── tsconfig.json
+├── vitest.config.ts
+├── eslint.config.mjs
 ├── CHANGELOG.md
 ├── LICENSE
 ├── CLAUDE.md
-├── HANDOVER.md
 └── README.md
 ```
 
@@ -453,7 +476,7 @@ Complex workflows with arbitrary dependency graphs are submitted via `FlowProduc
 
 ## Differentiators vs BullMQ
 
-1. **Streams-first**: PEL replaces active list + lock tokens. XAUTOCLAIM replaces stalled job checker scripts. Single function library (~15 functions vs 53 EVAL scripts).
+1. **Streams-first**: PEL replaces active list + lock tokens. XAUTOCLAIM replaces stalled job checker scripts. Single function library (37 functions vs 53 EVAL scripts).
 2. **Native NAPI performance**: speedkey's Rust core handles I/O, freeing Node.js event loop. No ioredis overhead.
 3. **Cluster-native**: Hash tags enforced at queue creation. No afterthought `{braces}` requirement.
 4. **Batch API**: Use speedkey's non-atomic Batch for pipelined multi-command operations (auto-splits across cluster nodes).
