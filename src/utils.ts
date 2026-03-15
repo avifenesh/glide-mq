@@ -47,6 +47,17 @@ export function isPlainStepPayload(value: unknown): value is Record<string, unkn
   return Object.getPrototypeOf(value) === Object.prototype;
 }
 
+/**
+ * A JSON reviver function that prevents prototype pollution by dropping
+ * dangerous keys like `__proto__`, `constructor`, and `prototype`.
+ */
+export function jsonReviver(key: string, value: unknown): unknown {
+  if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+    return undefined;
+  }
+  return value;
+}
+
 // ---- Compression helpers ----
 
 const COMPRESSED_PREFIX = 'gz:';
