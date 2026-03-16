@@ -259,6 +259,7 @@ export function extractJobIdsFromStreamEntries(entries: Record<string, [unknown,
       const value = fieldPairs[i][1];
       if (String(field) === 'jobId') {
         jobIds.push(String(value));
+        break; // Stop parsing remaining large fields once we found jobId
       }
     }
   }
