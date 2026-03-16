@@ -225,6 +225,17 @@ export const JOB_METADATA_FIELDS: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * A reviver function for JSON.parse to prevent prototype pollution.
+ * Drops keys that could modify the Object prototype.
+ */
+export function jsonReviver(key: string, value: any): any {
+  if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+    return undefined; // Drop dangerous keys
+  }
+  return value;
+}
+
+/**
  * Convert an HMGET result array to a Record keyed by field name.
  * Returns null if every value is null (key does not exist).
  */

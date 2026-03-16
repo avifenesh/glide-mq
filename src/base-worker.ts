@@ -13,6 +13,7 @@ import {
   nextReconnectDelay,
   reconnectWithBackoff,
   MAX_JOB_DATA_SIZE,
+  jsonReviver,
 } from './utils';
 import { createSandboxedProcessor } from './sandbox';
 import {
@@ -1009,7 +1010,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       let config: SchedulerEntry;
       try {
-        config = JSON.parse(String(raw));
+        config = JSON.parse(String(raw), jsonReviver);
       } catch {
         return;
       }
