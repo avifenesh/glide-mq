@@ -1,3 +1,4 @@
+import { jsonReviver } from './utils';
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import { randomBytes } from 'crypto';
 import type { Client, SchedulerEntry, Serializer } from './types';
@@ -357,7 +358,7 @@ export class Scheduler {
         const schedulerName = String(entry.field);
         let config: SchedulerEntry;
         try {
-          config = JSON.parse(String(entry.value));
+          config = JSON.parse(String(entry.value), jsonReviver);
         } catch {
           continue;
         }

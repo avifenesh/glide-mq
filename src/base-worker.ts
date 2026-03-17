@@ -1,3 +1,4 @@
+import { jsonReviver } from './utils';
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
@@ -1009,7 +1010,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       let config: SchedulerEntry;
       try {
-        config = JSON.parse(String(raw));
+        config = JSON.parse(String(raw), jsonReviver);
       } catch {
         return;
       }
