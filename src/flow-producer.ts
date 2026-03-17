@@ -88,8 +88,12 @@ export class FlowProducer {
   async addBulk(flows: FlowJob[]): Promise<JobNode[]> {
     const client = await this.getClient();
     const results: JobNode[] = [];
-    for (const flow of flows) {
-      results.push(await this.addFlowRecursive(client, flow));
+    // Process in chunks of 100 to avoid blocking the event loop and exhausting the connection pool
+    const CHUNK_SIZE = 100;
+    for (let i = 0; i < flows.length; i += CHUNK_SIZE) {
+      const chunk = flows.slice(i, i + CHUNK_SIZE);
+      const chunkResults = await Promise.all(chunk.map((flow) => this.addFlowRecursive(client, flow)));
+      results.push(...chunkResults);
     }
     return results;
   }
