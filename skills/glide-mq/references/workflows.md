@@ -69,11 +69,11 @@ const worker = new Worker('reports', async (job) => {
 import { FlowProducer, dag } from 'glide-mq';
 
 // Helper function (simpler API)
-const jobs = await dag('tasks', [
-  { name: 'A', data: { step: 1 } },
-  { name: 'B', data: { step: 2 }, deps: ['A'] },
-  { name: 'C', data: { step: 3 }, deps: ['A'] },
-  { name: 'D', data: { step: 4 }, deps: ['B', 'C'] },  // fan-in
+const jobs = await dag([
+  { name: 'A', queueName: 'tasks', data: { step: 1 } },
+  { name: 'B', queueName: 'tasks', data: { step: 2 }, deps: ['A'] },
+  { name: 'C', queueName: 'tasks', data: { step: 3 }, deps: ['A'] },
+  { name: 'D', queueName: 'tasks', data: { step: 4 }, deps: ['B', 'C'] },  // fan-in
 ], connection);
 
 // Or via FlowProducer directly
@@ -103,7 +103,12 @@ const jobs = await flow.addDAG({
 const worker = new Worker('tasks', async (job) => {
   if (job.name === 'D') {
     const parents = await job.getParents();
-    const results = parents.map(p => p.returnvalue);
+    // Returns { queue, id }[] - not Job instances
+    // Fetch full jobs if needed:
+    const parentJobs = await Promise.all(
+      parents.map(p => new Queue(p.queue, { connection }).getJob(p.id))
+    );
+    const results = parentJobs.map(p => p.returnvalue);
     return { merged: results };
   }
 }, { connection });

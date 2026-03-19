@@ -48,11 +48,12 @@ const result = await queue.addAndWait(name, data, {
 | `jobId` | `string` | auto-increment | Custom ID. Max 256 chars. No `{}:` or control chars. Returns `null` on collision. |
 | `lifo` | `boolean` | false | Last-in-first-out. Cannot combine with `ordering.key`. |
 | `removeOnComplete` | `boolean \| { age, count }` | false | Auto-remove on success |
-| `removeOnFail` | `boolean` | false | Keep failed jobs for inspection |
+| `removeOnFail` | `boolean \| number \| { age, count }` | false | Auto-remove on failure. Number = max count to keep. |
 | `deduplication` | `{ id, mode, ttl? }` | - | Modes: `'simple'`, `'throttle'`, `'debounce'`. Returns `null` when skipped. |
 | `ordering` | `{ key, concurrency?, rateLimit?, tokenBucket? }` | - | Per-key sequential/grouped processing |
 | `cost` | `number` | 1 | Token cost for token bucket rate limiting |
-| `compress` | inherited from Queue | - | Set at Queue level via `compression` option |
+
+> **Note:** Compression is not a per-job option. Set `compression: 'gzip'` at Queue level in the Queue constructor.
 
 ### Processing Order
 

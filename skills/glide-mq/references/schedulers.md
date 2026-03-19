@@ -56,6 +56,7 @@ Mutually exclusive with `pattern` and `every`.
 | `startDate` | `Date \| number` | Defer first run until this time |
 | `endDate` | `Date \| number` | Auto-remove scheduler when next run exceeds this |
 | `limit` | `number` | Auto-remove after creating this many jobs |
+| `tz` | `string` | IANA timezone for cron patterns (e.g., `'America/New_York'`) |
 
 Only one of `pattern`, `every`, `repeatAfterComplete` per scheduler.
 

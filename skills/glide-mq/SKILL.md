@@ -127,8 +127,8 @@ console.log(result); // processor return value
 
 ```typescript
 import { Producer } from 'glide-mq';
-const producer = new Producer(connection);
-await producer.add('queue', 'job-name', data);
+const producer = new Producer('queue', { connection });
+await producer.add('job-name', data);
 await producer.close();
 ```
 

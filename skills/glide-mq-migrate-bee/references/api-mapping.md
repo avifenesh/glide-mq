@@ -27,10 +27,6 @@ const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 const queue = new Queue('tasks', {
   connection,
   prefix: 'glide',
-  defaultJobOptions: {
-    removeOnComplete: false,
-    removeOnFail: false,
-  },
 });
 
 const worker = new Worker('tasks', processor, {
@@ -119,17 +115,14 @@ queue.createJob(data).delayUntil(Date.now() + 60000).save();
 await queue.add('task', data, { delay: 60000 });
 ```
 
-### timeout -> lockDuration on Worker
+### timeout -> timeout job option
 
 ```typescript
 // BEFORE - per-job timeout
 queue.createJob(data).timeout(30000).save();
 
-// AFTER - worker-level lock duration
-const worker = new Worker('tasks', processor, {
-  connection,
-  lockDuration: 30000,
-});
+// AFTER - per-job timeout option
+await queue.add('task', data, { timeout: 30000 });
 ```
 
 ### Full chained builder conversion
@@ -152,9 +145,9 @@ const job = await queue.add('send-email',
     attempts: 3,
     backoff: { type: 'exponential', delay: 1000 },
     delay: 60000,
+    timeout: 30000,
   }
 );
-// Note: timeout is handled via lockDuration on the Worker
 ```
 
 ## Processing Methods
@@ -204,9 +197,10 @@ queue.process(async (job) => {
   return result;
 });
 
-// AFTER - number only (0-100), use job.log() for structured data
+// AFTER - number (0-100) or object, use job.log() for text messages
 const worker = new Worker('tasks', async (job) => {
   await job.updateProgress(30);
+  await job.updateProgress({ page: 3, total: 10 });  // objects also supported
   await job.log('Processing page 3 of 10');
   await job.updateProgress(50);
   return result;

@@ -99,14 +99,18 @@ Bee-Queue has no repeatable jobs. glide-mq supports cron patterns and fixed inte
 
 ```typescript
 // Cron - run every day at midnight
-await queue.add('daily-report', {}, {
-  repeat: { pattern: '0 0 * * *' },
-});
+await queue.upsertJobScheduler(
+  'daily-report',
+  { pattern: '0 0 * * *' },
+  { name: 'daily-report', data: {} },
+);
 
 // Interval - run every 5 minutes
-await queue.add('health-check', {}, {
-  repeat: { every: 300000 },
-});
+await queue.upsertJobScheduler(
+  'health-check',
+  { every: 300000 },
+  { name: 'health-check', data: {} },
+);
 ```
 
 ## Rate Limiting
@@ -155,8 +159,8 @@ await queue.add('time-sensitive', data, { ttl: 300000 }); // 5 min expiry
 Process jobs sequentially per ordering key while maintaining parallelism across keys.
 
 ```typescript
-await queue.add('process-order', data, { ordering: 'customer-123' });
-await queue.add('process-order', data, { ordering: 'customer-456' });
+await queue.add('process-order', data, { ordering: { key: 'customer-123' } });
+await queue.add('process-order', data, { ordering: { key: 'customer-456' } });
 // Jobs for customer-123 run sequentially; customer-456 runs in parallel
 ```
 
@@ -212,8 +216,8 @@ Lightweight producer with no EventEmitter overhead for Lambda/Edge.
 import { Producer } from 'glide-mq';
 
 export async function handler(event) {
-  const producer = new Producer(connection);
-  await producer.add('queue', 'process', event.body);
+  const producer = new Producer('queue', { connection });
+  await producer.add('process', event.body);
   await producer.close();
   return { statusCode: 200 };
 }

@@ -304,7 +304,7 @@ await queue.add('job', data, {
 | addAndWait | `queue.addAndWait(name, data, { waitTimeout })` | Request-reply pattern |
 | Pluggable serializers | `{ serialize, deserialize }` on options | MessagePack, Protobuf, etc. |
 | Job TTL | `opts.ttl` | Auto-expire jobs after N ms |
-| repeatAfterComplete | `upsertJobScheduler('name', { repeatAfterComplete: true })` | No-overlap scheduling |
+| repeatAfterComplete | `upsertJobScheduler('name', { repeatAfterComplete: 5000 })` | No-overlap scheduling (ms delay after completion) |
 | LIFO mode | `lifo: true` | Last-in-first-out processing |
 | Job search | `queue.searchJobs(opts)` | Full-text search over job data |
 | excludeData | `queue.getJobs(type, start, end, { excludeData: true })` | Lightweight listings |

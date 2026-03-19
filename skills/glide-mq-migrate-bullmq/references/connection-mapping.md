@@ -182,7 +182,7 @@ const connection = {
 | `password` | `credentials: { password }` | Nested under credentials |
 | `username` | `credentials: { username }` | Nested under credentials |
 | `tls: {}` | `useTLS: true` | Boolean instead of object |
-| `db` | `databaseId` | Database index for standalone mode |
+| `db` | Not supported - Valkey GLIDE uses db 0 | Database selection not available |
 | `natMap` | Multiple entries in `addresses` | Cluster topology handled automatically |
 | `maxRetriesPerRequest` | Handled internally | valkey-glide manages reconnection |
 | `enableReadyCheck` | Not needed | valkey-glide handles readiness internally |

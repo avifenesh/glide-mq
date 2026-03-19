@@ -52,7 +52,7 @@ Assign a cost to each job and deduct from a refilling bucket per key:
 await queue.add('heavy-job', data, {
   ordering: {
     key: 'tenant-123',
-    tokenBucket: { max: 100, refillRate: 10, refillInterval: 1000 },
+    tokenBucket: { capacity: 100, refillRate: 10 },
   },
   cost: 25,  // this job consumes 25 tokens
 });
@@ -194,7 +194,7 @@ BullMQ has no equivalent. Typically requires `ioredis-mock` or a real Redis inst
 
 ## Broadcast / BroadcastWorker
 
-Pub/sub fan-out where every connected `BroadcastWorker` receives every message. Different paradigm from job queues - no state, no retries, just real-time delivery:
+Pub/sub fan-out where every connected `BroadcastWorker` receives every message. Supports per-subscriber retries for reliable delivery:
 
 ```ts
 import { Broadcast, BroadcastWorker } from 'glide-mq';
@@ -202,7 +202,7 @@ import { Broadcast, BroadcastWorker } from 'glide-mq';
 const broadcast = new Broadcast('notifications', { connection });
 const bw = new BroadcastWorker('notifications', async (message) => {
   console.log('Received:', message);
-}, { connection });
+}, { connection, subscription: 'my-group' });
 
 await broadcast.publish({ type: 'alert', text: 'Server restarting' });
 ```
@@ -236,14 +236,11 @@ import { FlowProducer, dag } from 'glide-mq';
 const flow = new FlowProducer({ connection });
 
 // Using the dag() helper for fan-in patterns
-await flow.addDAG(dag('tasks', {
-  aggregate: {
-    data: {},
-    dependsOn: ['fetch-a', 'fetch-b'],
-  },
-  'fetch-a': { data: { source: 'a' } },
-  'fetch-b': { data: { source: 'b' } },
-}));
+await flow.addDAG(dag([
+  { name: 'fetch-a', queueName: 'tasks', data: { source: 'a' } },
+  { name: 'fetch-b', queueName: 'tasks', data: { source: 'b' } },
+  { name: 'aggregate', queueName: 'tasks', data: {}, deps: ['fetch-a', 'fetch-b'] },
+], connection));
 ```
 
 ---
@@ -356,7 +353,7 @@ Scheduler mode that enqueues the next job only after the previous one completes,
 ```ts
 await queue.upsertJobScheduler(
   'sequential-poll',
-  { repeatAfterComplete: true, every: 60_000 },
+  { repeatAfterComplete: 5000 },
   { name: 'poll', data: {} },
 );
 ```

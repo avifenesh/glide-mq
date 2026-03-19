@@ -51,7 +51,7 @@ Step-by-step guide for converting Bee-Queue projects to glide-mq. Bee-Queue uses
 | Retries | `.retries(n)` | `{ attempts: n }` (different name!) |
 | Processing | `queue.process(concurrency, handler)` | `new Worker(name, handler, { concurrency })` |
 | Connection | `{ host, port }` or redis URL | `{ addresses: [{ host, port }] }` |
-| Progress | `job.reportProgress(anyJSON)` | `job.updateProgress(number)` (0-100) |
+| Progress | `job.reportProgress(anyJSON)` | `job.updateProgress(number \| object)` (number 0-100 or object) |
 | Per-job events | `job.on('succeeded', ...)` | `QueueEvents` class (centralized) |
 | Stall detection | Manual `checkStalledJobs()` | Automatic on Worker |
 | Batch save | `queue.saveAll(jobs)` | `queue.addBulk(jobs)` |
@@ -197,8 +197,8 @@ const queue = new Queue('tasks', {
 
 // AFTER (glide-mq) - Producer class
 import { Producer } from 'glide-mq';
-const producer = new Producer(connection);
-await producer.add('tasks', 'job-name', data);
+const producer = new Producer('tasks', { connection });
+await producer.add('job-name', data);
 await producer.close();
 ```
 
@@ -211,9 +211,10 @@ queue.process(async (job) => {
   return result;
 });
 
-// AFTER (glide-mq) - numeric 0-100
+// AFTER (glide-mq) - number (0-100) or object
 const worker = new Worker('tasks', async (job) => {
   await job.updateProgress(50);
+  await job.updateProgress({ page: 3, total: 10 });  // objects also supported
   await job.log('halfway done');  // structured info goes to job.log()
   return result;
 }, { connection });
@@ -297,7 +298,7 @@ Features Bee-Queue does not have that are available after migration:
 - [ ] Convert queue.process() to new Worker()
 - [ ] Convert queue.saveAll() to queue.addBulk()
 - [ ] Separate producer queues (isWorker:false to Producer class)
-- [ ] Convert job.reportProgress(json) to job.updateProgress(number)
+- [ ] Convert job.reportProgress(json) to job.updateProgress(number | object)
 - [ ] Remove manual checkStalledJobs() calls (automatic on Worker)
 - [ ] Convert checkHealth() to getJobCounts()
 - [ ] Update event listeners (queue.on to worker.on or QueueEvents)
@@ -318,7 +319,7 @@ Features Bee-Queue does not have that are available after migration:
 | `Missing job name` | Bee-Queue had no name | Add a name as first arg to `queue.add()` |
 | `retries option not recognized` | Different name | Use `attempts` not `retries` |
 | No stall detection | Bee-Queue needed manual start | glide-mq runs it automatically on Worker |
-| Progress expects number | Bee-Queue accepted any JSON | Use `job.updateProgress(0-100)` and `job.log()` for structured data |
+| Progress type changed | Bee-Queue accepted any JSON | Use `job.updateProgress(number \| object)` - numbers (0-100) or objects supported |
 | Per-job events not working | No per-job events in glide-mq | Use `QueueEvents` class and filter by `jobId` |
 
 ## Quick Start Commands
