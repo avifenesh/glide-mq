@@ -23,7 +23,7 @@ const worker = new Worker(
     lockDuration?: number,               // stall detection window per job ms (default: 30000)
     maxStalledCount?: number,            // max stall recoveries before fail
     limiter?: { max, duration },         // rate limit per worker
-    deadLetterQueue?: { name: string },  // route permanently-failed jobs here
+    deadLetterQueue?: { name: string },  // inherited from QueueOptions - usually set on Queue
     events?: boolean,                    // emit completed/failed events (default: true)
     metrics?: boolean,                   // record metrics (default: true)
     prefix?: string,

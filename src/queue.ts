@@ -257,7 +257,6 @@ export class Queue<D = any, R = any> extends EventEmitter {
         jobCost = Math.round(opts.cost * 1000);
       }
       let groupConcurrency = opts?.ordering?.concurrency ?? 0;
-      // Force group path when rate limit or token bucket is set
       if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
         groupConcurrency = 1;
       }

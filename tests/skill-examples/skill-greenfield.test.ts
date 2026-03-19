@@ -21,12 +21,10 @@ const { Producer } = require('../../dist/producer') as typeof import('../../src/
 const { QueueEvents } = require('../../dist/queue-events') as typeof import('../../src/queue-events');
 const { Broadcast } = require('../../dist/broadcast') as typeof import('../../src/broadcast');
 const { BroadcastWorker } = require('../../dist/broadcast-worker') as typeof import('../../src/broadcast-worker');
-const { ServerlessPool, serverlessPool } = require('../../dist/serverless-pool') as typeof import('../../src/serverless-pool');
-const {
-  UnrecoverableError,
-  WaitingChildrenError,
-  BatchError,
-} = require('../../dist/errors') as typeof import('../../src/errors');
+const { ServerlessPool, serverlessPool } =
+  require('../../dist/serverless-pool') as typeof import('../../src/serverless-pool');
+const { UnrecoverableError, WaitingChildrenError, BatchError } =
+  require('../../dist/errors') as typeof import('../../src/errors');
 const { gracefulShutdown } = require('../../dist/graceful-shutdown') as typeof import('../../src/graceful-shutdown');
 const { chain, group, chord, dag } = require('../../dist/workflows') as typeof import('../../src/workflows');
 const { matchSubject, compileSubjectMatcher } = require('../../dist/utils') as typeof import('../../src/utils');
@@ -64,12 +62,7 @@ afterAll(async () => {
 });
 
 afterEach(async () => {
-  // Close all tracked resources in reverse order
-  for (const r of resourcesToClose.reverse()) {
-    try {
-      await r.close();
-    } catch {}
-  }
+  await Promise.allSettled(resourcesToClose.reverse().map((r) => r.close()));
   resourcesToClose = [];
   // Flush all queue data
   for (const name of queueNames) {
@@ -167,9 +160,7 @@ describe('SKILL.md examples', () => {
       ),
     );
 
-    await queue.addBulk(
-      Array.from({ length: 5 }, (_, i) => ({ name: 'analytics', data: { i } })),
-    );
+    await queue.addBulk(Array.from({ length: 5 }, (_, i) => ({ name: 'analytics', data: { i } })));
 
     await waitFor(() => batchResults.length > 0);
     expect(batchResults[0]).toBeGreaterThan(0);
@@ -532,8 +523,7 @@ describe('broadcast.md examples', () => {
       ),
     );
 
-    // Wait for worker to be ready
-    await new Promise((r) => setTimeout(r, 500));
+    await worker.waitUntilReady();
 
     await broadcast.publish('order.placed', { event: 'order.placed', orderId: 42 });
 
@@ -570,7 +560,7 @@ describe('broadcast.md examples', () => {
       ),
     );
 
-    await new Promise((r) => setTimeout(r, 500));
+    await worker.waitUntilReady();
 
     // publish(subject, data, opts?)
     await broadcast.publish('orders.created', { orderId: 1 });
@@ -619,11 +609,7 @@ describe('schedulers.md examples', () => {
     const qName = uid('sched-interval');
     const queue = track(new Queue(qName, { connection }));
 
-    await queue.upsertJobScheduler(
-      'cleanup',
-      { every: 5 * 60 * 1_000 },
-      { name: 'cleanup-old', data: {} },
-    );
+    await queue.upsertJobScheduler('cleanup', { every: 5 * 60 * 1_000 }, { name: 'cleanup-old', data: {} });
 
     const info = await queue.getJobScheduler('cleanup');
     expect(info).toBeTruthy();
@@ -651,11 +637,7 @@ describe('schedulers.md examples', () => {
     const qName = uid('sched-mgmt');
     const queue = track(new Queue(qName, { connection }));
 
-    await queue.upsertJobScheduler(
-      'cleanup',
-      { every: 10_000 },
-      { name: 'cleanup', data: {} },
-    );
+    await queue.upsertJobScheduler('cleanup', { every: 10_000 }, { name: 'cleanup', data: {} });
 
     const schedulers = await queue.getRepeatableJobs();
     expect(schedulers.length).toBeGreaterThanOrEqual(1);
@@ -792,9 +774,7 @@ describe('observability.md examples', () => {
     const qName = uid('obs-metrics');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(
-      new Worker(qName, async () => 'ok', { connection }),
-    );
+    const worker = track(new Worker(qName, async () => 'ok', { connection }));
 
     await queue.add('metric-test', {});
     await waitFor(async () => {
@@ -1089,15 +1069,23 @@ describe('Deduplication examples', () => {
     const qName = uid('dedup-simple');
     const queue = track(new Queue(qName, { connection }));
 
-    const job1 = await queue.add('task', { x: 1 }, {
-      deduplication: { id: 'unique-key' },
-    });
+    const job1 = await queue.add(
+      'task',
+      { x: 1 },
+      {
+        deduplication: { id: 'unique-key' },
+      },
+    );
     expect(job1).not.toBeNull();
 
     // Second add with same dedup ID should return null
-    const job2 = await queue.add('task', { x: 2 }, {
-      deduplication: { id: 'unique-key' },
-    });
+    const job2 = await queue.add(
+      'task',
+      { x: 2 },
+      {
+        deduplication: { id: 'unique-key' },
+      },
+    );
     expect(job2).toBeNull();
   }, 15000);
 
@@ -1105,9 +1093,13 @@ describe('Deduplication examples', () => {
     const qName = uid('dedup-throttle');
     const queue = track(new Queue(qName, { connection }));
 
-    const job1 = await queue.add('task', { x: 1 }, {
-      deduplication: { id: 'user-123', ttl: 60000 },
-    });
+    const job1 = await queue.add(
+      'task',
+      { x: 1 },
+      {
+        deduplication: { id: 'user-123', ttl: 60000 },
+      },
+    );
     expect(job1).not.toBeNull();
   }, 15000);
 });
@@ -1120,9 +1112,13 @@ describe('Per-key ordering examples', () => {
     const qName = uid('ordering-key');
     const queue = track(new Queue(qName, { connection }));
 
-    const job = await queue.add('sync', { x: 1 }, {
-      ordering: { key: 'tenant-123' },
-    });
+    const job = await queue.add(
+      'sync',
+      { x: 1 },
+      {
+        ordering: { key: 'tenant-123' },
+      },
+    );
     expect(job).not.toBeNull();
   }, 15000);
 
@@ -1130,9 +1126,13 @@ describe('Per-key ordering examples', () => {
     const qName = uid('ordering-conc');
     const queue = track(new Queue(qName, { connection }));
 
-    const job = await queue.add('sync', { x: 1 }, {
-      ordering: { key: 'tenant-123', concurrency: 3 },
-    });
+    const job = await queue.add(
+      'sync',
+      { x: 1 },
+      {
+        ordering: { key: 'tenant-123', concurrency: 3 },
+      },
+    );
     expect(job).not.toBeNull();
   }, 15000);
 });
@@ -1184,10 +1184,14 @@ describe('Backoff jitter example', () => {
     const qName = uid('backoff-jitter');
     const queue = track(new Queue(qName, { connection }));
 
-    const job = await queue.add('job', { x: 1 }, {
-      attempts: 5,
-      backoff: { type: 'exponential', delay: 1000, jitter: 0.25 },
-    });
+    const job = await queue.add(
+      'job',
+      { x: 1 },
+      {
+        attempts: 5,
+        backoff: { type: 'exponential', delay: 1000, jitter: 0.25 },
+      },
+    );
     expect(job).not.toBeNull();
   }, 15000);
 });

@@ -117,7 +117,6 @@ export class FlowProducer {
         throw new Error('ttl must be a non-negative finite number');
       }
       let groupConcurrency = opts.ordering?.concurrency ?? 0;
-      // Force group path when rate limit or token bucket is set
       if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
         groupConcurrency = 1;
       }

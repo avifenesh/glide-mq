@@ -24,7 +24,7 @@ const emailWorker = new BroadcastWorker('events', async (job) => {
 }, { connection, subscription: 'email-service' });
 
 // Publish -- every subscriber receives this message
-await broadcast.publish({ event: 'order.placed', orderId: 42 });
+await broadcast.publish('order.placed', { event: 'order.placed', orderId: 42 });
 ```
 
 ## Queue vs Broadcast
@@ -33,7 +33,7 @@ await broadcast.publish({ event: 'order.placed', orderId: 42 });
 |---|---|---|
 | Delivery | Point-to-point (one consumer) | Fan-out (all subscribers) |
 | Use case | Task processing, job queues | Event distribution, notifications |
-| Add / Publish | `queue.add(name, data, opts)` | `broadcast.publish(data, opts?)` |
+| Add / Publish | `queue.add(name, data, opts)` | `broadcast.publish(subject, data, opts?)` |
 | Consumer | `Worker` | `BroadcastWorker` |
 | Retry / backoff | Per job | Per subscriber, per message |
 | Stream trimming | Auto (completion/removal) | `maxMessages` option |
@@ -122,9 +122,9 @@ const mixedWorker = new BroadcastWorker('events', async (job) => {
 For subject filtering to work, publish messages with a `name` that follows the dotted convention:
 
 ```typescript
-await broadcast.publish({ orderId: 42 }, { name: 'orders.created' });
-await broadcast.publish({ orderId: 42, status: 'shipped' }, { name: 'orders.shipped' });
-await broadcast.publish({ sku: 'ABC', qty: 0 }, { name: 'inventory.low' });
+await broadcast.publish('orders.created', { orderId: 42 });
+await broadcast.publish('orders.shipped', { orderId: 42, status: 'shipped' });
+await broadcast.publish('inventory.low', { sku: 'ABC', qty: 0 });
 ```
 
 ### Utility functions

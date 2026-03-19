@@ -10,3 +10,4 @@ agent-knowledge/
 HANDOVER.md
 .audit-queue.md
 benchmarks/results/
+.drift-report.md

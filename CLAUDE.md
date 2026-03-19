@@ -20,6 +20,10 @@
 
 # Rules
 
+## Community
+
+- We prioritize community. External issues and feature requests come before internal work.
+
 ## Communication
 
 - No emojis. Plain text markers only: [OK], [ERROR], [WARN].

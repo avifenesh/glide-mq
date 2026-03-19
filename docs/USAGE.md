@@ -200,7 +200,7 @@ const worker = new Worker(
     stalledInterval: 30_000, // how often to check for stalled jobs
     lockDuration: 30_000, // stall detection window per job
     limiter: { max: 100, duration: 60_000 }, // rate limit: 100 jobs / min
-    deadLetterQueue: { name: 'dlq' }, // route permanently-failed jobs here
+    deadLetterQueue: { name: 'dlq' }, // inherited from QueueOptions - can also set on Queue constructor
     backoffStrategies: {
       // custom strategy called as: custom(attemptsMade, err) => delayMs
       custom: (attemptsMade) => attemptsMade * 2_000,
@@ -377,7 +377,7 @@ const emailWorker = new BroadcastWorker(
 );
 
 // Publish — every subscriber receives this message
-await broadcast.publish({ event: 'order.placed', orderId: 42 });
+await broadcast.publish('order.placed', { event: 'order.placed', orderId: 42 });
 ```
 
 ### BroadcastWorker options
@@ -404,7 +404,7 @@ const replayWorker = new BroadcastWorker('events', processor, {
 | --------------- | ----------------------------- | --------------------------------- |
 | Delivery        | Point-to-point (one consumer) | Fan-out (all subscribers)         |
 | Use case        | Task processing, job queues   | Event distribution, notifications |
-| Add / Publish   | `queue.add(name, data, opts)` | `broadcast.publish(data, opts?)`  |
+| Add / Publish   | `queue.add(name, data, opts)` | `broadcast.publish(subject, data, opts?)` |
 | Consumer        | `Worker`                      | `BroadcastWorker`                 |
 | Retry / backoff | Per job                       | Per subscriber, per message       |
 | Stream trimming | Auto (completion/removal)     | `maxMessages` option              |

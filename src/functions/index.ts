@@ -15,6 +15,7 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 54: Guard XDEL in glidemq_moveToActive/deferActive/moveToWaitingChildren with broadcastMode flag.
 // Version 55: Guard XDEL in glidemq_moveActiveToDelayed with broadcastMode flag.
 // Version 56: glidemq_checkConcurrency includes list-active counter; complete/fail DECR on list jobs; rpopAndReserve.
+// Version 57: Clamp groupConcurrency >= 1 in Lua for rolling upgrade safety.
 // Version 57: glidemq_addFlow routes child jobs with lifo:true to LIFO list.
 // Version 58: XADD to job stream includes 'name' field for subject-based filtering in BroadcastWorker.
 // Version 59: tbRefill early exit, DAG pattern match, key assertions, metrics scan 1000.
@@ -480,21 +481,18 @@ redis.register_function('glidemq_addJob', function(keys, args)
     jobIdStr = tostring(jobId)
     jobKey = prefix .. 'job:' .. jobIdStr
   end
-  local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0 or tbCapacity > 0))
+  local useGroupConcurrency = (orderingKey ~= '' and groupConcurrency > 0)
   local orderingSeq = 0
   if orderingKey ~= '' and not useGroupConcurrency then
     local orderingMetaKey = prefix .. 'ordering'
     orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
   end
   if useGroupConcurrency then
+    if groupConcurrency < 1 then groupConcurrency = 1 end
     local groupHashKey = prefix .. 'group:' .. orderingKey
     local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
     if curMax ~= groupConcurrency then
       redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
-    end
-    -- When rate limit or token bucket forces group path but concurrency is 0 or 1, ensure maxConcurrency >= 1
-    if curMax == 0 and groupConcurrency <= 1 then
-      redis.call('HSET', groupHashKey, 'maxConcurrency', '1')
     end
     -- Upsert rate limit fields on group hash
     if groupRateMax > 0 then
@@ -1513,20 +1511,18 @@ redis.register_function('glidemq_dedup', function(keys, args)
     jobIdStr = tostring(jobId)
     jobKey = prefix .. 'job:' .. jobIdStr
   end
-  local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0 or tbCapacity > 0))
+  local useGroupConcurrency = (orderingKey ~= '' and groupConcurrency > 0)
   local orderingSeq = 0
   if orderingKey ~= '' and not useGroupConcurrency then
     local orderingMetaKey = prefix .. 'ordering'
     orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
   end
   if useGroupConcurrency then
+    if groupConcurrency < 1 then groupConcurrency = 1 end
     local groupHashKey = prefix .. 'group:' .. orderingKey
     local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
     if curMax ~= groupConcurrency then
       redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
-    end
-    if curMax == 0 and groupConcurrency <= 1 then
-      redis.call('HSET', groupHashKey, 'maxConcurrency', '1')
     end
     if groupRateMax > 0 then
       local curRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
