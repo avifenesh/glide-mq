@@ -527,8 +527,7 @@ describe('broadcast.md examples', () => {
       ),
     );
 
-    // Wait for worker to be ready
-    await new Promise((r) => setTimeout(r, 500));
+    await worker.waitUntilReady();
 
     await broadcast.publish('order.placed', { event: 'order.placed', orderId: 42 });
 
@@ -565,7 +564,7 @@ describe('broadcast.md examples', () => {
       ),
     );
 
-    await new Promise((r) => setTimeout(r, 500));
+    await worker.waitUntilReady();
 
     // publish(subject, data, opts?)
     await broadcast.publish('orders.created', { orderId: 1 });

@@ -403,7 +403,7 @@ describe('BullMQ new-features.md', () => {
       ),
     );
 
-    await new Promise((r) => setTimeout(r, 500));
+    await bw.waitUntilReady();
     // publish(subject, data, opts?) - actual API signature
     await broadcast.publish('alert', { type: 'alert', text: 'Server restarting' });
 

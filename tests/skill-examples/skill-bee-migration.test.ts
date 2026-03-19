@@ -634,7 +634,7 @@ describe('Bee new-features.md', () => {
       ),
     );
 
-    await new Promise((r) => setTimeout(r, 500));
+    await inventory.waitUntilReady();
     // publish(subject, data, opts?) - actual API signature
     await broadcast.publish('order.placed', { event: 'order.placed', orderId: 42 });
 
