@@ -114,11 +114,9 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
     k.priority,
     k.listActive,
   ];
-  for (const key of staticKeys) {
-    try {
-      await client.del([key]);
-    } catch {}
-  }
+  try {
+    await client.del(staticKeys);
+  } catch {}
 
   // Scan and delete job hashes + log keys + deps keys
   const pfx = keyPrefix(prefix, queueName);
