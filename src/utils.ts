@@ -16,6 +16,13 @@ export const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
 /** Maximum length for ordering keys. */
 export const MAX_ORDERING_KEY_LENGTH = 256;
 
+export function jsonReviver(key: string, value: unknown): unknown {
+  if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+    return undefined;
+  }
+  return value;
+}
+
 /**
  * Validate a job ID. Throws if the ID is too long or contains forbidden characters.
  */

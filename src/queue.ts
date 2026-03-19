@@ -41,6 +41,7 @@ import {
   validateQueueName,
   MAX_ORDERING_KEY_LENGTH,
   validateJobId,
+  jsonReviver,
 } from './utils';
 import {
   createBlockingClient,
@@ -949,7 +950,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const val = results[i];
         if (!val) continue;
         try {
-          const data = JSON.parse(String(val));
+          const data = JSON.parse(String(val), jsonReviver);
           if (typeof data.addr !== 'string' || typeof data.pid !== 'number' || typeof data.startedAt !== 'number') {
             continue;
           }
@@ -1023,7 +1024,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const existingRaw = await client.hget(this.keys.schedulers, name);
       if (existingRaw != null) {
         try {
-          const existing = JSON.parse(String(existingRaw)) as SchedulerEntry;
+          const existing = JSON.parse(String(existingRaw), jsonReviver) as SchedulerEntry;
           const scheduleUnchanged =
             existing.pattern === schedule.pattern &&
             existing.every === schedule.every &&
@@ -1649,7 +1650,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       try {
         result.push({
           name: String(item.field),
-          entry: JSON.parse(String(item.value)),
+          entry: JSON.parse(String(item.value), jsonReviver),
         });
       } catch {
         // Malformed JSON - skip entry
@@ -1667,7 +1668,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const raw = await client.hget(this.keys.schedulers, name);
     if (raw == null) return null;
     try {
-      return JSON.parse(String(raw)) as SchedulerEntry;
+      return JSON.parse(String(raw), jsonReviver) as SchedulerEntry;
     } catch {
       return null;
     }
