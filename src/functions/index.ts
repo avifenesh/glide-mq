@@ -15,6 +15,7 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 54: Guard XDEL in glidemq_moveToActive/deferActive/moveToWaitingChildren with broadcastMode flag.
 // Version 55: Guard XDEL in glidemq_moveActiveToDelayed with broadcastMode flag.
 // Version 56: glidemq_checkConcurrency includes list-active counter; complete/fail DECR on list jobs; rpopAndReserve.
+// Version 57: All ordering.key jobs use group path (implicit concurrency=1). Enables runtime per-group rate limiting.
 // Version 57: glidemq_addFlow routes child jobs with lifo:true to LIFO list.
 // Version 58: XADD to job stream includes 'name' field for subject-based filtering in BroadcastWorker.
 // Version 59: tbRefill early exit, DAG pattern match, key assertions, metrics scan 1000.
@@ -480,12 +481,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
     jobIdStr = tostring(jobId)
     jobKey = prefix .. 'job:' .. jobIdStr
   end
-  local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0 or tbCapacity > 0))
-  local orderingSeq = 0
-  if orderingKey ~= '' and not useGroupConcurrency then
-    local orderingMetaKey = prefix .. 'ordering'
-    orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
-  end
+  local useGroupConcurrency = (orderingKey ~= '')
   if useGroupConcurrency then
     local groupHashKey = prefix .. 'group:' .. orderingKey
     local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
@@ -557,11 +553,6 @@ redis.register_function('glidemq_addJob', function(keys, args)
   if useGroupConcurrency then
     hashFields[#hashFields + 1] = 'groupKey'
     hashFields[#hashFields + 1] = orderingKey
-  elseif orderingKey ~= '' then
-    hashFields[#hashFields + 1] = 'orderingKey'
-    hashFields[#hashFields + 1] = orderingKey
-    hashFields[#hashFields + 1] = 'orderingSeq'
-    hashFields[#hashFields + 1] = tostring(orderingSeq)
   end
   if jobCost > 0 then
     hashFields[#hashFields + 1] = 'cost'
@@ -1513,12 +1504,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
     jobIdStr = tostring(jobId)
     jobKey = prefix .. 'job:' .. jobIdStr
   end
-  local useGroupConcurrency = (orderingKey ~= '' and (groupConcurrency > 1 or groupRateMax > 0 or tbCapacity > 0))
-  local orderingSeq = 0
-  if orderingKey ~= '' and not useGroupConcurrency then
-    local orderingMetaKey = prefix .. 'ordering'
-    orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
-  end
+  local useGroupConcurrency = (orderingKey ~= '')
   if useGroupConcurrency then
     local groupHashKey = prefix .. 'group:' .. orderingKey
     local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
@@ -1587,11 +1573,6 @@ redis.register_function('glidemq_dedup', function(keys, args)
   if useGroupConcurrency then
     hashFields[#hashFields + 1] = 'groupKey'
     hashFields[#hashFields + 1] = orderingKey
-  elseif orderingKey ~= '' then
-    hashFields[#hashFields + 1] = 'orderingKey'
-    hashFields[#hashFields + 1] = orderingKey
-    hashFields[#hashFields + 1] = 'orderingSeq'
-    hashFields[#hashFields + 1] = tostring(orderingSeq)
   end
   if jobCost > 0 then
     hashFields[#hashFields + 1] = 'cost'
