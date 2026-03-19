@@ -483,14 +483,11 @@ redis.register_function('glidemq_addJob', function(keys, args)
   end
   local useGroupConcurrency = (orderingKey ~= '')
   if useGroupConcurrency then
+    if groupConcurrency < 1 then groupConcurrency = 1 end
     local groupHashKey = prefix .. 'group:' .. orderingKey
     local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
     if curMax ~= groupConcurrency then
       redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
-    end
-    -- When rate limit or token bucket forces group path but concurrency is 0 or 1, ensure maxConcurrency >= 1
-    if curMax == 0 and groupConcurrency <= 1 then
-      redis.call('HSET', groupHashKey, 'maxConcurrency', '1')
     end
     -- Upsert rate limit fields on group hash
     if groupRateMax > 0 then
@@ -1506,13 +1503,11 @@ redis.register_function('glidemq_dedup', function(keys, args)
   end
   local useGroupConcurrency = (orderingKey ~= '')
   if useGroupConcurrency then
+    if groupConcurrency < 1 then groupConcurrency = 1 end
     local groupHashKey = prefix .. 'group:' .. orderingKey
     local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
     if curMax ~= groupConcurrency then
       redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
-    end
-    if curMax == 0 and groupConcurrency <= 1 then
-      redis.call('HSET', groupHashKey, 'maxConcurrency', '1')
     end
     if groupRateMax > 0 then
       local curRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0

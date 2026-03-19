@@ -15,9 +15,7 @@ const { QueueEvents } = require('../../dist/queue-events') as typeof import('../
 const { Producer } = require('../../dist/producer') as typeof import('../../src/producer');
 const { Broadcast } = require('../../dist/broadcast') as typeof import('../../src/broadcast');
 const { BroadcastWorker } = require('../../dist/broadcast-worker') as typeof import('../../src/broadcast-worker');
-const {
-  UnrecoverableError,
-} = require('../../dist/errors') as typeof import('../../src/errors');
+const { UnrecoverableError } = require('../../dist/errors') as typeof import('../../src/errors');
 const { gracefulShutdown } = require('../../dist/graceful-shutdown') as typeof import('../../src/graceful-shutdown');
 
 import { flushQueue, createCleanupClient, STANDALONE, waitFor } from '../helpers/fixture';
@@ -125,9 +123,7 @@ describe('BullMQ SKILL.md - connection conversion', () => {
     const completedIds: string[] = [];
     qe.on('completed', ({ jobId }: any) => completedIds.push(jobId));
 
-    const worker = track(
-      new Worker(qName, async () => 'done', { connection }),
-    );
+    const worker = track(new Worker(qName, async () => 'done', { connection }));
 
     const job = await queue.add('test', { x: 1 });
     await waitFor(() => completedIds.length > 0, 5000);
@@ -137,9 +133,7 @@ describe('BullMQ SKILL.md - connection conversion', () => {
   it('Step 6: Graceful shutdown (SKILL.md:162)', async () => {
     const qName = uid('bmq-shutdown');
     const queue = track(new Queue(qName, { connection }));
-    const worker = track(
-      new Worker(qName, async () => 'ok', { connection }),
-    );
+    const worker = track(new Worker(qName, async () => 'ok', { connection }));
 
     // Verify close works without errors
     await worker.close();
@@ -212,10 +206,14 @@ describe('BullMQ SKILL.md - connection conversion', () => {
       if (job) failedAttempts.push(job.attemptsMade);
     });
 
-    await queue.add('backoff-test', {}, {
-      attempts: 3,
-      backoff: { type: 'linear', delay: 100 },
-    });
+    await queue.add(
+      'backoff-test',
+      {},
+      {
+        attempts: 3,
+        backoff: { type: 'linear', delay: 100 },
+      },
+    );
 
     await waitFor(() => failedAttempts.length >= 3, 10000);
   }, 15000);
@@ -225,8 +223,7 @@ describe('BullMQ SKILL.md - connection conversion', () => {
     const queue = track(new Queue(qName, { connection }));
 
     const DEFAULTS = { attempts: 3, backoff: { type: 'exponential' as const, delay: 1000 } };
-    const add = (name: string, data: unknown, opts?: any) =>
-      queue.add(name, data, { ...DEFAULTS, ...opts });
+    const add = (name: string, data: unknown, opts?: any) => queue.add(name, data, { ...DEFAULTS, ...opts });
 
     const job = await add('test', { x: 1 });
     expect(job).not.toBeNull();
@@ -240,10 +237,7 @@ describe('BullMQ SKILL.md - connection conversion', () => {
     await queue.add('job1', {});
     await queue.add('job2', {}, { delay: 60000 });
 
-    const [waiting, delayed] = await Promise.all([
-      queue.getJobs('waiting', 0, 99),
-      queue.getJobs('delayed', 0, 99),
-    ]);
+    const [waiting, delayed] = await Promise.all([queue.getJobs('waiting', 0, 99), queue.getJobs('delayed', 0, 99)]);
     const jobs = [...waiting, ...delayed];
     expect(jobs.length).toBeGreaterThanOrEqual(2);
   }, 15000);
@@ -252,9 +246,13 @@ describe('BullMQ SKILL.md - connection conversion', () => {
     const qName = uid('bmq-ordering');
     const queue = track(new Queue(qName, { connection }));
 
-    const job = await queue.add('job', { x: 1 }, {
-      ordering: { key: 'tenant-123', concurrency: 2 },
-    });
+    const job = await queue.add(
+      'job',
+      { x: 1 },
+      {
+        ordering: { key: 'tenant-123', concurrency: 2 },
+      },
+    );
     expect(job).not.toBeNull();
   }, 15000);
 });
@@ -283,9 +281,13 @@ describe('BullMQ new-features.md', () => {
     const qName = uid('bmq-nf-ordering');
     const queue = track(new Queue(qName, { connection }));
 
-    const job = await queue.add('sync', { x: 1 }, {
-      ordering: { key: 'tenant-123' },
-    });
+    const job = await queue.add(
+      'sync',
+      { x: 1 },
+      {
+        ordering: { key: 'tenant-123' },
+      },
+    );
     expect(job).not.toBeNull();
   }, 15000);
 
@@ -293,9 +295,13 @@ describe('BullMQ new-features.md', () => {
     const qName = uid('bmq-nf-grp-conc');
     const queue = track(new Queue(qName, { connection }));
 
-    const job = await queue.add('sync', { x: 1 }, {
-      ordering: { key: 'tenant-123', concurrency: 3 },
-    });
+    const job = await queue.add(
+      'sync',
+      { x: 1 },
+      {
+        ordering: { key: 'tenant-123', concurrency: 3 },
+      },
+    );
     expect(job).not.toBeNull();
   }, 15000);
 
@@ -303,13 +309,17 @@ describe('BullMQ new-features.md', () => {
     const qName = uid('bmq-nf-grp-rate');
     const queue = track(new Queue(qName, { connection }));
 
-    const job = await queue.add('sync', { x: 1 }, {
-      ordering: {
-        key: 'tenant-123',
-        concurrency: 3,
-        rateLimit: { max: 10, duration: 60_000 },
+    const job = await queue.add(
+      'sync',
+      { x: 1 },
+      {
+        ordering: {
+          key: 'tenant-123',
+          concurrency: 3,
+          rateLimit: { max: 10, duration: 60_000 },
+        },
       },
-    });
+    );
     expect(job).not.toBeNull();
   }, 15000);
 
@@ -317,13 +327,17 @@ describe('BullMQ new-features.md', () => {
     const qName = uid('bmq-nf-token');
     const queue = track(new Queue(qName, { connection }));
 
-    const job = await queue.add('heavy-job', { x: 1 }, {
-      ordering: {
-        key: 'tenant-123',
-        tokenBucket: { capacity: 100, refillRate: 10 },
+    const job = await queue.add(
+      'heavy-job',
+      { x: 1 },
+      {
+        ordering: {
+          key: 'tenant-123',
+          tokenBucket: { capacity: 100, refillRate: 10 },
+        },
+        cost: 25,
       },
-      cost: 25,
-    });
+    );
     expect(job).not.toBeNull();
   }, 15000);
 
@@ -427,9 +441,7 @@ describe('BullMQ new-features.md', () => {
       ),
     );
 
-    await queue.addBulk(
-      Array.from({ length: 3 }, (_, i) => ({ name: 'item', data: { i } })),
-    );
+    await queue.addBulk(Array.from({ length: 3 }, (_, i) => ({ name: 'item', data: { i } })));
 
     await waitFor(() => batchSizes.length > 0);
     expect(batchSizes[0]).toBeGreaterThan(0);
@@ -454,7 +466,11 @@ describe('BullMQ new-features.md', () => {
     // chain
     await chain(
       qName,
-      [{ name: 'step-1', data: {} }, { name: 'step-2', data: {} }, { name: 'step-3', data: {} }],
+      [
+        { name: 'step-1', data: {} },
+        { name: 'step-2', data: {} },
+        { name: 'step-3', data: {} },
+      ],
       connection,
     );
 
@@ -494,11 +510,7 @@ describe('BullMQ new-features.md', () => {
     const qName = uid('bmq-nf-rac');
     const queue = track(new Queue(qName, { connection }));
 
-    await queue.upsertJobScheduler(
-      'sequential-poll',
-      { repeatAfterComplete: 5000 },
-      { name: 'poll', data: {} },
-    );
+    await queue.upsertJobScheduler('sequential-poll', { repeatAfterComplete: 5000 }, { name: 'poll', data: {} });
 
     const info = await queue.getJobScheduler('sequential-poll');
     expect(info).toBeTruthy();
@@ -547,23 +559,31 @@ describe('BullMQ new-features.md', () => {
     const qName = uid('bmq-nf-dedup');
     const queue = track(new Queue(qName, { connection }));
 
-    const job1 = await queue.add('job', { x: 1 }, {
-      deduplication: {
-        id: 'my-dedup-key',
-        ttl: 60_000,
-        mode: 'simple',
+    const job1 = await queue.add(
+      'job',
+      { x: 1 },
+      {
+        deduplication: {
+          id: 'my-dedup-key',
+          ttl: 60_000,
+          mode: 'simple',
+        },
       },
-    });
+    );
     expect(job1).not.toBeNull();
 
     // Duplicate should be dropped
-    const job2 = await queue.add('job', { x: 2 }, {
-      deduplication: {
-        id: 'my-dedup-key',
-        ttl: 60_000,
-        mode: 'simple',
+    const job2 = await queue.add(
+      'job',
+      { x: 2 },
+      {
+        deduplication: {
+          id: 'my-dedup-key',
+          ttl: 60_000,
+          mode: 'simple',
+        },
       },
-    });
+    );
     expect(job2).toBeNull();
   }, 15000);
 
@@ -571,10 +591,14 @@ describe('BullMQ new-features.md', () => {
     const qName = uid('bmq-nf-jitter');
     const queue = track(new Queue(qName, { connection }));
 
-    const job = await queue.add('job', { x: 1 }, {
-      attempts: 5,
-      backoff: { type: 'exponential', delay: 1000, jitter: 0.25 },
-    });
+    const job = await queue.add(
+      'job',
+      { x: 1 },
+      {
+        attempts: 5,
+        backoff: { type: 'exponential', delay: 1000, jitter: 0.25 },
+      },
+    );
     expect(job).not.toBeNull();
   }, 15000);
 

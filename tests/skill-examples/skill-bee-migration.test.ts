@@ -15,9 +15,7 @@ const { QueueEvents } = require('../../dist/queue-events') as typeof import('../
 const { Producer } = require('../../dist/producer') as typeof import('../../src/producer');
 const { Broadcast } = require('../../dist/broadcast') as typeof import('../../src/broadcast');
 const { BroadcastWorker } = require('../../dist/broadcast-worker') as typeof import('../../src/broadcast-worker');
-const {
-  UnrecoverableError,
-} = require('../../dist/errors') as typeof import('../../src/errors');
+const { UnrecoverableError } = require('../../dist/errors') as typeof import('../../src/errors');
 const { gracefulShutdown } = require('../../dist/graceful-shutdown') as typeof import('../../src/graceful-shutdown');
 
 import { flushQueue, createCleanupClient, STANDALONE, waitFor } from '../helpers/fixture';
@@ -120,9 +118,7 @@ describe('Bee SKILL.md - connection and basic usage', () => {
     const queue = track(new Queue(qName, { connection }));
     const items = [{ x: 1 }, { x: 2 }, { x: 3 }];
 
-    const results = await queue.addBulk(
-      items.map((item) => ({ name: 'process', data: item })),
-    );
+    const results = await queue.addBulk(items.map((item) => ({ name: 'process', data: item })));
     expect(results.length).toBe(3);
   }, 15000);
 
@@ -253,24 +249,36 @@ describe('Bee api-mapping.md', () => {
     const queue = track(new Queue(qName, { connection }));
 
     // Fixed backoff
-    const j1 = await queue.add('task', { x: 1 }, {
-      attempts: 3,
-      backoff: { type: 'fixed', delay: 0 },
-    });
+    const j1 = await queue.add(
+      'task',
+      { x: 1 },
+      {
+        attempts: 3,
+        backoff: { type: 'fixed', delay: 0 },
+      },
+    );
     expect(j1).not.toBeNull();
 
     // Fixed with delay
-    const j2 = await queue.add('task2', { x: 2 }, {
-      attempts: 3,
-      backoff: { type: 'fixed', delay: 1000 },
-    });
+    const j2 = await queue.add(
+      'task2',
+      { x: 2 },
+      {
+        attempts: 3,
+        backoff: { type: 'fixed', delay: 1000 },
+      },
+    );
     expect(j2).not.toBeNull();
 
     // Exponential
-    const j3 = await queue.add('task3', { x: 3 }, {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 1000 },
-    });
+    const j3 = await queue.add(
+      'task3',
+      { x: 3 },
+      {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 1000 },
+      },
+    );
     expect(j3).not.toBeNull();
   }, 15000);
 
@@ -529,9 +537,7 @@ describe('Bee api-mapping.md', () => {
     const completedIds: string[] = [];
     events.on('completed', ({ jobId }: any) => completedIds.push(jobId));
 
-    const worker = track(
-      new Worker(qName, async () => 'ok', { connection }),
-    );
+    const worker = track(new Worker(qName, async () => 'ok', { connection }));
 
     const job = await queue.add('qe-test', { x: 1 });
     await waitFor(() => completedIds.length > 0, 5000);
@@ -561,18 +567,28 @@ describe('Bee api-mapping.md', () => {
     const queue = track(new Queue(qName, { connection }));
 
     const worker = track(
-      new Worker(qName, async () => { throw new Error('fail'); }, {
-        connection,
-        backoffStrategies: {
-          linear: (attemptsMade) => attemptsMade * 1000,
+      new Worker(
+        qName,
+        async () => {
+          throw new Error('fail');
         },
-      }),
+        {
+          connection,
+          backoffStrategies: {
+            linear: (attemptsMade) => attemptsMade * 1000,
+          },
+        },
+      ),
     );
 
-    const job = await queue.add('backoff', { x: 1 }, {
-      attempts: 2,
-      backoff: { type: 'linear', delay: 100 },
-    });
+    const job = await queue.add(
+      'backoff',
+      { x: 1 },
+      {
+        attempts: 2,
+        backoff: { type: 'linear', delay: 100 },
+      },
+    );
     expect(job).not.toBeNull();
 
     // Wait for at least one failure
@@ -671,14 +687,22 @@ describe('Bee new-features.md', () => {
     const qName = uid('bee-nf-dedup');
     const queue = track(new Queue(qName, { connection }));
 
-    const j1 = await queue.add('task', { x: 1 }, {
-      deduplication: { id: 'unique-key' },
-    });
+    const j1 = await queue.add(
+      'task',
+      { x: 1 },
+      {
+        deduplication: { id: 'unique-key' },
+      },
+    );
     expect(j1).not.toBeNull();
 
-    const j2 = await queue.add('task', { x: 2 }, {
-      deduplication: { id: 'unique-key' },
-    });
+    const j2 = await queue.add(
+      'task',
+      { x: 2 },
+      {
+        deduplication: { id: 'unique-key' },
+      },
+    );
     expect(j2).toBeNull();
   }, 15000);
 
@@ -687,18 +711,10 @@ describe('Bee new-features.md', () => {
     const queue = track(new Queue(qName, { connection }));
 
     // Cron
-    await queue.upsertJobScheduler(
-      'daily-report',
-      { pattern: '0 0 * * *' },
-      { name: 'daily-report', data: {} },
-    );
+    await queue.upsertJobScheduler('daily-report', { pattern: '0 0 * * *' }, { name: 'daily-report', data: {} });
 
     // Interval
-    await queue.upsertJobScheduler(
-      'health-check',
-      { every: 300000 },
-      { name: 'health-check', data: {} },
-    );
+    await queue.upsertJobScheduler('health-check', { every: 300000 }, { name: 'health-check', data: {} });
 
     const schedulers = await queue.getRepeatableJobs();
     expect(schedulers.length).toBeGreaterThanOrEqual(2);
@@ -772,12 +788,20 @@ describe('Bee new-features.md', () => {
     const qName = uid('bee-nf-ordering');
     const queue = track(new Queue(qName, { connection }));
 
-    const j1 = await queue.add('process-order', { x: 1 }, {
-      ordering: { key: 'customer-123' },
-    });
-    const j2 = await queue.add('process-order', { x: 2 }, {
-      ordering: { key: 'customer-456' },
-    });
+    const j1 = await queue.add(
+      'process-order',
+      { x: 1 },
+      {
+        ordering: { key: 'customer-123' },
+      },
+    );
+    const j2 = await queue.add(
+      'process-order',
+      { x: 2 },
+      {
+        ordering: { key: 'customer-456' },
+      },
+    );
     expect(j1).not.toBeNull();
     expect(j2).not.toBeNull();
   }, 15000);
@@ -796,11 +820,7 @@ describe('Bee new-features.md', () => {
       ),
     );
 
-    const result = await queue.addAndWait(
-      'inference',
-      { prompt: 'Hello' },
-      { waitTimeout: 10_000 },
-    );
+    const result = await queue.addAndWait('inference', { prompt: 'Hello' }, { waitTimeout: 10_000 });
     expect(result).toEqual({ reply: 'Hello' });
   }, 15000);
 
@@ -865,9 +885,7 @@ describe('Bee new-features.md', () => {
     const completedIds: string[] = [];
     events.on('completed', ({ jobId }: any) => completedIds.push(jobId));
 
-    const worker = track(
-      new Worker(qName, async () => 'ok', { connection }),
-    );
+    const worker = track(new Worker(qName, async () => 'ok', { connection }));
 
     const job = await queue.add('qe-test', {});
     await waitFor(() => completedIds.length > 0, 5000);
@@ -878,9 +896,7 @@ describe('Bee new-features.md', () => {
     const qName = uid('bee-nf-metrics');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(
-      new Worker(qName, async () => 'ok', { connection }),
-    );
+    const worker = track(new Worker(qName, async () => 'ok', { connection }));
 
     await queue.add('metric', {});
     await waitFor(async () => {
