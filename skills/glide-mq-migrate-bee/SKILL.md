@@ -275,7 +275,7 @@ Features Bee-Queue does not have that are available after migration:
 | Schedulers | Cron patterns and interval repeatable jobs |
 | Rate limiting | `limiter: { max: 100, duration: 60000 }` on Worker |
 | LIFO mode | Process newest jobs first with `{ lifo: true }` |
-| Dead letter queue | `deadLetterQueue: { name: 'dlq' }` on Worker |
+| Dead letter queue | `deadLetterQueue: { name: 'dlq' }` on Queue |
 | Serverless pool | Connection caching for Lambda/Edge |
 | HTTP proxy | Cross-language queue access via REST |
 | OpenTelemetry | Automatic span emission |
