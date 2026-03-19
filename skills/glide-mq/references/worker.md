@@ -161,8 +161,10 @@ const worker = new Worker('drip', async (job) => {
 
 ```typescript
 import { gracefulShutdown } from 'glide-mq';
-await gracefulShutdown([queue, worker, events]);
-// Registers SIGTERM/SIGINT, calls close() on all components
+// Returns a handle that auto-registers SIGTERM/SIGINT handlers.
+// await blocks until a signal fires. For manual shutdown: handle.shutdown()
+const handle = gracefulShutdown([queue, worker, events]);
+await handle.shutdown(); // programmatic trigger
 ```
 
 ## Gotchas

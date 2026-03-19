@@ -136,7 +136,16 @@ await producer.close();
 
 ```typescript
 import { gracefulShutdown } from 'glide-mq';
-await gracefulShutdown([worker1, worker2, queue, events]);
+
+// Registers SIGTERM/SIGINT handlers and returns a handle.
+// await blocks until a signal fires - use as last line of your program.
+const handle = gracefulShutdown([worker1, worker2, queue, events]);
+
+// For programmatic shutdown (e.g., in tests):
+await handle.shutdown();
+
+// To remove signal handlers without closing:
+handle.dispose();
 ```
 
 ### Testing Without Valkey

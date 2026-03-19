@@ -290,9 +290,10 @@ await worker.close();
 await queue.close();
 await events.close();
 
-// OR - graceful shutdown all at once
+// OR - graceful shutdown (registers SIGTERM/SIGINT, blocks until signal)
 import { gracefulShutdown } from 'glide-mq';
-await gracefulShutdown([worker, queue, events]);
+const handle = gracefulShutdown([worker, queue, events]);
+// For programmatic shutdown: await handle.shutdown();
 ```
 
 ### destroy -> obliterate
@@ -463,8 +464,8 @@ async function shutdown() {
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
-// AFTER
+// AFTER - gracefulShutdown registers SIGTERM/SIGINT automatically
 import { gracefulShutdown } from 'glide-mq';
-await gracefulShutdown([worker, queue, events]);
-// Registers SIGTERM/SIGINT automatically
+const handle = gracefulShutdown([worker, queue, events]);
+// Blocks until signal fires. For programmatic: await handle.shutdown()
 ```
