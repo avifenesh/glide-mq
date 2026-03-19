@@ -64,12 +64,7 @@ afterAll(async () => {
 });
 
 afterEach(async () => {
-  // Close all tracked resources in reverse order
-  for (const r of resourcesToClose.reverse()) {
-    try {
-      await r.close();
-    } catch {}
-  }
+  await Promise.allSettled(resourcesToClose.reverse().map((r) => r.close()));
   resourcesToClose = [];
   // Flush all queue data
   for (const name of queueNames) {

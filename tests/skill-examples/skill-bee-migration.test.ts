@@ -49,11 +49,7 @@ afterAll(async () => {
 });
 
 afterEach(async () => {
-  for (const r of resourcesToClose.reverse()) {
-    try {
-      await r.close();
-    } catch {}
-  }
+  await Promise.allSettled(resourcesToClose.reverse().map((r) => r.close()));
   resourcesToClose = [];
   for (const name of queueNames) {
     try {
