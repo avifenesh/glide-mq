@@ -204,7 +204,7 @@ const bw = new BroadcastWorker('notifications', async (message) => {
   console.log('Received:', message);
 }, { connection, subscription: 'my-group' });
 
-await broadcast.publish({ type: 'alert', text: 'Server restarting' });
+await broadcast.publish('alerts', { type: 'alert', text: 'Server restarting' });
 ```
 
 ---

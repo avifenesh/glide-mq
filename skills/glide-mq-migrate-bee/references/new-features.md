@@ -57,7 +57,7 @@ const email = new BroadcastWorker('events', async (job) => {
   await sendNotification(job.data);
 }, { connection, subscription: 'email-service' });
 
-await broadcast.publish({ event: 'order.placed', orderId: 42 });
+await broadcast.publish('orders', { event: 'order.placed', orderId: 42 });
 ```
 
 ## Batch Processing

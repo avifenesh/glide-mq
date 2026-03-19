@@ -18,12 +18,12 @@ const broadcast = new Broadcast('events', {
 ## Publishing
 
 ```typescript
-// Basic publish - every subscriber receives this
-await broadcast.publish({ event: 'order.placed', orderId: 42 });
+// publish(subject, data, opts?) - subject is the first arg
+await broadcast.publish('orders', { event: 'order.placed', orderId: 42 });
 
-// With name (required for subject filtering)
-await broadcast.publish({ orderId: 42 }, { name: 'orders.created' });
-await broadcast.publish({ sku: 'ABC', qty: 0 }, { name: 'inventory.low' });
+// With dotted subjects (for subject filtering)
+await broadcast.publish('orders.created', { orderId: 42 });
+await broadcast.publish('inventory.low', { sku: 'ABC', qty: 0 });
 
 await broadcast.close();
 ```
@@ -113,7 +113,7 @@ matcher('inventory.low');     // false
 |---|---|---|
 | Delivery | Point-to-point (one consumer) | Fan-out (all subscribers) |
 | Use case | Task processing | Event distribution |
-| API | `queue.add(name, data, opts)` | `broadcast.publish(data, opts?)` |
+| API | `queue.add(name, data, opts)` | `broadcast.publish(subject, data, opts?)` |
 | Consumer | `Worker` | `BroadcastWorker` |
 | Retry | Per job | Per subscriber, per message |
 | Trimming | Auto (completion/removal) | `maxMessages` option |
