@@ -64,6 +64,7 @@ import {
   cleanJobs,
   drainQueue,
   retryJobs,
+  rateLimitGroupExternal,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -1740,6 +1741,20 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * Close the queue and release the underlying client connection.
    * Idempotent: safe to call multiple times.
    */
+  /**
+   * Rate-limit a specific ordering group from outside the worker processor.
+   * Registers the group in the ratelimited ZADD — the scheduler will unblock it after duration.
+   * Any in-flight job for the group continues; new activations are blocked until resumeAt.
+   */
+  async rateLimitGroup(
+    groupKey: string,
+    duration: number,
+    opts?: { extend?: 'max' | 'replace' },
+  ): Promise<number> {
+    const client = await this.getClient();
+    return rateLimitGroupExternal(client, this.keys, groupKey, duration, Date.now(), opts?.extend ?? 'max');
+  }
+
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;

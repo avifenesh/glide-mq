@@ -48,3 +48,28 @@ export class WaitingChildrenError extends GlideMQError {
     this.name = 'WaitingChildrenError';
   }
 }
+
+export interface GroupRateLimitOptions {
+  /** What happens to the current job. Default: 'requeue' (re-parks without consuming retry). */
+  currentJob?: 'requeue' | 'fail';
+  /** Where to re-park the job in the group queue. Default: 'front' (resumes first). */
+  requeuePosition?: 'front' | 'back';
+  /** How to handle existing rate limit. Default: 'max' (never shortens). */
+  extend?: 'max' | 'replace';
+}
+
+export class GroupRateLimitError extends GlideMQError {
+  readonly delayMs: number;
+  readonly opts: Required<GroupRateLimitOptions>;
+
+  constructor(delayMs: number, opts?: GroupRateLimitOptions) {
+    super('group rate limited');
+    this.name = 'GroupRateLimitError';
+    this.delayMs = delayMs;
+    this.opts = {
+      currentJob: opts?.currentJob ?? 'requeue',
+      requeuePosition: opts?.requeuePosition ?? 'front',
+      extend: opts?.extend ?? 'max',
+    };
+  }
+}

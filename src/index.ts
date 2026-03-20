@@ -58,7 +58,9 @@ export {
   DelayedError,
   BatchError,
   WaitingChildrenError,
+  GroupRateLimitError,
 } from './errors';
+export type { GroupRateLimitOptions } from './errors';
 export { isClusterClient } from './connection';
 export { gracefulShutdown } from './graceful-shutdown';
 export type { GracefulShutdownHandle } from './graceful-shutdown';
