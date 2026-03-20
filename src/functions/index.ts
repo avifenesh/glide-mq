@@ -32,7 +32,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 70: Unify ordering path: ZSET groupq, nextSeq tracking, ordering gates in all activation paths.
 // Version 71: Step-job slot retention, returning step-job bypass, GROUP_ORDERED sentinel.
 // Version 72: Runtime per-group rate limiting: glidemq_rateLimitGroup + glidemq_rateLimitGroupExternal.
-export const LIBRARY_VERSION = '72';
+// Version 73: Fix review findings: groupqScore string ID fallback, promoteRateLimited loop, step-job gates in Phase 1/3, retry slot retention, addFlow routing.
+export const LIBRARY_VERSION = '73';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -157,7 +158,12 @@ end
 local function groupqScore(jobKey, jobId)
   local seq = tonumber(redis.call('HGET', jobKey, 'orderingSeq'))
   if seq and seq > 0 then return seq end
-  return tonumber(jobId) or 0
+  local num = tonumber(jobId)
+  if num then return num end
+  -- String IDs: use timestamp from job hash to preserve insertion order
+  local ts = tonumber(redis.call('HGET', jobKey, 'timestamp'))
+  if ts then return ts end
+  return 0
 end
 
 
@@ -1065,17 +1071,20 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
             local priMaxConc = tonumber(priGrp.maxConcurrency) or 0
             local priActive = tonumber(priGrp.active) or 0
             local priWaitListKey = prefix .. 'groupq:' .. priGroupKey
-            -- Ordering gate or concurrency gate: park in groupq
+            local priReturning = (priOrdSeq > 0 and priNextSeq > 0 and priOrdSeq < priNextSeq)
+            -- Ordering gate or concurrency gate (skip for returning step-jobs)
             if (priOrdSeq > 0 and priNextSeq > 0 and priOrdSeq > priNextSeq) or
-               (priMaxConc > 0 and priActive >= priMaxConc) then
+               (priMaxConc > 0 and priActive >= priMaxConc and not priReturning) then
               local priScore = priOrdSeq > 0 and priOrdSeq or tonumber(priJobId) or 0
               redis.call('ZADD', priWaitListKey, priScore, priJobId)
               redis.call('HSET', priJobKey, 'state', 'group-waiting')
             else
               -- All gates pass: activate with group bookkeeping
               redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
-              redis.call('HINCRBY', priGroupHashKey, 'active', 1)
-              if priOrdSeq > 0 then
+              if not priReturning then
+                redis.call('HINCRBY', priGroupHashKey, 'active', 1)
+              end
+              if priOrdSeq > 0 and not priReturning then
                 redis.call('HSET', priGroupHashKey, 'nextSeq', tostring(priOrdSeq + 1))
                 redis.call('ZREM', priWaitListKey, priJobId)
               end
@@ -1191,6 +1200,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
     -- Ordering gate
     local nextJobOrderingSeq = tonumber(redis.call('HGET', nextJobKey, 'orderingSeq')) or 0
+    local nextReturning = false
     if nextJobOrderingSeq > 0 then
       local nextExpectedSeq = tonumber(nGrp.nextSeq) or 0
       if nextExpectedSeq > 0 and nextJobOrderingSeq > nextExpectedSeq then
@@ -1200,9 +1210,10 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         redis.call('HSET', nextJobKey, 'state', 'group-waiting')
         return {'NEXT_NONE', jobId}
       end
+      nextReturning = (nextExpectedSeq > 0 and nextJobOrderingSeq < nextExpectedSeq)
     end
-    -- Concurrency gate (avoids burning rate/token slots on parked jobs)
-    if nextMaxConc > 0 and nextActive >= nextMaxConc then
+    -- Concurrency gate (skip for returning step-jobs)
+    if nextMaxConc > 0 and nextActive >= nextMaxConc and not nextReturning then
       redis.call('XACK', streamKey, group, nextEntryId)
       redis.call('XDEL', streamKey, nextEntryId)
       redis.call('ZADD', nextWaitListKey, groupqScore(nextJobKey, nextJobId), nextJobId)
@@ -1278,8 +1289,10 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         end
       end
     end
-    redis.call('HINCRBY', nextGroupHashKey, 'active', 1)
-    if nextJobOrderingSeq > 0 then
+    if not nextReturning then
+      redis.call('HINCRBY', nextGroupHashKey, 'active', 1)
+    end
+    if nextJobOrderingSeq > 0 and not nextReturning then
       redis.call('HSET', nextGroupHashKey, 'nextSeq', tostring(nextJobOrderingSeq + 1))
       redis.call('ZREM', nextWaitListKey, nextJobId)
     end
@@ -1333,7 +1346,11 @@ redis.register_function('glidemq_fail', function(keys, args)
       'failedReason', failedReason,
       'processedOn', tostring(timestamp)
     )
-    releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
+    -- Only release group slot if not an ordering-key job (ordering jobs hold the slot through retries)
+    local failOrdSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+    if failOrdSeq <= 0 then
+      releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
+    end
     emitEvent(eventsKey, 'retrying', jobId, {
       'failedReason', failedReason,
       'attemptsMade', tostring(attemptsMade),
@@ -1826,9 +1843,10 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
         canPromote = math.min(canPromote, math.max(0, maxConc - active))
       end
       local prNextSeq = tonumber(prGrp.nextSeq) or 0
+      local groupPromoted = 0
       local prIter = 0
       local prMaxIter = canPromote + 20
-      while promoted < canPromote + promoted and prIter < prMaxIter do
+      while groupPromoted < canPromote and prIter < prMaxIter do
         prIter = prIter + 1
         local zpResult = redis.call('ZPOPMIN', waitListKey, 1)
         local nextJobId = zpResult[1]
@@ -1850,6 +1868,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
           xaddJob(streamKey, nextJobId, redis.call('HGET', nextJobKey, 'name'))
           redis.call('HSET', nextJobKey, 'state', 'waiting')
           promoted = promoted + 1
+          groupPromoted = groupPromoted + 1
           if prNextSeq > 0 then prNextSeq = prNextSeq + 1 end
         end
       end
@@ -2199,9 +2218,9 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   local parentRateMax, parentRateDuration = extractGroupRateLimitFromOpts(parentOpts)
   local parentTbCapacity, parentTbRefillRate = extractTokenBucketFromOpts(parentOpts)
   local parentCost = extractCostFromOpts(parentOpts)
-  local parentUseGroup = (parentOrderingKey ~= '' and (parentGroupConc > 1 or parentRateMax > 0 or parentTbCapacity > 0))
+  local parentUseGroup = (parentOrderingKey ~= '')
   local parentOrderingSeq = 0
-  if parentOrderingKey ~= '' and not parentUseGroup then
+  if parentOrderingKey ~= '' then
     local parentOrderingMetaKey = parentPrefix .. 'ordering'
     parentOrderingSeq = redis.call('HINCRBY', parentOrderingMetaKey, parentOrderingKey, 1)
   end
@@ -2220,9 +2239,17 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   if parentUseGroup then
     parentHash[#parentHash + 1] = 'groupKey'
     parentHash[#parentHash + 1] = parentOrderingKey
+    if parentOrderingSeq > 0 then
+      parentHash[#parentHash + 1] = 'orderingSeq'
+      parentHash[#parentHash + 1] = tostring(parentOrderingSeq)
+    end
+    if parentGroupConc < 1 then parentGroupConc = 1 end
     local groupHashKey = parentPrefix .. 'group:' .. parentOrderingKey
-    redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(parentGroupConc > 1 and parentGroupConc or 1))
+    redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(parentGroupConc))
     redis.call('HSETNX', groupHashKey, 'active', '0')
+    if parentOrderingSeq > 0 and redis.call('HEXISTS', groupHashKey, 'nextSeq') == 0 then
+      redis.call('HSET', groupHashKey, 'nextSeq', '1')
+    end
     if parentRateMax > 0 then
       redis.call('HSET', groupHashKey, 'rateMax', tostring(parentRateMax))
       redis.call('HSET', groupHashKey, 'rateDuration', tostring(parentRateDuration))
@@ -2236,11 +2263,6 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       redis.call('HSETNX', groupHashKey, 'tbLastRefill', tostring(timestamp))
       redis.call('HSETNX', groupHashKey, 'tbRefillRemainder', '0')
     end
-  elseif parentOrderingKey ~= '' then
-    parentHash[#parentHash + 1] = 'orderingKey'
-    parentHash[#parentHash + 1] = parentOrderingKey
-    parentHash[#parentHash + 1] = 'orderingSeq'
-    parentHash[#parentHash + 1] = tostring(parentOrderingSeq)
   end
   if parentCost > 0 then
     parentHash[#parentHash + 1] = 'cost'
@@ -2302,9 +2324,9 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     local childRateMax, childRateDuration = extractGroupRateLimitFromOpts(childOpts)
     local childTbCapacity, childTbRefillRate = extractTokenBucketFromOpts(childOpts)
     local childCost = extractCostFromOpts(childOpts)
-    local childUseGroup = (childOrderingKey ~= '' and (childGroupConc > 1 or childRateMax > 0 or childTbCapacity > 0))
+    local childUseGroup = (childOrderingKey ~= '')
     local childOrderingSeq = 0
-    if childOrderingKey ~= '' and not childUseGroup then
+    if childOrderingKey ~= '' then
       local childOrderingMetaKey = childPrefix .. 'ordering'
       childOrderingSeq = redis.call('HINCRBY', childOrderingMetaKey, childOrderingKey, 1)
     end
@@ -2324,9 +2346,17 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     if childUseGroup then
       childHash[#childHash + 1] = 'groupKey'
       childHash[#childHash + 1] = childOrderingKey
+      if childOrderingSeq > 0 then
+        childHash[#childHash + 1] = 'orderingSeq'
+        childHash[#childHash + 1] = tostring(childOrderingSeq)
+      end
+      if childGroupConc < 1 then childGroupConc = 1 end
       local childGroupHashKey = childPrefix .. 'group:' .. childOrderingKey
-      redis.call('HSETNX', childGroupHashKey, 'maxConcurrency', tostring(childGroupConc > 1 and childGroupConc or 1))
+      redis.call('HSETNX', childGroupHashKey, 'maxConcurrency', tostring(childGroupConc))
       redis.call('HSETNX', childGroupHashKey, 'active', '0')
+      if childOrderingSeq > 0 and redis.call('HEXISTS', childGroupHashKey, 'nextSeq') == 0 then
+        redis.call('HSET', childGroupHashKey, 'nextSeq', '1')
+      end
       if childRateMax > 0 then
         redis.call('HSET', childGroupHashKey, 'rateMax', tostring(childRateMax))
         redis.call('HSET', childGroupHashKey, 'rateDuration', tostring(childRateDuration))
@@ -2337,11 +2367,6 @@ redis.register_function('glidemq_addFlow', function(keys, args)
         redis.call('HSETNX', childGroupHashKey, 'tbLastRefill', tostring(timestamp))
         redis.call('HSETNX', childGroupHashKey, 'tbRefillRemainder', '0')
       end
-    elseif childOrderingKey ~= '' then
-      childHash[#childHash + 1] = 'orderingKey'
-      childHash[#childHash + 1] = childOrderingKey
-      childHash[#childHash + 1] = 'orderingSeq'
-      childHash[#childHash + 1] = tostring(childOrderingSeq)
     end
     if childCost > 0 then
       childHash[#childHash + 1] = 'cost'
