@@ -5,6 +5,7 @@
 [![CI](https://github.com/avifenesh/glide-mq/actions/workflows/ci.yml/badge.svg)](https://github.com/avifenesh/glide-mq/actions/workflows/ci.yml)
 [![node](https://img.shields.io/node/v/glide-mq)](https://nodejs.org/)
 [![changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](CHANGELOG.md)
+[![docs](https://img.shields.io/badge/docs-glide--mq.dev-6366f1)](https://avifenesh.github.io/glide-mq.dev/)
 
 High-performance message queue for Node.js built on Valkey/Redis Streams with 1-RTT job operations and cluster-native design.
 
@@ -230,8 +231,10 @@ For zero-overhead integration, call Valkey Server Functions directly from any la
 | [@glidemq/fastify](https://github.com/avifenesh/glidemq-fastify) | Fastify plugin -- REST endpoints, SSE, serverless Producer | [npm](https://www.npmjs.com/package/@glidemq/fastify) |
 | [@glidemq/nestjs](https://github.com/avifenesh/glidemq-nestjs) | NestJS module -- decorators, DI, lifecycle management | [npm](https://www.npmjs.com/package/@glidemq/nestjs) |
 | [@glidemq/dashboard](https://github.com/avifenesh/glidemq-dashboard) | Web UI -- metrics charts, scheduler management, job mutations | [npm](https://www.npmjs.com/package/@glidemq/dashboard) |
+| [@glidemq/hapi](https://github.com/avifenesh/glidemq-hapi) | Hapi plugin -- REST endpoints, SSE, Joi validation | [npm](https://www.npmjs.com/package/@glidemq/hapi) |
 | [@glidemq/speedkey](https://github.com/avifenesh/speedkey) | Valkey GLIDE client with native NAPI bindings | [npm](https://www.npmjs.com/package/@glidemq/speedkey) |
-| [glidemq-examples](https://github.com/avifenesh/glidemq-examples) | 34 runnable examples across frameworks and use cases | [GitHub](https://github.com/avifenesh/glidemq-examples) |
+| [glidemq-examples](https://github.com/avifenesh/glidemq-examples) | 40+ runnable examples across frameworks and use cases | [GitHub](https://github.com/avifenesh/glidemq-examples) |
+| [glide-mq.dev](https://avifenesh.github.io/glide-mq.dev/) | Full documentation, guides, API reference | [Website](https://avifenesh.github.io/glide-mq.dev/) |
 
 > If glide-mq is useful to you, consider [starring the repo](https://github.com/avifenesh/glide-mq). It helps others find the project.
 
