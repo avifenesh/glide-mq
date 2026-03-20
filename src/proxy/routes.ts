@@ -253,7 +253,7 @@ export function createRoutes(
       }
 
       const queue = await getQueue(param(req, 'name'));
-      const results = await Promise.all(jobs.map((j) => queue.add(j.name, j.data ?? null, j.opts)));
+      const results = await queue.addBulk(jobs.map((j) => ({ name: j.name, data: j.data ?? null, opts: j.opts })));
 
       const responseJobs: (AddJobResponse | AddJobSkippedResponse)[] = results.map((job) =>
         job ? { id: job.id, name: job.name, timestamp: job.timestamp } : { skipped: true },
