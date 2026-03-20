@@ -29,6 +29,7 @@ import {
   WaitingChildrenError,
   UnrecoverableError,
   BatchError,
+  GroupRateLimitError,
 } from './errors';
 import {
   completeJob,
@@ -36,6 +37,7 @@ import {
   failJob,
   addJob,
   rateLimit as rateLimitFn,
+  rateLimitGroup as rateLimitGroupFn,
   moveToActive,
   moveActiveToDelayed,
   moveToWaitingChildren,
@@ -1170,6 +1172,32 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           });
         } catch (delayErr) {
           const err = delayErr instanceof Error ? delayErr : new Error(String(delayErr));
+          await this.handleJobFailure(job, currentJobId, currentEntryId, err);
+        }
+        return;
+      }
+
+      if (processError instanceof GroupRateLimitError) {
+        if (!this.commandClient) return;
+        try {
+          const rlResult = await rateLimitGroupFn(
+            this.commandClient,
+            this.queueKeys,
+            currentJobId,
+            currentEntryId,
+            processError.delayMs,
+            Date.now(),
+            this.consumerGroup,
+            processError.opts.currentJob,
+            processError.opts.requeuePosition,
+            processError.opts.extend,
+            this.broadcastMode ? true : undefined,
+          );
+          if (rlResult.startsWith('error:')) {
+            throw new Error(`Cannot rate limit group: ${rlResult.slice(6)}`);
+          }
+        } catch (rlErr) {
+          const err = rlErr instanceof Error ? rlErr : new Error(String(rlErr));
           await this.handleJobFailure(job, currentJobId, currentEntryId, err);
         }
         return;

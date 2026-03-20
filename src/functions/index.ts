@@ -28,9 +28,11 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 66: glidemq_reclaimStalledListJobs - stall detection for list-sourced jobs via bounded SCAN.
 // Version 67: reclaimStalledListJobs - increase SCAN bounds (maxIter 100->1000, COUNT 50->500) for large DBs.
 // Version 68: completeAndFetchNext HMGET optimization - merge 4 separate hash lookups into 1 HMGET (13→10 redis.call()s on hot path).
-// Version 69: Remove auto-ID EXISTS check
-// Version 70: Unify ordering path: ZSET groupq, nextSeq tracking, ordering gates in all activation paths. - monotonic INCR can't collide; custom numeric IDs advance counter to prevent future conflicts.
-export const LIBRARY_VERSION = '71';
+// Version 69: Remove auto-ID EXISTS check - monotonic INCR can't collide; custom numeric IDs advance counter to prevent future conflicts.
+// Version 70: Unify ordering path: ZSET groupq, nextSeq tracking, ordering gates in all activation paths.
+// Version 71: Step-job slot retention, returning step-job bypass, GROUP_ORDERED sentinel.
+// Version 72: Runtime per-group rate limiting: glidemq_rateLimitGroup + glidemq_rateLimitGroupExternal.
+export const LIBRARY_VERSION = '72';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -2909,6 +2911,96 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
   return 'ok'
 end)
 
+redis.register_function('glidemq_rateLimitGroup', function(keys, args)
+  local jobKey = keys[1]
+  local streamKey = keys[2]
+  local jobId = args[1]
+  local entryId = args[2]
+  local group = args[3]
+  local duration = tonumber(args[4]) or 0
+  local timestamp = tonumber(args[5]) or 0
+  local broadcastMode = args[6] or '0'
+  local currentJob = args[7] or 'requeue'
+  local requeuePosition = args[8] or 'front'
+  local extend = args[9] or 'max'
+
+  local state = redis.call('HGET', jobKey, 'state')
+  if state ~= 'active' then return 'error:not_active' end
+
+  local groupKey = redis.call('HGET', jobKey, 'groupKey')
+  if not groupKey or groupKey == '' then return 'error:no_group' end
+
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  local groupHashKey = prefix .. 'group:' .. groupKey
+  local waitListKey = prefix .. 'groupq:' .. groupKey
+  local rateLimitedKey = prefix .. 'ratelimited'
+  local eventsKey = prefix .. 'events'
+
+  if entryId ~= '' then pcall(redis.call, 'XACK', streamKey, group, entryId) end
+  if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
+  if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
+
+  local active = tonumber(redis.call('HGET', groupHashKey, 'active')) or 0
+  if active > 0 then redis.call('HSET', groupHashKey, 'active', tostring(active - 1)) end
+
+  if currentJob == 'requeue' then
+    local orderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+    local score
+    if requeuePosition == 'front' then
+      score = orderingSeq > 0 and orderingSeq or 0
+    else
+      local lastEntry = redis.call('ZRANGE', waitListKey, -1, -1, 'WITHSCORES')
+      if lastEntry and #lastEntry >= 2 then
+        score = tonumber(lastEntry[2]) + 1
+      else
+        score = orderingSeq > 0 and orderingSeq or (tonumber(jobId) or 0)
+      end
+    end
+    redis.call('ZADD', waitListKey, score, jobId)
+    redis.call('HSET', jobKey, 'state', 'group-waiting')
+  else
+    redis.call('ZADD', prefix .. 'failed', timestamp, jobId)
+    local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
+    redis.call('HSET', jobKey, 'state', 'failed', 'failedReason', 'group rate limited', 'finishedOn', tostring(timestamp), 'processedOn', tostring(processedOn))
+    emitEvent(eventsKey, 'failed', jobId, {'failedReason', 'group rate limited'})
+    local metricsKey = prefix .. 'metrics:failed'
+    recordMetrics(metricsKey, timestamp, timestamp - processedOn)
+  end
+
+  local resumeAt = timestamp + duration
+  if extend == 'max' then
+    local existing = tonumber(redis.call('ZSCORE', rateLimitedKey, groupKey))
+    if existing and existing > resumeAt then resumeAt = existing end
+  end
+  redis.call('ZADD', rateLimitedKey, resumeAt, groupKey)
+
+  emitEvent(eventsKey, 'group-rate-limited', jobId, {
+    'groupKey', groupKey, 'duration', tostring(duration), 'resumeAt', tostring(resumeAt)
+  })
+  return tostring(resumeAt)
+end)
+
+redis.register_function('glidemq_rateLimitGroupExternal', function(keys, args)
+  local rateLimitedKey = keys[1]
+  local eventsKey = keys[2]
+  local groupKey = args[1]
+  local duration = tonumber(args[2]) or 0
+  local timestamp = tonumber(args[3]) or 0
+  local extend = args[4] or 'max'
+
+  local resumeAt = timestamp + duration
+  if extend == 'max' then
+    local existing = tonumber(redis.call('ZSCORE', rateLimitedKey, groupKey))
+    if existing and existing > resumeAt then resumeAt = existing end
+  end
+  redis.call('ZADD', rateLimitedKey, resumeAt, groupKey)
+
+  emitEvent(eventsKey, 'group-rate-limited', '', {
+    'groupKey', groupKey, 'duration', tostring(duration), 'resumeAt', tostring(resumeAt)
+  })
+  return resumeAt
+end)
+
 redis.register_function('glidemq_searchByName', function(keys, args)
   local stateKey = keys[1]
   local stateType = args[1]
@@ -3849,6 +3941,64 @@ export async function moveToActive(
  */
 export async function promoteRateLimited(client: Client, k: QueueKeys, timestamp: number): Promise<number> {
   const result = await client.fcall('glidemq_promoteRateLimited', [k.ratelimited, k.stream], [timestamp.toString()]);
+  return Number(result) || 0;
+}
+
+/**
+ * Rate-limit a specific ordering group from inside a worker processor.
+ * Re-parks the current job in the group queue and registers the group
+ * in the ratelimited ZADD for the scheduler to unblock after duration.
+ * Returns the resumeAt timestamp as a string, or 'error:...' on failure.
+ */
+export async function rateLimitGroup(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  entryId: string,
+  duration: number,
+  timestamp: number,
+  group: string,
+  currentJob: 'requeue' | 'fail' = 'requeue',
+  requeuePosition: 'front' | 'back' = 'front',
+  extend: 'max' | 'replace' = 'max',
+  broadcastMode?: boolean,
+): Promise<string> {
+  const result = await client.fcall(
+    'glidemq_rateLimitGroup',
+    [k.job(jobId), k.stream],
+    [
+      jobId,
+      entryId,
+      group,
+      duration.toString(),
+      timestamp.toString(),
+      broadcastMode ? '1' : '0',
+      currentJob,
+      requeuePosition,
+      extend,
+    ],
+  );
+  return String(result);
+}
+
+/**
+ * Rate-limit a group from outside the worker (e.g. from a webhook or health check).
+ * Registers the group in the ratelimited ZADD without re-parking a specific job.
+ * Returns the resumeAt timestamp.
+ */
+export async function rateLimitGroupExternal(
+  client: Client,
+  k: QueueKeys,
+  groupKey: string,
+  duration: number,
+  timestamp: number,
+  extend: 'max' | 'replace' = 'max',
+): Promise<number> {
+  const result = await client.fcall(
+    'glidemq_rateLimitGroupExternal',
+    [k.ratelimited, k.events],
+    [groupKey, duration.toString(), timestamp.toString(), extend],
+  );
   return Number(result) || 0;
 }
 

@@ -4,7 +4,8 @@ import type { JobOptions, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
-import { GlideMQError, DelayedError, WaitingChildrenError } from './errors';
+import { GlideMQError, DelayedError, WaitingChildrenError, GroupRateLimitError } from './errors';
+import type { GroupRateLimitOptions } from './errors';
 import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
@@ -410,6 +411,24 @@ export class Job<D = any, R = any> {
       this.requestMoveToDelayed(delayedUntil);
     }
     throw new DelayedError(delayedUntil);
+  }
+
+  /**
+   * Rate-limit this job's ordering group for the given duration (milliseconds).
+   * The current job is re-parked in the group queue (by default at the front)
+   * and the entire group is paused until the duration expires.
+   *
+   * Can only be called from inside a Worker processor.
+   * Throws GroupRateLimitError which the worker catches internally.
+   */
+  async rateLimitGroup(duration: number, opts?: GroupRateLimitOptions): Promise<never> {
+    if (!Number.isFinite(duration) || duration <= 0) {
+      throw new Error('duration must be a positive finite number (milliseconds)');
+    }
+    if (!this.groupKey) {
+      throw new Error('rateLimitGroup() requires a group key (set via ordering.key option)');
+    }
+    throw new GroupRateLimitError(Math.trunc(duration), opts);
   }
 
   /**
