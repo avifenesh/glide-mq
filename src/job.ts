@@ -6,7 +6,7 @@ import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
 import { GlideMQError, DelayedError, WaitingChildrenError, GroupRateLimitError } from './errors';
 import type { GroupRateLimitOptions } from './errors';
-import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
+import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE, jsonReviver } from './utils';
 import { isClusterClient } from './connection';
 
 export class Job<D = any, R = any> {
@@ -570,7 +570,7 @@ export class Job<D = any, R = any> {
     }
 
     try {
-      opts = JSON.parse(hash.opts || '{}');
+      opts = JSON.parse(hash.opts || '{}', jsonReviver);
     } catch {
       opts = {};
     }
@@ -593,21 +593,21 @@ export class Job<D = any, R = any> {
     job.schedulerName = hash.schedulerName || undefined;
     if (hash.parentIds) {
       try {
-        job.parentIds = JSON.parse(hash.parentIds);
+        job.parentIds = JSON.parse(hash.parentIds, jsonReviver);
       } catch {
         job.parentIds = undefined;
       }
     }
     if (hash.parentQueues) {
       try {
-        job.parentQueues = JSON.parse(hash.parentQueues);
+        job.parentQueues = JSON.parse(hash.parentQueues, jsonReviver);
       } catch {
         job.parentQueues = undefined;
       }
     }
     if (hash.progress) {
       try {
-        job.progress = JSON.parse(hash.progress);
+        job.progress = JSON.parse(hash.progress, jsonReviver);
       } catch {
         job.progress = parseInt(hash.progress, 10) || 0;
       }

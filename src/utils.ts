@@ -855,3 +855,15 @@ export function compileSubjectMatcher(patterns: string[] | undefined): ((subject
   }
   return (subject) => patterns.some((p) => matchSubject(p, subject));
 }
+
+/**
+ * A JSON reviver function to prevent prototype pollution.
+ * Explicitly drops dangerous keys like __proto__, constructor, and prototype.
+ * Use this when parsing internal system data, but NOT for arbitrary user payloads.
+ */
+export function jsonReviver(key: string, value: unknown): unknown {
+  if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+    return undefined;
+  }
+  return value;
+}
