@@ -6,25 +6,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
-
-### Performance
-
-- **HMGET consolidation in `completeAndFetchNext`**: merge 4 separate hash lookups (EXISTS, HGET revoked, HGET expireAt, HGET groupKey) into 1 HMGET. Reduces redis.call()s from 13 to 10 on hot path. Same optimization applied to priority/LIFO list paths.
-- **Remove auto-ID EXISTS check**: monotonic INCR cannot collide. Custom numeric IDs advance the counter via `advanceIdCounter` helper to prevent future conflicts. Saves 1 redis.call() per add.
-- TS-side micro-optimizations: `withSpan` lazy attributes overload, `Buffer.byteLength` skip for small payloads, cached retention objects, `completionHints` skip for non-ordered jobs, avoid `JSON.stringify({})` allocation.
-- ElastiCache results: c=1 gap eliminated (was -12%, now +0.5%), c=10 +32-40%.
+## [0.12.0] - 2026-03-20
 
 ### Added
 
-- Queue/Producer option `events: false` to skip XADD 'added' event emission on job add. Saves 1 redis.call() per add. Applies to `add()`, `addBulk()`, and deduplication paths.
+- **Runtime per-group rate limiting** (#148): three complementary APIs for pausing individual ordering groups at runtime.
+  - `job.rateLimitGroup(duration, opts?)` - pause from inside the processor (e.g., on 429 response)
+  - `throw new GroupRateLimitError(duration, opts?)` - throw-style sugar
+  - `queue.rateLimitGroup(groupKey, duration, opts?)` - pause from outside (webhooks, health checks)
+  - Options: `currentJob` (requeue|fail), `requeuePosition` (front|back), `extend` (max|replace)
+- **Ordering path unification** (#158): all `ordering.key` jobs now route through the group path with implicit `concurrency: 1`. Enables group features (runtime rate limiting, token bucket) for all ordering-key users.
+  - ZSET groupq for ordered promotion (score = orderingSeq)
+  - `nextSeq` counter on group hash gates all 6 activation paths
+  - Step-jobs hold ordering slot until full completion
+  - Returning step-jobs bypass concurrency/rate gates
+- `GroupRateLimitError` and `GroupRateLimitOptions` exported from public API.
+- `BroadcastWorker.waitUntilReady()` method (#149).
+- Queue/Producer option `events: false` to skip XADD 'added' event emission on job add.
+
+### Performance
+
+- **HMGET consolidation in `completeAndFetchNext`**: merge 4 separate hash lookups into 1 HMGET. Reduces redis.call()s from 13 to 10 on hot path.
+- **Remove auto-ID EXISTS check**: monotonic INCR cannot collide. Saves 1 redis.call() per add.
+- **Parallel resource cleanup** in test fixtures (#151).
+- **Multi-key DEL** for queue obliteration (#154).
+- TS-side micro-optimizations: `withSpan` lazy attributes, `Buffer.byteLength` skip, cached retention objects.
 
 ### Fixed
 
-- `addBulk` and `Producer.addBulk` dedup batch paths now correctly pass `skipEvents` to `glidemq_dedup`.
-- `advanceIdCounter` only matches pure decimal strings and uses the original string (not `tostring()`) to avoid Lua float precision loss on large IDs.
-- Dedup debounce 'removed' event now gated behind `skipEvents` flag.
-- Fuzz test: filter transient client timeouts under concurrent storm on cluster.
+- `Broadcast.publish()` signature documented correctly - subject is first arg (#152).
+- DLQ configuration location clarified in docs (#153).
+- `addBulk` dedup batch paths correctly pass `skipEvents`.
+- `advanceIdCounter` avoids Lua float precision loss on large IDs.
+- `flatted` dependency bumped to resolve prototype pollution vulnerability.
+
+### Breaking
+
+- `groupq` key type changed from LIST to ZSET. Existing groups with queued jobs need migration (drain before upgrade). Pre-stable, acceptable.
+
+## [Unreleased]
 
 ---
 
