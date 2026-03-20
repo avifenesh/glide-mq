@@ -595,7 +595,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
-          String(p.lifo ? 1 : 0),
+          p.lifo ? '1' : '0',
           p.parentQueue,
           this.skipEvents ? '1' : '0',
         ]);
@@ -622,7 +622,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           p.jobCost.toString(),
           p.ttl.toString(),
           p.customJobId,
-          String(p.lifo ? 1 : 0),
+          p.lifo ? '1' : '0',
           p.parentQueue,
           '',
           this.skipEvents ? '1' : '0',
