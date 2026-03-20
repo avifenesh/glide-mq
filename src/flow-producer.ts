@@ -117,7 +117,7 @@ export class FlowProducer {
         throw new Error('ttl must be a non-negative finite number');
       }
       let groupConcurrency = opts.ordering?.concurrency ?? 0;
-      if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
+      if (opts.ordering?.key && groupConcurrency < 1) {
         groupConcurrency = 1;
       }
       const serializedData = this.serializer.serialize(flow.data);
@@ -395,7 +395,10 @@ export class FlowProducer {
           }
 
           // Extract rate-limit and token bucket params
-          const groupConcurrency = opts.ordering?.concurrency ?? 0;
+          let groupConcurrency = opts.ordering?.concurrency ?? 0;
+          if (opts.ordering?.key && groupConcurrency < 1) {
+            groupConcurrency = 1;
+          }
           const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
           const groupRateDuration = opts.ordering?.rateLimit?.duration ?? 0;
           const tbCapacity = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.capacity * 1000) : 0;
