@@ -757,6 +757,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       | 'GROUP_FULL'
       | 'GROUP_RATE_LIMITED'
       | 'GROUP_TOKEN_LIMITED'
+      | 'GROUP_ORDERED'
       | 'ERR:COST_EXCEEDS_CAPACITY'
       | null,
     jobId: string,
@@ -810,6 +811,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       moveResult === 'GROUP_FULL' ||
       moveResult === 'GROUP_RATE_LIMITED' ||
       moveResult === 'GROUP_TOKEN_LIMITED' ||
+      moveResult === 'GROUP_ORDERED' ||
       moveResult === 'ERR:COST_EXCEEDS_CAPACITY'
     ) {
       return true;

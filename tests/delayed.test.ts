@@ -228,15 +228,15 @@ describeEachMode('Delayed jobs', (CONNECTION) => {
     const delayedDeadline = Date.now() + 5000;
     while (Date.now() < delayedDeadline) {
       const firstState = String(await cleanupClient.hget(k.job(first.id), 'state'));
-      const waitLen = Number(await cleanupClient.llen(`glide:{${qName}}:groupq:tenant-a`));
-      if (firstState === 'delayed' && waitLen === 0) {
+      if (firstState === 'delayed') {
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
 
     expect(String(await cleanupClient.hget(k.job(first.id), 'state'))).toBe('delayed');
-    expect(Number(await cleanupClient.llen(`glide:{${qName}}:groupq:tenant-a`))).toBe(0);
+    // second is in groupq because the ordering-key step-job holds the group slot
+    expect(Number(await cleanupClient.zcard(`glide:{${qName}}:groupq:tenant-a`))).toBe(1);
 
     await new Promise((resolve) => setTimeout(resolve, 125));
     expect(processed).toEqual(['first:send']);

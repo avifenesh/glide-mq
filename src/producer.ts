@@ -202,7 +202,7 @@ export class Producer<D = any> {
       jobCost = Math.round(opts.cost * 1000);
     }
     let groupConcurrency = opts?.ordering?.concurrency ?? 0;
-    if ((groupRateMax > 0 || tbCapacity > 0) && groupConcurrency < 1) {
+    if (orderingKey && groupConcurrency < 1) {
       groupConcurrency = 1;
     }
     validateOrderingKey(orderingKey);
