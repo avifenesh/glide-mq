@@ -3964,7 +3964,17 @@ export async function rateLimitGroup(
   const result = await client.fcall(
     'glidemq_rateLimitGroup',
     [k.job(jobId), k.stream],
-    [jobId, entryId, group, duration.toString(), timestamp.toString(), broadcastMode ? '1' : '0', currentJob, requeuePosition, extend],
+    [
+      jobId,
+      entryId,
+      group,
+      duration.toString(),
+      timestamp.toString(),
+      broadcastMode ? '1' : '0',
+      currentJob,
+      requeuePosition,
+      extend,
+    ],
   );
   return String(result);
 }
