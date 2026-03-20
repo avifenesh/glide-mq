@@ -73,14 +73,15 @@ describeEachMode('FlowProducer', (CONNECTION) => {
     });
 
     const k = buildKeys(qName);
-    const parentOrderingKey = await cleanupClient.hget(k.job(node.job.id), 'orderingKey');
+    // Ordering-key jobs use the group path: groupKey + orderingSeq
+    const parentGroupKey = await cleanupClient.hget(k.job(node.job.id), 'groupKey');
     const parentOrderingSeq = await cleanupClient.hget(k.job(node.job.id), 'orderingSeq');
-    const childOrderingKey = await cleanupClient.hget(k.job(node.children![0].job.id), 'orderingKey');
+    const childGroupKey = await cleanupClient.hget(k.job(node.children![0].job.id), 'groupKey');
     const childOrderingSeq = await cleanupClient.hget(k.job(node.children![0].job.id), 'orderingSeq');
 
-    expect(String(parentOrderingKey)).toBe('parent-key');
+    expect(String(parentGroupKey)).toBe('parent-key');
     expect(Number(parentOrderingSeq)).toBe(1);
-    expect(String(childOrderingKey)).toBe('child-key');
+    expect(String(childGroupKey)).toBe('child-key');
     expect(Number(childOrderingSeq)).toBe(1);
 
     await flow.close();
