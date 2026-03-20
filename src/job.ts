@@ -426,7 +426,7 @@ export class Job<D = any, R = any> {
       throw new Error('duration must be a positive finite number (milliseconds)');
     }
     if (!this.groupKey) {
-      throw new Error('rateLimitGroup() requires an ordering key on the job');
+      throw new Error('rateLimitGroup() requires a group key (set via ordering.key option)');
     }
     throw new GroupRateLimitError(Math.trunc(duration), opts);
   }

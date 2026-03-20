@@ -28,9 +28,10 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 66: glidemq_reclaimStalledListJobs - stall detection for list-sourced jobs via bounded SCAN.
 // Version 67: reclaimStalledListJobs - increase SCAN bounds (maxIter 100->1000, COUNT 50->500) for large DBs.
 // Version 68: completeAndFetchNext HMGET optimization - merge 4 separate hash lookups into 1 HMGET (13→10 redis.call()s on hot path).
-// Version 69: Remove auto-ID EXISTS check
+// Version 69: Remove auto-ID EXISTS check - monotonic INCR can't collide; custom numeric IDs advance counter to prevent future conflicts.
 // Version 70: Unify ordering path: ZSET groupq, nextSeq tracking, ordering gates in all activation paths.
-// Version 72: Runtime per-group rate limiting: glidemq_rateLimitGroup + glidemq_rateLimitGroupExternal. - monotonic INCR can't collide; custom numeric IDs advance counter to prevent future conflicts.
+// Version 71: Step-job slot retention, returning step-job bypass, GROUP_ORDERED sentinel.
+// Version 72: Runtime per-group rate limiting: glidemq_rateLimitGroup + glidemq_rateLimitGroupExternal.
 export const LIBRARY_VERSION = '72';
 
 // Consumer group name used by workers
@@ -2959,9 +2960,10 @@ redis.register_function('glidemq_rateLimitGroup', function(keys, args)
     redis.call('HSET', jobKey, 'state', 'group-waiting')
   else
     redis.call('ZADD', prefix .. 'failed', timestamp, jobId)
-    redis.call('HSET', jobKey, 'state', 'failed', 'failedReason', 'group rate limited', 'finishedOn', tostring(timestamp))
-    local metricsKey = prefix .. 'metrics:failed'
     local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
+    redis.call('HSET', jobKey, 'state', 'failed', 'failedReason', 'group rate limited', 'finishedOn', tostring(timestamp), 'processedOn', tostring(processedOn))
+    emitEvent(eventsKey, 'failed', jobId, {'failedReason', 'group rate limited'})
+    local metricsKey = prefix .. 'metrics:failed'
     recordMetrics(metricsKey, timestamp, timestamp - processedOn)
   end
 

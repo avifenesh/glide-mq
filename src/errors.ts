@@ -63,6 +63,9 @@ export class GroupRateLimitError extends GlideMQError {
   readonly opts: Required<GroupRateLimitOptions>;
 
   constructor(delayMs: number, opts?: GroupRateLimitOptions) {
+    if (!Number.isFinite(delayMs) || delayMs <= 0) {
+      throw new GlideMQError('GroupRateLimitError requires a positive finite duration in milliseconds');
+    }
     super('group rate limited');
     this.name = 'GroupRateLimitError';
     this.delayMs = delayMs;

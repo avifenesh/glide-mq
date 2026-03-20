@@ -1738,19 +1738,21 @@ export class Queue<D = any, R = any> extends EventEmitter {
   }
 
   /**
-   * Close the queue and release the underlying client connection.
-   * Idempotent: safe to call multiple times.
-   */
-  /**
    * Rate-limit a specific ordering group from outside the worker processor.
    * Registers the group in the ratelimited ZADD — the scheduler will unblock it after duration.
    * Any in-flight job for the group continues; new activations are blocked until resumeAt.
    */
   async rateLimitGroup(groupKey: string, duration: number, opts?: { extend?: 'max' | 'replace' }): Promise<number> {
+    if (!groupKey) throw new Error('groupKey must be a non-empty string');
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error('duration must be a positive finite number');
     const client = await this.getClient();
     return rateLimitGroupExternal(client, this.keys, groupKey, duration, Date.now(), opts?.extend ?? 'max');
   }
 
+  /**
+   * Close the queue and release the underlying client connection.
+   * Idempotent: safe to call multiple times.
+   */
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
