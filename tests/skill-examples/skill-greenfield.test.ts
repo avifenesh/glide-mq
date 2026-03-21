@@ -197,7 +197,7 @@ describe('SKILL.md examples', () => {
 
     const queue = new TestQueue('tasks');
     const processed: any[] = [];
-    const _worker = new TestWorker(queue, async (job: any) => {
+    const worker = new TestWorker(queue, async (job: any) => {
       processed.push(job.data);
       return { ok: true };
     });
@@ -854,7 +854,7 @@ describe('serverless.md examples', () => {
     const queue = new TestQueue('tasks');
     const results: any[] = [];
 
-    const _worker = new TestWorker(queue, async (job: any) => {
+    const worker = new TestWorker(queue, async (job: any) => {
       results.push({ processed: job.data });
       return { processed: job.data };
     });
@@ -878,7 +878,7 @@ describe('serverless.md examples', () => {
     const queue = new TestQueue('batch-test');
     const results: any[] = [];
     // Use batch timeout of 0 so partial batches process immediately
-    const _worker = new TestWorker(
+    const worker = new TestWorker(
       queue,
       async (jobs: any[]) => {
         const out = jobs.map((j: any) => ({ doubled: j.data.n * 2 }));

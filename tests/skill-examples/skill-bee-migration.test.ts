@@ -453,7 +453,7 @@ describe('Bee api-mapping.md', () => {
   it('close components individually (api-mapping.md:289)', async () => {
     const qName = uid('bee-am-close');
     const queue = new Queue(qName, { connection });
-    const _worker = new Worker(qName, async () => 'ok', { connection });
+    const worker = new Worker(qName, async () => 'ok', { connection });
     const events = new QueueEvents(qName, { connection });
 
     await worker.close();
@@ -468,7 +468,7 @@ describe('Bee api-mapping.md', () => {
     // Add a job first to create the stream so the worker doesn't error
     await queue.add('init', {});
 
-    const _worker = new Worker(qName, async () => 'ok', { connection });
+    const worker = new Worker(qName, async () => 'ok', { connection });
 
     // Wait briefly for worker to process the job
     await waitFor(async () => {
@@ -842,7 +842,7 @@ describe('Bee new-features.md', () => {
       ),
     );
 
-    worker.on('failed', (_job, err) => failedReasons.push(err.message));
+    worker.on('failed', (job, err) => failedReasons.push(err.message));
 
     await queue.add('validate', {}, { attempts: 5 });
     await waitFor(() => failedReasons.length > 0);
@@ -862,7 +862,7 @@ describe('Bee new-features.md', () => {
     const queue = new TestQueue('tasks');
     const processed: any[] = [];
 
-    const _worker = new TestWorker(queue, async (job: any) => {
+    const worker = new TestWorker(queue, async (job: any) => {
       processed.push({ processed: true });
       return { processed: true };
     });
