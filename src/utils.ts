@@ -72,6 +72,17 @@ export function decompress(data: string): string {
   return gunzipSync(buf, { maxOutputLength: MAX_JOB_DATA_SIZE }).toString('utf8');
 }
 
+// ---- JSON Reviver ----
+
+/**
+ * A reviver function for JSON.parse to prevent prototype pollution.
+ * Drops '__proto__', 'constructor', and 'prototype' keys.
+ */
+export function jsonReviver(key: string, value: unknown): unknown {
+  if (key === '__proto__' || key === 'constructor' || key === 'prototype') return undefined;
+  return value;
+}
+
 // Valkey SCAN glob special characters that must be escaped in key patterns
 const GLOB_SPECIAL = /[*?\[\]\\]/g;
 

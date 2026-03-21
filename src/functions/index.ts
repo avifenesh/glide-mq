@@ -1,5 +1,6 @@
 import type { Client } from '../types';
 import type { GlideReturnType } from '@glidemq/speedkey';
+import { jsonReviver } from '../utils';
 
 export const LIBRARY_NAME = 'glidemq';
 // Version 44: Added metrics recording (time-series data for getMetrics).
@@ -3700,7 +3701,7 @@ export async function completeAndFetchNext(
   }
 
   // Backward compatibility: JSON protocol (older library versions)
-  const parsed = JSON.parse(String(raw));
+  const parsed = JSON.parse(String(raw), jsonReviver);
   if (!parsed.next || parsed.next === false) {
     return { completed: parsed.completed, next: false };
   }
@@ -3951,7 +3952,7 @@ export async function moveToActive(
   if (str === 'GROUP_ORDERED') return 'GROUP_ORDERED';
   if (str === 'ERR:COST_EXCEEDS_CAPACITY') return 'ERR:COST_EXCEEDS_CAPACITY';
   // Backward compatibility: older library returns cjson string
-  const arr = JSON.parse(str) as string[];
+  const arr = JSON.parse(str, jsonReviver) as string[];
   const hash: Record<string, string> = Object.create(null);
   for (let i = 0; i < arr.length; i += 2) {
     hash[String(arr[i])] = String(arr[i + 1]);
@@ -4324,7 +4325,7 @@ export async function addFlow(
   }
 
   const result = await client.fcall('glidemq_addFlow', keys, args);
-  return JSON.parse(result as string) as string[];
+  return JSON.parse(result as string, jsonReviver) as string[];
 }
 
 /**

@@ -1,3 +1,4 @@
+import { jsonReviver } from './utils';
 /**
  * In-memory testing mode for glide-mq.
  * TestQueue and TestWorker mimic the real API using plain Maps - no Valkey needed.
@@ -556,7 +557,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       nextRun,
     };
     // Store via JSON roundtrip to detach from caller references (matches production serialization)
-    this.schedulers.set(name, JSON.parse(JSON.stringify(entry)));
+    this.schedulers.set(name, JSON.parse(JSON.stringify(entry), jsonReviver));
     this.ensureSchedulerLoop();
   }
 
@@ -568,13 +569,13 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   async getJobScheduler(name: string): Promise<SchedulerEntry | null> {
     const entry = this.schedulers.get(name);
     if (!entry) return null;
-    return JSON.parse(JSON.stringify(entry));
+    return JSON.parse(JSON.stringify(entry), jsonReviver);
   }
 
   async getRepeatableJobs(): Promise<{ name: string; entry: SchedulerEntry }[]> {
     return [...this.schedulers.entries()].map(([name, entry]) => ({
       name,
-      entry: JSON.parse(JSON.stringify(entry)),
+      entry: JSON.parse(JSON.stringify(entry), jsonReviver),
     }));
   }
 
@@ -701,7 +702,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
             this.schedulers.delete(name);
           } else {
             entry.nextRun = nextRun;
-            this.schedulers.set(name, JSON.parse(JSON.stringify(entry)));
+            this.schedulers.set(name, JSON.parse(JSON.stringify(entry), jsonReviver));
           }
         }
       }
