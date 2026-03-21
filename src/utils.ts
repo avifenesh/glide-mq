@@ -855,3 +855,24 @@ export function compileSubjectMatcher(patterns: string[] | undefined): ((subject
   }
   return (subject) => patterns.some((p) => matchSubject(p, subject));
 }
+
+/**
+ * JSON reviver that prevents prototype pollution by stripping dangerous keys.
+ *
+ * JSON.parse natively treats "__proto__" as a regular own-property, so direct
+ * parsing alone is safe. However, defense-in-depth is warranted because:
+ *  1. Parsed objects may later be spread/merged via Object.assign or deep merge
+ *     in downstream consumer code.
+ *  2. Redis data could be tampered with outside the application's control.
+ *
+ * Only strips the three prototype-chain keys — all other user data is preserved.
+ * Apply to internal system metadata (scheduler configs, worker opts, etc.).
+ * Do NOT apply to user-facing fields (e.g., job.progress) where arbitrary keys
+ * are legitimate and silent dropping causes data loss.
+ */
+export function jsonReviver(key: string, value: unknown): unknown {
+  if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+    return undefined;
+  }
+  return value;
+}

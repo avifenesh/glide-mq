@@ -3,6 +3,7 @@ import type { GlideClient, GlideClusterClient, ReadFrom } from '@glidemq/speedke
 export type Client = GlideClient | GlideClusterClient;
 
 export type { ReadFrom } from '@glidemq/speedkey';
+import { jsonReviver } from './utils';
 
 /** Standard password-based credentials. */
 export interface PasswordCredentials {
@@ -250,7 +251,7 @@ export interface Serializer {
 /** Default JSON serializer used when no custom serializer is provided. */
 export const JSON_SERIALIZER: Serializer = {
   serialize: (data) => JSON.stringify(data),
-  deserialize: (raw) => JSON.parse(raw),
+  deserialize: (raw) => JSON.parse(raw, jsonReviver),
 };
 
 export interface JobData {

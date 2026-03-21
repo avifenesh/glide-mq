@@ -16,7 +16,7 @@ import {
   healListActive,
 } from './functions/index';
 import type { buildKeys } from './utils';
-import { computeFollowingSchedulerNextRun, isValidSchedulerEvery, MAX_JOB_DATA_SIZE } from './utils';
+import { computeFollowingSchedulerNextRun, isValidSchedulerEvery, MAX_JOB_DATA_SIZE, jsonReviver } from './utils';
 import { isClusterClient } from './connection';
 
 export interface SchedulerOptions {
@@ -357,7 +357,7 @@ export class Scheduler {
         const schedulerName = String(entry.field);
         let config: SchedulerEntry;
         try {
-          config = JSON.parse(String(entry.value));
+          config = JSON.parse(String(entry.value), jsonReviver);
         } catch {
           continue;
         }
