@@ -388,7 +388,7 @@ describe('BullMQ new-features.md', () => {
     const { TestQueue, TestWorker } = require('../../dist/testing');
 
     const queue = new TestQueue<{ email: string }, { sent: boolean }>('tasks');
-    const worker = new TestWorker(queue, async (job: any) => {
+    const _worker = new TestWorker(queue, async (job: any) => {
       return { sent: true };
     });
 

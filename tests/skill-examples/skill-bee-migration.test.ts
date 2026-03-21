@@ -95,7 +95,7 @@ describe('Bee SKILL.md - connection and basic usage', () => {
     const worker = track(
       new Worker(
         qName,
-        async (job) => {
+        async (_job) => {
           processed.push({ processed: true });
           return { processed: true };
         },
@@ -103,7 +103,7 @@ describe('Bee SKILL.md - connection and basic usage', () => {
       ),
     );
 
-    worker.on('completed', (job) => {
+    worker.on('completed', (_job) => {
       // Verify returnValue is accessible
       expect(job).toBeTruthy();
     });
@@ -137,7 +137,7 @@ describe('Bee SKILL.md - connection and basic usage', () => {
     const worker = track(
       new Worker(
         qName,
-        async (job) => {
+        async (_job) => {
           await job.updateProgress(50);
           await job.updateProgress({ page: 3, total: 10 });
           await job.log('halfway done');
@@ -200,7 +200,7 @@ describe('Bee api-mapping.md', () => {
     const worker = track(
       new Worker(
         qName,
-        async (job) => {
+        async (_job) => {
           processed.push(job.data);
           return 'ok';
         },
@@ -324,7 +324,7 @@ describe('Bee api-mapping.md', () => {
     const worker = track(
       new Worker(
         qName,
-        async (job) => {
+        async (_job) => {
           results.push({ result: job.data.x * 2 });
           return { result: job.data.x * 2 };
         },
@@ -345,7 +345,7 @@ describe('Bee api-mapping.md', () => {
     const worker = track(
       new Worker(
         qName,
-        async (job) => {
+        async (_job) => {
           results.push(job.data);
           return job.data;
         },
@@ -365,7 +365,7 @@ describe('Bee api-mapping.md', () => {
     const worker = track(
       new Worker(
         qName,
-        async (job) => {
+        async (_job) => {
           await job.updateProgress(30);
           await job.updateProgress({ page: 3, total: 10 });
           await job.log('Processing page 3 of 10');
@@ -453,7 +453,7 @@ describe('Bee api-mapping.md', () => {
   it('close components individually (api-mapping.md:289)', async () => {
     const qName = uid('bee-am-close');
     const queue = new Queue(qName, { connection });
-    const worker = new Worker(qName, async () => 'ok', { connection });
+    const _worker = new Worker(qName, async () => 'ok', { connection });
     const events = new QueueEvents(qName, { connection });
 
     await worker.close();
@@ -468,7 +468,7 @@ describe('Bee api-mapping.md', () => {
     // Add a job first to create the stream so the worker doesn't error
     await queue.add('init', {});
 
-    const worker = new Worker(qName, async () => 'ok', { connection });
+    const _worker = new Worker(qName, async () => 'ok', { connection });
 
     // Wait briefly for worker to process the job
     await waitFor(async () => {
@@ -551,7 +551,7 @@ describe('Bee api-mapping.md', () => {
     const worker = track(
       new Worker(
         qName,
-        async (job) => {
+        async (_job) => {
           return { result: 'done' };
         },
         { connection },
@@ -643,7 +643,7 @@ describe('Bee new-features.md', () => {
     const inventory = track(
       new BroadcastWorker(
         bName,
-        async (job) => {
+        async (_job) => {
           received.push({ service: 'inventory', data: job.data });
         },
         { connection, subscription: 'inventory-service' },
@@ -813,7 +813,7 @@ describe('Bee new-features.md', () => {
     const worker = track(
       new Worker(
         qName,
-        async (job) => {
+        async (_job) => {
           return { reply: job.data.prompt };
         },
         { connection },
@@ -832,7 +832,7 @@ describe('Bee new-features.md', () => {
     const worker = track(
       new Worker(
         qName,
-        async (job) => {
+        async (_job) => {
           if (!job.data.requiredField) {
             throw new UnrecoverableError('missing required field');
           }
@@ -862,7 +862,7 @@ describe('Bee new-features.md', () => {
     const queue = new TestQueue('tasks');
     const processed: any[] = [];
 
-    const worker = new TestWorker(queue, async (job: any) => {
+    const _worker = new TestWorker(queue, async (job: any) => {
       processed.push({ processed: true });
       return { processed: true };
     });

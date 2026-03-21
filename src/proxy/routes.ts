@@ -259,7 +259,7 @@ export function createRoutes(
           name: j.name,
           data: j.data ?? null,
           opts: j.opts,
-        }))
+        })),
       );
 
       const responseJobs: (AddJobResponse | AddJobSkippedResponse)[] = results.map((job) =>
