@@ -1446,7 +1446,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   private async refreshMetaFlags(): Promise<void> {
     if (!this.commandClient) return;
     try {
-      // Read only the 3 specific fields we need - avoids O(N) on orderdone:* fields
+      // Read only the 5 specific fields we need - avoids O(N) on orderdone:* fields
       const vals = await this.commandClient.hmget(this.queueKeys.meta, [
         'globalConcurrency',
         'rateLimitMax',

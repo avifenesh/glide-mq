@@ -133,6 +133,8 @@ local function tbRefill(groupHashKey, g, now)
   return newTokens
 end
 
+-- recordMetrics uses duration sampling (first METRICS_DURATION_SAMPLE_RATE exact, then every Nth scaled).
+-- avgDuration computed from these samples is an approximation with bounded bias of ±(SAMPLE_RATE-1)/SAMPLE_RATE.
 local function recordMetrics(metricsKey, timestamp, duration)
   local minuteTs = timestamp - (timestamp % 60000)
   local newCount = tonumber(redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':c', 1))
@@ -177,6 +179,8 @@ local function groupqScore(jobKey, jobId)
   return 0
 end
 
+
+local rescheduleRepeatAfterComplete  -- forward declaration (defined below)
 
 local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   local gk = hintGroupKey

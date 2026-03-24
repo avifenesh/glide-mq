@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Breaking
+
+- `completed` QueueEvents payload no longer includes `returnvalue`. Use `job.getReturnvalue()` or retrieve the job via `queue.getJob(jobId)` instead.
+
+---
+
 ## [0.12.0] - 2026-03-20
 
 ### Added

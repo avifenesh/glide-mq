@@ -365,7 +365,7 @@ interface JobOptions {
 ```typescript
 class QueueEvents {
   constructor(name: string, opts?: QueueEventsOptions);
-  on(event: 'completed', handler: (args: { jobId: string; returnvalue: string }) => void): void;
+  on(event: 'completed', handler: (args: { jobId: string }) => void): void;
   on(event: 'failed', handler: (args: { jobId: string; failedReason: string }) => void): void;
   on(event: 'progress', handler: (args: { jobId: string; data: any }) => void): void;
   on(event: 'added' | 'stalled' | 'paused' | 'resumed', handler: Function): void;

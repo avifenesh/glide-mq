@@ -1115,6 +1115,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       .map(([timestamp, b]) => ({
         timestamp,
         count: b.count,
+        // avgDuration is an approximation — durations are sampled (see recordMetrics in Lua source).
         avgDuration: b.count > 0 ? Math.round(b.totalDuration / b.count) : 0,
       }));
 

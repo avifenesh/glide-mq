@@ -441,7 +441,7 @@ const events = new QueueEvents('tasks', { connection });
 
 events.on('added', ({ jobId }) => console.log('added', jobId));
 events.on('progress', ({ jobId, data }) => console.log('progress', jobId, data));
-events.on('completed', ({ jobId, returnvalue }) => console.log('completed', jobId, returnvalue));
+events.on('completed', ({ jobId }) => console.log('completed', jobId));
 events.on('failed', ({ jobId, failedReason }) => console.log('failed', jobId, failedReason));
 events.on('stalled', ({ jobId }) => console.log('stalled', jobId));
 events.on('paused', () => console.log('queue paused'));
