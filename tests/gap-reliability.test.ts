@@ -347,10 +347,31 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       const Q = uniqueQueue('mem-heap');
       // Use a longer requestTimeout in cluster mode to avoid transient timeouts
       // after heavy tests (e.g., fuzzer) exhaust the cluster connection pool.
-      const conn = CONNECTION.clusterMode
-        ? { ...CONNECTION, requestTimeout: 5000 }
-        : CONNECTION;
-      const queue = new Queue(Q, { connection: conn });
+      const conn = CONNECTION.clusterMode ? { ...CONNECTION, requestTimeout: 10000 } : CONNECTION;
+
+      // Retry Queue creation in cluster mode — the cluster may still be recovering
+      // from heavy fuzzer tests that ran before this suite, causing transient timeouts.
+      const maxAttempts = CONNECTION.clusterMode ? 3 : 1;
+      let queue: InstanceType<typeof Queue>;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          queue = new Queue(Q, { connection: conn });
+          // Warm up the connection by adding a probe job
+          await queue.add('probe', { attempt });
+          break;
+        } catch (err) {
+          if (attempt < maxAttempts && CONNECTION.clusterMode) {
+            try {
+              await queue!.close();
+            } catch {
+              /* ignore */
+            }
+            await new Promise((r) => setTimeout(r, 2000 * attempt));
+            continue;
+          }
+          throw err;
+        }
+      }
 
       if (global.gc) global.gc();
       const baseline = process.memoryUsage().heapUsed;
@@ -404,9 +425,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       // Cluster mode uses more connections per client, so use fewer instances
       const instanceCount = CONNECTION.clusterMode ? 10 : 50;
       // Use longer requestTimeout for cluster to handle transient timeouts
-      const conn = CONNECTION.clusterMode
-        ? { ...CONNECTION, requestTimeout: 5000 }
-        : CONNECTION;
+      const conn = CONNECTION.clusterMode ? { ...CONNECTION, requestTimeout: 5000 } : CONNECTION;
 
       for (let i = 0; i < instanceCount; i++) {
         const Q = uniqueQueue(`leak-q-${i}`);
