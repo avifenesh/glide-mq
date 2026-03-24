@@ -105,6 +105,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected globalRateLimitEnabled = false;
   protected cachedRateLimitMax = 0;
   protected cachedRateLimitDuration = 0;
+  protected hasPriorityJobs = false;
+  protected hasLifoJobs = false;
   protected sandboxClose?: (force?: boolean) => Promise<void>;
   protected workerHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   protected pollLoopPromise: Promise<void> | null = null;
@@ -662,7 +664,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           continue;
         }
 
-        const parentInfo = await this.buildParentInfo(entry.job, entry.jobId);
+        const parentInfo =
+          entry.job.parentId || entry.job.parentQueue ? await this.buildParentInfo(entry.job, entry.jobId) : undefined;
 
         await completeJob(
           this.commandClient!,
@@ -680,6 +683,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         entry.job.returnvalue = result;
         entry.job.finishedOn = Date.now();
         if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
+        if (entry.job.schedulerName) {
+          await this.updateSchedulerAfterComplete(entry.job.schedulerName, entry.job.finishedOn);
+        }
       }
     } else if (batchError) {
       // Partial failure: process each result individually
@@ -715,7 +721,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             continue;
           }
 
-          const parentInfo = await this.buildParentInfo(entry.job, entry.jobId);
+          const parentInfo =
+            entry.job.parentId || entry.job.parentQueue ? await this.buildParentInfo(entry.job, entry.jobId) : undefined;
 
           await completeJob(
             this.commandClient!,
@@ -733,6 +740,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           entry.job.returnvalue = result as R;
           entry.job.finishedOn = Date.now();
           if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
+          if (entry.job.schedulerName) {
+            await this.updateSchedulerAfterComplete(entry.job.schedulerName, entry.job.finishedOn);
+          }
         }
       }
     } else if (thrownError) {
@@ -988,22 +998,18 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * update the scheduler entry so the next job is scheduled.
    *
    * KNOWN LIMITATIONS:
-   * 1. Non-atomic: This update happens after the job completion transaction,
-   *    so a worker crash between completion and this call will leave the scheduler
-   *    stuck at nextRun=0 (awaiting completion sentinel) indefinitely.
-   * 2. Non-worker failures: Jobs that reach terminal failure outside the worker
-   *    path (e.g., revoked jobs, expired jobs in moveToActive, stalled terminal
-   *    failures in glidemq_reclaimStalled) never trigger this update, leaving
-   *    the scheduler permanently stuck.
-   * 3. Race conditions: The idempotency check (nextRun === 0) prevents duplicate
-   *    updates from stalled reclaim, but doesn't prevent races with concurrent
-   *    upsertJobScheduler/removeJobScheduler (those use scheduler lock, this doesn't).
+   * 1. Non-atomic successful completion: this update still happens after the
+   *    completion transaction, so a worker crash between completion and this call
+   *    can leave the scheduler stuck at nextRun=0 (awaiting completion sentinel).
+   * 2. Race conditions: The idempotency check (nextRun === 0) prevents duplicate
+   *    updates, but doesn't prevent races with concurrent upsertJobScheduler /
+   *    removeJobScheduler (those use a scheduler lock, this path doesn't).
    *
    * MITIGATION: Run multiple workers for redundancy. Manually remove/re-add the
    * scheduler to recover from stuck state.
    *
-   * FUTURE WORK: Move scheduler update into Lua completion/failure functions to
-   * make it atomic and handle all terminal failure paths.
+   * FUTURE WORK: Move successful-completion scheduler updates into Lua so the
+   * await-completion sentinel can be cleared atomically.
    */
   protected async updateSchedulerAfterComplete(schedulerName: string, now: number): Promise<void> {
     if (!this.commandClient) return;
@@ -1283,6 +1289,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         !!job.parentIds,
         this.skipEvents,
         this.skipMetrics,
+        this.hasPriorityJobs || this.hasLifoJobs,
       );
 
       job.returnvalue = processResult;
@@ -1348,12 +1355,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
   protected startHeartbeat(jobId: string): void {
     if (!this.commandClient) return;
-    // Only start periodic heartbeat for long lockDurations where stall detection matters.
-    // moveToActive already writes the initial lastActive - protects against immediate stall reclaim.
-    // For the default 30s lockDuration with 30s stalledInterval, the heartbeat fires at 15s.
-    // Skip entirely if lockDuration >= stalledInterval (initial write is sufficient for one cycle).
-    if (this.lockDuration >= this.stalledInterval) return;
     const interval = this.lockDuration / 2;
+    // moveToActive already writes the initial lastActive. We only need a recurring
+    // heartbeat when the next write can happen before stalled reclaim would fire.
+    // Example: lockDuration=30s => heartbeat every 15s, which safely refreshes
+    // the default stalledInterval=30s window. If the heartbeat cadence would be
+    // equal to or slower than stalled reclaim, skip it and let reclaim happen.
+    if (interval >= this.stalledInterval) return;
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
     const timer = setInterval(() => {
@@ -1441,14 +1449,30 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         'globalConcurrency',
         'rateLimitMax',
         'rateLimitDuration',
+        'hasPriority',
+        'hasLifo',
       ]);
       const gcVal = vals?.[0] != null ? String(vals[0]) : null;
       const rlMax = vals?.[1] != null ? String(vals[1]) : null;
       const rlDur = vals?.[2] != null ? String(vals[2]) : null;
+      const hasPriorityVal = vals?.[3] != null ? String(vals[3]) : null;
+      const hasLifoVal = vals?.[4] != null ? String(vals[4]) : null;
       this.globalConcurrencyEnabled = gcVal != null && Number(gcVal) > 0;
       this.globalRateLimitEnabled = rlMax != null && Number(rlMax) > 0;
       this.cachedRateLimitMax = Number(rlMax) || 0;
       this.cachedRateLimitDuration = Number(rlDur) || 0;
+      this.hasPriorityJobs =
+        hasPriorityVal != null
+          ? hasPriorityVal === '1'
+          : typeof this.commandClient.llen === 'function'
+            ? (await this.commandClient.llen(this.queueKeys.priority)) > 0
+            : false;
+      this.hasLifoJobs =
+        hasLifoVal != null
+          ? hasLifoVal === '1'
+          : typeof this.commandClient.llen === 'function'
+            ? (await this.commandClient.llen(this.queueKeys.lifo)) > 0
+            : false;
     } catch {
       // Transient error - next tick will retry
     }

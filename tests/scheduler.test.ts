@@ -3,7 +3,7 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -779,6 +779,73 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     await localQueue.close();
     await flushQueue(cleanupClient, qName);
   }, 15000);
+
+  it('repeatAfterComplete schedules next after stalled terminal failure outside worker fail path', async () => {
+    const qName = Q + '-rac-stalled';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const k = buildKeys(qName);
+
+    await localQueue.upsertJobScheduler('rac-stalled-test', { repeatAfterComplete: 300 }, { name: 'rac-stalled-job' });
+
+    let firstJobId = '';
+    let firstWorkerStarted = false;
+    const hangingWorker = new Worker(
+      qName,
+      async (job: any) => {
+        firstJobId = job.id;
+        firstWorkerStarted = true;
+        await new Promise(() => {});
+        return 'never';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 100,
+        stalledInterval: 60000,
+        promotionInterval: 100,
+      },
+    );
+    hangingWorker.on('error', () => {});
+
+    await hangingWorker.waitUntilReady();
+    await waitFor(() => firstWorkerStarted, 6000, 50);
+    await hangingWorker.close(true);
+
+    let resumedRuns = 0;
+    const recoveryWorker = new Worker(
+      qName,
+      async () => {
+        resumedRuns++;
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 100,
+        stalledInterval: 500,
+        maxStalledCount: 1,
+        promotionInterval: 100,
+      },
+    );
+    recoveryWorker.on('error', () => {});
+
+    await recoveryWorker.waitUntilReady();
+    await waitFor(async () => String(await cleanupClient.hget(k.job(firstJobId), 'state')) === 'failed', 8000, 100);
+    await waitFor(() => resumedRuns > 0, 8000, 100);
+
+    await recoveryWorker.close(true);
+
+    expect(String(await cleanupClient.hget(k.job(firstJobId), 'state'))).toBe('failed');
+    expect(resumedRuns).toBeGreaterThanOrEqual(1);
+
+    const rawScheduler = await cleanupClient.hget(k.schedulers, 'rac-stalled-test');
+    if (rawScheduler != null) {
+      expect(JSON.parse(String(rawScheduler)).nextRun).not.toBe(0);
+    }
+
+    await localQueue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 20000);
 
   it('repeatAfterComplete respects limit', async () => {
     const qName = Q + '-rac-limit';

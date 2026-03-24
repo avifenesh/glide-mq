@@ -759,8 +759,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
             if (!eventType || payload.jobId !== jobId) continue;
 
             if (eventType === 'completed') {
-              const raw = payload.returnvalue ?? 'null';
-              return this.serializer.deserialize(raw) as R;
+              const client = await this.getClient();
+              const raw = await client.hget(this.keys.job(jobId), 'returnvalue');
+              return this.serializer.deserialize(raw != null ? String(raw) : 'null') as R;
             }
 
             if (eventType === 'failed' || eventType === 'expired' || eventType === 'revoked') {

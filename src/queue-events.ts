@@ -146,10 +146,14 @@ export class QueueEvents extends EventEmitter {
 
         if (!eventType) continue;
 
-        this.emit(eventType, payload);
-
         // Update lastId to this entry so we don't re-read it
         this.lastId = String(entryId);
+
+        try {
+          this.emit(eventType, payload);
+        } catch (err) {
+          this.emit('error', err instanceof Error ? err : new Error(String(err)));
+        }
       }
     }
   }

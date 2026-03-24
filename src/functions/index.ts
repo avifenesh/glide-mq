@@ -33,7 +33,13 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 71: Step-job slot retention, returning step-job bypass, GROUP_ORDERED sentinel.
 // Version 72: Runtime per-group rate limiting: glidemq_rateLimitGroup + glidemq_rateLimitGroupExternal.
 // Version 73: Fix review findings: groupqScore string ID fallback, promoteRateLimited loop, step-job gates in Phase 1/3, retry slot retention, addFlow routing.
-export const LIBRARY_VERSION = '73';
+// Version 74: Fix repeatAfterComplete scheduler recovery in Lua terminal-failure paths.
+// Version 75: Reload glidemq_fail after follow-up scheduler helper fixes.
+// Version 76: Remove returnvalue from completed QueueEvents payloads.
+// Version 77: Sample metrics avgDuration to reduce hot-path writes while keeping counts exact.
+// Version 78: Scale sampled avgDuration writes instead of storing sample counts.
+// Version 79: Skip completeAndFetchNext list probes when queue has not seen list-backed jobs.
+export const LIBRARY_VERSION = '79';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -43,6 +49,7 @@ export const CONSUMER_GROUP = 'workers';
 export const LIBRARY_SOURCE = `#!lua name=glidemq
 
 local PRIORITY_SHIFT = 4398046511104
+local METRICS_DURATION_SAMPLE_RATE = 8
 
 local function emitEvent(eventsKey, eventType, jobId, extraFields)
   local fields = {'event', eventType, 'jobId', tostring(jobId)}
@@ -129,8 +136,12 @@ end
 local function recordMetrics(metricsKey, timestamp, duration)
   local minuteTs = timestamp - (timestamp % 60000)
   local newCount = tonumber(redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':c', 1))
-  if duration > 0 then
-    redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':d', duration)
+  if duration > 0 and newCount then
+    if newCount <= METRICS_DURATION_SAMPLE_RATE then
+      redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':d', duration)
+    elseif (newCount % METRICS_DURATION_SAMPLE_RATE) == 0 then
+      redis.call('HINCRBY', metricsKey, 'm:' .. minuteTs .. ':d', duration * METRICS_DURATION_SAMPLE_RATE)
+    end
   end
   if newCount and (newCount % 1000 == 0) then
     local cutoff = minuteTs - 86400000
@@ -239,6 +250,7 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
             'state', 'failed',
             'failedReason', 'cost exceeds token bucket capacity',
             'finishedOn', tostring(ts))
+          rescheduleRepeatAfterComplete(headJobKey, prefix, ts)
           emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
           recordMetrics(metricsKey, ts, ts - processedOn)
         elseif tbTokensCur < headCost then
@@ -301,6 +313,39 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   end
 end
 
+local function rescheduleRepeatAfterComplete(jobKey, prefix, now)
+  local schedulerName = redis.call('HGET', jobKey, 'schedulerName')
+  if not schedulerName or schedulerName == '' then return end
+
+  local schedulersKey = prefix .. 'schedulers'
+  local raw = redis.call('HGET', schedulersKey, schedulerName)
+  if not raw or raw == '' then return end
+
+  local ok, config = pcall(cjson.decode, raw)
+  if not ok or type(config) ~= 'table' then return end
+
+  local repeatAfterComplete = tonumber(config['repeatAfterComplete']) or 0
+  if repeatAfterComplete <= 0 then return end
+  if tonumber(config['nextRun']) ~= 0 then return end
+
+  local limit = tonumber(config['limit'])
+  local iterationCount = tonumber(config['iterationCount']) or 0
+  if limit and iterationCount >= limit then
+    redis.call('HDEL', schedulersKey, schedulerName)
+    return
+  end
+
+  local nextRun = now + repeatAfterComplete
+  local endDate = tonumber(config['endDate'])
+  if endDate and nextRun > endDate then
+    redis.call('HDEL', schedulersKey, schedulerName)
+    return
+  end
+
+  config['nextRun'] = nextRun
+  redis.call('HSET', schedulersKey, schedulerName, cjson.encode(config))
+end
+
 local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, hintOrderingSeq, hintGroupKey)
   if curState == 'failed' then return true end
   local wasActive = (curState == 'active')
@@ -318,6 +363,7 @@ local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, 
   if wasActive then
     releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   end
+  rescheduleRepeatAfterComplete(jobKey, prefix, now)
   emitEvent(eventsKey, 'expired', jobId, nil)
   recordMetrics(metricsKey, now, now - processedOn)
   return true
@@ -452,6 +498,7 @@ local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, ma
     )
     markOrderingDone(jobKey, jobId)
     releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
+    rescheduleRepeatAfterComplete(jobKey, prefix, timestamp)
     emitEvent(eventsKey, 'failed', jobId, {
       'failedReason', 'job stalled more than maxStalledCount'
     })
@@ -506,6 +553,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local schedulerName = args[20] or ''
   local skipEvents = args[21] or '0'
   local prefix = string.sub(idKey, 1, #idKey - 2)
+  local metaKey = prefix .. 'meta'
   local jobIdStr
   local jobKey
   if customJobId ~= '' then
@@ -646,12 +694,20 @@ redis.register_function('glidemq_addJob', function(keys, args)
   if delay > 0 then
     local score = priority * PRIORITY_SHIFT + (timestamp + delay)
     redis.call('ZADD', scheduledKey, score, jobIdStr)
+    if priority > 0 then
+      redis.call('HSET', metaKey, 'hasPriority', '1')
+    end
+    if lifo > 0 then
+      redis.call('HSET', metaKey, 'hasLifo', '1')
+    end
   elseif priority > 0 then
     local score = priority * PRIORITY_SHIFT
     redis.call('ZADD', scheduledKey, score, jobIdStr)
+    redis.call('HSET', metaKey, 'hasPriority', '1')
   elseif lifo > 0 then
     local lifoKey = prefix .. 'lifo'
     redis.call('RPUSH', lifoKey, jobIdStr)
+    redis.call('HSET', metaKey, 'hasLifo', '1')
   else
     xaddJob(streamKey, jobIdStr, jobName)
   end
@@ -804,7 +860,7 @@ redis.register_function('glidemq_complete', function(keys, args)
   )
   markOrderingDone(jobKey, jobId)
   releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
-  emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
+  emitEvent(eventsKey, 'completed', jobId, nil)
   recordMetrics(metricsKey, timestamp, timestamp - processedOn)
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   if broadcastMode ~= '1' then
@@ -922,6 +978,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local hasParents = args[17] or '0'
   local skipEvents = args[18] or '0'
   local skipMetrics = args[19] or '0'
+  local checkLists = args[20] or '1'
 
   -- Phase 1: Complete current job (same as glidemq_complete)
   local processedOn
@@ -944,7 +1001,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   if currentGroupKey ~= '__' then
     releaseGroupSlotAndPromote(jobKey, jobId, timestamp, currentGroupKey)
   end
-  if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
+  if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, nil) end
   if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
@@ -1044,9 +1101,10 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId}
   -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ...}
 
-  -- Phase 1.0: Try priority list first (highest priority: priority > LIFO > FIFO)
-  local priorityKey = prefix .. 'priority'
-  for _priAttempt = 1, 3 do
+  if checkLists ~= '0' then
+    -- Phase 1.0: Try priority list first (highest priority: priority > LIFO > FIFO)
+    local priorityKey = prefix .. 'priority'
+    for _priAttempt = 1, 3 do
     local priJobId = redis.call('RPOP', priorityKey)
     if not priJobId then
       break  -- priority list is empty
@@ -1106,11 +1164,11 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         end
       end
     end
-  end
+    end
 
-  -- Phase 1.5: Try LIFO list (before stream), retry up to 3 times
-  local lifoKey = prefix .. 'lifo'
-  for _lifoAttempt = 1, 3 do
+    -- Phase 1.5: Try LIFO list (before stream), retry up to 3 times
+    local lifoKey = prefix .. 'lifo'
+    for _lifoAttempt = 1, 3 do
     local lifoJobId = redis.call('RPOP', lifoKey)
     if not lifoJobId then
       break  -- LIFO list is empty
@@ -1132,6 +1190,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
           expireJob(lifoJobKey, lifoJobId, prefix, timestamp, lifoMeta[1], nil, nil, nil)
         end
       end
+    end
     end
   end
 
@@ -1239,6 +1298,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
           'state', 'failed',
           'failedReason', 'cost exceeds token bucket capacity',
           'finishedOn', tostring(timestamp))
+        rescheduleRepeatAfterComplete(nextJobKey, prefix, tonumber(timestamp))
         if skipEvents ~= '1' then emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
         if skipMetrics ~= '1' then recordMetrics(metricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn) end
         return {'NEXT_NONE', jobId}
@@ -1325,6 +1385,7 @@ redis.register_function('glidemq_fail', function(keys, args)
   local removeCount = tonumber(args[9]) or 0
   local removeAge = tonumber(args[10]) or 0
   local broadcastMode = args[11] or '0'
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
@@ -1368,9 +1429,9 @@ redis.register_function('glidemq_fail', function(keys, args)
     )
     markOrderingDone(jobKey, jobId)
     releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
+    rescheduleRepeatAfterComplete(jobKey, string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)), timestamp)
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
     recordMetrics(metricsKey, timestamp, timestamp - processedOn)
-    local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     -- In broadcast mode, skip job hash deletion: the job must persist for all subscriptions
     if broadcastMode ~= '1' then
       if removeMode == 'true' then
@@ -1559,6 +1620,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local parentQueue = args[22] or ''
   local skipEvents = args[23] or '0'
   local prefix = string.sub(idKey, 1, #idKey - 2)
+  local metaKey = prefix .. 'meta'
   local existing = redis.call('HGET', dedupKey, dedupId)
   if mode == 'simple' then
     if existing then
@@ -1733,12 +1795,20 @@ redis.register_function('glidemq_dedup', function(keys, args)
   if delay > 0 then
     local score = priority * PRIORITY_SHIFT + (timestamp + delay)
     redis.call('ZADD', scheduledKey, score, jobIdStr)
+    if priority > 0 then
+      redis.call('HSET', metaKey, 'hasPriority', '1')
+    end
+    if lifo > 0 then
+      redis.call('HSET', metaKey, 'hasLifo', '1')
+    end
   elseif priority > 0 then
     local score = priority * PRIORITY_SHIFT
     redis.call('ZADD', scheduledKey, score, jobIdStr)
+    redis.call('HSET', metaKey, 'hasPriority', '1')
   elseif lifo > 0 then
     local lifoKey = prefix .. 'lifo'
     redis.call('RPUSH', lifoKey, jobIdStr)
+    redis.call('HSET', metaKey, 'hasLifo', '1')
   else
     xaddJob(streamKey, jobIdStr, jobName)
   end
@@ -1818,6 +1888,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
               'state', 'failed',
               'failedReason', 'cost exceeds token bucket capacity',
               'finishedOn', tostring(now))
+            rescheduleRepeatAfterComplete(headJobKey, prefix, now)
             emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
             tbCheckPassed = false
           end
@@ -2049,6 +2120,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
           'state', 'failed',
           'failedReason', 'cost exceeds token bucket capacity',
           'finishedOn', timestampStr)
+        rescheduleRepeatAfterComplete(jobKey, prefix, ts)
         emitEvent(prefix .. 'events', 'failed', jobId, {'failedReason', 'cost exceeds token bucket capacity'})
         return 'ERR:COST_EXCEEDS_CAPACITY'
       end
@@ -2586,6 +2658,7 @@ redis.register_function('glidemq_revoke', function(keys, args)
       'failedReason', 'revoked',
       'finishedOn', tostring(timestamp)
     )
+    rescheduleRepeatAfterComplete(jobKey, string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)), timestamp)
     emitEvent(eventsKey, 'revoked', jobId, nil)
     return 'revoked'
   end
@@ -2622,6 +2695,7 @@ redis.register_function('glidemq_revoke', function(keys, args)
       'finishedOn', tostring(timestamp)
     )
     markOrderingDone(jobKey, jobId)
+    rescheduleRepeatAfterComplete(jobKey, string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)), timestamp)
     emitEvent(eventsKey, 'revoked', jobId, nil)
     return 'revoked'
   end
@@ -2987,6 +3061,7 @@ redis.register_function('glidemq_rateLimitGroup', function(keys, args)
     redis.call('ZADD', prefix .. 'failed', timestamp, jobId)
     local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
     redis.call('HSET', jobKey, 'state', 'failed', 'failedReason', 'group rate limited', 'finishedOn', tostring(timestamp), 'processedOn', tostring(processedOn))
+    rescheduleRepeatAfterComplete(jobKey, prefix, timestamp)
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', 'group rate limited'})
     local metricsKey = prefix .. 'metrics:failed'
     recordMetrics(metricsKey, timestamp, timestamp - processedOn)
@@ -3630,6 +3705,7 @@ export async function completeAndFetchNext(
   hasParents?: boolean,
   skipEvents?: boolean,
   skipMetrics?: boolean,
+  checkLists?: boolean,
 ): Promise<CompleteAndFetchResult> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
@@ -3667,6 +3743,7 @@ export async function completeAndFetchNext(
   args.push(hasParents ? '1' : '0');
   args.push(skipEvents ? '1' : '0');
   args.push(skipMetrics ? '1' : '0');
+  args.push(checkLists === false ? '0' : '1');
 
   const raw = await client.fcall('glidemq_completeAndFetchNext', keys, args);
 

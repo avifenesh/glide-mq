@@ -375,4 +375,43 @@ describe('QueueEvents connection error recovery', () => {
     }
     expect(createCount).toBe(countAfterClose);
   });
+
+  it('advances lastId before surfacing listener failures', async () => {
+    const eventEntry = [
+      {
+        key: 'glide:{test-queue}:events',
+        value: {
+          '1-0': [
+            ['event', 'added'],
+            ['jobId', '42'],
+          ],
+        },
+      },
+    ];
+
+    const client = makeMockClient({
+      xread: vi.fn().mockResolvedValueOnce(eventEntry).mockReturnValue(new Promise(() => {})),
+    });
+
+    vi.mocked(GlideClient.createClient).mockResolvedValue(client as any);
+
+    const qe = new QueueEvents('test-queue', {
+      connection: connectionOpts,
+      blockTimeout: 100,
+    });
+
+    const errors: Error[] = [];
+    qe.on('error', (err: Error) => errors.push(err));
+    qe.on('added', () => {
+      throw new Error('listener blew up');
+    });
+
+    await qe.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(errors.map((err) => err.message)).toContain('listener blew up');
+    expect((qe as any).lastId).toBe('1-0');
+
+    await qe.close();
+  });
 });

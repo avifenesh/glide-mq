@@ -29,6 +29,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     fcall: vi.fn().mockResolvedValue(LIBRARY_VERSION),
     functionLoad: vi.fn(),
     hset: vi.fn(),
+    hget: vi.fn().mockResolvedValue(null),
     hgetall: vi.fn().mockResolvedValue([]),
     xadd: vi.fn(),
     xread: vi.fn().mockResolvedValue(null),
@@ -250,6 +251,7 @@ describe('Queue', () => {
             .mockResolvedValueOnce(LIBRARY_VERSION) // ensureFunctionLibrary
             .mockResolvedValueOnce('1'), // addJob
           xrevrange: vi.fn().mockResolvedValue({}),
+          hget: vi.fn().mockResolvedValue('"done"'),
         });
         const blockingClient1 = makeMockClient({
           xread: vi.fn().mockRejectedValue(new Error('socket lost')),
@@ -297,6 +299,7 @@ describe('Queue', () => {
         const commandClient = makeMockClient({
           fcall: vi.fn().mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1'),
           xrevrange: vi.fn().mockResolvedValue({}),
+          hget: vi.fn().mockResolvedValue('"done"'),
         });
         const blockingClient1 = makeMockClient({
           xread: vi.fn().mockRejectedValue(new Error('socket lost')),

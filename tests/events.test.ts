@@ -75,7 +75,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
       queueEvents = new QueueEvents(Q, { connection: CONNECTION, blockTimeout: 1000 });
       queueEvents.on('error', () => {});
 
-      const received = new Promise<{ jobId: string; returnvalue: string }>((resolve, reject) => {
+      const received = new Promise<{ jobId: string; returnvalue?: string }>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('timeout waiting for completed event')), 15000);
         queueEvents.on('completed', (data: any) => {
           clearTimeout(timeout);
@@ -100,7 +100,7 @@ describeEachMode('QueueEvents', (CONNECTION) => {
 
       const event = await received;
       expect(event.jobId).toBe(job.id);
-      expect(event.returnvalue).toBe(JSON.stringify({ result: 42 }));
+      expect(event.returnvalue).toBeUndefined();
 
       await worker.close(true);
     }, 20000);

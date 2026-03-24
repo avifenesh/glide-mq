@@ -313,7 +313,7 @@ redis.register_function('glidemq_complete', function(keys, args)
   markOrderingDone(jobKey, jobId)
 
   -- Emit event
-  emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
+  emitEvent(eventsKey, 'completed', jobId, nil)
 
   -- Retention cleanup
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
