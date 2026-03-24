@@ -266,7 +266,7 @@ describe('Worker', () => {
     );
     expect(completeAndFetchNextCall).toBeDefined();
     const completionArgs = completeAndFetchNextCall[2] as string[];
-    expect(completionArgs.slice(-8, -5)).toEqual(['tenant-a', '1', 'group-1']);
+    expect(completionArgs.slice(-9, -6)).toEqual(['tenant-a', '1', 'group-1']);
 
     // Event should have been emitted
     expect(completedJobs).toHaveLength(1);
@@ -338,8 +338,8 @@ describe('Worker', () => {
     );
     expect(call).toBeDefined();
     const completionArgs = call[2] as string[];
-    // Last two args are skipEvents and skipMetrics
-    expect(completionArgs.slice(-2)).toEqual(['1', '1']);
+    // Last three args are skipEvents, skipMetrics, checkLists
+    expect(completionArgs.slice(-3, -1)).toEqual(['1', '1']);
 
     await worker.close(true);
   });
