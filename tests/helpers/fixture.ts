@@ -24,6 +24,7 @@ const { LIBRARY_SOURCE } = require('../../dist/functions/index') as typeof impor
 export interface ConnectionConfig {
   addresses: { host: string; port: number }[];
   clusterMode?: boolean;
+  requestTimeout?: number;
 }
 
 export const STANDALONE: ConnectionConfig = {

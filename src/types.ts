@@ -51,6 +51,11 @@ export interface ConnectionOptions {
    * Passed through to GLIDE. Default: 1000.
    */
   inflightRequestsLimit?: number;
+  /**
+   * Request timeout in milliseconds. Passed through to GLIDE.
+   * Default: 250ms. Increase for high-latency or heavily-loaded clusters.
+   */
+  requestTimeout?: number;
 }
 
 export interface DeadLetterQueueOptions {

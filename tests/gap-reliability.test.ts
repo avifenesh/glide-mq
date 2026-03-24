@@ -345,7 +345,12 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
   describe('Memory leak regression', () => {
     it('add and process many jobs - heap does not grow beyond 2x baseline', async () => {
       const Q = uniqueQueue('mem-heap');
-      const queue = new Queue(Q, { connection: CONNECTION });
+      // Use a longer requestTimeout in cluster mode to avoid transient timeouts
+      // after heavy tests (e.g., fuzzer) exhaust the cluster connection pool.
+      const conn = CONNECTION.clusterMode
+        ? { ...CONNECTION, requestTimeout: 5000 }
+        : CONNECTION;
+      const queue = new Queue(Q, { connection: conn });
 
       if (global.gc) global.gc();
       const baseline = process.memoryUsage().heapUsed;
@@ -357,7 +362,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       let completedCount = 0;
 
       const worker = new Worker(Q, async () => 'ok', {
-        connection: CONNECTION,
+        connection: conn,
         concurrency: 20,
         blockTimeout: 500,
         stalledInterval: 60000,
@@ -398,10 +403,14 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       const queues: InstanceType<typeof Queue>[] = [];
       // Cluster mode uses more connections per client, so use fewer instances
       const instanceCount = CONNECTION.clusterMode ? 10 : 50;
+      // Use longer requestTimeout for cluster to handle transient timeouts
+      const conn = CONNECTION.clusterMode
+        ? { ...CONNECTION, requestTimeout: 5000 }
+        : CONNECTION;
 
       for (let i = 0; i < instanceCount; i++) {
         const Q = uniqueQueue(`leak-q-${i}`);
-        const q = new Queue(Q, { connection: CONNECTION });
+        const q = new Queue(Q, { connection: conn });
         await q.add('leak-test', { i });
         queues.push(q);
       }
@@ -416,7 +425,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       // Verify system is still functional after mass create/close
       // (proves connections were released, not leaked/exhausted)
       const Q = uniqueQueue('leak-verify');
-      const verifyQueue = new Queue(Q, { connection: CONNECTION });
+      const verifyQueue = new Queue(Q, { connection: conn });
       const job = await verifyQueue.add('verify', { x: 1 });
       expect(job.id).toBeTruthy();
       await verifyQueue.close();

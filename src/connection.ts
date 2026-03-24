@@ -41,6 +41,7 @@ export async function createClient(opts: ConnectionOptions): Promise<Client> {
     readFrom: opts.readFrom,
     clientAz: opts.clientAz,
     inflightRequestsLimit: opts.inflightRequestsLimit,
+    requestTimeout: opts.requestTimeout,
   };
 
   try {
