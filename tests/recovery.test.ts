@@ -390,7 +390,10 @@ describe('QueueEvents connection error recovery', () => {
     ];
 
     const client = makeMockClient({
-      xread: vi.fn().mockResolvedValueOnce(eventEntry).mockReturnValue(new Promise(() => {})),
+      xread: vi
+        .fn()
+        .mockResolvedValueOnce(eventEntry)
+        .mockReturnValue(new Promise(() => {})),
     });
 
     vi.mocked(GlideClient.createClient).mockResolvedValue(client as any);

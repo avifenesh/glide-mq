@@ -722,7 +722,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           }
 
           const parentInfo =
-            entry.job.parentId || entry.job.parentQueue ? await this.buildParentInfo(entry.job, entry.jobId) : undefined;
+            entry.job.parentId || entry.job.parentQueue
+              ? await this.buildParentInfo(entry.job, entry.jobId)
+              : undefined;
 
           await completeJob(
             this.commandClient!,
