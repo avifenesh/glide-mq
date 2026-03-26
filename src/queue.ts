@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
-import { InfBoundary, Batch, ClusterBatch, ClusterScanCursor } from '@glidemq/speedkey';
-import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
+import { InfBoundary, Batch, ClusterBatch, ClusterScanCursor, GlideFt } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient, Field } from '@glidemq/speedkey';
 import type {
   QueueOptions,
   JobOptions,
@@ -21,6 +21,9 @@ import type {
   WorkerInfo,
   Serializer,
   SignalEntry,
+  JobIndexOptions,
+  VectorSearchOptions,
+  VectorSearchResult,
 } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
@@ -107,6 +110,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   private serializer: Serializer;
   private skipEvents: boolean;
+  private searchModuleAvailable: boolean | null = null;
 
   constructor(name: string, opts: QueueOptions) {
     super();
@@ -1928,6 +1932,219 @@ export class Queue<D = any, R = any> extends EventEmitter {
       timeout: values[3] ? parseInt(String(values[3]), 10) : undefined,
       signals,
     };
+  }
+
+  // ---- Valkey Search / Vector Index ----
+
+  /**
+   * Create a Valkey Search index over job hashes for this queue.
+   * Auto-includes base fields: name (TAG), state (TAG), timestamp (NUMERIC), priority (NUMERIC).
+   *
+   * The index uses a queue-specific prefix that uniquely matches this queue's job hashes.
+   * Requires the valkey-search module to be loaded on the server (standalone mode).
+   */
+  async createJobIndex(opts?: JobIndexOptions): Promise<void> {
+    const client = await this.getClient();
+    await this.ensureSearchModule(client);
+    const indexName = opts?.name ?? `${this.name}-idx`;
+    // Valkey Search rejects complete hash tags ({...}) in prefixes.
+    // Use a partial prefix that includes the opening brace and queue name
+    // but omits the closing brace. This uniquely matches this queue's keys
+    // (e.g. "glide:{myqueue" matches "glide:{myqueue}:job:*") without
+    // triggering the hash tag validator.
+    const pfxBase = this.opts.prefix ?? 'glide';
+    const searchPrefix = `${pfxBase}:{${this.name}`;
+
+    const schema: Field[] = [
+      { type: 'TAG', name: 'name' },
+      { type: 'TAG', name: 'state' },
+      { type: 'NUMERIC', name: 'timestamp' },
+      { type: 'NUMERIC', name: 'priority' },
+    ];
+
+    if (opts?.fields) {
+      schema.push(...opts.fields);
+    }
+
+    if (opts?.vectorField) {
+      const vf = opts.vectorField;
+      const algorithm = vf.algorithm ?? 'HNSW';
+      const distanceMetric = vf.distanceMetric ?? 'COSINE';
+      if (algorithm === 'HNSW') {
+        schema.push({
+          type: 'VECTOR',
+          name: vf.name,
+          attributes: {
+            algorithm: 'HNSW',
+            dimensions: vf.dimensions,
+            distanceMetric,
+            type: 'FLOAT32',
+          },
+        });
+      } else {
+        schema.push({
+          type: 'VECTOR',
+          name: vf.name,
+          attributes: {
+            algorithm: 'FLAT',
+            dimensions: vf.dimensions,
+            distanceMetric,
+            type: 'FLOAT32',
+          },
+        });
+      }
+    } else {
+      // valkey-search requires at least one vector field; add a minimal placeholder
+      schema.push({
+        type: 'VECTOR',
+        name: '_vec',
+        attributes: {
+          algorithm: 'FLAT',
+          dimensions: 2,
+          distanceMetric: 'COSINE',
+          type: 'FLOAT32',
+        },
+      });
+    }
+
+    await GlideFt.create(client, indexName, schema, {
+      dataType: 'HASH',
+      prefixes: [searchPrefix],
+    });
+  }
+
+  /**
+   * Drop a Valkey Search index. Indexed document keys (job hashes) are not affected.
+   */
+  async dropJobIndex(name?: string): Promise<void> {
+    const client = await this.getClient();
+    const indexName = name ?? `${this.name}-idx`;
+    await GlideFt.dropindex(client, indexName);
+  }
+
+  /**
+   * Search for jobs by vector similarity (KNN) using a Valkey Search index.
+   * Requires a prior call to createJobIndex with a vectorField configured.
+   *
+   * The search is automatically scoped to this queue via the index prefix.
+   *
+   * @param embedding - The query vector (number[] or Float32Array).
+   * @param opts - Search options (index name, k, pre-filter, return fields, score field).
+   * @returns Array of { job, score } sorted by similarity (best first).
+   */
+  async vectorSearch(
+    embedding: number[] | Float32Array,
+    opts?: VectorSearchOptions,
+  ): Promise<VectorSearchResult<D, R>[]> {
+    const client = await this.getClient();
+    const indexName = opts?.indexName ?? `${this.name}-idx`;
+    const k = opts?.k ?? 10;
+    const filter = opts?.filter ?? '*';
+    const scoreField = opts?.scoreField ?? '__score';
+
+    // Determine vector field name from index info.
+    // The info response format varies across valkey-search versions:
+    // - v1.x: fields in info.attributes as array of arrays
+    // - later: fields in info.fields as array of objects
+    const info = await GlideFt.info(client, indexName);
+    let vecFieldName = '_vec';
+    const attrs = (info.attributes ?? info.fields) as any;
+    if (Array.isArray(attrs)) {
+      for (const attr of attrs) {
+        if (Array.isArray(attr)) {
+          // v1.x format: ["identifier","vec","attribute","vec","type","VECTOR",...]
+          const typeIdx = attr.indexOf('type');
+          if (typeIdx >= 0 && String(attr[typeIdx + 1]) === 'VECTOR') {
+            const idIdx = attr.indexOf('identifier');
+            if (idIdx >= 0) vecFieldName = String(attr[idIdx + 1]);
+            break;
+          }
+        } else if (typeof attr === 'object' && attr !== null) {
+          // Object format: { type: 'VECTOR', identifier: '...', ... }
+          if (String(attr.type) === 'VECTOR') {
+            vecFieldName = String(attr.field_name || attr.identifier);
+            break;
+          }
+        }
+      }
+    }
+
+    // Convert embedding to Buffer
+    const arr = embedding instanceof Float32Array ? embedding : new Float32Array(embedding);
+    const vecBuf = Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength);
+
+    const query = `${filter}=>[KNN ${k} @${vecFieldName} $BLOB AS ${scoreField}]`;
+    const searchOpts: Record<string, any> = {
+      params: [{ key: 'BLOB', value: vecBuf }],
+      dialect: 2,
+      // Request only the score field from the search result to avoid
+      // binary vector data causing UTF-8 decode errors. Full job data
+      // is fetched separately via HGETALL.
+      returnFields: [{ fieldIdentifier: scoreField }],
+    };
+
+    const [totalCount, records] = await GlideFt.search(client, indexName, query, searchOpts);
+
+    const results: VectorSearchResult<D, R>[] = [];
+    if (totalCount === 0 || !records || records.length === 0) return results;
+
+    // Fetch job data using HMGET to avoid reading binary vector fields
+    // (HGETALL would include vector buffers that fail UTF-8 string decoding).
+    const JOB_TEXT_FIELDS = [
+      'data', 'returnvalue', ...JOB_METADATA_FIELDS,
+    ] as string[];
+    const batch = this.newBatch();
+    const scoreMap = new Map<string, number>();
+    const jobIds: string[] = [];
+
+    for (const record of records) {
+      const key = String(record.key);
+      const lastColon = key.lastIndexOf(':');
+      if (lastColon === -1) continue;
+      const jobId = key.substring(lastColon + 1);
+
+      let score = 0;
+      for (const field of record.value) {
+        if (String(field.key) === scoreField) {
+          score = parseFloat(String(field.value));
+          break;
+        }
+      }
+
+      jobIds.push(jobId);
+      scoreMap.set(jobId, score);
+      (batch as any).hmget(this.keys.job(jobId), JOB_TEXT_FIELDS);
+    }
+
+    const batchResults = await client.exec(batch as any, false);
+    if (!batchResults) return results;
+
+    for (let i = 0; i < jobIds.length; i++) {
+      const hash = hmgetArrayToRecord(batchResults[i] as (unknown | null)[], JOB_TEXT_FIELDS as readonly string[]);
+      if (!hash) continue;
+      const job = Job.fromHash<D, R>(client, this.keys, jobIds[i], hash, this.serializer);
+      results.push({ job, score: scoreMap.get(jobIds[i]) ?? 0 });
+    }
+
+    return results;
+  }
+
+  /**
+   * Check that the valkey-search module is available. Caches the result.
+   * Throws a clear error if the module is not loaded.
+   * @internal
+   */
+  private async ensureSearchModule(client: Client): Promise<void> {
+    if (this.searchModuleAvailable === true) return;
+    try {
+      await GlideFt.list(client);
+      this.searchModuleAvailable = true;
+    } catch {
+      this.searchModuleAvailable = false;
+      throw new GlideMQError(
+        'Valkey Search module is not available. Install valkey-bundle or load the search module to use index features.',
+      );
+    }
   }
 
   /**

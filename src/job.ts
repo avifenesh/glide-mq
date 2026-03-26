@@ -784,6 +784,18 @@ export class Job<D = any, R = any> {
     return job;
   }
 
+  /**
+   * Store a vector embedding in this job's hash field.
+   * The vector is stored as a raw Float32Array buffer suitable for Valkey Search vector indexing.
+   * @param field - Hash field name where the vector is stored (must match the index schema).
+   * @param embedding - The vector as a number[] or Float32Array.
+   */
+  async storeVector(field: string, embedding: number[] | Float32Array): Promise<void> {
+    const arr = embedding instanceof Float32Array ? embedding : new Float32Array(embedding);
+    const buf = Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength);
+    await this.client.hset(this.queueKeys.job(this.id), { [field]: buf });
+  }
+
   private serializeData(data: D): string {
     const serialized = this.serializer.serialize(data);
     const byteLen = Buffer.byteLength(serialized, 'utf8');

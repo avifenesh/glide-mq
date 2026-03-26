@@ -1,4 +1,4 @@
-import type { GlideClient, GlideClusterClient, ReadFrom } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient, ReadFrom, Field } from '@glidemq/speedkey';
 
 export type Client = GlideClient | GlideClusterClient;
 
@@ -296,6 +296,47 @@ export interface BudgetOptions {
   maxCostUsd?: number;
   /** What happens when budget is exceeded. Default: 'fail'. */
   onExceeded?: 'pause' | 'fail';
+}
+
+/** Options for creating a Valkey Search index over job hashes. */
+export interface JobIndexOptions {
+  /** Index name. Defaults to `{queueName}-idx`. */
+  name?: string;
+  /** Additional schema fields beyond the auto-included base fields (name, state, timestamp, priority). */
+  fields?: Field[];
+  /** Vector field configuration. When omitted, a minimal placeholder vector field is added (required by valkey-search). */
+  vectorField?: {
+    /** Field name in the job hash where the vector is stored. */
+    name: string;
+    /** Number of dimensions in the vector. */
+    dimensions: number;
+    /** Indexing algorithm. Default: 'HNSW'. */
+    algorithm?: 'HNSW' | 'FLAT';
+    /** Distance metric. Default: 'COSINE'. */
+    distanceMetric?: 'COSINE' | 'L2' | 'IP';
+  };
+}
+
+/** Options for vector similarity search over indexed jobs. */
+export interface VectorSearchOptions {
+  /** Index name to search. Defaults to `{queueName}-idx`. */
+  indexName?: string;
+  /** Number of nearest neighbours to return. Default: 10. */
+  k?: number;
+  /** Pre-filter expression applied before KNN (e.g. `@state:{completed}`). */
+  filter?: string;
+  /** Fields to return from each result. When omitted, all indexed fields are returned. */
+  returnFields?: string[];
+  /** Name of the score field in results. Default: `__score`. */
+  scoreField?: string;
+}
+
+/** A single result from a vector similarity search. */
+export interface VectorSearchResult<D = any, R = any> {
+  /** The hydrated Job object. */
+  job: import('./job').Job<D, R>;
+  /** Distance/similarity score (lower = more similar for L2/COSINE). */
+  score: number;
 }
 
 export interface FlowJob {

@@ -137,3 +137,31 @@ jobs:
           --exclude 'tests/testing-mode.test.ts'
           --exclude 'tests/worker-saturation.test.ts'
           --exclude 'tests/worker.test.ts'
+          --exclude 'tests/search-index.test.ts'
+
+  test-search:
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      valkey:
+        image: valkey/valkey-bundle:latest
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Run search integration tests
+        run: npx vitest run tests/search-index.test.ts
+        env:
+          SKIP_CLUSTER: "1"
