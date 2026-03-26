@@ -527,7 +527,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         continue;
       }
 
-      this.startHeartbeat(entry.jobId);
+      this.startHeartbeat(entry.jobId, job.opts.lockDuration);
       batch.push({ jobId: entry.jobId, entryId: entry.entryId, job });
     }
 
@@ -837,7 +837,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     const ac = new AbortController();
     this.activeAbortControllers.set(jobId, ac);
     job.abortSignal = ac.signal;
-    this.startHeartbeat(jobId);
+    this.startHeartbeat(jobId, job.opts.lockDuration);
 
     let result: R | undefined;
     let error: Error | undefined;
@@ -1171,7 +1171,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       if (hasContinuation) {
         const onResume = this.suspendContinuations.get(currentJobId)!;
         this.suspendContinuations.delete(currentJobId);
-        this.startHeartbeat(currentJobId);
+        this.startHeartbeat(currentJobId, job.opts.lockDuration);
         try {
           processResult = await onResume(job.signals);
           processError = undefined;
@@ -1399,14 +1399,16 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     return false;
   }
 
-  protected startHeartbeat(jobId: string): void {
+  protected startHeartbeat(jobId: string, jobLockDuration?: number): void {
     if (!this.commandClient) return;
+    // Use per-job lockDuration when specified, otherwise fall back to worker-level.
+    const effectiveLock = jobLockDuration ?? this.lockDuration;
     // Only start periodic heartbeat for long lockDurations where stall detection matters.
     // moveToActive already writes the initial lastActive - protects against immediate stall reclaim.
     // For the default 30s lockDuration with 30s stalledInterval, the heartbeat fires at 15s.
     // Skip entirely if lockDuration >= stalledInterval (initial write is sufficient for one cycle).
-    if (this.lockDuration >= this.stalledInterval) return;
-    const interval = this.lockDuration / 2;
+    if (effectiveLock >= this.stalledInterval) return;
+    const interval = effectiveLock / 2;
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
     const timer = setInterval(() => {
