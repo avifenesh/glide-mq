@@ -123,10 +123,7 @@ export class QueueEvents extends EventEmitter {
       const streamEntry = result[i];
       const entries = streamEntry.value;
 
-      for (const entryId in entries) {
-        if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
-
-        const fieldPairs = entries[entryId];
+      for (const [entryId, fieldPairs] of Object.entries(entries)) {
         if (!fieldPairs) continue;
 
         // Extract event type and payload from field pairs

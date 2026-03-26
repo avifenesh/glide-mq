@@ -739,9 +739,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
         for (const streamEntry of result) {
           const entries = streamEntry.value;
-          for (const entryId in entries) {
-            if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
-            const fieldPairs = entries[entryId];
+          for (const [entryId, fieldPairs] of Object.entries(entries)) {
             if (!fieldPairs) continue;
 
             let eventType: string | undefined;
