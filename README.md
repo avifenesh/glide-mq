@@ -144,6 +144,7 @@ Run `npm run bench` locally or `npx tsx benchmarks/elasticache-head-to-head.ts` 
 
 - **Job metadata** -- `job.reportUsage()` persists model, provider, tokens, cost, and latency; `queue.getFlowUsage()` aggregates across parent and child jobs ([Usage](docs/USAGE.md#ai-native-primitives))
 - **Job streaming channel** -- `job.stream(chunk)` appends output chunks during processing; `queue.readStream(jobId)` reads them back; SSE endpoint `GET /queues/:name/jobs/:id/stream` for real-time consumers ([Usage](docs/USAGE.md#ai-native-primitives))
+- **Suspend/resume with signals** -- `job.suspend()` pauses a job mid-processor; `queue.signal(jobId, name, data)` resumes it with an external event; optional timeout auto-fails expired suspensions; `onResume` callback for same-worker continuations ([Usage](docs/USAGE.md#suspendresume-with-signals))
 
 ### Serverless
 
