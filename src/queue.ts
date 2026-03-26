@@ -1180,14 +1180,20 @@ export class Queue<D = any, R = any> extends EventEmitter {
     }
 
     if (jobIds.length === 0) return [];
-    const batch = this.newBatch();
-    for (const id of jobIds) (batch as any).hgetall(this.keys.job(id));
-    const batchResults = await client.exec(batch as any, false);
     const jobs: Job<D, R>[] = [];
-    if (batchResults) {
-      for (let i = 0; i < batchResults.length; i++) {
-        const hash = hashDataToRecord(batchResults[i] as any);
-        if (hash) jobs.push(Job.fromHash<D, R>(client, this.keys, jobIds[i], hash, this.serializer));
+    const CHUNK = 1000;
+    for (let offset = 0; offset < jobIds.length; offset += CHUNK) {
+      const chunk = jobIds.slice(offset, offset + CHUNK);
+      const batch = this.newBatch();
+      for (const id of chunk) {
+        batch.hgetall(this.keys.job(id));
+      }
+      const batchResults = await client.exec(batch, false);
+      if (batchResults) {
+        for (let i = 0; i < batchResults.length; i++) {
+          const hash = hashDataToRecord(batchResults[i] as any);
+          if (hash) jobs.push(Job.fromHash<D, R>(client, this.keys, chunk[i], hash, this.serializer));
+        }
       }
     }
     return jobs;
@@ -1227,9 +1233,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const chunk = jobIds.slice(offset, offset + CHUNK);
       const batch = this.newBatch();
       for (const id of chunk) {
-        (batch as any).hgetall(this.keys.job(id));
+        batch.hgetall(this.keys.job(id));
       }
-      const batchResults = await client.exec(batch as any, false);
+      const batchResults = await client.exec(batch, false);
       if (!batchResults) continue;
 
       for (let i = 0; i < chunk.length && jobs.length < limit; i++) {
@@ -1476,17 +1482,23 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const jobIds = extractJobIdsFromStreamEntries(entries);
     const sliced = jobIds.slice(start, end >= 0 ? end + 1 : undefined);
     if (sliced.length === 0) return [];
-    const batch = this.newBatch();
-    for (const id of sliced) (batch as any).hgetall(dlqKeys.job(id));
-    const batchResults = await client.exec(batch as any, false);
     const jobs: Job<D, R>[] = [];
-    if (batchResults) {
-      for (let i = 0; i < batchResults.length; i++) {
-        const hash = hashDataToRecord(batchResults[i] as any);
-        if (!hash) continue;
-        // DLQ envelope is always JSON (written by Worker.moveToDLQ with JSON.stringify),
-        // regardless of the queue's custom serializer.
-        jobs.push(Job.fromHash<D, R>(client, dlqKeys, sliced[i], hash));
+    const CHUNK = 1000;
+    for (let offset = 0; offset < sliced.length; offset += CHUNK) {
+      const chunk = sliced.slice(offset, offset + CHUNK);
+      const batch = this.newBatch();
+      for (const id of chunk) {
+        batch.hgetall(dlqKeys.job(id));
+      }
+      const batchResults = await client.exec(batch, false);
+      if (batchResults) {
+        for (let i = 0; i < batchResults.length; i++) {
+          const hash = hashDataToRecord(batchResults[i] as any);
+          if (!hash) continue;
+          // DLQ envelope is always JSON (written by Worker.moveToDLQ with JSON.stringify),
+          // regardless of the queue's custom serializer.
+          jobs.push(Job.fromHash<D, R>(client, dlqKeys, chunk[i], hash));
+        }
       }
     }
     return jobs;
