@@ -120,6 +120,7 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     worker: (id: string) => `${p}:w:${id}`,
     suspended: `${p}:suspended`,
     signals: (id: string) => `${p}:signals:${id}`,
+    budget: (flowId: string) => `${p}:budget:${flowId}`,
   };
 }
 

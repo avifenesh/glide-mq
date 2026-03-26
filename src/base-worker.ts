@@ -44,11 +44,13 @@ import {
   moveToWaitingChildren,
   suspendJob,
   deferActive,
+  checkBudget,
+  recordUsageAndCheckBudget,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
 
-export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained';
+export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained' | 'budget-exceeded';
 
 /**
  * Configuration that differs between Worker and BroadcastWorker.
@@ -1162,6 +1164,42 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.isDrained = false;
       if (this.hasActiveListeners) this.emit('active', job, currentJobId);
 
+      // Pre-dispatch budget check: if budget already exceeded, fail immediately
+      if (job.budgetKey && this.commandClient) {
+        const budgetStatus = await checkBudget(this.commandClient, job.budgetKey);
+        if (budgetStatus === 'exceeded') {
+          const onExceeded = await this.getBudgetOnExceeded(job.budgetKey);
+          this.emit('budget-exceeded', job, currentJobId);
+          if (onExceeded === 'pause') {
+            // Move to delayed with a long backoff so it can be resumed
+            try {
+              await moveActiveToDelayed(
+                this.commandClient,
+                this.queueKeys,
+                currentJobId,
+                currentEntryId,
+                Date.now() + 86400000,
+                undefined,
+                Date.now(),
+                this.consumerGroup,
+                this.broadcastMode ? true : undefined,
+              );
+            } catch (err) {
+              const e = err instanceof Error ? err : new Error(String(err));
+              await this.handleJobFailure(job, currentJobId, currentEntryId, e);
+            }
+          } else {
+            await this.handleJobFailure(
+              job,
+              currentJobId,
+              currentEntryId,
+              new Error('Budget exceeded'),
+            );
+          }
+          return;
+        }
+      }
+
       // Check for suspend continuation: if this job was previously suspended on this
       // worker and has an onResume callback, run it instead of the main processor.
       let processResult: R | undefined;
@@ -1342,6 +1380,23 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       job.finishedOn = now;
       if (this.hasCompletedListeners) this.emit('completed', job, processResult);
 
+      // Post-completion budget check: record usage and detect exceeded
+      if (job.budgetKey && job.usage && this.commandClient) {
+        const tokens = job.usage.totalTokens ?? 0;
+        const cost = job.usage.costUsd ?? 0;
+        if (tokens > 0 || cost > 0) {
+          const budgetResult = await recordUsageAndCheckBudget(
+            this.commandClient,
+            job.budgetKey,
+            tokens,
+            cost,
+          );
+          if (budgetResult === 'exceeded') {
+            this.emit('budget-exceeded', job, currentJobId);
+          }
+        }
+      }
+
       if (job.schedulerName) {
         await this.updateSchedulerAfterComplete(job.schedulerName, now);
       }
@@ -1506,6 +1561,20 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.cachedRateLimitDuration = Number(rlDur) || 0;
     } catch {
       // Transient error - next tick will retry
+    }
+  }
+
+  /**
+   * Read the onExceeded policy from a budget hash.
+   * Returns 'fail' (default) or 'pause'.
+   */
+  private async getBudgetOnExceeded(budgetKey: string): Promise<string> {
+    if (!this.commandClient) return 'fail';
+    try {
+      const val = await this.commandClient.hget(budgetKey, 'onExceeded');
+      return val ? String(val) : 'fail';
+    } catch {
+      return 'fail';
     }
   }
 

@@ -274,6 +274,16 @@ export interface BatchOptions {
 
 export type BatchProcessor<D = any, R = any> = (jobs: import('./job').Job<D, R>[]) => Promise<R[]>;
 
+/** Budget constraints for a flow. Caps total token usage and/or USD cost across all jobs. */
+export interface BudgetOptions {
+  /** Hard cap on total tokens across all jobs in this flow. */
+  maxTotalTokens?: number;
+  /** Hard cap on total USD cost across all jobs in this flow. */
+  maxCostUsd?: number;
+  /** What happens when budget is exceeded. Default: 'fail'. */
+  onExceeded?: 'pause' | 'fail';
+}
+
 export interface FlowJob {
   name: string;
   queueName: string;

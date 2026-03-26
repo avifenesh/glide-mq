@@ -1763,6 +1763,33 @@ export class Queue<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Read the budget state for a flow. Returns null if no budget was set.
+   */
+  async getFlowBudget(flowId: string): Promise<{
+    maxTotalTokens?: number;
+    maxCostUsd?: number;
+    usedTokens: number;
+    usedCost: number;
+    exceeded: boolean;
+    onExceeded: 'pause' | 'fail';
+  } | null> {
+    const client = await this.getClient();
+    const budgetKey = this.keys.budget(flowId);
+    const raw = await client.hgetall(budgetKey);
+    if (!raw || (Array.isArray(raw) && raw.length === 0)) return null;
+    const fields = hashDataToRecord(raw as any);
+    if (!fields) return null;
+    return {
+      maxTotalTokens: fields.maxTotalTokens ? parseFloat(fields.maxTotalTokens) : undefined,
+      maxCostUsd: fields.maxCostUsd ? parseFloat(fields.maxCostUsd) : undefined,
+      usedTokens: parseFloat(fields.usedTokens || '0'),
+      usedCost: parseFloat(fields.usedCost || '0'),
+      exceeded: fields.exceeded === '1',
+      onExceeded: (fields.onExceeded as 'pause' | 'fail') || 'fail',
+    };
+  }
+
+  /**
    * Read entries from a job's streaming channel.
    * Uses XRANGE for non-blocking reads. Pass lastId to resume from a known position.
    */

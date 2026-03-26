@@ -75,6 +75,8 @@ export interface TestJobRecord<D = any, R = any> {
   suspendedAt?: number;
   /** @internal Suspend timeout in ms. */
   suspendTimeout?: number;
+  /** @internal Budget key for flow-level budget enforcement. */
+  budgetKey?: string;
 }
 
 /**
@@ -97,6 +99,7 @@ export class TestJob<D = any, R = any> {
   fallbackIndex: number = 0;
   usage?: JobUsage;
   signals: SignalEntry[] = [];
+  budgetKey?: string;
   /** @internal */ private _record: TestJobRecord<D, R>;
 
   constructor(record: TestJobRecord<D, R>) {
@@ -115,6 +118,7 @@ export class TestJob<D = any, R = any> {
     this.expireAt = record.expireAt;
     this.fallbackIndex = record.fallbackIndex;
     this.signals = record.signals ?? [];
+    this.budgetKey = record.budgetKey;
   }
 
   get currentFallback(): { model: string; provider?: string; [key: string]: any } | undefined {
@@ -242,11 +246,22 @@ export interface TestQueueOptions {
  * - repeatAfterComplete behaves like 'every'
  * - No sandbox processor support
  */
+/** Budget state stored in-memory for testing mode. */
+interface TestBudgetState {
+  maxTotalTokens?: number;
+  maxCostUsd?: number;
+  usedTokens: number;
+  usedCost: number;
+  exceeded: boolean;
+  onExceeded: 'pause' | 'fail';
+}
+
 export class TestQueue<D = any, R = any> extends EventEmitter {
   readonly name: string;
   /** @internal */ readonly jobs: Map<string, TestJobRecord<D, R>> = new Map();
   /** @internal */ readonly dedupSet: Set<string> = new Set();
   /** @internal */ readonly waitingQueue: TestJobRecord<D, R>[] = [];
+  /** @internal */ readonly budgets: Map<string, TestBudgetState> = new Map();
   private idCounter = 0;
   private paused = false;
   private opts: TestQueueOptions;
@@ -698,6 +713,70 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     return agg;
   }
 
+  /**
+   * Read the budget state for a flow. Returns null if no budget was set.
+   */
+  async getFlowBudget(flowId: string): Promise<{
+    maxTotalTokens?: number;
+    maxCostUsd?: number;
+    usedTokens: number;
+    usedCost: number;
+    exceeded: boolean;
+    onExceeded: 'pause' | 'fail';
+  } | null> {
+    const budget = this.budgets.get(flowId);
+    if (!budget) return null;
+    return { ...budget };
+  }
+
+  /**
+   * @internal Set a budget for a flow (used by test setup).
+   */
+  setBudget(flowId: string, budget: {
+    maxTotalTokens?: number;
+    maxCostUsd?: number;
+    onExceeded?: 'pause' | 'fail';
+  }): void {
+    this.budgets.set(flowId, {
+      maxTotalTokens: budget.maxTotalTokens,
+      maxCostUsd: budget.maxCostUsd,
+      usedTokens: 0,
+      usedCost: 0,
+      exceeded: false,
+      onExceeded: budget.onExceeded ?? 'fail',
+    });
+  }
+
+  /**
+   * @internal Record usage against a budget and check if exceeded.
+   * Returns 'ok', 'exceeded', or 'no_budget'.
+   */
+  recordBudgetUsage(budgetKey: string, tokens: number, costUsd: number): string {
+    const budget = this.budgets.get(budgetKey);
+    if (!budget) return 'no_budget';
+
+    budget.usedTokens += tokens;
+    budget.usedCost += costUsd;
+
+    const tokenExceeded = (budget.maxTotalTokens ?? 0) > 0 && budget.usedTokens > budget.maxTotalTokens!;
+    const costExceeded = (budget.maxCostUsd ?? 0) > 0 && budget.usedCost > budget.maxCostUsd!;
+
+    if (tokenExceeded || costExceeded) {
+      budget.exceeded = true;
+      return 'exceeded';
+    }
+    return 'ok';
+  }
+
+  /**
+   * @internal Check if a budget is exceeded. Returns 'ok', 'exceeded', or 'no_budget'.
+   */
+  checkBudget(budgetKey: string): string {
+    const budget = this.budgets.get(budgetKey);
+    if (!budget) return 'no_budget';
+    return budget.exceeded ? 'exceeded' : 'ok';
+  }
+
   async readStream(
     jobId: string,
     opts?: { lastId?: string; count?: number },
@@ -1050,6 +1129,37 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       }
       return;
     }
+    // Pre-dispatch budget check
+    if (record.budgetKey) {
+      const budgetStatus = this.queue.checkBudget(record.budgetKey);
+      if (budgetStatus === 'exceeded') {
+        const budget = this.queue.budgets.get(record.budgetKey);
+        this.emit('budget-exceeded', job, record.id);
+        if (budget?.onExceeded === 'pause') {
+          // Move back to waiting for later retry
+          record.state = 'waiting';
+          this.activeCount--;
+          if (this.running && !this.queue.isPaused()) {
+            this.processAvailable();
+          }
+          return;
+        }
+        record.state = 'failed';
+        record.failedReason = 'Budget exceeded';
+        record.finishedOn = Date.now();
+        job.failedReason = 'Budget exceeded';
+        job.finishedOn = record.finishedOn;
+        this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
+        const err = new Error('Budget exceeded');
+        this.emit('failed', job, err);
+        this.queue.emit('failed', job, err);
+        this.activeCount--;
+        if (this.running && !this.queue.isPaused()) {
+          this.processAvailable();
+        }
+        return;
+      }
+    }
     this.processor(job as any)
       .then((result) => {
         // Roundtrip returnvalue through serializer to match production behavior
@@ -1063,6 +1173,18 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
         this.emit('completed', job, roundtripped);
         this.queue.emit('completed', job, roundtripped);
+
+        // Post-completion budget check
+        if (record.budgetKey && job.usage) {
+          const tokens = job.usage.totalTokens ?? 0;
+          const cost = job.usage.costUsd ?? 0;
+          if (tokens > 0 || cost > 0) {
+            const budgetResult = this.queue.recordBudgetUsage(record.budgetKey, tokens, cost);
+            if (budgetResult === 'exceeded') {
+              this.emit('budget-exceeded', job, record.id);
+            }
+          }
+        }
       })
       .catch((err: Error) => {
         // Handle suspend: the job is already marked suspended by TestJob.suspend()

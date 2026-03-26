@@ -1,4 +1,4 @@
-import type { FlowProducerOptions, FlowJob, DAGFlow, Client, Serializer } from './types';
+import type { FlowProducerOptions, FlowJob, DAGFlow, Client, Serializer, BudgetOptions } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE, validateJobId, validateQueueName } from './utils';
@@ -66,8 +66,13 @@ export class FlowProducer {
    * Add a flow (parent with children) atomically.
    * Children can have their own children (recursive flows), which are flattened
    * into multiple addFlow calls (one per level with children).
+   *
+   * When `flowOpts.budget` is provided, a budget hash is created in Valkey and
+   * a `budgetKey` field is written to the parent and all child job hashes.
+   * Workers check this key before processing and after completion to enforce
+   * token and cost caps across the entire flow.
    */
-  async add(flow: FlowJob): Promise<JobNode> {
+  async add(flow: FlowJob, flowOpts?: { budget?: BudgetOptions }): Promise<JobNode> {
     return withSpan(
       'glide-mq.flow.add',
       {
@@ -77,9 +82,55 @@ export class FlowProducer {
       },
       async () => {
         const client = await this.getClient();
-        return this.addFlowRecursive(client, flow);
+        const result = await this.addFlowRecursive(client, flow);
+
+        if (flowOpts?.budget) {
+          const prefix = this.opts.prefix ?? 'glide';
+          const budgetKey = `${prefix}:{${flow.queueName}}:budget:${result.job.id}`;
+          const budgetFields: Record<string, string> = {
+            usedTokens: '0',
+            usedCost: '0',
+            exceeded: '0',
+            onExceeded: flowOpts.budget.onExceeded ?? 'fail',
+          };
+          if (flowOpts.budget.maxTotalTokens != null) {
+            budgetFields.maxTotalTokens = flowOpts.budget.maxTotalTokens.toString();
+          }
+          if (flowOpts.budget.maxCostUsd != null) {
+            budgetFields.maxCostUsd = flowOpts.budget.maxCostUsd.toString();
+          }
+          await client.hset(budgetKey, budgetFields);
+
+          // Write budgetKey to all jobs in the flow
+          await this.propagateBudgetKey(client, result, flow, budgetKey, prefix);
+        }
+
+        return result;
       },
     );
+  }
+
+  /**
+   * Recursively write budgetKey to every job in a flow tree.
+   * Walks the FlowJob tree in parallel with the JobNode tree to access queue names.
+   */
+  private async propagateBudgetKey(
+    client: Client,
+    node: JobNode,
+    flowDef: FlowJob,
+    budgetKey: string,
+    prefix: string,
+  ): Promise<void> {
+    const keys = buildKeys(flowDef.queueName, prefix);
+    await client.hset(keys.job(node.job.id), { budgetKey });
+    node.job.budgetKey = budgetKey;
+    if (node.children && flowDef.children) {
+      for (let i = 0; i < node.children.length; i++) {
+        const childNode = node.children[i];
+        const childFlow = flowDef.children[i];
+        await this.propagateBudgetKey(client, childNode, childFlow, budgetKey, prefix);
+      }
+    }
   }
 
   /**
