@@ -131,6 +131,7 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
     `${pfx}:w:*`,
     `${pfx}:signals:*`,
     `${pfx}:budget:*`,
+    `${pfx}:tpm:*`,
   ]) {
     try {
       if (client.constructor.name === 'GlideClusterClient') {

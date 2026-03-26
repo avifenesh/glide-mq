@@ -110,6 +110,20 @@ export interface WorkerOptions extends QueueOptions {
   maxStalledCount?: number;
   promotionInterval?: number;
   limiter?: { max: number; duration: number };
+  /** Token-per-minute rate limiting. Tracks total tokens consumed per time window.
+   *  Worker pauses fetching when either RPM limiter or TPM tokenLimiter is exceeded.
+   *  Tokens reported via job.reportTokens() or auto-extracted from job.reportUsage(). */
+  tokenLimiter?: {
+    /** Max tokens per window. */
+    maxTokens: number;
+    /** Window duration in milliseconds. */
+    duration: number;
+    /** Enforcement scope. Default: 'both'.
+     *  - 'queue': Valkey counter shared across all workers.
+     *  - 'worker': In-memory counter per worker.
+     *  - 'both': Local check first, then Valkey (optimal). */
+    scope?: 'queue' | 'worker' | 'both';
+  };
   backoffStrategies?: Record<string, (attemptsMade: number, err: Error) => number>;
   /** Lock duration in ms. The worker sends a heartbeat every lockDuration/2.
    *  Jobs with a recent heartbeat are not reclaimed as stalled.

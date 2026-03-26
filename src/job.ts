@@ -43,6 +43,9 @@ export class Job<D = any, R = any> {
   /** AI-specific usage metadata reported via reportUsage(). */
   usage?: JobUsage;
 
+  /** Tokens reported via reportTokens() for TPM rate limiting. */
+  tpmTokens?: number;
+
   /**
    * AbortSignal that fires when this job is revoked during processing.
    * The processor should check signal.aborted cooperatively.
@@ -222,6 +225,20 @@ export class Job<D = any, R = any> {
     }
 
     this.usage = resolved;
+  }
+
+  /**
+   * Report tokens consumed by this job for TPM (tokens-per-minute) tracking.
+   * The count is stored in the job hash field `tpmTokens`.
+   * After job completion, the Worker reads this value and increments the TPM counter
+   * if a tokenLimiter is configured.
+   *
+   * Calling multiple times overwrites the previous value.
+   */
+  async reportTokens(count: number): Promise<void> {
+    if (count < 0) throw new Error('Token count must not be negative');
+    await this.client.hset(this.queueKeys.job(this.id), { tpmTokens: count.toString() });
+    this.tpmTokens = count;
   }
 
   /**
@@ -723,6 +740,7 @@ export class Job<D = any, R = any> {
     job.schedulerName = hash.schedulerName || undefined;
     job.budgetKey = hash.budgetKey || undefined;
     job.fallbackIndex = hash.fallbackIndex ? parseInt(hash.fallbackIndex, 10) : 0;
+    job.tpmTokens = hash.tpmTokens ? parseInt(hash.tpmTokens, 10) : undefined;
     if (hash.parentIds) {
       try {
         job.parentIds = JSON.parse(hash.parentIds);
