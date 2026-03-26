@@ -261,9 +261,7 @@ export function hmgetArrayToRecord(
  */
 export function extractJobIdsFromStreamEntries(entries: Record<string, [unknown, unknown][]>): string[] {
   const jobIds: string[] = [];
-  for (const entryId in entries) {
-    if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
-    const fieldPairs = entries[entryId];
+  for (const [_entryId, fieldPairs] of Object.entries(entries)) {
     for (let i = 0; i < fieldPairs.length; i++) {
       const field = fieldPairs[i][0];
       const value = fieldPairs[i][1];
