@@ -34,6 +34,9 @@ export class Job<D = any, R = any> {
   expireAt?: number;
   schedulerName?: string;
 
+  /** Current position in the fallback chain. 0 = original request, 1+ = fallback entries. */
+  fallbackIndex: number = 0;
+
   /** AI-specific usage metadata reported via reportUsage(). */
   usage?: JobUsage;
 
@@ -103,6 +106,16 @@ export class Job<D = any, R = any> {
     this.attemptsMade = 0;
     this.progress = 0;
     this.timestamp = Date.now();
+  }
+
+  /**
+   * The current fallback entry, or undefined when running the original request.
+   * fallbackIndex=0 means original (no fallback). On first failure, fallbackIndex
+   * becomes 1 and currentFallback returns fallbacks[0], etc.
+   */
+  get currentFallback(): { model: string; provider?: string; [key: string]: any } | undefined {
+    if (!this.opts.fallbacks || this.fallbackIndex === 0) return undefined;
+    return this.opts.fallbacks[this.fallbackIndex - 1];
   }
 
   /**
@@ -705,6 +718,7 @@ export class Job<D = any, R = any> {
     job.cost = hash.cost ? parseInt(hash.cost, 10) : undefined;
     job.expireAt = hash.expireAt ? parseInt(hash.expireAt, 10) : undefined;
     job.schedulerName = hash.schedulerName || undefined;
+    job.fallbackIndex = hash.fallbackIndex ? parseInt(hash.fallbackIndex, 10) : 0;
     if (hash.parentIds) {
       try {
         job.parentIds = JSON.parse(hash.parentIds);

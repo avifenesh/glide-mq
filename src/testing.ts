@@ -61,6 +61,8 @@ export interface TestJobRecord<D = any, R = any> {
   finishedOn: number | undefined;
   processedOn: number | undefined;
   expireAt?: number;
+  /** Current position in the fallback chain. */
+  fallbackIndex: number;
   /** @internal Per-job streaming channel chunks. */
   streamChunks?: { id: string; fields: Record<string, string> }[];
   /** @internal Counter for synthetic stream entry IDs. */
@@ -92,6 +94,7 @@ export class TestJob<D = any, R = any> {
   finishedOn: number | undefined;
   processedOn: number | undefined;
   expireAt?: number;
+  fallbackIndex: number = 0;
   usage?: JobUsage;
   signals: SignalEntry[] = [];
   /** @internal */ private _record: TestJobRecord<D, R>;
@@ -110,7 +113,13 @@ export class TestJob<D = any, R = any> {
     this.finishedOn = record.finishedOn;
     this.processedOn = record.processedOn;
     this.expireAt = record.expireAt;
+    this.fallbackIndex = record.fallbackIndex;
     this.signals = record.signals ?? [];
+  }
+
+  get currentFallback(): { model: string; provider?: string; [key: string]: any } | undefined {
+    if (!this.opts.fallbacks || this.fallbackIndex === 0) return undefined;
+    return this.opts.fallbacks[this.fallbackIndex - 1];
   }
 
   async log(_message: string): Promise<void> {
@@ -309,6 +318,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       finishedOn: undefined,
       processedOn: undefined,
       expireAt: ttl > 0 ? now + ttl : undefined,
+      fallbackIndex: 0,
     };
     this.jobs.set(id, record);
     this.waitingQueue.push(record);
@@ -1067,6 +1077,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
         const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
         if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
+          // Advance fallback chain if configured
+          if (record.opts.fallbacks && record.opts.fallbacks.length > 0) {
+            record.fallbackIndex++;
+          }
           // Retry: put back to waiting
           record.state = 'waiting';
           this.queue.waitingQueue.push(record);
@@ -1212,6 +1226,9 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
               const skipRetry =
                 job.discarded || result instanceof UnrecoverableError || result.name === 'UnrecoverableError';
               if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
+                if (record.opts.fallbacks && record.opts.fallbacks.length > 0) {
+                  record.fallbackIndex++;
+                }
                 record.state = 'waiting';
                 this.queue.waitingQueue.push(record);
                 queueMicrotask(() => this.processAvailable());
@@ -1248,6 +1265,9 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
             const maxAttempts = record.opts.attempts ?? 0;
             const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
             if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
+              if (record.opts.fallbacks && record.opts.fallbacks.length > 0) {
+                record.fallbackIndex++;
+              }
               record.state = 'waiting';
               this.queue.waitingQueue.push(record);
               queueMicrotask(() => this.processAvailable());

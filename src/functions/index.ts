@@ -37,7 +37,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 75: Suspend/resume with signals: glidemq_suspend, glidemq_signal, glidemq_sweepSuspended.
 // Version 76: glidemq_clean and glidemq_drain delete signals: keys to prevent key leaks.
 // Version 77: Per-job lockDuration: reclaimStalled/reclaimStalledListJobs read lockDuration from job opts for per-job stall threshold.
-export const LIBRARY_VERSION = '77';
+// Version 78: glidemq_fail increments fallbackIndex on retry when job has fallbacks configured.
+export const LIBRARY_VERSION = '78';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1348,6 +1349,12 @@ redis.register_function('glidemq_fail', function(keys, args)
     attemptsMade = redis.call('HINCRBY', jobKey, 'attemptsMade', 1)
   end
   if maxAttempts > 0 and attemptsMade < maxAttempts then
+    -- Advance fallback chain if the job has fallbacks configured
+    local optsRaw = redis.call('HGET', jobKey, 'opts')
+    if optsRaw and string.find(optsRaw, '"fallbacks"') then
+      local fbIdx = tonumber(redis.call('HGET', jobKey, 'fallbackIndex') or '0') or 0
+      redis.call('HSET', jobKey, 'fallbackIndex', tostring(fbIdx + 1))
+    end
     local retryAt = timestamp + backoffDelay
     local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
     local score = priority * PRIORITY_SHIFT + retryAt
