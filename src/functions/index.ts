@@ -33,7 +33,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 71: Step-job slot retention, returning step-job bypass, GROUP_ORDERED sentinel.
 // Version 72: Runtime per-group rate limiting: glidemq_rateLimitGroup + glidemq_rateLimitGroupExternal.
 // Version 73: Fix review findings: groupqScore string ID fallback, promoteRateLimited loop, step-job gates in Phase 1/3, retry slot retention, addFlow routing.
-export const LIBRARY_VERSION = '73';
+// Version 74: glidemq_removeJob/clean/drain delete per-job streaming channel keys (jstream:).
+export const LIBRARY_VERSION = '74';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -2526,10 +2527,12 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
   markOrderingDone(jobKey, jobId)
-  -- Clean up DAG parents SET
+  -- Clean up DAG parents SET and per-job streaming channel
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   local parentsKey = prefix .. 'parents:' .. jobId
+  local jstreamKey = prefix .. 'jstream:' .. jobId
   redis.call('DEL', parentsKey)
+  redis.call('DEL', jstreamKey)
   redis.call('DEL', jobKey)
   redis.call('DEL', logKey)
   emitEvent(eventsKey, 'removed', jobId, nil)
@@ -2549,7 +2552,7 @@ redis.register_function('glidemq_clean', function(keys, args)
     return {}
   end
   for i = 1, #ids do
-    redis.call('DEL', prefix .. 'job:' .. ids[i], prefix .. 'log:' .. ids[i], prefix .. 'deps:' .. ids[i], prefix .. 'parents:' .. ids[i])
+    redis.call('DEL', prefix .. 'job:' .. ids[i], prefix .. 'log:' .. ids[i], prefix .. 'deps:' .. ids[i], prefix .. 'parents:' .. ids[i], prefix .. 'jstream:' .. ids[i])
   end
   for i = 1, #ids, 1000 do
     redis.call('ZREM', setKey, unpack(ids, i, math.min(i + 999, #ids)))
@@ -3126,7 +3129,7 @@ redis.register_function('glidemq_drain', function(keys, args)
         for j = 1, #fields, 2 do
           if fields[j] == 'jobId' and fields[j + 1] ~= '' then
             local jobId = fields[j + 1]
-            redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+            redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId)
             removed = removed + 1
             break
           end
@@ -3158,6 +3161,7 @@ redis.register_function('glidemq_drain', function(keys, args)
         batch[#batch + 1] = prefix .. 'job:' .. jobId
         batch[#batch + 1] = prefix .. 'log:' .. jobId
         batch[#batch + 1] = prefix .. 'deps:' .. jobId
+        batch[#batch + 1] = prefix .. 'jstream:' .. jobId
       end
       redis.call('DEL', unpack(batch))
       removed = removed + #scheduled
@@ -3171,7 +3175,7 @@ redis.register_function('glidemq_drain', function(keys, args)
     local lifoIds = redis.call('LRANGE', lifoKey, 0, -1)
     for i = 1, #lifoIds do
       local jobId = lifoIds[i]
-      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId)
       removed = removed + 1
     end
     redis.call('DEL', lifoKey)
@@ -3182,7 +3186,7 @@ redis.register_function('glidemq_drain', function(keys, args)
     local priorityIds = redis.call('LRANGE', priorityKey, 0, -1)
     for i = 1, #priorityIds do
       local jobId = priorityIds[i]
-      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId)
       removed = removed + 1
     end
     redis.call('DEL', priorityKey)

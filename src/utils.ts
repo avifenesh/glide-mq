@@ -116,6 +116,7 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     group: (key: string) => `${p}:group:${key}`,
     groupq: (key: string) => `${p}:groupq:${key}`,
     parents: (id: string) => `${p}:parents:${id}`,
+    jstream: (id: string) => `${p}:jstream:${id}`,
     worker: (id: string) => `${p}:w:${id}`,
   };
 }

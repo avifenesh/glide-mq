@@ -301,6 +301,58 @@ export function createRoutes(
     }
   });
 
+  router.get('/queues/:name/jobs/:id/stream', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+
+      const queue = await getQueue(param(req, 'name'));
+      const jobId = param(req, 'id');
+
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+
+      let lastId = (req.headers['last-event-id'] as string) || (req.query.lastId as string) || undefined;
+      let closed = false;
+
+      req.on('close', () => {
+        closed = true;
+      });
+
+      while (!closed) {
+        const entries = await queue.readStream(jobId, { lastId, count: 100 });
+        for (const entry of entries) {
+          res.write(`id: ${entry.id}\ndata: ${JSON.stringify(entry.fields)}\n\n`);
+          lastId = entry.id;
+        }
+
+        const job = await queue.getJob(jobId);
+        if (!job) break;
+        const state = await job.getState();
+        if (state === 'completed' || state === 'failed') {
+          const trailing = await queue.readStream(jobId, { lastId, count: 100 });
+          for (const entry of trailing) {
+            res.write(`id: ${entry.id}\ndata: ${JSON.stringify(entry.fields)}\n\n`);
+          }
+          break;
+        }
+
+        await new Promise<void>((r) => setTimeout(r, 500));
+      }
+
+      res.end();
+    } catch (err) {
+      if (!res.headersSent) {
+        const { status, message } = errorResponse(err);
+        res.status(status).json({ error: message });
+      } else {
+        res.end();
+      }
+    }
+  });
+
   router.post('/queues/:name/pause', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;

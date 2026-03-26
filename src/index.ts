@@ -48,6 +48,7 @@ export type {
   DAGNode,
   DAGFlow,
   JobUsage,
+  ReadStreamOptions,
 } from './types';
 
 export { JSON_SERIALIZER } from './types';
