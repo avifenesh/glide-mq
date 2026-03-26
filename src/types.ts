@@ -212,6 +212,9 @@ export interface JobOptions {
   parents?: Array<{ queue: string; id: string }>;
   /** Time-to-live in milliseconds. Jobs not processed within this window are failed as 'expired'. */
   ttl?: number;
+  /** Ordered list of fallback configurations tried on retryable failure.
+   *  Each entry provides model/provider info the processor reads via job.currentFallback. */
+  fallbacks?: Array<{ model: string; provider?: string; [key: string]: any }>;
 }
 
 export interface AddAndWaitOptions extends JobOptions {
