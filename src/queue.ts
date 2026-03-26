@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
-import { InfBoundary, Batch, ClusterBatch, ClusterScanCursor } from '@glidemq/speedkey';
-import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
+import { InfBoundary, Batch, ClusterBatch, ClusterScanCursor, GlideFt } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient, Field } from '@glidemq/speedkey';
 import type {
   QueueOptions,
   JobOptions,
@@ -16,9 +16,14 @@ import type {
   JobCounts,
   SearchJobsOptions,
   GetJobsOptions,
+  ReadStreamOptions,
   RateLimitConfig,
   WorkerInfo,
   Serializer,
+  SignalEntry,
+  JobIndexOptions,
+  VectorSearchOptions,
+  VectorSearchResult,
 } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
@@ -65,6 +70,7 @@ import {
   drainQueue,
   retryJobs,
   rateLimitGroupExternal,
+  signalJob,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -104,6 +110,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   private serializer: Serializer;
   private skipEvents: boolean;
+  private searchModuleAvailable: boolean | null = null;
 
   constructor(name: string, opts: QueueOptions) {
     super();
@@ -1687,6 +1694,137 @@ export class Queue<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Aggregate AI usage metadata across a flow (parent + children).
+   * Walks the deps set of the parent job and sums token counts, cost, and model usage.
+   */
+  async getFlowUsage(parentJobId: string): Promise<{
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCostUsd: number;
+    jobCount: number;
+    models: Record<string, number>;
+  }> {
+    const client = await this.getClient();
+    const usageFields = ['usage:model', 'usage:inputTokens', 'usage:outputTokens', 'usage:costUsd'];
+    const agg = { totalInputTokens: 0, totalOutputTokens: 0, totalCostUsd: 0, jobCount: 0, models: {} as Record<string, number> };
+
+    // Include the parent job itself
+    const parentValues = await client.hmget(this.keys.job(parentJobId), usageFields);
+    if (parentValues) {
+      const pModel = parentValues[0] ? String(parentValues[0]) : undefined;
+      const pIn = parentValues[1] ? parseInt(String(parentValues[1]), 10) : 0;
+      const pOut = parentValues[2] ? parseInt(String(parentValues[2]), 10) : 0;
+      const pCost = parentValues[3] ? parseFloat(String(parentValues[3])) : 0;
+      if (pModel || pIn || pOut || pCost) {
+        agg.totalInputTokens += pIn;
+        agg.totalOutputTokens += pOut;
+        agg.totalCostUsd += pCost;
+        agg.jobCount++;
+        if (pModel) agg.models[pModel] = (agg.models[pModel] || 0) + 1;
+      }
+    }
+
+    // Walk children via deps set
+    const members = await client.smembers(this.keys.deps(parentJobId));
+    if (!members || members.size === 0) return agg;
+
+    const batch = this.newBatch();
+    const memberList: string[] = [];
+    for (const member of members) {
+      const memberStr = String(member);
+      const lastColon = memberStr.lastIndexOf(':');
+      if (lastColon === -1) continue;
+      const queuePrefix = memberStr.substring(0, lastColon);
+      const childId = memberStr.substring(lastColon + 1);
+      const jobKey = `${queuePrefix}:job:${childId}`;
+      (batch as any).hmget(jobKey, usageFields);
+      memberList.push(memberStr);
+    }
+
+    if (memberList.length === 0) return agg;
+    const batchResults = await client.exec(batch as any, false);
+    if (!batchResults) return agg;
+
+    for (let i = 0; i < memberList.length; i++) {
+      const values = batchResults[i] as any[] | null;
+      if (!values) continue;
+      const model = values[0] ? String(values[0]) : undefined;
+      const inTokens = values[1] ? parseInt(String(values[1]), 10) : 0;
+      const outTokens = values[2] ? parseInt(String(values[2]), 10) : 0;
+      const cost = values[3] ? parseFloat(String(values[3])) : 0;
+      if (model || inTokens || outTokens || cost) {
+        agg.totalInputTokens += inTokens;
+        agg.totalOutputTokens += outTokens;
+        agg.totalCostUsd += cost;
+        agg.jobCount++;
+        if (model) agg.models[model] = (agg.models[model] || 0) + 1;
+      }
+    }
+
+    return agg;
+  }
+
+  /**
+   * Read the budget state for a flow. Returns null if no budget was set.
+   */
+  async getFlowBudget(flowId: string): Promise<{
+    maxTotalTokens?: number;
+    maxCostUsd?: number;
+    usedTokens: number;
+    usedCost: number;
+    exceeded: boolean;
+    onExceeded: 'pause' | 'fail';
+  } | null> {
+    const client = await this.getClient();
+    const budgetKey = this.keys.budget(flowId);
+    const raw = await client.hgetall(budgetKey);
+    if (!raw || (Array.isArray(raw) && raw.length === 0)) return null;
+    const fields = hashDataToRecord(raw as any);
+    if (!fields) return null;
+    return {
+      maxTotalTokens: fields.maxTotalTokens ? parseFloat(fields.maxTotalTokens) : undefined,
+      maxCostUsd: fields.maxCostUsd ? parseFloat(fields.maxCostUsd) : undefined,
+      usedTokens: parseFloat(fields.usedTokens || '0'),
+      usedCost: parseFloat(fields.usedCost || '0'),
+      exceeded: fields.exceeded === '1',
+      onExceeded: (fields.onExceeded as 'pause' | 'fail') || 'fail',
+    };
+  }
+
+  /**
+   * Read entries from a job's streaming channel.
+   * Uses XRANGE for non-blocking reads. Pass lastId to resume from a known position.
+   */
+  async readStream(
+    jobId: string,
+    opts?: ReadStreamOptions,
+  ): Promise<{ id: string; fields: Record<string, string> }[]> {
+    const client = await this.getClient();
+    const lastId = opts?.lastId;
+    const count = opts?.count ?? 100;
+    const start = lastId
+      ? ({ value: lastId, isInclusive: false } as const)
+      : InfBoundary.NegativeInfinity;
+    const entries = await client.xrange(
+      this.keys.jstream(jobId),
+      start,
+      InfBoundary.PositiveInfinity,
+      { count },
+    );
+    if (!entries) return [];
+    const result: { id: string; fields: Record<string, string> }[] = [];
+    for (const entryId of Object.keys(entries)) {
+      const pairs = entries[entryId];
+      const fields: Record<string, string> = Object.create(null);
+      for (const [k, v] of pairs) {
+        fields[String(k)] = String(v);
+      }
+      result.push({ id: entryId, fields });
+    }
+    return result;
+  }
+
+  /**
    * Retrieve jobs from the dead letter queue configured for this queue.
    * Returns an empty array if no DLQ is configured.
    * @param start - Start index (default 0)
@@ -1745,6 +1883,266 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (!Number.isFinite(duration) || duration <= 0) throw new Error('duration must be a positive finite number');
     const client = await this.getClient();
     return rateLimitGroupExternal(client, this.keys, groupKey, duration, Date.now(), opts?.extend ?? 'max');
+  }
+
+  /**
+   * Send a signal to a suspended job, resuming it.
+   * The job moves back to waiting state and re-enters the stream.
+   * Returns true if the job was resumed, false if it was not in suspended state.
+   */
+  async signal(jobId: string, signalName: string, data?: any): Promise<boolean> {
+    const client = await this.getClient();
+    const serialized = data !== undefined ? JSON.stringify(data) : '';
+    const result = await signalJob(client, this.keys, jobId, signalName, serialized, Date.now());
+    return String(result) === 'ok';
+  }
+
+  /**
+   * Get suspension information for a job.
+   * Returns null if the job is not in the suspended state.
+   */
+  async getSuspendInfo(jobId: string): Promise<{
+    reason?: string;
+    suspendedAt: number;
+    timeout?: number;
+    signals: SignalEntry[];
+  } | null> {
+    const client = await this.getClient();
+    const values = await client.hmget(this.keys.job(jobId), [
+      'state',
+      'suspendReason',
+      'suspendedAt',
+      'suspendTimeout',
+      'signals',
+    ]);
+    if (!values || String(values[0]) !== 'suspended') return null;
+    let signals: SignalEntry[] = [];
+    if (values[4]) {
+      try {
+        signals = JSON.parse(String(values[4]));
+      } catch {
+        // ignore parse errors
+      }
+    }
+    return {
+      reason: values[1] ? String(values[1]) : undefined,
+      suspendedAt: values[2] ? parseInt(String(values[2]), 10) : 0,
+      timeout: values[3] ? parseInt(String(values[3]), 10) : undefined,
+      signals,
+    };
+  }
+
+  // ---- Valkey Search / Vector Index ----
+
+  /**
+   * Create a Valkey Search index over job hashes for this queue.
+   * Auto-includes base fields: name (TAG), state (TAG), timestamp (NUMERIC), priority (NUMERIC).
+   *
+   * The index uses a queue-specific prefix that uniquely matches this queue's job hashes.
+   * Requires the valkey-search module to be loaded on the server (standalone mode).
+   */
+  async createJobIndex(opts?: JobIndexOptions): Promise<void> {
+    const client = await this.getClient();
+    await this.ensureSearchModule(client);
+    const indexName = opts?.name ?? `${this.name}-idx`;
+    // Valkey Search rejects complete hash tags ({...}) in prefixes.
+    // Use a partial prefix that includes the opening brace and queue name
+    // but omits the closing brace. This uniquely matches this queue's keys
+    // (e.g. "glide:{myqueue" matches "glide:{myqueue}:job:*") without
+    // triggering the hash tag validator.
+    const pfxBase = this.opts.prefix ?? 'glide';
+    const searchPrefix = `${pfxBase}:{${this.name}`;
+
+    const schema: Field[] = [
+      { type: 'TAG', name: 'name' },
+      { type: 'TAG', name: 'state' },
+      { type: 'NUMERIC', name: 'timestamp' },
+      { type: 'NUMERIC', name: 'priority' },
+    ];
+
+    if (opts?.fields) {
+      schema.push(...opts.fields);
+    }
+
+    if (opts?.vectorField) {
+      const vf = opts.vectorField;
+      const algorithm = vf.algorithm ?? 'HNSW';
+      const distanceMetric = vf.distanceMetric ?? 'COSINE';
+      if (algorithm === 'HNSW') {
+        schema.push({
+          type: 'VECTOR',
+          name: vf.name,
+          attributes: {
+            algorithm: 'HNSW',
+            dimensions: vf.dimensions,
+            distanceMetric,
+            type: 'FLOAT32',
+          },
+        });
+      } else {
+        schema.push({
+          type: 'VECTOR',
+          name: vf.name,
+          attributes: {
+            algorithm: 'FLAT',
+            dimensions: vf.dimensions,
+            distanceMetric,
+            type: 'FLOAT32',
+          },
+        });
+      }
+    } else {
+      // valkey-search requires at least one vector field; add a minimal placeholder
+      schema.push({
+        type: 'VECTOR',
+        name: '_vec',
+        attributes: {
+          algorithm: 'FLAT',
+          dimensions: 2,
+          distanceMetric: 'COSINE',
+          type: 'FLOAT32',
+        },
+      });
+    }
+
+    await GlideFt.create(client, indexName, schema, {
+      dataType: 'HASH',
+      prefixes: [searchPrefix],
+    });
+  }
+
+  /**
+   * Drop a Valkey Search index. Indexed document keys (job hashes) are not affected.
+   */
+  async dropJobIndex(name?: string): Promise<void> {
+    const client = await this.getClient();
+    const indexName = name ?? `${this.name}-idx`;
+    await GlideFt.dropindex(client, indexName);
+  }
+
+  /**
+   * Search for jobs by vector similarity (KNN) using a Valkey Search index.
+   * Requires a prior call to createJobIndex with a vectorField configured.
+   *
+   * The search is automatically scoped to this queue via the index prefix.
+   *
+   * @param embedding - The query vector (number[] or Float32Array).
+   * @param opts - Search options (index name, k, pre-filter, return fields, score field).
+   * @returns Array of { job, score } sorted by similarity (best first).
+   */
+  async vectorSearch(
+    embedding: number[] | Float32Array,
+    opts?: VectorSearchOptions,
+  ): Promise<VectorSearchResult<D, R>[]> {
+    const client = await this.getClient();
+    const indexName = opts?.indexName ?? `${this.name}-idx`;
+    const k = opts?.k ?? 10;
+    const filter = opts?.filter ?? '*';
+    const scoreField = opts?.scoreField ?? '__score';
+
+    // Determine vector field name from index info.
+    // The info response format varies across valkey-search versions:
+    // - v1.x: fields in info.attributes as array of arrays
+    // - later: fields in info.fields as array of objects
+    const info = await GlideFt.info(client, indexName);
+    let vecFieldName = '_vec';
+    const attrs = (info.attributes ?? info.fields) as any;
+    if (Array.isArray(attrs)) {
+      for (const attr of attrs) {
+        if (Array.isArray(attr)) {
+          // v1.x format: ["identifier","vec","attribute","vec","type","VECTOR",...]
+          const typeIdx = attr.indexOf('type');
+          if (typeIdx >= 0 && String(attr[typeIdx + 1]) === 'VECTOR') {
+            const idIdx = attr.indexOf('identifier');
+            if (idIdx >= 0) vecFieldName = String(attr[idIdx + 1]);
+            break;
+          }
+        } else if (typeof attr === 'object' && attr !== null) {
+          // Object format: { type: 'VECTOR', identifier: '...', ... }
+          if (String(attr.type) === 'VECTOR') {
+            vecFieldName = String(attr.field_name || attr.identifier);
+            break;
+          }
+        }
+      }
+    }
+
+    // Convert embedding to Buffer
+    const arr = embedding instanceof Float32Array ? embedding : new Float32Array(embedding);
+    const vecBuf = Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength);
+
+    const query = `${filter}=>[KNN ${k} @${vecFieldName} $BLOB AS ${scoreField}]`;
+    const searchOpts: Record<string, any> = {
+      params: [{ key: 'BLOB', value: vecBuf }],
+      dialect: 2,
+      // Request only the score field from the search result to avoid
+      // binary vector data causing UTF-8 decode errors. Full job data
+      // is fetched separately via HGETALL.
+      returnFields: [{ fieldIdentifier: scoreField }],
+    };
+
+    const [totalCount, records] = await GlideFt.search(client, indexName, query, searchOpts);
+
+    const results: VectorSearchResult<D, R>[] = [];
+    if (totalCount === 0 || !records || records.length === 0) return results;
+
+    // Fetch job data using HMGET to avoid reading binary vector fields
+    // (HGETALL would include vector buffers that fail UTF-8 string decoding).
+    const JOB_TEXT_FIELDS = [
+      'data', 'returnvalue', ...JOB_METADATA_FIELDS,
+    ] as string[];
+    const batch = this.newBatch();
+    const scoreMap = new Map<string, number>();
+    const jobIds: string[] = [];
+
+    for (const record of records) {
+      const key = String(record.key);
+      const lastColon = key.lastIndexOf(':');
+      if (lastColon === -1) continue;
+      const jobId = key.substring(lastColon + 1);
+
+      let score = 0;
+      for (const field of record.value) {
+        if (String(field.key) === scoreField) {
+          score = parseFloat(String(field.value));
+          break;
+        }
+      }
+
+      jobIds.push(jobId);
+      scoreMap.set(jobId, score);
+      (batch as any).hmget(this.keys.job(jobId), JOB_TEXT_FIELDS);
+    }
+
+    const batchResults = await client.exec(batch as any, false);
+    if (!batchResults) return results;
+
+    for (let i = 0; i < jobIds.length; i++) {
+      const hash = hmgetArrayToRecord(batchResults[i] as (unknown | null)[], JOB_TEXT_FIELDS as readonly string[]);
+      if (!hash) continue;
+      const job = Job.fromHash<D, R>(client, this.keys, jobIds[i], hash, this.serializer);
+      results.push({ job, score: scoreMap.get(jobIds[i]) ?? 0 });
+    }
+
+    return results;
+  }
+
+  /**
+   * Check that the valkey-search module is available. Caches the result.
+   * Throws a clear error if the module is not loaded.
+   * @internal
+   */
+  private async ensureSearchModule(client: Client): Promise<void> {
+    if (this.searchModuleAvailable === true) return;
+    try {
+      await GlideFt.list(client);
+      this.searchModuleAvailable = true;
+    } catch {
+      this.searchModuleAvailable = false;
+      throw new GlideMQError(
+        'Valkey Search module is not available. Install valkey-bundle or load the search module to use index features.',
+      );
+    }
   }
 
   /**

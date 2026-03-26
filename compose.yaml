@@ -1,0 +1,58 @@
+services:
+  valkey:
+    image: valkey/valkey-bundle:latest
+    ports:
+      - "6379:6379"
+    command: valkey-server --save "" --appendonly no --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 5
+
+  valkey-cluster:
+    image: valkey/valkey:8.0
+    ports:
+      - "7000-7005:7000-7005"
+      - "17000-17005:17000-17005"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ANNOUNCE_IP=$${CLUSTER_ANNOUNCE_IP:-127.0.0.1}
+        for port in 7000 7001 7002 7003 7004 7005; do
+          mkdir -p /data/$$port
+          cat > /data/$$port/valkey.conf <<EOF
+        port $$port
+        cluster-enabled yes
+        cluster-config-file /data/$$port/nodes.conf
+        cluster-node-timeout 5000
+        appendonly no
+        save ""
+        maxmemory-policy noeviction
+        dir /data/$$port
+        daemonize yes
+        pidfile /data/$$port/valkey.pid
+        logfile /data/$$port/valkey.log
+        bind 0.0.0.0
+        protected-mode no
+        cluster-announce-ip $$ANNOUNCE_IP
+        cluster-announce-port $$port
+        cluster-announce-bus-port 1$$port
+        EOF
+          valkey-server /data/$$port/valkey.conf
+        done
+        sleep 2
+        echo "yes" | valkey-cli --cluster create \
+          $$ANNOUNCE_IP:7000 $$ANNOUNCE_IP:7001 $$ANNOUNCE_IP:7002 \
+          $$ANNOUNCE_IP:7003 $$ANNOUNCE_IP:7004 $$ANNOUNCE_IP:7005 \
+          --cluster-replicas 1
+        sleep 2
+        state=$$(valkey-cli -p 7000 cluster info | grep cluster_state | tr -d '\r')
+        echo "Cluster state: $$state"
+        tail -f /dev/null
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -p 7000 cluster info | grep -q cluster_state:ok"]
+      interval: 3s
+      timeout: 5s
+      retries: 15
+      start_period: 10s

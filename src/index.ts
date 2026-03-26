@@ -47,9 +47,19 @@ export type {
   BroadcastWorkerOptions,
   DAGNode,
   DAGFlow,
+  JobUsage,
+  ReadStreamOptions,
+  SuspendOptions,
+  SignalEntry,
+  BudgetOptions,
+  JobIndexOptions,
+  VectorSearchOptions,
+  VectorSearchResult,
 } from './types';
 
 export { JSON_SERIALIZER } from './types';
+
+export type { Field } from '@glidemq/speedkey';
 
 export {
   GlideMQError,
@@ -58,6 +68,7 @@ export {
   DelayedError,
   BatchError,
   WaitingChildrenError,
+  SuspendError,
   GroupRateLimitError,
 } from './errors';
 export type { GroupRateLimitOptions } from './errors';

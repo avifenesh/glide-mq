@@ -46,6 +46,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Suspend/Resume with signals**: `job.suspend(opts?)` pauses a job mid-processor; `queue.signal(jobId, name, data?)` resumes it with an external event. Enables human-in-the-loop approval gates, webhook callbacks, and any pattern requiring external input before a job can continue.
+  - `SuspendOptions`: `reason` (label), `timeout` (auto-fail after N ms)
+  - `onResume` callback: best-effort same-worker continuation called with `signals[]` on resume
+  - `queue.getSuspendInfo(jobId)`: returns suspension metadata and signals delivered so far
+  - `glidemq_suspend` FCALL: moves active job to suspended sorted set, releases group slot
+  - `glidemq_signal` FCALL: appends signal, re-queues job to stream
+  - `glidemq_sweepSuspended` FCALL: fails timed-out suspended jobs on each stalled recovery tick
+  - Proxy: `POST /queues/:name/jobs/:id/signal` endpoint
+  - Testing: `TestJob.suspend()` and `TestQueue.signal()` with full parity (no Valkey)
+  - Library version bumped to 75 (suspend/resume) then 76 (signals key cleanup in clean/drain).
+- `SuspendError`, `SuspendOptions`, `SignalEntry` exported from public API.
+
+### Fixed
+
+- `glidemq_clean` and `glidemq_drain` now delete `signals:{id}` LIST keys when removing jobs, preventing a key leak when suspended jobs time out or are cleaned after failure.
+
 ---
 
 ## [0.11.0] - 2026-03-10

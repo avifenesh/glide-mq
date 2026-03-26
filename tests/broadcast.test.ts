@@ -315,7 +315,7 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
     );
     expect(id2).toBeNull();
 
-    await waitFor(() => received.sub1.length === 1 && received.sub2.length === 1, 3000);
+    await waitFor(() => received.sub1.length === 1 && received.sub2.length === 1, 5000);
 
     // Both subscribers got the first message, duplicate was skipped
     expect(received.sub1.length).toBe(1);

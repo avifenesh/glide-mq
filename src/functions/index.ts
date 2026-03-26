@@ -32,7 +32,14 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 70: Unify ordering path: ZSET groupq, nextSeq tracking, ordering gates in all activation paths.
 // Version 71: Step-job slot retention, returning step-job bypass, GROUP_ORDERED sentinel.
 // Version 72: Runtime per-group rate limiting: glidemq_rateLimitGroup + glidemq_rateLimitGroupExternal.
-export const LIBRARY_VERSION = '72';
+// Version 73: Fix review findings: groupqScore string ID fallback, promoteRateLimited loop, step-job gates in Phase 1/3, retry slot retention, addFlow routing.
+// Version 74: glidemq_removeJob/clean/drain delete per-job streaming channel keys (jstream:).
+// Version 75: Suspend/resume with signals: glidemq_suspend, glidemq_signal, glidemq_sweepSuspended.
+// Version 76: glidemq_clean and glidemq_drain delete signals: keys to prevent key leaks.
+// Version 77: Per-job lockDuration: reclaimStalled/reclaimStalledListJobs read lockDuration from job opts for per-job stall threshold.
+// Version 78: glidemq_fail increments fallbackIndex on retry when job has fallbacks configured.
+// Version 79: Budget middleware: glidemq_checkBudget, glidemq_recordUsageAndCheckBudget.
+export const LIBRARY_VERSION = '79';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -157,7 +164,12 @@ end
 local function groupqScore(jobKey, jobId)
   local seq = tonumber(redis.call('HGET', jobKey, 'orderingSeq'))
   if seq and seq > 0 then return seq end
-  return tonumber(jobId) or 0
+  local num = tonumber(jobId)
+  if num then return num end
+  -- String IDs: use timestamp from job hash to preserve insertion order
+  local ts = tonumber(redis.call('HGET', jobKey, 'timestamp'))
+  if ts then return ts end
+  return 0
 end
 
 
@@ -429,6 +441,13 @@ local function extractTtlFromOpts(optsJson)
   local ok, decoded = pcall(cjson.decode, optsJson)
   if not ok or type(decoded) ~= 'table' then return 0 end
   return tonumber(decoded['ttl']) or 0
+end
+
+local function extractLockDurationFromOpts(optsJson)
+  if not optsJson or optsJson == '' then return 0 end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then return 0 end
+  return tonumber(decoded['lockDuration']) or 0
 end
 
 -- Apply stall logic to a job: increment stalledCount, fail if over max, else emit stalled event.
@@ -1065,17 +1084,20 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
             local priMaxConc = tonumber(priGrp.maxConcurrency) or 0
             local priActive = tonumber(priGrp.active) or 0
             local priWaitListKey = prefix .. 'groupq:' .. priGroupKey
-            -- Ordering gate or concurrency gate: park in groupq
+            local priReturning = (priOrdSeq > 0 and priNextSeq > 0 and priOrdSeq < priNextSeq)
+            -- Ordering gate or concurrency gate (skip for returning step-jobs)
             if (priOrdSeq > 0 and priNextSeq > 0 and priOrdSeq > priNextSeq) or
-               (priMaxConc > 0 and priActive >= priMaxConc) then
+               (priMaxConc > 0 and priActive >= priMaxConc and not priReturning) then
               local priScore = priOrdSeq > 0 and priOrdSeq or tonumber(priJobId) or 0
               redis.call('ZADD', priWaitListKey, priScore, priJobId)
               redis.call('HSET', priJobKey, 'state', 'group-waiting')
             else
               -- All gates pass: activate with group bookkeeping
               redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
-              redis.call('HINCRBY', priGroupHashKey, 'active', 1)
-              if priOrdSeq > 0 then
+              if not priReturning then
+                redis.call('HINCRBY', priGroupHashKey, 'active', 1)
+              end
+              if priOrdSeq > 0 and not priReturning then
                 redis.call('HSET', priGroupHashKey, 'nextSeq', tostring(priOrdSeq + 1))
                 redis.call('ZREM', priWaitListKey, priJobId)
               end
@@ -1191,6 +1213,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
     -- Ordering gate
     local nextJobOrderingSeq = tonumber(redis.call('HGET', nextJobKey, 'orderingSeq')) or 0
+    local nextReturning = false
     if nextJobOrderingSeq > 0 then
       local nextExpectedSeq = tonumber(nGrp.nextSeq) or 0
       if nextExpectedSeq > 0 and nextJobOrderingSeq > nextExpectedSeq then
@@ -1200,9 +1223,10 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         redis.call('HSET', nextJobKey, 'state', 'group-waiting')
         return {'NEXT_NONE', jobId}
       end
+      nextReturning = (nextExpectedSeq > 0 and nextJobOrderingSeq < nextExpectedSeq)
     end
-    -- Concurrency gate (avoids burning rate/token slots on parked jobs)
-    if nextMaxConc > 0 and nextActive >= nextMaxConc then
+    -- Concurrency gate (skip for returning step-jobs)
+    if nextMaxConc > 0 and nextActive >= nextMaxConc and not nextReturning then
       redis.call('XACK', streamKey, group, nextEntryId)
       redis.call('XDEL', streamKey, nextEntryId)
       redis.call('ZADD', nextWaitListKey, groupqScore(nextJobKey, nextJobId), nextJobId)
@@ -1278,8 +1302,10 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         end
       end
     end
-    redis.call('HINCRBY', nextGroupHashKey, 'active', 1)
-    if nextJobOrderingSeq > 0 then
+    if not nextReturning then
+      redis.call('HINCRBY', nextGroupHashKey, 'active', 1)
+    end
+    if nextJobOrderingSeq > 0 and not nextReturning then
       redis.call('HSET', nextGroupHashKey, 'nextSeq', tostring(nextJobOrderingSeq + 1))
       redis.call('ZREM', nextWaitListKey, nextJobId)
     end
@@ -1324,6 +1350,12 @@ redis.register_function('glidemq_fail', function(keys, args)
     attemptsMade = redis.call('HINCRBY', jobKey, 'attemptsMade', 1)
   end
   if maxAttempts > 0 and attemptsMade < maxAttempts then
+    -- Advance fallback chain if the job has fallbacks configured
+    local optsRaw = redis.call('HGET', jobKey, 'opts')
+    if optsRaw and string.find(optsRaw, '"fallbacks"') then
+      local fbIdx = tonumber(redis.call('HGET', jobKey, 'fallbackIndex') or '0') or 0
+      redis.call('HSET', jobKey, 'fallbackIndex', tostring(fbIdx + 1))
+    end
     local retryAt = timestamp + backoffDelay
     local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
     local score = priority * PRIORITY_SHIFT + retryAt
@@ -1333,7 +1365,11 @@ redis.register_function('glidemq_fail', function(keys, args)
       'failedReason', failedReason,
       'processedOn', tostring(timestamp)
     )
-    releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
+    -- Only release group slot if not an ordering-key job (ordering jobs hold the slot through retries)
+    local failOrdSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+    if failOrdSeq <= 0 then
+      releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
+    end
     emitEvent(eventsKey, 'retrying', jobId, {
       'failedReason', failedReason,
       'attemptsMade', tostring(attemptsMade),
@@ -1422,8 +1458,11 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
         if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
         count = count + 1
       else
-      local lastActive = tonumber(redis.call('HGET', jobKey, 'lastActive'))
-      if lastActive and (timestamp - lastActive) < minIdleMs then
+      local vals = redis.call('HMGET', jobKey, 'lastActive', 'opts')
+      local lastActive = tonumber(vals[1])
+      local jobLockDuration = extractLockDurationFromOpts(vals[2])
+      local effectiveIdle = (jobLockDuration > 0) and jobLockDuration or minIdleMs
+      if lastActive and (timestamp - lastActive) < effectiveIdle then
         count = count + 1
       else
       local failed = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp)
@@ -1471,10 +1510,12 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
       local jk = scannedKeys[i]
       local state = redis.call('HGET', jk, 'state')
       if state == 'active' then
-        local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority')
+        local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority', 'opts')
         local lastActive = tonumber(vals[1])
         local isListSourced = vals[2] == '1' or (tonumber(vals[3]) or 0) > 0
-        if isListSourced and lastActive and (timestamp - lastActive) >= minIdleMs then
+        local jobLockDuration = extractLockDurationFromOpts(vals[4])
+        local effectiveIdle = (jobLockDuration > 0) and jobLockDuration or minIdleMs
+        if isListSourced and lastActive and (timestamp - lastActive) >= effectiveIdle then
           local jobId = string.sub(jk, #prefix + 5)
           local shouldDecr = false
           if checkExpired(jk, jobId, prefix, timestamp) then
@@ -1826,9 +1867,10 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
         canPromote = math.min(canPromote, math.max(0, maxConc - active))
       end
       local prNextSeq = tonumber(prGrp.nextSeq) or 0
+      local groupPromoted = 0
       local prIter = 0
       local prMaxIter = canPromote + 20
-      while promoted < canPromote + promoted and prIter < prMaxIter do
+      while groupPromoted < canPromote and prIter < prMaxIter do
         prIter = prIter + 1
         local zpResult = redis.call('ZPOPMIN', waitListKey, 1)
         local nextJobId = zpResult[1]
@@ -1850,6 +1892,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
           xaddJob(streamKey, nextJobId, redis.call('HGET', nextJobKey, 'name'))
           redis.call('HSET', nextJobKey, 'state', 'waiting')
           promoted = promoted + 1
+          groupPromoted = groupPromoted + 1
           if prNextSeq > 0 then prNextSeq = prNextSeq + 1 end
         end
       end
@@ -2199,9 +2242,9 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   local parentRateMax, parentRateDuration = extractGroupRateLimitFromOpts(parentOpts)
   local parentTbCapacity, parentTbRefillRate = extractTokenBucketFromOpts(parentOpts)
   local parentCost = extractCostFromOpts(parentOpts)
-  local parentUseGroup = (parentOrderingKey ~= '' and (parentGroupConc > 1 or parentRateMax > 0 or parentTbCapacity > 0))
+  local parentUseGroup = (parentOrderingKey ~= '')
   local parentOrderingSeq = 0
-  if parentOrderingKey ~= '' and not parentUseGroup then
+  if parentOrderingKey ~= '' then
     local parentOrderingMetaKey = parentPrefix .. 'ordering'
     parentOrderingSeq = redis.call('HINCRBY', parentOrderingMetaKey, parentOrderingKey, 1)
   end
@@ -2220,9 +2263,17 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   if parentUseGroup then
     parentHash[#parentHash + 1] = 'groupKey'
     parentHash[#parentHash + 1] = parentOrderingKey
+    if parentOrderingSeq > 0 then
+      parentHash[#parentHash + 1] = 'orderingSeq'
+      parentHash[#parentHash + 1] = tostring(parentOrderingSeq)
+    end
+    if parentGroupConc < 1 then parentGroupConc = 1 end
     local groupHashKey = parentPrefix .. 'group:' .. parentOrderingKey
-    redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(parentGroupConc > 1 and parentGroupConc or 1))
+    redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(parentGroupConc))
     redis.call('HSETNX', groupHashKey, 'active', '0')
+    if parentOrderingSeq > 0 and redis.call('HEXISTS', groupHashKey, 'nextSeq') == 0 then
+      redis.call('HSET', groupHashKey, 'nextSeq', '1')
+    end
     if parentRateMax > 0 then
       redis.call('HSET', groupHashKey, 'rateMax', tostring(parentRateMax))
       redis.call('HSET', groupHashKey, 'rateDuration', tostring(parentRateDuration))
@@ -2236,11 +2287,6 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       redis.call('HSETNX', groupHashKey, 'tbLastRefill', tostring(timestamp))
       redis.call('HSETNX', groupHashKey, 'tbRefillRemainder', '0')
     end
-  elseif parentOrderingKey ~= '' then
-    parentHash[#parentHash + 1] = 'orderingKey'
-    parentHash[#parentHash + 1] = parentOrderingKey
-    parentHash[#parentHash + 1] = 'orderingSeq'
-    parentHash[#parentHash + 1] = tostring(parentOrderingSeq)
   end
   if parentCost > 0 then
     parentHash[#parentHash + 1] = 'cost'
@@ -2302,9 +2348,9 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     local childRateMax, childRateDuration = extractGroupRateLimitFromOpts(childOpts)
     local childTbCapacity, childTbRefillRate = extractTokenBucketFromOpts(childOpts)
     local childCost = extractCostFromOpts(childOpts)
-    local childUseGroup = (childOrderingKey ~= '' and (childGroupConc > 1 or childRateMax > 0 or childTbCapacity > 0))
+    local childUseGroup = (childOrderingKey ~= '')
     local childOrderingSeq = 0
-    if childOrderingKey ~= '' and not childUseGroup then
+    if childOrderingKey ~= '' then
       local childOrderingMetaKey = childPrefix .. 'ordering'
       childOrderingSeq = redis.call('HINCRBY', childOrderingMetaKey, childOrderingKey, 1)
     end
@@ -2324,9 +2370,17 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     if childUseGroup then
       childHash[#childHash + 1] = 'groupKey'
       childHash[#childHash + 1] = childOrderingKey
+      if childOrderingSeq > 0 then
+        childHash[#childHash + 1] = 'orderingSeq'
+        childHash[#childHash + 1] = tostring(childOrderingSeq)
+      end
+      if childGroupConc < 1 then childGroupConc = 1 end
       local childGroupHashKey = childPrefix .. 'group:' .. childOrderingKey
-      redis.call('HSETNX', childGroupHashKey, 'maxConcurrency', tostring(childGroupConc > 1 and childGroupConc or 1))
+      redis.call('HSETNX', childGroupHashKey, 'maxConcurrency', tostring(childGroupConc))
       redis.call('HSETNX', childGroupHashKey, 'active', '0')
+      if childOrderingSeq > 0 and redis.call('HEXISTS', childGroupHashKey, 'nextSeq') == 0 then
+        redis.call('HSET', childGroupHashKey, 'nextSeq', '1')
+      end
       if childRateMax > 0 then
         redis.call('HSET', childGroupHashKey, 'rateMax', tostring(childRateMax))
         redis.call('HSET', childGroupHashKey, 'rateDuration', tostring(childRateDuration))
@@ -2337,11 +2391,6 @@ redis.register_function('glidemq_addFlow', function(keys, args)
         redis.call('HSETNX', childGroupHashKey, 'tbLastRefill', tostring(timestamp))
         redis.call('HSETNX', childGroupHashKey, 'tbRefillRemainder', '0')
       end
-    elseif childOrderingKey ~= '' then
-      childHash[#childHash + 1] = 'orderingKey'
-      childHash[#childHash + 1] = childOrderingKey
-      childHash[#childHash + 1] = 'orderingSeq'
-      childHash[#childHash + 1] = tostring(childOrderingSeq)
     end
     if childCost > 0 then
       childHash[#childHash + 1] = 'cost'
@@ -2501,10 +2550,16 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
   markOrderingDone(jobKey, jobId)
-  -- Clean up DAG parents SET
+  -- Clean up DAG parents SET, per-job streaming channel, and signals
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   local parentsKey = prefix .. 'parents:' .. jobId
+  local jstreamKey = prefix .. 'jstream:' .. jobId
+  local signalsKey = prefix .. 'signals:' .. jobId
+  local suspendedKey = prefix .. 'suspended'
   redis.call('DEL', parentsKey)
+  redis.call('DEL', jstreamKey)
+  redis.call('DEL', signalsKey)
+  redis.call('ZREM', suspendedKey, jobId)
   redis.call('DEL', jobKey)
   redis.call('DEL', logKey)
   emitEvent(eventsKey, 'removed', jobId, nil)
@@ -2524,7 +2579,7 @@ redis.register_function('glidemq_clean', function(keys, args)
     return {}
   end
   for i = 1, #ids do
-    redis.call('DEL', prefix .. 'job:' .. ids[i], prefix .. 'log:' .. ids[i], prefix .. 'deps:' .. ids[i], prefix .. 'parents:' .. ids[i])
+    redis.call('DEL', prefix .. 'job:' .. ids[i], prefix .. 'log:' .. ids[i], prefix .. 'deps:' .. ids[i], prefix .. 'parents:' .. ids[i], prefix .. 'jstream:' .. ids[i], prefix .. 'signals:' .. ids[i])
   end
   for i = 1, #ids, 1000 do
     redis.call('ZREM', setKey, unpack(ids, i, math.min(i + 999, #ids)))
@@ -3101,7 +3156,7 @@ redis.register_function('glidemq_drain', function(keys, args)
         for j = 1, #fields, 2 do
           if fields[j] == 'jobId' and fields[j + 1] ~= '' then
             local jobId = fields[j + 1]
-            redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+            redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId, prefix .. 'signals:' .. jobId)
             removed = removed + 1
             break
           end
@@ -3133,6 +3188,8 @@ redis.register_function('glidemq_drain', function(keys, args)
         batch[#batch + 1] = prefix .. 'job:' .. jobId
         batch[#batch + 1] = prefix .. 'log:' .. jobId
         batch[#batch + 1] = prefix .. 'deps:' .. jobId
+        batch[#batch + 1] = prefix .. 'jstream:' .. jobId
+        batch[#batch + 1] = prefix .. 'signals:' .. jobId
       end
       redis.call('DEL', unpack(batch))
       removed = removed + #scheduled
@@ -3146,7 +3203,7 @@ redis.register_function('glidemq_drain', function(keys, args)
     local lifoIds = redis.call('LRANGE', lifoKey, 0, -1)
     for i = 1, #lifoIds do
       local jobId = lifoIds[i]
-      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId, prefix .. 'signals:' .. jobId)
       removed = removed + 1
     end
     redis.call('DEL', lifoKey)
@@ -3157,7 +3214,7 @@ redis.register_function('glidemq_drain', function(keys, args)
     local priorityIds = redis.call('LRANGE', priorityKey, 0, -1)
     for i = 1, #priorityIds do
       local jobId = priorityIds[i]
-      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId)
+      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId, prefix .. 'signals:' .. jobId)
       removed = removed + 1
     end
     redis.call('DEL', priorityKey)
@@ -3270,6 +3327,145 @@ redis.register_function('glidemq_popLists', function(keys, args)
     results[#results + 1] = id
   end
   return results
+end)
+
+redis.register_function('glidemq_suspend', function(keys, args)
+  local jobKey = keys[1]
+  local streamKey = keys[2]
+  local eventsKey = keys[3]
+  local suspendedKey = keys[4]
+  local jobId = args[1]
+  local entryId = args[2]
+  local group = args[3]
+  local now = tonumber(args[4]) or 0
+  local reason = args[5] or ''
+  local timeout = tonumber(args[6]) or 0
+  local broadcastMode = args[7] or '0'
+
+  local state = redis.call('HGET', jobKey, 'state')
+  if not state then return 'error:not_found' end
+  if state ~= 'active' then return 'error:not_active' end
+
+  pcall(redis.call, 'XACK', streamKey, group, entryId)
+  if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
+
+  local fields = {'state', 'suspended', 'suspendedAt', tostring(now)}
+  if reason ~= '' then
+    fields[#fields + 1] = 'suspendReason'
+    fields[#fields + 1] = reason
+  end
+  if timeout > 0 then
+    fields[#fields + 1] = 'suspendTimeout'
+    fields[#fields + 1] = tostring(timeout)
+  end
+  redis.call('HSET', jobKey, unpack(fields))
+
+  local deadline = timeout > 0 and (now + timeout) or 9999999999999
+  redis.call('ZADD', suspendedKey, deadline, jobId)
+
+  local ordSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+  if ordSeq <= 0 then
+    releaseGroupSlotAndPromote(jobKey, jobId, now)
+  end
+
+  if entryId == '' then
+    local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+    redis.call('DECR', prefix .. 'list-active')
+  end
+
+  emitEvent(eventsKey, 'suspended', jobId, nil)
+  return 'ok'
+end)
+
+redis.register_function('glidemq_signal', function(keys, args)
+  local jobKey = keys[1]
+  local streamKey = keys[2]
+  local eventsKey = keys[3]
+  local suspendedKey = keys[4]
+  local signalsKey = keys[5]
+  local jobId = args[1]
+  local signalName = args[2]
+  local signalData = args[3] or ''
+  local now = tonumber(args[4]) or 0
+
+  local state = redis.call('HGET', jobKey, 'state')
+  if not state or state ~= 'suspended' then return 'not_suspended' end
+
+  local signalJson = cjson.encode({name = signalName, data = signalData, receivedAt = now})
+  redis.call('RPUSH', signalsKey, signalJson)
+
+  local rawSignals = redis.call('LRANGE', signalsKey, 0, -1)
+  local signalsArr = {}
+  for i, s in ipairs(rawSignals) do signalsArr[i] = cjson.decode(s) end
+  redis.call('HSET', jobKey, 'signals', cjson.encode(signalsArr))
+
+  redis.call('HSET', jobKey, 'state', 'waiting')
+  redis.call('ZREM', suspendedKey, jobId)
+
+  local jobName = redis.call('HGET', jobKey, 'name') or ''
+  xaddJob(streamKey, jobId, jobName)
+
+  emitEvent(eventsKey, 'resumed', jobId, {'signal', signalName})
+  return 'ok'
+end)
+
+redis.register_function('glidemq_sweepSuspended', function(keys, args)
+  local suspendedKey = keys[1]
+  local eventsKey = keys[2]
+  local now = tonumber(args[1]) or 0
+  local keyPrefix = args[2] or ''
+
+  local expired = redis.call('ZRANGEBYSCORE', suspendedKey, '0', string.format('%.0f', now), 'LIMIT', 0, 100)
+  if not expired or #expired == 0 then return 0 end
+
+  local count = 0
+  for _, jobId in ipairs(expired) do
+    local id = tostring(jobId)
+    local jobKey = keyPrefix .. 'job:' .. id
+    local jState = redis.call('HGET', jobKey, 'state')
+    if jState == 'suspended' then
+      redis.call('HSET', jobKey, 'state', 'failed', 'failedReason', 'Suspend timeout exceeded')
+      emitEvent(eventsKey, 'failed', id, {'failedReason', 'Suspend timeout exceeded'})
+      count = count + 1
+    end
+    redis.call('ZREM', suspendedKey, id)
+  end
+  return count
+end)
+
+redis.register_function('glidemq_checkBudget', function(keys, args)
+  local budgetKey = keys[1]
+  local exists = redis.call('EXISTS', budgetKey)
+  if exists == 0 then return 'no_budget' end
+  local exceeded = redis.call('HGET', budgetKey, 'exceeded')
+  if exceeded == '1' then return 'exceeded' end
+  return 'ok'
+end)
+
+redis.register_function('glidemq_recordUsageAndCheckBudget', function(keys, args)
+  local budgetKey = keys[1]
+  local tokens = tonumber(args[1]) or 0
+  local cost = tonumber(args[2]) or 0
+
+  local exists = redis.call('EXISTS', budgetKey)
+  if exists == 0 then return 'no_budget' end
+
+  if tokens > 0 then redis.call('HINCRBYFLOAT', budgetKey, 'usedTokens', tokens) end
+  if cost > 0 then redis.call('HINCRBYFLOAT', budgetKey, 'usedCost', cost) end
+
+  local maxTokens = tonumber(redis.call('HGET', budgetKey, 'maxTotalTokens')) or 0
+  local maxCost = tonumber(redis.call('HGET', budgetKey, 'maxCostUsd')) or 0
+  local usedTokens = tonumber(redis.call('HGET', budgetKey, 'usedTokens')) or 0
+  local usedCost = tonumber(redis.call('HGET', budgetKey, 'usedCost')) or 0
+
+  local tokenExceeded = maxTokens > 0 and usedTokens > maxTokens
+  local costExceeded = maxCost > 0 and usedCost > maxCost
+
+  if tokenExceeded or costExceeded then
+    redis.call('HSET', budgetKey, 'exceeded', '1')
+    return 'exceeded'
+  end
+  return 'ok'
 end)
 `;
 
@@ -4357,4 +4553,93 @@ export async function registerParent(
 export async function healListActive(client: Client, keys: QueueKeys): Promise<number> {
   const result = await client.fcall('glidemq_healListActive', [keys.id], []);
   return Number(result) || 0;
+}
+
+/**
+ * Suspend an active job. Moves it from active to the suspended sorted set.
+ * Returns 'ok', or 'error:not_found' / 'error:not_active'.
+ */
+export async function suspendJob(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  entryId: string,
+  group: string,
+  timestamp: number,
+  reason?: string,
+  timeout?: number,
+  broadcastMode?: boolean,
+): Promise<string> {
+  const args = [jobId, entryId, group, timestamp.toString(), reason || '', (timeout || 0).toString()];
+  if (broadcastMode) args.push('1');
+  const result = await client.fcall(
+    'glidemq_suspend',
+    [k.job(jobId), k.stream, k.events, k.suspended],
+    args,
+  );
+  return result as string;
+}
+
+/**
+ * Send a signal to a suspended job. Stores the signal and re-queues the job.
+ * Returns 'ok' if the job was resumed, or 'not_suspended'.
+ */
+export async function signalJob(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  signalName: string,
+  signalData: string,
+  timestamp: number,
+): Promise<string> {
+  const result = await client.fcall(
+    'glidemq_signal',
+    [k.job(jobId), k.stream, k.events, k.suspended, k.signals(jobId)],
+    [jobId, signalName, signalData, timestamp.toString()],
+  );
+  return result as string;
+}
+
+/**
+ * Sweep expired suspended jobs whose timeout has passed.
+ * Moves them to failed state. Returns the number of jobs failed.
+ */
+export async function sweepSuspended(
+  client: Client,
+  k: QueueKeys,
+  timestamp: number,
+  keyPrefix: string,
+): Promise<number> {
+  const result = await client.fcall(
+    'glidemq_sweepSuspended',
+    [k.suspended, k.events],
+    [timestamp.toString(), keyPrefix],
+  );
+  return Number(result) || 0;
+}
+
+/**
+ * Check whether a budget has been exceeded. Returns 'ok', 'exceeded', or 'no_budget'.
+ */
+export async function checkBudget(client: Client, budgetKey: string): Promise<string> {
+  const result = await client.fcall('glidemq_checkBudget', [budgetKey], []);
+  return result as string;
+}
+
+/**
+ * Atomically record usage and check whether the budget is now exceeded.
+ * Returns 'ok', 'exceeded', or 'no_budget'.
+ */
+export async function recordUsageAndCheckBudget(
+  client: Client,
+  budgetKey: string,
+  tokens: number,
+  costUsd: number,
+): Promise<string> {
+  const result = await client.fcall(
+    'glidemq_recordUsageAndCheckBudget',
+    [budgetKey],
+    [tokens.toString(), costUsd.toString()],
+  );
+  return result as string;
 }

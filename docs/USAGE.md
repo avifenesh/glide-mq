@@ -9,6 +9,8 @@
 - [Pluggable Serializers](#pluggable-serializers)
 - [Broadcast / BroadcastWorker](#broadcast--broadcastworker)
 - [Event Listeners](#event-listeners)
+- [AI-native Primitives](#ai-native-primitives)
+  - [Suspend/Resume with Signals](#suspendresume-with-signals)
 
 ---
 
@@ -606,3 +608,151 @@ const worker = new Worker(
 ```
 
 The job is marked as permanently failed regardless of the `attempts` configuration. This is equivalent to calling `job.discard()` and then throwing, but more explicit.
+
+## AI-native Primitives
+
+### Job Metadata (reportUsage / getFlowUsage)
+
+Track token usage, cost, and latency per job for cost attribution and observability.
+
+```typescript
+import { Worker, Queue } from 'glide-mq';
+
+const worker = new Worker('llm-tasks', async (job) => {
+  const result = await callLLM(job.data.prompt);
+
+  await job.reportUsage({
+    model: 'gpt-4o',
+    provider: 'openai',
+    inputTokens: result.usage.prompt_tokens,
+    outputTokens: result.usage.completion_tokens,
+    costUsd: result.usage.total_cost,
+    latencyMs: result.latencyMs,
+  });
+
+  return result.text;
+}, { connection });
+
+// Aggregate usage for a job flow (parent + all children)
+const usage = await queue.getFlowUsage(parentJobId);
+console.log(usage.totalTokens, usage.costUsd);
+```
+
+`reportUsage()` persists usage to the job hash in Valkey. `job.usage` is populated when the job is fetched via `getJob()`. `getFlowUsage()` walks the DAG upward and sums all fields.
+
+### Job Streaming Channel (stream / readStream)
+
+Stream incremental output from a processor - useful for LLM token-by-token output or progress chunks.
+
+```typescript
+import { Worker, Queue } from 'glide-mq';
+
+// Producer side: emit chunks from inside the processor
+const worker = new Worker('llm-stream', async (job) => {
+  for await (const chunk of callLLMStreaming(job.data.prompt)) {
+    await job.stream({ token: chunk.text });
+  }
+  return 'done';
+}, { connection });
+
+// Consumer side: read back all chunks after completion
+const entries = await queue.readStream(jobId);
+// entries: [{ id: '1-0', fields: { token: 'Hello' } }, ...]
+
+// Resume from a known position
+const more = await queue.readStream(jobId, { lastId: entries[entries.length - 1].id });
+```
+
+**SSE endpoint** (proxy): `GET /queues/:name/jobs/:id/stream` streams chunks as Server-Sent Events while the job is active, then drains remaining chunks and closes. Supports the `Last-Event-ID` header and `?lastId` query param for resume.
+
+Stream keys are automatically cleaned up when a job is removed via `job.remove()`, `queue.clean()`, or `queue.drain()`.
+
+**Testing mode**: `TestJob.stream()` and `TestQueue.readStream()` provide full parity with no Valkey dependency.
+
+### Suspend/Resume with Signals
+
+Suspend a job mid-processor and resume it later via an external signal. Designed for human-in-the-loop workflows: approval gates, webhook callbacks, or any pattern where a job must pause and wait for external input.
+
+```typescript
+import { Worker, Queue, SuspendError } from 'glide-mq';
+
+const worker = new Worker('approvals', async (job) => {
+  if (job.data.step === 'process') {
+    // Start work...
+    const draft = await generateDraft(job.data);
+
+    // Suspend and wait for human approval
+    await job.suspend({
+      reason: 'awaiting-approval',
+      timeout: 86_400_000, // fail after 24 h if no signal arrives
+      onResume: async (signals) => {
+        // Called on the same worker instance when the job is re-queued (best-effort)
+        const approval = signals[0];
+        if (approval.name === 'approve') {
+          return await publishDraft(draft, approval.data);
+        }
+        throw new Error('Draft rejected');
+      },
+    });
+  }
+  // Fallback path if onResume is not used (job re-enters processor normally)
+  return await publishDraft(job.data);
+}, { connection });
+
+// From outside (e.g., a webhook handler) - send the signal:
+const resumed = await queue.signal(jobId, 'approve', { reviewer: 'alice' });
+// resumed: true if the job was in suspended state and has been re-queued
+```
+
+#### How it works
+
+1. `job.suspend(opts?)` stores a suspend request and throws `SuspendError`. The worker catches it, calls `glidemq_suspend` (FCALL), and moves the job to the `suspended` sorted set.
+2. `queue.signal(jobId, name, data?)` calls `glidemq_signal` (FCALL). The signal is appended to the job and the job is re-queued into the stream with state `waiting`.
+3. When the job is re-dispatched, the worker checks for a registered `onResume` continuation. If present (same worker instance), it is called with `signals[]` instead of the main processor. Otherwise, the main processor runs and reads `job.signals`.
+4. If `timeout` is set, `sweepExpiredSuspended` runs on each stalled recovery tick and fails timed-out suspended jobs with reason `'Suspend timeout exceeded'`.
+
+#### Options
+
+```typescript
+interface SuspendOptions {
+  reason?: string;    // Human-readable label stored on the job hash
+  timeout?: number;   // Milliseconds until auto-fail (0 = infinite, default)
+}
+```
+
+The `onResume` callback on `job.suspend()` is separate from `SuspendOptions` - it is a best-effort in-process continuation, not persisted to Valkey.
+
+#### Reading suspension state
+
+```typescript
+const info = await queue.getSuspendInfo(jobId);
+// null if not suspended
+// { reason, suspendedAt, timeout?, signals: SignalEntry[] }
+```
+
+#### Proxy endpoint
+
+The proxy exposes a REST endpoint for sending signals:
+
+```
+POST /queues/:name/jobs/:id/signal
+{ "name": "approve", "data": { "reviewer": "alice" } }
+```
+
+Returns `{ "resumed": true|false }`.
+
+#### Testing mode
+
+`TestJob.suspend()` and `TestQueue.signal()` provide full parity with no Valkey dependency:
+
+```typescript
+import { TestQueue, TestWorker } from 'glide-mq/testing';
+
+const queue = new TestQueue('approvals');
+const worker = new TestWorker(queue, async (job) => {
+  await job.suspend({ reason: 'needs-review' });
+});
+
+// Signal from outside
+const resumed = await queue.signal(jobId, 'approve');
+```

@@ -1,4 +1,4 @@
-import type { GlideClient, GlideClusterClient, ReadFrom } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient, ReadFrom, Field } from '@glidemq/speedkey';
 
 export type Client = GlideClient | GlideClusterClient;
 
@@ -110,6 +110,20 @@ export interface WorkerOptions extends QueueOptions {
   maxStalledCount?: number;
   promotionInterval?: number;
   limiter?: { max: number; duration: number };
+  /** Token-per-minute rate limiting. Tracks total tokens consumed per time window.
+   *  Worker pauses fetching when either RPM limiter or TPM tokenLimiter is exceeded.
+   *  Tokens reported via job.reportTokens() or auto-extracted from job.reportUsage(). */
+  tokenLimiter?: {
+    /** Max tokens per window. */
+    maxTokens: number;
+    /** Window duration in milliseconds. */
+    duration: number;
+    /** Enforcement scope. Default: 'both'.
+     *  - 'queue': Valkey counter shared across all workers.
+     *  - 'worker': In-memory counter per worker.
+     *  - 'both': Local check first, then Valkey (optimal). */
+    scope?: 'queue' | 'worker' | 'both';
+  };
   backoffStrategies?: Record<string, (attemptsMade: number, err: Error) => number>;
   /** Lock duration in ms. The worker sends a heartbeat every lockDuration/2.
    *  Jobs with a recent heartbeat are not reclaimed as stalled.
@@ -196,6 +210,9 @@ export interface JobOptions {
   attempts?: number;
   backoff?: { type: 'fixed' | 'exponential' | string; delay: number; jitter?: number };
   timeout?: number;
+  /** Override worker-level lockDuration for this specific job (ms).
+   *  Controls heartbeat frequency and stall detection threshold. */
+  lockDuration?: number;
   removeOnComplete?: boolean | number | { age: number; count: number };
   removeOnFail?: boolean | number | { age: number; count: number };
   deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
@@ -209,6 +226,9 @@ export interface JobOptions {
   parents?: Array<{ queue: string; id: string }>;
   /** Time-to-live in milliseconds. Jobs not processed within this window are failed as 'expired'. */
   ttl?: number;
+  /** Ordered list of fallback configurations tried on retryable failure.
+   *  Each entry provides model/provider info the processor reads via job.currentFallback. */
+  fallbacks?: Array<{ model: string; provider?: string; [key: string]: any }>;
 }
 
 export interface AddAndWaitOptions extends JobOptions {
@@ -267,6 +287,57 @@ export interface BatchOptions {
 }
 
 export type BatchProcessor<D = any, R = any> = (jobs: import('./job').Job<D, R>[]) => Promise<R[]>;
+
+/** Budget constraints for a flow. Caps total token usage and/or USD cost across all jobs. */
+export interface BudgetOptions {
+  /** Hard cap on total tokens across all jobs in this flow. */
+  maxTotalTokens?: number;
+  /** Hard cap on total USD cost across all jobs in this flow. */
+  maxCostUsd?: number;
+  /** What happens when budget is exceeded. Default: 'fail'. */
+  onExceeded?: 'pause' | 'fail';
+}
+
+/** Options for creating a Valkey Search index over job hashes. */
+export interface JobIndexOptions {
+  /** Index name. Defaults to `{queueName}-idx`. */
+  name?: string;
+  /** Additional schema fields beyond the auto-included base fields (name, state, timestamp, priority). */
+  fields?: Field[];
+  /** Vector field configuration. When omitted, a minimal placeholder vector field is added (required by valkey-search). */
+  vectorField?: {
+    /** Field name in the job hash where the vector is stored. */
+    name: string;
+    /** Number of dimensions in the vector. */
+    dimensions: number;
+    /** Indexing algorithm. Default: 'HNSW'. */
+    algorithm?: 'HNSW' | 'FLAT';
+    /** Distance metric. Default: 'COSINE'. */
+    distanceMetric?: 'COSINE' | 'L2' | 'IP';
+  };
+}
+
+/** Options for vector similarity search over indexed jobs. */
+export interface VectorSearchOptions {
+  /** Index name to search. Defaults to `{queueName}-idx`. */
+  indexName?: string;
+  /** Number of nearest neighbours to return. Default: 10. */
+  k?: number;
+  /** Pre-filter expression applied before KNN (e.g. `@state:{completed}`). */
+  filter?: string;
+  /** Fields to return from each result. When omitted, all indexed fields are returned. */
+  returnFields?: string[];
+  /** Name of the score field in results. Default: `__score`. */
+  scoreField?: string;
+}
+
+/** A single result from a vector similarity search. */
+export interface VectorSearchResult<D = any, R = any> {
+  /** The hydrated Job object. */
+  job: import('./job').Job<D, R>;
+  /** Distance/similarity score (lower = more similar for L2/COSINE). */
+  score: number;
+}
 
 export interface FlowJob {
   name: string;
@@ -424,4 +495,47 @@ export interface DAGNode {
 export interface DAGFlow {
   /** The nodes of the DAG. Order does not matter - topological sort is applied. */
   nodes: DAGNode[];
+}
+
+export interface ReadStreamOptions {
+  lastId?: string;
+  count?: number;
+}
+
+/** AI-specific usage metadata reported by a job processor. */
+export interface JobUsage {
+  /** Model identifier (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). */
+  model?: string;
+  /** Provider identifier (e.g. 'openai', 'anthropic'). */
+  provider?: string;
+  /** Number of input/prompt tokens consumed. */
+  inputTokens?: number;
+  /** Number of output/completion tokens generated. */
+  outputTokens?: number;
+  /** Total tokens (auto-computed as inputTokens + outputTokens if not provided). */
+  totalTokens?: number;
+  /** Actual cost in USD. */
+  costUsd?: number;
+  /** Inference latency in milliseconds (not including queue wait time). */
+  latencyMs?: number;
+  /** Whether the response came from a cache hit. */
+  cached?: boolean;
+}
+
+/** Options for suspending a job. */
+export interface SuspendOptions {
+  /** Human-readable reason for the suspension. */
+  reason?: string;
+  /** Timeout in milliseconds. 0 means infinite (default). */
+  timeout?: number;
+}
+
+/** A signal entry delivered to a suspended job on resume. */
+export interface SignalEntry {
+  /** Signal name (e.g. 'approve', 'reject'). */
+  name: string;
+  /** Arbitrary signal payload (deserialized from JSON). */
+  data: any;
+  /** Epoch ms when the signal was received. */
+  receivedAt: number;
 }

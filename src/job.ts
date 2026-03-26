@@ -1,10 +1,10 @@
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
-import type { JobOptions, Client, Serializer } from './types';
+import type { JobOptions, JobUsage, Client, Serializer, SuspendOptions, SignalEntry } from './types';
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
-import { GlideMQError, DelayedError, WaitingChildrenError, GroupRateLimitError } from './errors';
+import { GlideMQError, DelayedError, WaitingChildrenError, GroupRateLimitError, SuspendError } from './errors';
 import type { GroupRateLimitOptions } from './errors';
 import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
@@ -34,12 +34,27 @@ export class Job<D = any, R = any> {
   expireAt?: number;
   schedulerName?: string;
 
+  /** Budget key for flow-level budget enforcement. Set when the job belongs to a budgeted flow. */
+  budgetKey?: string;
+
+  /** Current position in the fallback chain. 0 = original request, 1+ = fallback entries. */
+  fallbackIndex: number = 0;
+
+  /** AI-specific usage metadata reported via reportUsage(). */
+  usage?: JobUsage;
+
+  /** Tokens reported via reportTokens() for TPM rate limiting. */
+  tpmTokens?: number;
+
   /**
    * AbortSignal that fires when this job is revoked during processing.
    * The processor should check signal.aborted cooperatively.
    * Only set when the job is being processed by a Worker.
    */
   abortSignal?: AbortSignal;
+
+  /** Signals delivered to this job while it was suspended. */
+  signals: SignalEntry[] = [];
 
   /**
    * When true, the job will not be retried on failure regardless of attempts config.
@@ -52,6 +67,9 @@ export class Job<D = any, R = any> {
 
   /** @internal Request captured by moveToWaitingChildren() while inside the worker. */
   moveToWaitingChildrenRequest?: boolean;
+
+  /** @internal Request captured by suspend() while inside the worker. */
+  suspendRequest?: { reason?: string; timeout?: number; onResume?: (signals: SignalEntry[]) => Promise<any> };
 
   /**
    * Set to true when data or returnvalue could not be deserialized from Valkey.
@@ -94,6 +112,16 @@ export class Job<D = any, R = any> {
     this.attemptsMade = 0;
     this.progress = 0;
     this.timestamp = Date.now();
+  }
+
+  /**
+   * The current fallback entry, or undefined when running the original request.
+   * fallbackIndex=0 means original (no fallback). On first failure, fallbackIndex
+   * becomes 1 and currentFallback returns fallbacks[0], etc.
+   */
+  get currentFallback(): { model: string; provider?: string; [key: string]: any } | undefined {
+    if (!this.opts.fallbacks || this.fallbackIndex === 0) return undefined;
+    return this.opts.fallbacks[this.fallbackIndex - 1];
   }
 
   /**
@@ -149,6 +177,95 @@ export class Job<D = any, R = any> {
   }
 
   /**
+   * Report AI-specific usage metadata for this job. Persists to the job hash
+   * and emits a 'usage' event on the events stream.
+   *
+   * Callable from any context (inside a processor, externally via getJob(), etc.).
+   * If `totalTokens` is not provided, it is auto-computed as inputTokens + outputTokens.
+   * Calling multiple times overwrites the previous usage data.
+   */
+  async reportUsage(usage: JobUsage): Promise<void> {
+    if (
+      (usage.inputTokens !== undefined && usage.inputTokens < 0) ||
+      (usage.outputTokens !== undefined && usage.outputTokens < 0) ||
+      (usage.totalTokens !== undefined && usage.totalTokens < 0)
+    ) {
+      throw new Error('Token counts must not be negative');
+    }
+
+    const resolved: JobUsage = { ...usage };
+    if (resolved.totalTokens === undefined && (resolved.inputTokens !== undefined || resolved.outputTokens !== undefined)) {
+      resolved.totalTokens = (resolved.inputTokens ?? 0) + (resolved.outputTokens ?? 0);
+    }
+
+    const fields: Record<string, string> = {};
+    if (resolved.model !== undefined) fields['usage:model'] = resolved.model;
+    if (resolved.provider !== undefined) fields['usage:provider'] = resolved.provider;
+    if (resolved.inputTokens !== undefined) fields['usage:inputTokens'] = resolved.inputTokens.toString();
+    if (resolved.outputTokens !== undefined) fields['usage:outputTokens'] = resolved.outputTokens.toString();
+    if (resolved.totalTokens !== undefined) fields['usage:totalTokens'] = resolved.totalTokens.toString();
+    if (resolved.costUsd !== undefined) fields['usage:costUsd'] = resolved.costUsd.toString();
+    if (resolved.latencyMs !== undefined) fields['usage:latencyMs'] = resolved.latencyMs.toString();
+    if (resolved.cached !== undefined) fields['usage:cached'] = resolved.cached ? '1' : '0';
+
+    const isCluster = isClusterClient(this.client);
+    const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
+
+    batch.hset(this.queueKeys.job(this.id), fields);
+    batch.xadd(this.queueKeys.events, [
+      ['event', 'usage'],
+      ['jobId', this.id],
+      ['data', JSON.stringify(resolved)],
+    ]);
+
+    if (isCluster) {
+      await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false);
+    } else {
+      await (this.client as GlideClient).exec(batch as Batch, false);
+    }
+
+    this.usage = resolved;
+  }
+
+  /**
+   * Report tokens consumed by this job for TPM (tokens-per-minute) tracking.
+   * The count is stored in the job hash field `tpmTokens`.
+   * After job completion, the Worker reads this value and increments the TPM counter
+   * if a tokenLimiter is configured.
+   *
+   * Calling multiple times overwrites the previous value.
+   */
+  async reportTokens(count: number): Promise<void> {
+    if (count < 0) throw new Error('Token count must not be negative');
+    await this.client.hset(this.queueKeys.job(this.id), { tpmTokens: count.toString() });
+    this.tpmTokens = count;
+  }
+
+  /**
+   * Append a chunk to this job's streaming channel.
+   * Each chunk is a flat string-keyed object appended via XADD to a per-job stream.
+   * Returns the Valkey stream entry ID.
+   */
+  async stream(chunk: Record<string, string>): Promise<string> {
+    const fieldNames = Object.keys(chunk);
+    if (fieldNames.length === 0) {
+      throw new Error('Stream chunk must not be empty');
+    }
+    const entries: [string, string][] = [];
+    let totalBytes = 0;
+    for (const key of fieldNames) {
+      const val = chunk[key];
+      totalBytes += Buffer.byteLength(key, 'utf8') + Buffer.byteLength(val, 'utf8');
+      entries.push([key, val]);
+    }
+    if (totalBytes > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Stream chunk exceeds maximum size (${totalBytes} bytes > ${MAX_JOB_DATA_SIZE})`);
+    }
+    const entryId = await this.client.xadd(this.queueKeys.jstream(this.id), entries);
+    return String(entryId);
+  }
+
+  /**
    * Mark this job so it will not be retried on failure.
    * Call inside the processor before throwing to skip all remaining attempts.
    */
@@ -199,6 +316,36 @@ export class Job<D = any, R = any> {
     const requested = this.moveToWaitingChildrenRequest ?? false;
     this.moveToWaitingChildrenRequest = undefined;
     return requested;
+  }
+
+  /**
+   * Suspend this job to wait for an external signal (human-in-the-loop).
+   * The processor is interrupted and the job moves to 'suspended' state.
+   * When a signal arrives via Queue.signal(), the job re-enters the stream
+   * and the processor is re-invoked from scratch with job.signals populated.
+   *
+   * Optionally provide an onResume callback that runs instead of the main
+   * processor when the job resumes on the same worker (best-effort).
+   *
+   * This method must be called from inside a Worker processor.
+   */
+  async suspend(opts?: SuspendOptions & { onResume?: (signals: SignalEntry[]) => Promise<any> }): Promise<never> {
+    if (!this.entryId) {
+      throw new Error('suspend() can only be used while the job is active in a Worker');
+    }
+    this.suspendRequest = {
+      reason: opts?.reason,
+      timeout: opts?.timeout,
+      onResume: opts?.onResume,
+    };
+    throw new SuspendError();
+  }
+
+  /** @internal */
+  consumeSuspendRequest(): { reason?: string; timeout?: number; onResume?: (signals: SignalEntry[]) => Promise<any> } | undefined {
+    const req = this.suspendRequest;
+    this.suspendRequest = undefined;
+    return req;
   }
 
   /**
@@ -591,6 +738,9 @@ export class Job<D = any, R = any> {
     job.cost = hash.cost ? parseInt(hash.cost, 10) : undefined;
     job.expireAt = hash.expireAt ? parseInt(hash.expireAt, 10) : undefined;
     job.schedulerName = hash.schedulerName || undefined;
+    job.budgetKey = hash.budgetKey || undefined;
+    job.fallbackIndex = hash.fallbackIndex ? parseInt(hash.fallbackIndex, 10) : 0;
+    job.tpmTokens = hash.tpmTokens ? parseInt(hash.tpmTokens, 10) : undefined;
     if (hash.parentIds) {
       try {
         job.parentIds = JSON.parse(hash.parentIds);
@@ -612,7 +762,38 @@ export class Job<D = any, R = any> {
         job.progress = parseInt(hash.progress, 10) || 0;
       }
     }
+    if (hash['usage:model'] || hash['usage:inputTokens'] || hash['usage:provider'] || hash['usage:costUsd']) {
+      job.usage = {
+        model: hash['usage:model'] || undefined,
+        provider: hash['usage:provider'] || undefined,
+        inputTokens: hash['usage:inputTokens'] ? parseInt(hash['usage:inputTokens'], 10) : undefined,
+        outputTokens: hash['usage:outputTokens'] ? parseInt(hash['usage:outputTokens'], 10) : undefined,
+        totalTokens: hash['usage:totalTokens'] ? parseInt(hash['usage:totalTokens'], 10) : undefined,
+        costUsd: hash['usage:costUsd'] ? parseFloat(hash['usage:costUsd']) : undefined,
+        latencyMs: hash['usage:latencyMs'] ? parseInt(hash['usage:latencyMs'], 10) : undefined,
+        cached: hash['usage:cached'] === '1' ? true : hash['usage:cached'] === '0' ? false : undefined,
+      };
+    }
+    if (hash.signals) {
+      try {
+        job.signals = JSON.parse(hash.signals) as SignalEntry[];
+      } catch {
+        job.signals = [];
+      }
+    }
     return job;
+  }
+
+  /**
+   * Store a vector embedding in this job's hash field.
+   * The vector is stored as a raw Float32Array buffer suitable for Valkey Search vector indexing.
+   * @param field - Hash field name where the vector is stored (must match the index schema).
+   * @param embedding - The vector as a number[] or Float32Array.
+   */
+  async storeVector(field: string, embedding: number[] | Float32Array): Promise<void> {
+    const arr = embedding instanceof Float32Array ? embedding : new Float32Array(embedding);
+    const buf = Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength);
+    await this.client.hset(this.queueKeys.job(this.id), { [field]: buf });
   }
 
   private serializeData(data: D): string {
