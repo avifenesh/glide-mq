@@ -1689,6 +1689,77 @@ export class Queue<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Aggregate AI usage metadata across a flow (parent + children).
+   * Walks the deps set of the parent job and sums token counts, cost, and model usage.
+   */
+  async getFlowUsage(parentJobId: string): Promise<{
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCostUsd: number;
+    jobCount: number;
+    models: Record<string, number>;
+  }> {
+    const client = await this.getClient();
+    const usageFields = ['usage:model', 'usage:inputTokens', 'usage:outputTokens', 'usage:costUsd'];
+    const agg = { totalInputTokens: 0, totalOutputTokens: 0, totalCostUsd: 0, jobCount: 0, models: {} as Record<string, number> };
+
+    // Include the parent job itself
+    const parentValues = await client.hmget(this.keys.job(parentJobId), usageFields);
+    if (parentValues) {
+      const pModel = parentValues[0] ? String(parentValues[0]) : undefined;
+      const pIn = parentValues[1] ? parseInt(String(parentValues[1]), 10) : 0;
+      const pOut = parentValues[2] ? parseInt(String(parentValues[2]), 10) : 0;
+      const pCost = parentValues[3] ? parseFloat(String(parentValues[3])) : 0;
+      if (pModel || pIn || pOut || pCost) {
+        agg.totalInputTokens += pIn;
+        agg.totalOutputTokens += pOut;
+        agg.totalCostUsd += pCost;
+        agg.jobCount++;
+        if (pModel) agg.models[pModel] = (agg.models[pModel] || 0) + 1;
+      }
+    }
+
+    // Walk children via deps set
+    const members = await client.smembers(this.keys.deps(parentJobId));
+    if (!members || members.size === 0) return agg;
+
+    const batch = this.newBatch();
+    const memberList: string[] = [];
+    for (const member of members) {
+      const memberStr = String(member);
+      const lastColon = memberStr.lastIndexOf(':');
+      if (lastColon === -1) continue;
+      const queuePrefix = memberStr.substring(0, lastColon);
+      const childId = memberStr.substring(lastColon + 1);
+      const jobKey = `${queuePrefix}:job:${childId}`;
+      (batch as any).hmget(jobKey, usageFields);
+      memberList.push(memberStr);
+    }
+
+    if (memberList.length === 0) return agg;
+    const batchResults = await client.exec(batch as any, false);
+    if (!batchResults) return agg;
+
+    for (let i = 0; i < memberList.length; i++) {
+      const values = batchResults[i] as any[] | null;
+      if (!values) continue;
+      const model = values[0] ? String(values[0]) : undefined;
+      const inTokens = values[1] ? parseInt(String(values[1]), 10) : 0;
+      const outTokens = values[2] ? parseInt(String(values[2]), 10) : 0;
+      const cost = values[3] ? parseFloat(String(values[3])) : 0;
+      if (model || inTokens || outTokens || cost) {
+        agg.totalInputTokens += inTokens;
+        agg.totalOutputTokens += outTokens;
+        agg.totalCostUsd += cost;
+        agg.jobCount++;
+        if (model) agg.models[model] = (agg.models[model] || 0) + 1;
+      }
+    }
+
+    return agg;
+  }
+
+  /**
    * Retrieve jobs from the dead letter queue configured for this queue.
    * Returns an empty array if no DLQ is configured.
    * @param start - Start index (default 0)

@@ -47,6 +47,7 @@ export type {
   BroadcastWorkerOptions,
   DAGNode,
   DAGFlow,
+  JobUsage,
 } from './types';
 
 export { JSON_SERIALIZER } from './types';

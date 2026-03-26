@@ -16,6 +16,7 @@ import path from 'path';
 import os from 'os';
 import type {
   JobOptions,
+  JobUsage,
   JobCounts,
   Metrics,
   MetricsOptions,
@@ -77,6 +78,7 @@ export class TestJob<D = any, R = any> {
   finishedOn: number | undefined;
   processedOn: number | undefined;
   expireAt?: number;
+  usage?: JobUsage;
 
   constructor(record: TestJobRecord<D, R>) {
     this.id = record.id;
@@ -127,6 +129,21 @@ export class TestJob<D = any, R = any> {
 
   discard(): void {
     this.discarded = true;
+  }
+
+  async reportUsage(usage: JobUsage): Promise<void> {
+    if (
+      (usage.inputTokens !== undefined && usage.inputTokens < 0) ||
+      (usage.outputTokens !== undefined && usage.outputTokens < 0) ||
+      (usage.totalTokens !== undefined && usage.totalTokens < 0)
+    ) {
+      throw new Error('Token counts must not be negative');
+    }
+    const resolved = { ...usage };
+    if (resolved.totalTokens === undefined && (resolved.inputTokens !== undefined || resolved.outputTokens !== undefined)) {
+      resolved.totalTokens = (resolved.inputTokens ?? 0) + (resolved.outputTokens ?? 0);
+    }
+    this.usage = resolved;
   }
 }
 
@@ -579,6 +596,44 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   }
 
   /** Close the queue. */
+  async getFlowUsage(parentJobId: string): Promise<{
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCostUsd: number;
+    jobCount: number;
+    models: Record<string, number>;
+  }> {
+    const agg = { totalInputTokens: 0, totalOutputTokens: 0, totalCostUsd: 0, jobCount: 0, models: {} as Record<string, number> };
+    const parentJob = this.jobs.get(parentJobId);
+    if (!parentJob) return agg;
+
+    // Include parent
+    const pUsage = (parentJob as any).usage as JobUsage | undefined;
+    if (pUsage) {
+      agg.totalInputTokens += pUsage.inputTokens ?? 0;
+      agg.totalOutputTokens += pUsage.outputTokens ?? 0;
+      agg.totalCostUsd += pUsage.costUsd ?? 0;
+      agg.jobCount++;
+      if (pUsage.model) agg.models[pUsage.model] = (agg.models[pUsage.model] || 0) + 1;
+    }
+
+    // Walk all jobs looking for children (testing mode has no deps set, scan by parentId)
+    for (const [, record] of this.jobs) {
+      if ((record as any).opts?.parent?.id === parentJobId) {
+        const childUsage = (record as any).usage as JobUsage | undefined;
+        if (childUsage) {
+          agg.totalInputTokens += childUsage.inputTokens ?? 0;
+          agg.totalOutputTokens += childUsage.outputTokens ?? 0;
+          agg.totalCostUsd += childUsage.costUsd ?? 0;
+          agg.jobCount++;
+          if (childUsage.model) agg.models[childUsage.model] = (agg.models[childUsage.model] || 0) + 1;
+        }
+      }
+    }
+
+    return agg;
+  }
+
   async close(): Promise<void> {
     this.clearSchedulerTimer();
     this.removeAllListeners();
