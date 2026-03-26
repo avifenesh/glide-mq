@@ -52,9 +52,14 @@ export type {
   SuspendOptions,
   SignalEntry,
   BudgetOptions,
+  JobIndexOptions,
+  VectorSearchOptions,
+  VectorSearchResult,
 } from './types';
 
 export { JSON_SERIALIZER } from './types';
+
+export type { Field } from '@glidemq/speedkey';
 
 export {
   GlideMQError,

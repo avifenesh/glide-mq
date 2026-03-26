@@ -30,6 +30,8 @@ import type {
   Serializer,
   SignalEntry,
   SuspendOptions,
+  JobIndexOptions,
+  VectorSearchOptions,
 } from './types';
 import { JSON_SERIALIZER } from './types';
 import { GlideMQError, UnrecoverableError, BatchError, SuspendError } from './errors';
@@ -77,6 +79,8 @@ export interface TestJobRecord<D = any, R = any> {
   suspendTimeout?: number;
   /** @internal Budget key for flow-level budget enforcement. */
   budgetKey?: string;
+  /** @internal Stored vectors for vector search testing. */
+  vectors?: Map<string, number[]>;
 }
 
 /**
@@ -212,6 +216,15 @@ export class TestJob<D = any, R = any> {
     if (!this._record.signals) this._record.signals = [];
     throw new SuspendError();
   }
+
+  /**
+   * Store a vector embedding on this job (in-memory for testing mode).
+   */
+  async storeVector(field: string, embedding: number[] | Float32Array): Promise<void> {
+    if (!this._record.vectors) this._record.vectors = new Map();
+    const arr = embedding instanceof Float32Array ? Array.from(embedding) : embedding;
+    this._record.vectors.set(field, arr);
+  }
 }
 
 // ---- Search options ----
@@ -230,6 +243,21 @@ function matchesData(data: Record<string, unknown>, filter: Record<string, unkno
     if (data[key] !== value) return false;
   }
   return true;
+}
+
+/** Compute cosine similarity between two vectors. Returns value in [-1, 1]. */
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denom === 0) return 0;
+  return dot / denom;
 }
 
 // ---- TestQueue ----
@@ -272,6 +300,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private paused = false;
   private opts: TestQueueOptions;
   /** @internal */ readonly serializer: Serializer;
+  /** @internal */ private indexConfig: JobIndexOptions | null = null;
 
   /** @internal */ readonly metricsData: Map<string, Map<number, { count: number; totalDuration: number }>> = new Map([
     ['completed', new Map()],
@@ -842,6 +871,61 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       timeout: record.suspendTimeout,
       signals: record.signals ?? [],
     };
+  }
+
+  /**
+   * Create a job index (in-memory no-op, stores config for vectorSearch).
+   */
+  async createJobIndex(opts?: JobIndexOptions): Promise<void> {
+    this.indexConfig = opts ?? {};
+  }
+
+  /**
+   * Drop the job index (clears stored config).
+   */
+  async dropJobIndex(_name?: string): Promise<void> {
+    this.indexConfig = null;
+  }
+
+  /**
+   * Vector similarity search over jobs with stored vectors (brute-force cosine similarity).
+   * Requires prior createJobIndex call.
+   */
+  async vectorSearch(
+    embedding: number[] | Float32Array,
+    opts?: VectorSearchOptions,
+  ): Promise<{ job: TestJob<D, R>; score: number }[]> {
+    if (!this.indexConfig) {
+      throw new Error('No index created. Call createJobIndex() first.');
+    }
+    const k = opts?.k ?? 10;
+    const query = Array.from(embedding);
+    const vecFieldName = this.indexConfig.vectorField?.name ?? '_vec';
+
+    const candidates: { record: TestJobRecord<D, R>; score: number }[] = [];
+    for (const record of this.jobs.values()) {
+      // Apply pre-filter if provided
+      if (opts?.filter) {
+        const stateMatch = opts.filter.match(/@state:\{(\w+)\}/);
+        if (stateMatch && record.state !== stateMatch[1]) continue;
+      }
+      const vectors = record.vectors;
+      if (!vectors) continue;
+      const vec = vectors.get(vecFieldName);
+      if (!vec || vec.length !== query.length) continue;
+      const sim = cosineSimilarity(query, vec);
+      // Convert similarity to distance (lower = more similar, matching Valkey COSINE behavior)
+      const distance = 1 - sim;
+      candidates.push({ record, score: distance });
+    }
+
+    candidates.sort((a, b) => a.score - b.score);
+    const topK = candidates.slice(0, k);
+
+    return topK.map((c) => ({
+      job: new TestJob<D, R>(c.record),
+      score: c.score,
+    }));
   }
 
   async close(): Promise<void> {
