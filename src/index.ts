@@ -51,6 +51,7 @@ export type {
   ReadStreamOptions,
   SuspendOptions,
   SignalEntry,
+  BudgetOptions,
 } from './types';
 
 export { JSON_SERIALIZER } from './types';

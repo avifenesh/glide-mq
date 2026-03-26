@@ -34,6 +34,9 @@ export class Job<D = any, R = any> {
   expireAt?: number;
   schedulerName?: string;
 
+  /** Budget key for flow-level budget enforcement. Set when the job belongs to a budgeted flow. */
+  budgetKey?: string;
+
   /** Current position in the fallback chain. 0 = original request, 1+ = fallback entries. */
   fallbackIndex: number = 0;
 
@@ -718,6 +721,7 @@ export class Job<D = any, R = any> {
     job.cost = hash.cost ? parseInt(hash.cost, 10) : undefined;
     job.expireAt = hash.expireAt ? parseInt(hash.expireAt, 10) : undefined;
     job.schedulerName = hash.schedulerName || undefined;
+    job.budgetKey = hash.budgetKey || undefined;
     job.fallbackIndex = hash.fallbackIndex ? parseInt(hash.fallbackIndex, 10) : 0;
     if (hash.parentIds) {
       try {
