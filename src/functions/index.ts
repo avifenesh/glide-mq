@@ -36,7 +36,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 74: glidemq_removeJob/clean/drain delete per-job streaming channel keys (jstream:).
 // Version 75: Suspend/resume with signals: glidemq_suspend, glidemq_signal, glidemq_sweepSuspended.
 // Version 76: glidemq_clean and glidemq_drain delete signals: keys to prevent key leaks.
-export const LIBRARY_VERSION = '76';
+// Version 77: Per-job lockDuration: reclaimStalled/reclaimStalledListJobs read lockDuration from job opts for per-job stall threshold.
+export const LIBRARY_VERSION = '77';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -438,6 +439,13 @@ local function extractTtlFromOpts(optsJson)
   local ok, decoded = pcall(cjson.decode, optsJson)
   if not ok or type(decoded) ~= 'table' then return 0 end
   return tonumber(decoded['ttl']) or 0
+end
+
+local function extractLockDurationFromOpts(optsJson)
+  if not optsJson or optsJson == '' then return 0 end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then return 0 end
+  return tonumber(decoded['lockDuration']) or 0
 end
 
 -- Apply stall logic to a job: increment stalledCount, fail if over max, else emit stalled event.
@@ -1442,8 +1450,11 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
         if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
         count = count + 1
       else
-      local lastActive = tonumber(redis.call('HGET', jobKey, 'lastActive'))
-      if lastActive and (timestamp - lastActive) < minIdleMs then
+      local vals = redis.call('HMGET', jobKey, 'lastActive', 'opts')
+      local lastActive = tonumber(vals[1])
+      local jobLockDuration = extractLockDurationFromOpts(vals[2])
+      local effectiveIdle = (jobLockDuration > 0) and jobLockDuration or minIdleMs
+      if lastActive and (timestamp - lastActive) < effectiveIdle then
         count = count + 1
       else
       local failed = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp)
@@ -1491,10 +1502,12 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
       local jk = scannedKeys[i]
       local state = redis.call('HGET', jk, 'state')
       if state == 'active' then
-        local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority')
+        local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority', 'opts')
         local lastActive = tonumber(vals[1])
         local isListSourced = vals[2] == '1' or (tonumber(vals[3]) or 0) > 0
-        if isListSourced and lastActive and (timestamp - lastActive) >= minIdleMs then
+        local jobLockDuration = extractLockDurationFromOpts(vals[4])
+        local effectiveIdle = (jobLockDuration > 0) and jobLockDuration or minIdleMs
+        if isListSourced and lastActive and (timestamp - lastActive) >= effectiveIdle then
           local jobId = string.sub(jk, #prefix + 5)
           local shouldDecr = false
           if checkExpired(jk, jobId, prefix, timestamp) then

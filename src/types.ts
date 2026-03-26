@@ -196,6 +196,9 @@ export interface JobOptions {
   attempts?: number;
   backoff?: { type: 'fixed' | 'exponential' | string; delay: number; jitter?: number };
   timeout?: number;
+  /** Override worker-level lockDuration for this specific job (ms).
+   *  Controls heartbeat frequency and stall detection threshold. */
+  lockDuration?: number;
   removeOnComplete?: boolean | number | { age: number; count: number };
   removeOnFail?: boolean | number | { age: number; count: number };
   deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
