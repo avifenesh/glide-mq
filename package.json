@@ -33,7 +33,14 @@
     "bench:memory": "npx tsx benchmarks/run.ts memory",
     "bench:sharing": "npx tsx benchmarks/run.ts sharing",
     "bench:ci": "npx tsx benchmarks/run.ts ci",
-    "fuzz": "vitest run tests/fuzzer/"
+    "fuzz": "vitest run tests/fuzzer/",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "docker:valkey:up": "docker compose up -d valkey",
+    "docker:valkey:down": "docker compose down valkey",
+    "docker:cluster:up": "docker compose up -d valkey-cluster",
+    "docker:cluster:down": "docker compose down valkey-cluster"
   },
   "engines": {
     "node": ">=20"
