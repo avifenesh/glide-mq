@@ -98,6 +98,7 @@ export class TestJob<D = any, R = any> {
   expireAt?: number;
   fallbackIndex: number = 0;
   usage?: JobUsage;
+  tpmTokens?: number;
   signals: SignalEntry[] = [];
   budgetKey?: string;
   /** @internal */ private _record: TestJobRecord<D, R>;
@@ -175,6 +176,11 @@ export class TestJob<D = any, R = any> {
       resolved.totalTokens = (resolved.inputTokens ?? 0) + (resolved.outputTokens ?? 0);
     }
     this.usage = resolved;
+  }
+
+  async reportTokens(count: number): Promise<void> {
+    if (count < 0) throw new Error('Token count must not be negative');
+    this.tpmTokens = count;
   }
 
   async stream(chunk: Record<string, string>): Promise<string> {
@@ -976,6 +982,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 export interface TestWorkerOptions {
   concurrency?: number;
   batch?: { size: number; timeout?: number };
+  /** Token-per-minute rate limiting (in-memory only for testing mode). */
+  tokenLimiter?: {
+    maxTokens: number;
+    duration: number;
+  };
 }
 
 export class TestWorker<D = any, R = any> extends EventEmitter {
@@ -994,6 +1005,9 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private readonly batchTimeout: number;
   private readonly batchProcessor: ((jobs: TestJob<D, R>[]) => Promise<R[]>) | null;
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly tokenLimiter: TestWorkerOptions['tokenLimiter'];
+  private tpmLocalCounter = 0;
+  private tpmWindowStart = 0;
 
   constructor(
     queue: TestQueue<D, R>,
@@ -1045,6 +1059,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       }
     }
     this.concurrency = opts?.concurrency ?? 1;
+    this.tokenLimiter = opts?.tokenLimiter;
     this.id = `test-worker-${++TestWorker.idCounter}`;
     this.startedAt = Date.now();
 
@@ -1160,7 +1175,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         return;
       }
     }
-    this.processor(job as any)
+    this.waitForTokenLimitIfNeeded()
+      .then(() => this.processor(job as any))
       .then((result) => {
         // Roundtrip returnvalue through serializer to match production behavior
         const s = this.queue.serializer;
@@ -1173,6 +1189,12 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
         this.emit('completed', job, roundtripped);
         this.queue.emit('completed', job, roundtripped);
+
+        // Post-completion TPM tracking
+        if (this.tokenLimiter) {
+          const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
+          this.incrementLocalTpm(tpmTokens);
+        }
 
         // Post-completion budget check
         if (record.budgetKey && job.usage) {
@@ -1412,6 +1434,36 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           this.processAvailable();
         }
       });
+  }
+
+  /** Wait if the TPM counter exceeds the limit for the current window. */
+  private async waitForTokenLimitIfNeeded(): Promise<void> {
+    if (!this.tokenLimiter) return;
+    const tl = this.tokenLimiter;
+
+    while (true) {
+      const now = Date.now();
+      // Reset window if expired
+      if (now >= this.tpmWindowStart + tl.duration) {
+        this.tpmLocalCounter = 0;
+        this.tpmWindowStart = now - (now % tl.duration);
+      }
+      if (this.tpmLocalCounter < tl.maxTokens) break;
+      const sleepMs = this.tpmWindowStart + tl.duration - now;
+      if (sleepMs <= 0) continue;
+      await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+    }
+  }
+
+  /** Increment the local TPM counter after a job completes. */
+  private incrementLocalTpm(tokens: number): void {
+    if (tokens <= 0 || !this.tokenLimiter) return;
+    const now = Date.now();
+    if (now >= this.tpmWindowStart + this.tokenLimiter.duration) {
+      this.tpmLocalCounter = 0;
+      this.tpmWindowStart = now - (now % this.tokenLimiter.duration);
+    }
+    this.tpmLocalCounter += tokens;
   }
 
   /** Return the number of jobs currently being processed. */

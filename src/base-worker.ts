@@ -109,6 +109,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected globalRateLimitEnabled = false;
   protected cachedRateLimitMax = 0;
   protected cachedRateLimitDuration = 0;
+
+  // TPM (token-per-minute) rate limiting state
+  protected tpmLocalCounter = 0;
+  protected tpmWindowStart = 0;
   protected sandboxClose?: (force?: boolean) => Promise<void>;
   protected workerHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   protected pollLoopPromise: Promise<void> | null = null;
@@ -573,6 +577,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
     // Rate limit check (once per batch)
     if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
+    if (this.opts.tokenLimiter) await this.waitForTokenLimit();
 
     // Set up abort controllers for all jobs
     const batchAc = new AbortController();
@@ -685,6 +690,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         entry.job.returnvalue = result;
         entry.job.finishedOn = Date.now();
         if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
+
+        // TPM tracking for batch jobs
+        if (this.opts.tokenLimiter) {
+          const tpmTokens = Math.max(entry.job.usage?.totalTokens ?? 0, entry.job.tpmTokens ?? 0);
+          if (tpmTokens > 0) {
+            await this.incrementTpmCounter(tpmTokens);
+          }
+        }
       }
     } else if (batchError) {
       // Partial failure: process each result individually
@@ -738,6 +751,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           entry.job.returnvalue = result as R;
           entry.job.finishedOn = Date.now();
           if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
+
+          // TPM tracking for batch jobs (partial success)
+          if (this.opts.tokenLimiter) {
+            const tpmTokens = Math.max(entry.job.usage?.totalTokens ?? 0, entry.job.tpmTokens ?? 0);
+            if (tpmTokens > 0) {
+              await this.incrementTpmCounter(tpmTokens);
+            }
+          }
         }
       }
     } else if (thrownError) {
@@ -835,6 +856,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     jobId: string,
   ): Promise<{ result?: R; error?: Error; aborted: boolean }> {
     if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
+    if (this.opts.tokenLimiter) await this.waitForTokenLimit();
 
     const ac = new AbortController();
     this.activeAbortControllers.set(jobId, ac);
@@ -1397,6 +1419,15 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         }
       }
 
+      // Post-completion TPM tracking: increment counter for token rate limiting.
+      // Use whichever is larger: usage.totalTokens or explicit tpmTokens.
+      if (this.opts.tokenLimiter) {
+        const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
+        if (tpmTokens > 0) {
+          await this.incrementTpmCounter(tpmTokens);
+        }
+      }
+
       if (job.schedulerName) {
         await this.updateSchedulerAfterComplete(job.schedulerName, now);
       }
@@ -1539,6 +1570,90 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       // Wait for the delay, then re-check
       await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  /**
+   * Check the TPM (token-per-minute) rate limit and wait if either the local or
+   * per-queue counter exceeds the configured maxTokens for the current window.
+   */
+  protected async waitForTokenLimit(): Promise<void> {
+    const tl = this.opts.tokenLimiter;
+    if (!tl) return;
+
+    const scope = tl.scope ?? 'both';
+
+    while (true) {
+      const now = Date.now();
+
+      // Reset local counter if the window has expired
+      if (now >= this.tpmWindowStart + tl.duration) {
+        this.tpmLocalCounter = 0;
+        this.tpmWindowStart = now - (now % tl.duration);
+      }
+
+      // Local check
+      if (scope === 'worker' || scope === 'both') {
+        if (this.tpmLocalCounter >= tl.maxTokens) {
+          const sleepMs = this.tpmWindowStart + tl.duration - now;
+          if (sleepMs > 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+            continue;
+          }
+        }
+      }
+
+      // Queue-wide (Valkey) check
+      if ((scope === 'queue' || scope === 'both') && this.commandClient) {
+        const windowId = Math.floor(now / tl.duration);
+        const tpmKey = `${this.queueKeys.tpm}:${windowId}`;
+        // INCRBY 0 reads the current value without modifying it
+        const current = await this.commandClient.incrBy(tpmKey, 0);
+        if (current >= tl.maxTokens) {
+          const windowEndMs = (windowId + 1) * tl.duration;
+          const sleepMs = windowEndMs - now;
+          if (sleepMs > 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+            continue;
+          }
+        }
+      }
+
+      break;
+    }
+  }
+
+  /**
+   * Increment the TPM counter after a job completes (or reports tokens).
+   * Called from the completion path when tokenLimiter is configured.
+   */
+  protected async incrementTpmCounter(tokens: number): Promise<void> {
+    if (tokens <= 0) return;
+    const tl = this.opts.tokenLimiter;
+    if (!tl) return;
+
+    const scope = tl.scope ?? 'both';
+    const now = Date.now();
+
+    // Local counter
+    if (scope === 'worker' || scope === 'both') {
+      if (now >= this.tpmWindowStart + tl.duration) {
+        this.tpmLocalCounter = 0;
+        this.tpmWindowStart = now - (now % tl.duration);
+      }
+      this.tpmLocalCounter += tokens;
+    }
+
+    // Valkey counter
+    if ((scope === 'queue' || scope === 'both') && this.commandClient) {
+      const windowId = Math.floor(now / tl.duration);
+      const tpmKey = `${this.queueKeys.tpm}:${windowId}`;
+      const newVal = await this.commandClient.incrBy(tpmKey, tokens);
+      // Set expiry on first increment so the key auto-cleans.
+      // If newVal === tokens, this is likely the first write in this window.
+      if (newVal === tokens) {
+        await this.commandClient.pexpire(tpmKey, tl.duration);
+      }
     }
   }
 

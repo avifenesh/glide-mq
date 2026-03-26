@@ -121,6 +121,7 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     suspended: `${p}:suspended`,
     signals: (id: string) => `${p}:signals:${id}`,
     budget: (flowId: string) => `${p}:budget:${flowId}`,
+    tpm: `${p}:tpm`,
   };
 }
 
@@ -230,6 +231,7 @@ export const JOB_METADATA_FIELDS: readonly string[] = Object.freeze([
   'suspendedAt',
   'suspendTimeout',
   'signals',
+  'tpmTokens',
 ]);
 
 /**
