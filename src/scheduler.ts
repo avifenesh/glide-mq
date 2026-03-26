@@ -14,6 +14,7 @@ import {
   renewLock,
   unlock,
   healListActive,
+  sweepSuspended,
 } from './functions/index';
 import type { buildKeys } from './utils';
 import { computeFollowingSchedulerNextRun, isValidSchedulerEvery, MAX_JOB_DATA_SIZE } from './utils';
@@ -215,10 +216,26 @@ export class Scheduler {
 
   private runStalledRecovery(): void {
     this.trackRun(
-      Promise.all([this.reclaimStalledJobs(), this.reclaimStalledListJobs()]).catch((err) => {
-        this.reportError(err);
-      }),
+      Promise.all([this.reclaimStalledJobs(), this.reclaimStalledListJobs(), this.sweepExpiredSuspended()]).catch(
+        (err) => {
+          this.reportError(err);
+        },
+      ),
     );
+  }
+
+  /**
+   * Sweep suspended jobs whose timeout deadline has passed.
+   * Moves them to failed state with reason 'Suspend timeout exceeded'.
+   */
+  private async sweepExpiredSuspended(): Promise<void> {
+    try {
+      // Derive the key prefix (e.g. 'glide:{queueName}:') from queueKeys.id ('glide:{queueName}:id')
+      const kPrefix = this.queueKeys.id.slice(0, -2);
+      await sweepSuspended(this.client, this.queueKeys, Date.now(), kPrefix);
+    } catch (err) {
+      this.reportError(err);
+    }
   }
 
   /**

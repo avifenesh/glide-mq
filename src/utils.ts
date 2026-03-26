@@ -118,6 +118,8 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     parents: (id: string) => `${p}:parents:${id}`,
     jstream: (id: string) => `${p}:jstream:${id}`,
     worker: (id: string) => `${p}:w:${id}`,
+    suspended: `${p}:suspended`,
+    signals: (id: string) => `${p}:signals:${id}`,
   };
 }
 
@@ -223,6 +225,10 @@ export const JOB_METADATA_FIELDS: readonly string[] = Object.freeze([
   'schedulerName',
   'parentIds',
   'parentQueues',
+  'suspendReason',
+  'suspendedAt',
+  'suspendTimeout',
+  'signals',
 ]);
 
 /**

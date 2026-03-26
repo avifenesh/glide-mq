@@ -389,6 +389,27 @@ export function createRoutes(
     }
   });
 
+  router.post('/queues/:name/jobs/:id/signal', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+
+      const queue = await getQueue(param(req, 'name'));
+      const jobId = param(req, 'id');
+      const body = req.body;
+
+      if (!body || !body.name || typeof body.name !== 'string') {
+        res.status(400).json({ error: 'Missing required field: name (string)' });
+        return;
+      }
+
+      const resumed = await queue.signal(jobId, body.name, body.data);
+      res.status(200).json({ resumed });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
   router.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({
       status: 'ok',

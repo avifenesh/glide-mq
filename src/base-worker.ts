@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
 import { TimeUnit } from '@glidemq/speedkey';
-import type { WorkerOptions, Processor, BatchProcessor, Client, Serializer, SchedulerEntry } from './types';
+import type { WorkerOptions, Processor, BatchProcessor, Client, Serializer, SchedulerEntry, SignalEntry } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import {
@@ -27,6 +27,7 @@ import {
   ConnectionError,
   DelayedError,
   WaitingChildrenError,
+  SuspendError,
   UnrecoverableError,
   BatchError,
   GroupRateLimitError,
@@ -41,6 +42,7 @@ import {
   moveToActive,
   moveActiveToDelayed,
   moveToWaitingChildren,
+  suspendJob,
   deferActive,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
@@ -108,6 +110,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected sandboxClose?: (force?: boolean) => Promise<void>;
   protected workerHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   protected pollLoopPromise: Promise<void> | null = null;
+  protected suspendContinuations = new Map<string, (signals: SignalEntry[]) => Promise<any>>();
   protected readonly startedAt = Date.now();
   protected readonly hostname = os.hostname();
   protected serializer: Serializer;
@@ -1159,7 +1162,29 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.isDrained = false;
       if (this.hasActiveListeners) this.emit('active', job, currentJobId);
 
-      const { result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId);
+      // Check for suspend continuation: if this job was previously suspended on this
+      // worker and has an onResume callback, run it instead of the main processor.
+      let processResult: R | undefined;
+      let processError: Error | undefined;
+      let aborted: boolean;
+      const hasContinuation = job.signals.length > 0 && this.suspendContinuations.has(currentJobId);
+      if (hasContinuation) {
+        const onResume = this.suspendContinuations.get(currentJobId)!;
+        this.suspendContinuations.delete(currentJobId);
+        this.startHeartbeat(currentJobId);
+        try {
+          processResult = await onResume(job.signals);
+          processError = undefined;
+        } catch (err) {
+          processError = err instanceof Error ? err : new Error(String(err));
+        } finally {
+          this.stopHeartbeat(currentJobId);
+        }
+        aborted = false;
+      } else {
+        this.suspendContinuations.delete(currentJobId);
+        ({ result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId));
+      }
 
       const delayedRequest = job.consumeMoveToDelayedRequest();
       const delayedError = processError instanceof DelayedError ? processError : undefined;
@@ -1222,6 +1247,34 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           }
         } catch (wtcErr) {
           const err = wtcErr instanceof Error ? wtcErr : new Error(String(wtcErr));
+          await this.handleJobFailure(job, currentJobId, currentEntryId, err);
+        }
+        return;
+      }
+
+      const suspendReq = job.consumeSuspendRequest();
+      if (processError instanceof SuspendError || suspendReq) {
+        if (!this.commandClient) return;
+        try {
+          if (suspendReq?.onResume) {
+            this.suspendContinuations.set(currentJobId, suspendReq.onResume);
+          }
+          const suspResult = await suspendJob(
+            this.commandClient,
+            this.queueKeys,
+            currentJobId,
+            currentEntryId,
+            this.consumerGroup,
+            Date.now(),
+            suspendReq?.reason,
+            suspendReq?.timeout,
+            this.broadcastMode ? true : undefined,
+          );
+          if (typeof suspResult === 'string' && suspResult.startsWith('error:')) {
+            throw new Error(`Cannot suspend job: ${suspResult.slice(6)}`);
+          }
+        } catch (suspErr) {
+          const err = suspErr instanceof Error ? suspErr : new Error(String(suspErr));
           await this.handleJobFailure(job, currentJobId, currentEntryId, err);
         }
         return;

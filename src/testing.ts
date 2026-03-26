@@ -28,9 +28,11 @@ import type {
   ScheduleOpts,
   JobTemplate,
   Serializer,
+  SignalEntry,
+  SuspendOptions,
 } from './types';
 import { JSON_SERIALIZER } from './types';
-import { GlideMQError, UnrecoverableError, BatchError } from './errors';
+import { GlideMQError, UnrecoverableError, BatchError, SuspendError } from './errors';
 import {
   MAX_JOB_DATA_SIZE,
   computeFollowingSchedulerNextRun,
@@ -51,7 +53,7 @@ export interface TestJobRecord<D = any, R = any> {
   name: string;
   data: D;
   opts: JobOptions;
-  state: 'waiting' | 'active' | 'completed' | 'failed' | 'delayed';
+  state: 'waiting' | 'active' | 'completed' | 'failed' | 'delayed' | 'suspended';
   attemptsMade: number;
   returnvalue: R | undefined;
   failedReason: string | undefined;
@@ -63,6 +65,14 @@ export interface TestJobRecord<D = any, R = any> {
   streamChunks?: { id: string; fields: Record<string, string> }[];
   /** @internal Counter for synthetic stream entry IDs. */
   streamCounter?: number;
+  /** @internal Signals delivered to a suspended job. */
+  signals?: SignalEntry[];
+  /** @internal Reason for suspension. */
+  suspendReason?: string;
+  /** @internal When the job was suspended (epoch ms). */
+  suspendedAt?: number;
+  /** @internal Suspend timeout in ms. */
+  suspendTimeout?: number;
 }
 
 /**
@@ -83,6 +93,7 @@ export class TestJob<D = any, R = any> {
   processedOn: number | undefined;
   expireAt?: number;
   usage?: JobUsage;
+  signals: SignalEntry[] = [];
   /** @internal */ private _record: TestJobRecord<D, R>;
 
   constructor(record: TestJobRecord<D, R>) {
@@ -99,6 +110,7 @@ export class TestJob<D = any, R = any> {
     this.finishedOn = record.finishedOn;
     this.processedOn = record.processedOn;
     this.expireAt = record.expireAt;
+    this.signals = record.signals ?? [];
   }
 
   async log(_message: string): Promise<void> {
@@ -168,6 +180,18 @@ export class TestJob<D = any, R = any> {
     const id = `test-${++this._record.streamCounter}`;
     this._record.streamChunks.push({ id, fields: { ...chunk } });
     return id;
+  }
+
+  /**
+   * Suspend this job. Marks the record as suspended and throws SuspendError.
+   */
+  async suspend(opts?: SuspendOptions): Promise<never> {
+    this._record.state = 'suspended';
+    this._record.suspendedAt = Date.now();
+    this._record.suspendReason = opts?.reason;
+    this._record.suspendTimeout = opts?.timeout;
+    if (!this._record.signals) this._record.signals = [];
+    throw new SuspendError();
   }
 }
 
@@ -352,7 +376,13 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   async getJobCounts(): Promise<JobCounts> {
     const counts: JobCounts = { waiting: 0, active: 0, delayed: 0, completed: 0, failed: 0 };
     for (const record of this.jobs.values()) {
-      counts[record.state]++;
+      const s = record.state;
+      if (s === 'waiting') counts.waiting++;
+      else if (s === 'active') counts.active++;
+      else if (s === 'delayed') counts.delayed++;
+      else if (s === 'completed') counts.completed++;
+      else if (s === 'failed') counts.failed++;
+      // 'suspended' is not tracked in JobCounts
     }
     return counts;
   }
@@ -675,6 +705,50 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     return filtered.slice(0, count);
   }
 
+  /**
+   * Send a signal to a suspended job, resuming it.
+   * Returns true if the job was resumed, false if not in suspended state.
+   */
+  async signal(jobId: string, signalName: string, data?: any): Promise<boolean> {
+    const record = this.jobs.get(jobId);
+    if (!record || record.state !== 'suspended') return false;
+
+    if (!record.signals) record.signals = [];
+    record.signals.push({ name: signalName, data: data ?? '', receivedAt: Date.now() });
+
+    record.state = 'waiting';
+    this.waitingQueue.push(record);
+    this.emit('resumed', jobId, signalName);
+
+    // Notify attached workers so the resumed job gets processed
+    queueMicrotask(() => {
+      for (const w of this.workers) {
+        w.onJobAdded();
+      }
+    });
+    return true;
+  }
+
+  /**
+   * Get suspension information for a job.
+   * Returns null if the job is not in the suspended state.
+   */
+  async getSuspendInfo(jobId: string): Promise<{
+    reason?: string;
+    suspendedAt: number;
+    timeout?: number;
+    signals: SignalEntry[];
+  } | null> {
+    const record = this.jobs.get(jobId);
+    if (!record || record.state !== 'suspended') return null;
+    return {
+      reason: record.suspendReason,
+      suspendedAt: record.suspendedAt ?? 0,
+      timeout: record.suspendTimeout,
+      signals: record.signals ?? [],
+    };
+  }
+
   async close(): Promise<void> {
     this.clearSchedulerTimer();
     this.removeAllListeners();
@@ -981,6 +1055,13 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         this.queue.emit('completed', job, roundtripped);
       })
       .catch((err: Error) => {
+        // Handle suspend: the job is already marked suspended by TestJob.suspend()
+        if (err instanceof SuspendError || err.name === 'SuspendError') {
+          // State already set to 'suspended' by TestJob.suspend(). Nothing more to do.
+          this.queue.emit('suspended', job, record.suspendReason);
+          return;
+        }
+
         record.attemptsMade++;
         const maxAttempts = record.opts.attempts ?? 0;
 
