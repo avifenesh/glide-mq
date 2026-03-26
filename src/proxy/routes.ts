@@ -293,6 +293,7 @@ export function createRoutes(
         finishedOn: job.finishedOn,
         processedOn: job.processedOn,
         parentId: job.parentId,
+        usage: job.usage,
       });
     } catch (err) {
       const { status, message } = errorResponse(err);

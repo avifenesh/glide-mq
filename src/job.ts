@@ -1,6 +1,6 @@
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
-import type { JobOptions, Client, Serializer } from './types';
+import type { JobOptions, JobUsage, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
@@ -33,6 +33,9 @@ export class Job<D = any, R = any> {
   cost?: number;
   expireAt?: number;
   schedulerName?: string;
+
+  /** AI-specific usage metadata reported via reportUsage(). */
+  usage?: JobUsage;
 
   /**
    * AbortSignal that fires when this job is revoked during processing.
@@ -146,6 +149,57 @@ export class Job<D = any, R = any> {
       data: serialized,
     });
     this.data = data;
+  }
+
+  /**
+   * Report AI-specific usage metadata for this job. Persists to the job hash
+   * and emits a 'usage' event on the events stream.
+   *
+   * Callable from any context (inside a processor, externally via getJob(), etc.).
+   * If `totalTokens` is not provided, it is auto-computed as inputTokens + outputTokens.
+   * Calling multiple times overwrites the previous usage data.
+   */
+  async reportUsage(usage: JobUsage): Promise<void> {
+    if (
+      (usage.inputTokens !== undefined && usage.inputTokens < 0) ||
+      (usage.outputTokens !== undefined && usage.outputTokens < 0) ||
+      (usage.totalTokens !== undefined && usage.totalTokens < 0)
+    ) {
+      throw new Error('Token counts must not be negative');
+    }
+
+    const resolved: JobUsage = { ...usage };
+    if (resolved.totalTokens === undefined && (resolved.inputTokens !== undefined || resolved.outputTokens !== undefined)) {
+      resolved.totalTokens = (resolved.inputTokens ?? 0) + (resolved.outputTokens ?? 0);
+    }
+
+    const fields: Record<string, string> = {};
+    if (resolved.model !== undefined) fields['usage:model'] = resolved.model;
+    if (resolved.provider !== undefined) fields['usage:provider'] = resolved.provider;
+    if (resolved.inputTokens !== undefined) fields['usage:inputTokens'] = resolved.inputTokens.toString();
+    if (resolved.outputTokens !== undefined) fields['usage:outputTokens'] = resolved.outputTokens.toString();
+    if (resolved.totalTokens !== undefined) fields['usage:totalTokens'] = resolved.totalTokens.toString();
+    if (resolved.costUsd !== undefined) fields['usage:costUsd'] = resolved.costUsd.toString();
+    if (resolved.latencyMs !== undefined) fields['usage:latencyMs'] = resolved.latencyMs.toString();
+    if (resolved.cached !== undefined) fields['usage:cached'] = resolved.cached ? '1' : '0';
+
+    const isCluster = isClusterClient(this.client);
+    const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
+
+    batch.hset(this.queueKeys.job(this.id), fields);
+    batch.xadd(this.queueKeys.events, [
+      ['event', 'usage'],
+      ['jobId', this.id],
+      ['data', JSON.stringify(resolved)],
+    ]);
+
+    if (isCluster) {
+      await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false);
+    } else {
+      await (this.client as GlideClient).exec(batch as Batch, false);
+    }
+
+    this.usage = resolved;
   }
 
   /**
@@ -611,6 +665,18 @@ export class Job<D = any, R = any> {
       } catch {
         job.progress = parseInt(hash.progress, 10) || 0;
       }
+    }
+    if (hash['usage:model'] || hash['usage:inputTokens'] || hash['usage:provider'] || hash['usage:costUsd']) {
+      job.usage = {
+        model: hash['usage:model'] || undefined,
+        provider: hash['usage:provider'] || undefined,
+        inputTokens: hash['usage:inputTokens'] ? parseInt(hash['usage:inputTokens'], 10) : undefined,
+        outputTokens: hash['usage:outputTokens'] ? parseInt(hash['usage:outputTokens'], 10) : undefined,
+        totalTokens: hash['usage:totalTokens'] ? parseInt(hash['usage:totalTokens'], 10) : undefined,
+        costUsd: hash['usage:costUsd'] ? parseFloat(hash['usage:costUsd']) : undefined,
+        latencyMs: hash['usage:latencyMs'] ? parseInt(hash['usage:latencyMs'], 10) : undefined,
+        cached: hash['usage:cached'] === '1' ? true : hash['usage:cached'] === '0' ? false : undefined,
+      };
     }
     return job;
   }

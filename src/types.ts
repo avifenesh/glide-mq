@@ -425,3 +425,23 @@ export interface DAGFlow {
   /** The nodes of the DAG. Order does not matter - topological sort is applied. */
   nodes: DAGNode[];
 }
+
+/** AI-specific usage metadata reported by a job processor. */
+export interface JobUsage {
+  /** Model identifier (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). */
+  model?: string;
+  /** Provider identifier (e.g. 'openai', 'anthropic'). */
+  provider?: string;
+  /** Number of input/prompt tokens consumed. */
+  inputTokens?: number;
+  /** Number of output/completion tokens generated. */
+  outputTokens?: number;
+  /** Total tokens (auto-computed as inputTokens + outputTokens if not provided). */
+  totalTokens?: number;
+  /** Actual cost in USD. */
+  costUsd?: number;
+  /** Inference latency in milliseconds (not including queue wait time). */
+  latencyMs?: number;
+  /** Whether the response came from a cache hit. */
+  cached?: boolean;
+}
