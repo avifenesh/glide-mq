@@ -49,6 +49,8 @@ export type {
   DAGFlow,
   JobUsage,
   ReadStreamOptions,
+  SuspendOptions,
+  SignalEntry,
 } from './types';
 
 export { JSON_SERIALIZER } from './types';
@@ -60,6 +62,7 @@ export {
   DelayedError,
   BatchError,
   WaitingChildrenError,
+  SuspendError,
   GroupRateLimitError,
 } from './errors';
 export type { GroupRateLimitOptions } from './errors';

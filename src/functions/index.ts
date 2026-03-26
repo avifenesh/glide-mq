@@ -34,7 +34,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 72: Runtime per-group rate limiting: glidemq_rateLimitGroup + glidemq_rateLimitGroupExternal.
 // Version 73: Fix review findings: groupqScore string ID fallback, promoteRateLimited loop, step-job gates in Phase 1/3, retry slot retention, addFlow routing.
 // Version 74: glidemq_removeJob/clean/drain delete per-job streaming channel keys (jstream:).
-export const LIBRARY_VERSION = '74';
+// Version 75: Suspend/resume with signals: glidemq_suspend, glidemq_signal, glidemq_sweepSuspended.
+export const LIBRARY_VERSION = '75';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -2527,12 +2528,16 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
   markOrderingDone(jobKey, jobId)
-  -- Clean up DAG parents SET and per-job streaming channel
+  -- Clean up DAG parents SET, per-job streaming channel, and signals
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   local parentsKey = prefix .. 'parents:' .. jobId
   local jstreamKey = prefix .. 'jstream:' .. jobId
+  local signalsKey = prefix .. 'signals:' .. jobId
+  local suspendedKey = prefix .. 'suspended'
   redis.call('DEL', parentsKey)
   redis.call('DEL', jstreamKey)
+  redis.call('DEL', signalsKey)
+  redis.call('ZREM', suspendedKey, jobId)
   redis.call('DEL', jobKey)
   redis.call('DEL', logKey)
   emitEvent(eventsKey, 'removed', jobId, nil)
@@ -3299,6 +3304,110 @@ redis.register_function('glidemq_popLists', function(keys, args)
     results[#results + 1] = id
   end
   return results
+end)
+
+redis.register_function('glidemq_suspend', function(keys, args)
+  local jobKey = keys[1]
+  local streamKey = keys[2]
+  local eventsKey = keys[3]
+  local suspendedKey = keys[4]
+  local jobId = args[1]
+  local entryId = args[2]
+  local group = args[3]
+  local now = tonumber(args[4]) or 0
+  local reason = args[5] or ''
+  local timeout = tonumber(args[6]) or 0
+  local broadcastMode = args[7] or '0'
+
+  local state = redis.call('HGET', jobKey, 'state')
+  if not state then return 'error:not_found' end
+  if state ~= 'active' then return 'error:not_active' end
+
+  pcall(redis.call, 'XACK', streamKey, group, entryId)
+  if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
+
+  local fields = {'state', 'suspended', 'suspendedAt', tostring(now)}
+  if reason ~= '' then
+    fields[#fields + 1] = 'suspendReason'
+    fields[#fields + 1] = reason
+  end
+  if timeout > 0 then
+    fields[#fields + 1] = 'suspendTimeout'
+    fields[#fields + 1] = tostring(timeout)
+  end
+  redis.call('HSET', jobKey, unpack(fields))
+
+  local deadline = timeout > 0 and (now + timeout) or 9999999999999
+  redis.call('ZADD', suspendedKey, deadline, jobId)
+
+  local ordSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+  if ordSeq <= 0 then
+    releaseGroupSlotAndPromote(jobKey, jobId, now)
+  end
+
+  if entryId == '' then
+    local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+    redis.call('DECR', prefix .. 'list-active')
+  end
+
+  emitEvent(eventsKey, 'suspended', jobId, nil)
+  return 'ok'
+end)
+
+redis.register_function('glidemq_signal', function(keys, args)
+  local jobKey = keys[1]
+  local streamKey = keys[2]
+  local eventsKey = keys[3]
+  local suspendedKey = keys[4]
+  local signalsKey = keys[5]
+  local jobId = args[1]
+  local signalName = args[2]
+  local signalData = args[3] or ''
+  local now = tonumber(args[4]) or 0
+
+  local state = redis.call('HGET', jobKey, 'state')
+  if not state or state ~= 'suspended' then return 'not_suspended' end
+
+  local signalJson = cjson.encode({name = signalName, data = signalData, receivedAt = now})
+  redis.call('RPUSH', signalsKey, signalJson)
+
+  local rawSignals = redis.call('LRANGE', signalsKey, 0, -1)
+  local signalsArr = {}
+  for i, s in ipairs(rawSignals) do signalsArr[i] = cjson.decode(s) end
+  redis.call('HSET', jobKey, 'signals', cjson.encode(signalsArr))
+
+  redis.call('HSET', jobKey, 'state', 'waiting')
+  redis.call('ZREM', suspendedKey, jobId)
+
+  local jobName = redis.call('HGET', jobKey, 'name') or ''
+  xaddJob(streamKey, jobId, jobName)
+
+  emitEvent(eventsKey, 'resumed', jobId, {'signal', signalName})
+  return 'ok'
+end)
+
+redis.register_function('glidemq_sweepSuspended', function(keys, args)
+  local suspendedKey = keys[1]
+  local eventsKey = keys[2]
+  local now = tonumber(args[1]) or 0
+  local keyPrefix = args[2] or ''
+
+  local expired = redis.call('ZRANGEBYSCORE', suspendedKey, '0', string.format('%.0f', now), 'LIMIT', 0, 100)
+  if not expired or #expired == 0 then return 0 end
+
+  local count = 0
+  for _, jobId in ipairs(expired) do
+    local id = tostring(jobId)
+    local jobKey = keyPrefix .. 'job:' .. id
+    local jState = redis.call('HGET', jobKey, 'state')
+    if jState == 'suspended' then
+      redis.call('HSET', jobKey, 'state', 'failed', 'failedReason', 'Suspend timeout exceeded')
+      emitEvent(eventsKey, 'failed', id, {'failedReason', 'Suspend timeout exceeded'})
+      count = count + 1
+    end
+    redis.call('ZREM', suspendedKey, id)
+  end
+  return count
 end)
 `;
 
@@ -4385,5 +4494,68 @@ export async function registerParent(
  */
 export async function healListActive(client: Client, keys: QueueKeys): Promise<number> {
   const result = await client.fcall('glidemq_healListActive', [keys.id], []);
+  return Number(result) || 0;
+}
+
+/**
+ * Suspend an active job. Moves it from active to the suspended sorted set.
+ * Returns 'ok', or 'error:not_found' / 'error:not_active'.
+ */
+export async function suspendJob(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  entryId: string,
+  group: string,
+  timestamp: number,
+  reason?: string,
+  timeout?: number,
+  broadcastMode?: boolean,
+): Promise<string> {
+  const args = [jobId, entryId, group, timestamp.toString(), reason || '', (timeout || 0).toString()];
+  if (broadcastMode) args.push('1');
+  const result = await client.fcall(
+    'glidemq_suspend',
+    [k.job(jobId), k.stream, k.events, k.suspended],
+    args,
+  );
+  return result as string;
+}
+
+/**
+ * Send a signal to a suspended job. Stores the signal and re-queues the job.
+ * Returns 'ok' if the job was resumed, or 'not_suspended'.
+ */
+export async function signalJob(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  signalName: string,
+  signalData: string,
+  timestamp: number,
+): Promise<string> {
+  const result = await client.fcall(
+    'glidemq_signal',
+    [k.job(jobId), k.stream, k.events, k.suspended, k.signals(jobId)],
+    [jobId, signalName, signalData, timestamp.toString()],
+  );
+  return result as string;
+}
+
+/**
+ * Sweep expired suspended jobs whose timeout has passed.
+ * Moves them to failed state. Returns the number of jobs failed.
+ */
+export async function sweepSuspended(
+  client: Client,
+  k: QueueKeys,
+  timestamp: number,
+  keyPrefix: string,
+): Promise<number> {
+  const result = await client.fcall(
+    'glidemq_sweepSuspended',
+    [k.suspended, k.events],
+    [timestamp.toString(), keyPrefix],
+  );
   return Number(result) || 0;
 }

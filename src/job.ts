@@ -1,10 +1,10 @@
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
-import type { JobOptions, JobUsage, Client, Serializer } from './types';
+import type { JobOptions, JobUsage, Client, Serializer, SuspendOptions, SignalEntry } from './types';
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
-import { GlideMQError, DelayedError, WaitingChildrenError, GroupRateLimitError } from './errors';
+import { GlideMQError, DelayedError, WaitingChildrenError, GroupRateLimitError, SuspendError } from './errors';
 import type { GroupRateLimitOptions } from './errors';
 import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
@@ -44,6 +44,9 @@ export class Job<D = any, R = any> {
    */
   abortSignal?: AbortSignal;
 
+  /** Signals delivered to this job while it was suspended. */
+  signals: SignalEntry[] = [];
+
   /**
    * When true, the job will not be retried on failure regardless of attempts config.
    * Set by calling `discard()` inside the processor.
@@ -55,6 +58,9 @@ export class Job<D = any, R = any> {
 
   /** @internal Request captured by moveToWaitingChildren() while inside the worker. */
   moveToWaitingChildrenRequest?: boolean;
+
+  /** @internal Request captured by suspend() while inside the worker. */
+  suspendRequest?: { reason?: string; timeout?: number; onResume?: (signals: SignalEntry[]) => Promise<any> };
 
   /**
    * Set to true when data or returnvalue could not be deserialized from Valkey.
@@ -277,6 +283,36 @@ export class Job<D = any, R = any> {
     const requested = this.moveToWaitingChildrenRequest ?? false;
     this.moveToWaitingChildrenRequest = undefined;
     return requested;
+  }
+
+  /**
+   * Suspend this job to wait for an external signal (human-in-the-loop).
+   * The processor is interrupted and the job moves to 'suspended' state.
+   * When a signal arrives via Queue.signal(), the job re-enters the stream
+   * and the processor is re-invoked from scratch with job.signals populated.
+   *
+   * Optionally provide an onResume callback that runs instead of the main
+   * processor when the job resumes on the same worker (best-effort).
+   *
+   * This method must be called from inside a Worker processor.
+   */
+  async suspend(opts?: SuspendOptions & { onResume?: (signals: SignalEntry[]) => Promise<any> }): Promise<never> {
+    if (!this.entryId) {
+      throw new Error('suspend() can only be used while the job is active in a Worker');
+    }
+    this.suspendRequest = {
+      reason: opts?.reason,
+      timeout: opts?.timeout,
+      onResume: opts?.onResume,
+    };
+    throw new SuspendError();
+  }
+
+  /** @internal */
+  consumeSuspendRequest(): { reason?: string; timeout?: number; onResume?: (signals: SignalEntry[]) => Promise<any> } | undefined {
+    const req = this.suspendRequest;
+    this.suspendRequest = undefined;
+    return req;
   }
 
   /**
@@ -701,6 +737,13 @@ export class Job<D = any, R = any> {
         latencyMs: hash['usage:latencyMs'] ? parseInt(hash['usage:latencyMs'], 10) : undefined,
         cached: hash['usage:cached'] === '1' ? true : hash['usage:cached'] === '0' ? false : undefined,
       };
+    }
+    if (hash.signals) {
+      try {
+        job.signals = JSON.parse(hash.signals) as SignalEntry[];
+      } catch {
+        job.signals = [];
+      }
     }
     return job;
   }

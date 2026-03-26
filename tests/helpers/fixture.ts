@@ -113,12 +113,13 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
     k.lifo,
     k.priority,
     k.listActive,
+    k.suspended,
   ];
   try {
     await client.del(staticKeys);
   } catch {}
 
-  // Scan and delete job hashes + log keys + deps keys
+  // Scan and delete job hashes + log keys + deps keys + signals keys
   const pfx = keyPrefix(prefix, queueName);
   for (const pattern of [
     `${pfx}:job:*`,
@@ -128,6 +129,7 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
     `${pfx}:groupq:*`,
     `${pfx}:parents:*`,
     `${pfx}:w:*`,
+    `${pfx}:signals:*`,
   ]) {
     try {
       if (client.constructor.name === 'GlideClusterClient') {

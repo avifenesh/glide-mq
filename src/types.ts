@@ -450,3 +450,21 @@ export interface JobUsage {
   /** Whether the response came from a cache hit. */
   cached?: boolean;
 }
+
+/** Options for suspending a job. */
+export interface SuspendOptions {
+  /** Human-readable reason for the suspension. */
+  reason?: string;
+  /** Timeout in milliseconds. 0 means infinite (default). */
+  timeout?: number;
+}
+
+/** A signal entry delivered to a suspended job on resume. */
+export interface SignalEntry {
+  /** Signal name (e.g. 'approve', 'reject'). */
+  name: string;
+  /** Arbitrary signal payload (deserialized from JSON). */
+  data: any;
+  /** Epoch ms when the signal was received. */
+  receivedAt: number;
+}

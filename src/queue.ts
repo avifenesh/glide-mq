@@ -20,6 +20,7 @@ import type {
   RateLimitConfig,
   WorkerInfo,
   Serializer,
+  SignalEntry,
 } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
@@ -66,6 +67,7 @@ import {
   drainQueue,
   retryJobs,
   rateLimitGroupExternal,
+  signalJob,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -1852,6 +1854,53 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (!Number.isFinite(duration) || duration <= 0) throw new Error('duration must be a positive finite number');
     const client = await this.getClient();
     return rateLimitGroupExternal(client, this.keys, groupKey, duration, Date.now(), opts?.extend ?? 'max');
+  }
+
+  /**
+   * Send a signal to a suspended job, resuming it.
+   * The job moves back to waiting state and re-enters the stream.
+   * Returns true if the job was resumed, false if it was not in suspended state.
+   */
+  async signal(jobId: string, signalName: string, data?: any): Promise<boolean> {
+    const client = await this.getClient();
+    const serialized = data !== undefined ? JSON.stringify(data) : '';
+    const result = await signalJob(client, this.keys, jobId, signalName, serialized, Date.now());
+    return String(result) === 'ok';
+  }
+
+  /**
+   * Get suspension information for a job.
+   * Returns null if the job is not in the suspended state.
+   */
+  async getSuspendInfo(jobId: string): Promise<{
+    reason?: string;
+    suspendedAt: number;
+    timeout?: number;
+    signals: SignalEntry[];
+  } | null> {
+    const client = await this.getClient();
+    const values = await client.hmget(this.keys.job(jobId), [
+      'state',
+      'suspendReason',
+      'suspendedAt',
+      'suspendTimeout',
+      'signals',
+    ]);
+    if (!values || String(values[0]) !== 'suspended') return null;
+    let signals: SignalEntry[] = [];
+    if (values[4]) {
+      try {
+        signals = JSON.parse(String(values[4]));
+      } catch {
+        // ignore parse errors
+      }
+    }
+    return {
+      reason: values[1] ? String(values[1]) : undefined,
+      suspendedAt: values[2] ? parseInt(String(values[2]), 10) : 0,
+      timeout: values[3] ? parseInt(String(values[3]), 10) : undefined,
+      signals,
+    };
   }
 
   /**

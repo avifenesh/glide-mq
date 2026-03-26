@@ -49,6 +49,13 @@ export class WaitingChildrenError extends GlideMQError {
   }
 }
 
+export class SuspendError extends GlideMQError {
+  constructor() {
+    super('Job suspended');
+    this.name = 'SuspendError';
+  }
+}
+
 export interface GroupRateLimitOptions {
   /** What happens to the current job. Default: 'requeue' (re-parks without consuming retry). */
   currentJob?: 'requeue' | 'fail';
