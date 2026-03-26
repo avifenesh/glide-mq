@@ -203,6 +203,30 @@ export class Job<D = any, R = any> {
   }
 
   /**
+   * Append a chunk to this job's streaming channel.
+   * Each chunk is a flat string-keyed object appended via XADD to a per-job stream.
+   * Returns the Valkey stream entry ID.
+   */
+  async stream(chunk: Record<string, string>): Promise<string> {
+    const fieldNames = Object.keys(chunk);
+    if (fieldNames.length === 0) {
+      throw new Error('Stream chunk must not be empty');
+    }
+    const entries: [string, string][] = [];
+    let totalBytes = 0;
+    for (const key of fieldNames) {
+      const val = chunk[key];
+      totalBytes += Buffer.byteLength(key, 'utf8') + Buffer.byteLength(val, 'utf8');
+      entries.push([key, val]);
+    }
+    if (totalBytes > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Stream chunk exceeds maximum size (${totalBytes} bytes > ${MAX_JOB_DATA_SIZE})`);
+    }
+    const entryId = await this.client.xadd(this.queueKeys.jstream(this.id), entries);
+    return String(entryId);
+  }
+
+  /**
    * Mark this job so it will not be retried on failure.
    * Call inside the processor before throwing to skip all remaining attempts.
    */

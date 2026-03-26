@@ -606,3 +606,63 @@ const worker = new Worker(
 ```
 
 The job is marked as permanently failed regardless of the `attempts` configuration. This is equivalent to calling `job.discard()` and then throwing, but more explicit.
+
+## AI-native Primitives
+
+### Job Metadata (reportUsage / getFlowUsage)
+
+Track token usage, cost, and latency per job for cost attribution and observability.
+
+```typescript
+import { Worker, Queue } from 'glide-mq';
+
+const worker = new Worker('llm-tasks', async (job) => {
+  const result = await callLLM(job.data.prompt);
+
+  await job.reportUsage({
+    model: 'gpt-4o',
+    provider: 'openai',
+    inputTokens: result.usage.prompt_tokens,
+    outputTokens: result.usage.completion_tokens,
+    costUsd: result.usage.total_cost,
+    latencyMs: result.latencyMs,
+  });
+
+  return result.text;
+}, { connection });
+
+// Aggregate usage for a job flow (parent + all children)
+const usage = await queue.getFlowUsage(parentJobId);
+console.log(usage.totalTokens, usage.costUsd);
+```
+
+`reportUsage()` persists usage to the job hash in Valkey. `job.usage` is populated when the job is fetched via `getJob()`. `getFlowUsage()` walks the DAG upward and sums all fields.
+
+### Job Streaming Channel (stream / readStream)
+
+Stream incremental output from a processor - useful for LLM token-by-token output or progress chunks.
+
+```typescript
+import { Worker, Queue } from 'glide-mq';
+
+// Producer side: emit chunks from inside the processor
+const worker = new Worker('llm-stream', async (job) => {
+  for await (const chunk of callLLMStreaming(job.data.prompt)) {
+    await job.stream({ token: chunk.text });
+  }
+  return 'done';
+}, { connection });
+
+// Consumer side: read back all chunks after completion
+const entries = await queue.readStream(jobId);
+// entries: [{ id: '1-0', fields: { token: 'Hello' } }, ...]
+
+// Resume from a known position
+const more = await queue.readStream(jobId, { lastId: entries[entries.length - 1].id });
+```
+
+**SSE endpoint** (proxy): `GET /queues/:name/jobs/:id/stream` streams chunks as Server-Sent Events while the job is active, then drains remaining chunks and closes. Supports the `Last-Event-ID` header and `?lastId` query param for resume.
+
+Stream keys are automatically cleaned up when a job is removed via `job.remove()`, `queue.clean()`, or `queue.drain()`.
+
+**Testing mode**: `TestJob.stream()` and `TestQueue.readStream()` provide full parity with no Valkey dependency.

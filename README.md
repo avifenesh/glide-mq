@@ -140,6 +140,11 @@ Run `npm run bench` locally or `npx tsx benchmarks/elasticache-head-to-head.ts` 
 - **BroadcastWorker** -- independent consumer groups with own retries, concurrency, and backpressure ([Usage](docs/USAGE.md#broadcast--broadcastworker))
 - **Subject filtering** -- NATS-style patterns (`*` one segment, `>` trailing wildcard) for topic-based routing ([Usage](docs/USAGE.md#broadcast--broadcastworker))
 
+### AI-native
+
+- **Job metadata** -- `job.reportUsage()` persists model, provider, tokens, cost, and latency; `queue.getFlowUsage()` aggregates across parent and child jobs ([Usage](docs/USAGE.md#ai-native-primitives))
+- **Job streaming channel** -- `job.stream(chunk)` appends output chunks during processing; `queue.readStream(jobId)` reads them back; SSE endpoint `GET /queues/:name/jobs/:id/stream` for real-time consumers ([Usage](docs/USAGE.md#ai-native-primitives))
+
 ### Serverless
 
 - **Producer** -- enqueue without EventEmitter overhead, returns plain string IDs ([Usage](docs/USAGE.md))
@@ -193,7 +198,7 @@ curl -X POST http://localhost:3000/queues/emails/jobs \
   -d '{"name": "send-email", "data": {"to": "user@example.com"}}'
 ```
 
-Endpoints: `POST /queues/:name/jobs`, `POST /queues/:name/jobs/bulk`, `GET /queues/:name/jobs/:id`, `POST /queues/:name/pause`, `POST /queues/:name/resume`, `GET /queues/:name/counts`, `GET /health`.
+Endpoints: `POST /queues/:name/jobs`, `POST /queues/:name/jobs/bulk`, `GET /queues/:name/jobs/:id`, `GET /queues/:name/jobs/:id/stream` (SSE), `POST /queues/:name/pause`, `POST /queues/:name/resume`, `GET /queues/:name/counts`, `GET /health`.
 
 For zero-overhead integration, call Valkey Server Functions directly from any language with a Valkey client. See [Wire Protocol](docs/WIRE_PROTOCOL.md) for FCALL signatures, key layout, and examples in Python and Go.
 

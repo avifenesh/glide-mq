@@ -426,6 +426,11 @@ export interface DAGFlow {
   nodes: DAGNode[];
 }
 
+export interface ReadStreamOptions {
+  lastId?: string;
+  count?: number;
+}
+
 /** AI-specific usage metadata reported by a job processor. */
 export interface JobUsage {
   /** Model identifier (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). */

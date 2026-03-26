@@ -59,6 +59,10 @@ export interface TestJobRecord<D = any, R = any> {
   finishedOn: number | undefined;
   processedOn: number | undefined;
   expireAt?: number;
+  /** @internal Per-job streaming channel chunks. */
+  streamChunks?: { id: string; fields: Record<string, string> }[];
+  /** @internal Counter for synthetic stream entry IDs. */
+  streamCounter?: number;
 }
 
 /**
@@ -79,8 +83,10 @@ export class TestJob<D = any, R = any> {
   processedOn: number | undefined;
   expireAt?: number;
   usage?: JobUsage;
+  /** @internal */ private _record: TestJobRecord<D, R>;
 
   constructor(record: TestJobRecord<D, R>) {
+    this._record = record;
     this.id = record.id;
     this.name = record.name;
     this.data = record.data;
@@ -144,6 +150,24 @@ export class TestJob<D = any, R = any> {
       resolved.totalTokens = (resolved.inputTokens ?? 0) + (resolved.outputTokens ?? 0);
     }
     this.usage = resolved;
+  }
+
+  async stream(chunk: Record<string, string>): Promise<string> {
+    if (Object.keys(chunk).length === 0) {
+      throw new Error('Stream chunk must not be empty');
+    }
+    let totalBytes = 0;
+    for (const key of Object.keys(chunk)) {
+      totalBytes += Buffer.byteLength(key, 'utf8') + Buffer.byteLength(chunk[key], 'utf8');
+    }
+    if (totalBytes > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Stream chunk exceeds maximum size (${totalBytes} bytes > ${MAX_JOB_DATA_SIZE})`);
+    }
+    if (!this._record.streamChunks) this._record.streamChunks = [];
+    if (this._record.streamCounter === undefined) this._record.streamCounter = 0;
+    const id = `test-${++this._record.streamCounter}`;
+    this._record.streamChunks.push({ id, fields: { ...chunk } });
+    return id;
   }
 }
 
@@ -632,6 +656,23 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
 
     return agg;
+  }
+
+  async readStream(
+    jobId: string,
+    opts?: { lastId?: string; count?: number },
+  ): Promise<{ id: string; fields: Record<string, string> }[]> {
+    const record = this.jobs.get(jobId);
+    if (!record) return [];
+    const chunks = record.streamChunks ?? [];
+    const lastId = opts?.lastId;
+    const count = opts?.count ?? 100;
+    let filtered = chunks;
+    if (lastId) {
+      const idx = chunks.findIndex((c) => c.id === lastId);
+      filtered = idx >= 0 ? chunks.slice(idx + 1) : chunks;
+    }
+    return filtered.slice(0, count);
   }
 
   async close(): Promise<void> {

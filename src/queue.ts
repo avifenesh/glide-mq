@@ -16,6 +16,7 @@ import type {
   JobCounts,
   SearchJobsOptions,
   GetJobsOptions,
+  ReadStreamOptions,
   RateLimitConfig,
   WorkerInfo,
   Serializer,
@@ -1757,6 +1758,39 @@ export class Queue<D = any, R = any> extends EventEmitter {
     }
 
     return agg;
+  }
+
+  /**
+   * Read entries from a job's streaming channel.
+   * Uses XRANGE for non-blocking reads. Pass lastId to resume from a known position.
+   */
+  async readStream(
+    jobId: string,
+    opts?: ReadStreamOptions,
+  ): Promise<{ id: string; fields: Record<string, string> }[]> {
+    const client = await this.getClient();
+    const lastId = opts?.lastId;
+    const count = opts?.count ?? 100;
+    const start = lastId
+      ? ({ value: lastId, isInclusive: false } as const)
+      : InfBoundary.NegativeInfinity;
+    const entries = await client.xrange(
+      this.keys.jstream(jobId),
+      start,
+      InfBoundary.PositiveInfinity,
+      { count },
+    );
+    if (!entries) return [];
+    const result: { id: string; fields: Record<string, string> }[] = [];
+    for (const entryId of Object.keys(entries)) {
+      const pairs = entries[entryId];
+      const fields: Record<string, string> = Object.create(null);
+      for (const [k, v] of pairs) {
+        fields[String(k)] = String(v);
+      }
+      result.push({ id: entryId, fields });
+    }
+    return result;
   }
 
   /**
