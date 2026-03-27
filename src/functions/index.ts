@@ -4626,11 +4626,7 @@ export async function suspendJob(
 ): Promise<string> {
   const args = [jobId, entryId, group, timestamp.toString(), reason || '', (timeout || 0).toString()];
   if (broadcastMode) args.push('1');
-  const result = await client.fcall(
-    'glidemq_suspend',
-    [k.job(jobId), k.stream, k.events, k.suspended],
-    args,
-  );
+  const result = await client.fcall('glidemq_suspend', [k.job(jobId), k.stream, k.events, k.suspended], args);
   return result as string;
 }
 

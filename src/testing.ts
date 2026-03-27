@@ -807,15 +807,18 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   /**
    * @internal Set a budget for a flow (used by test setup).
    */
-  setBudget(flowId: string, budget: {
-    maxTotalTokens?: number;
-    maxTokens?: Record<string, number>;
-    tokenWeights?: Record<string, number>;
-    maxTotalCost?: number;
-    maxCosts?: Record<string, number>;
-    costUnit?: string;
-    onExceeded?: 'pause' | 'fail';
-  }): void {
+  setBudget(
+    flowId: string,
+    budget: {
+      maxTotalTokens?: number;
+      maxTokens?: Record<string, number>;
+      tokenWeights?: Record<string, number>;
+      maxTotalCost?: number;
+      maxCosts?: Record<string, number>;
+      costUnit?: string;
+      onExceeded?: 'pause' | 'fail';
+    },
+  ): void {
     this.budgets.set(flowId, {
       maxTotalTokens: budget.maxTotalTokens,
       maxTokens: budget.maxTokens,
@@ -1404,7 +1407,11 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
             }
 
             const budgetResult = this.queue.recordBudgetUsage(
-              record.budgetKey, usageTokens, usageCosts, weightedTotal, totalCost,
+              record.budgetKey,
+              usageTokens,
+              usageCosts,
+              weightedTotal,
+              totalCost,
             );
             if (budgetResult === 'exceeded') {
               this.emit('budget-exceeded', job, record.id);

@@ -33,13 +33,19 @@ describeEachMode('Budget middleware', (CONNECTION) => {
 
   afterEach(async () => {
     if (worker) {
-      try { await worker.close(true); } catch {}
+      try {
+        await worker.close(true);
+      } catch {}
     }
     if (queue) {
-      try { await queue.close(); } catch {}
+      try {
+        await queue.close();
+      } catch {}
     }
     if (flow) {
-      try { await flow.close(); } catch {}
+      try {
+        await flow.close();
+      } catch {}
     }
     if (queueName) await flushQueue(cleanupClient, queueName);
   });
@@ -462,11 +468,7 @@ describe('Budget middleware (testing mode)', () => {
     const failedJobs: string[] = [];
     const budgetExceededJobs: string[] = [];
 
-    const worker = new TestWorker(
-      queue,
-      async () => 'ok',
-      { concurrency: 1 },
-    );
+    const worker = new TestWorker(queue, async () => 'ok', { concurrency: 1 });
 
     worker.on('failed', (job: any) => failedJobs.push(job.name));
     worker.on('budget-exceeded', (job: any) => budgetExceededJobs.push(job.name));
@@ -504,7 +506,9 @@ describe('Budget middleware (testing mode)', () => {
     );
 
     let budgetExceeded = false;
-    worker.on('budget-exceeded', () => { budgetExceeded = true; });
+    worker.on('budget-exceeded', () => {
+      budgetExceeded = true;
+    });
 
     await new Promise((r) => setTimeout(r, 200));
 
@@ -540,7 +544,9 @@ describe('Budget middleware (testing mode)', () => {
     );
 
     let budgetExceeded = false;
-    worker.on('budget-exceeded', () => { budgetExceeded = true; });
+    worker.on('budget-exceeded', () => {
+      budgetExceeded = true;
+    });
 
     await new Promise((r) => setTimeout(r, 200));
 
@@ -576,7 +582,9 @@ describe('Budget middleware (testing mode)', () => {
     );
 
     let budgetExceeded = false;
-    worker.on('budget-exceeded', () => { budgetExceeded = true; });
+    worker.on('budget-exceeded', () => {
+      budgetExceeded = true;
+    });
 
     await new Promise((r) => setTimeout(r, 200));
 
@@ -611,7 +619,9 @@ describe('Budget middleware (testing mode)', () => {
     );
 
     let budgetExceeded = false;
-    worker.on('budget-exceeded', () => { budgetExceeded = true; });
+    worker.on('budget-exceeded', () => {
+      budgetExceeded = true;
+    });
 
     await new Promise((r) => setTimeout(r, 200));
 
@@ -648,7 +658,9 @@ describe('Budget middleware (testing mode)', () => {
     );
 
     let budgetExceeded = false;
-    worker.on('budget-exceeded', () => { budgetExceeded = true; });
+    worker.on('budget-exceeded', () => {
+      budgetExceeded = true;
+    });
 
     await new Promise((r) => setTimeout(r, 200));
 

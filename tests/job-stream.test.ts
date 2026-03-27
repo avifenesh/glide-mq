@@ -51,10 +51,7 @@ describe('Job.stream (unit)', () => {
     const job = new Job(mockClient as any, keys, '42', 'llm-stream', {}, {});
     const entryId = await job.stream({ token: 'Hello' });
 
-    expect(mockClient.xadd).toHaveBeenCalledWith(
-      keys.jstream('42'),
-      [['token', 'Hello']],
-    );
+    expect(mockClient.xadd).toHaveBeenCalledWith(keys.jstream('42'), [['token', 'Hello']]);
     expect(entryId).toBe('1-0');
   });
 
@@ -98,10 +95,10 @@ describe('Job.stream (unit)', () => {
     const job = new Job(mockClient as any, keys, '42', 'llm-stream', {}, {});
     const entryId = await job.streamChunk('reasoning', 'thinking...');
 
-    expect(mockClient.xadd).toHaveBeenCalledWith(
-      keys.jstream('42'),
-      [['type', 'reasoning'], ['content', 'thinking...']],
-    );
+    expect(mockClient.xadd).toHaveBeenCalledWith(keys.jstream('42'), [
+      ['type', 'reasoning'],
+      ['content', 'thinking...'],
+    ]);
     expect(entryId).toBe('1-0');
   });
 
@@ -109,10 +106,7 @@ describe('Job.stream (unit)', () => {
     const job = new Job(mockClient as any, keys, '42', 'llm-stream', {}, {});
     const entryId = await job.streamChunk('done');
 
-    expect(mockClient.xadd).toHaveBeenCalledWith(
-      keys.jstream('42'),
-      [['type', 'done']],
-    );
+    expect(mockClient.xadd).toHaveBeenCalledWith(keys.jstream('42'), [['type', 'done']]);
     expect(entryId).toBe('1-0');
   });
 
@@ -120,10 +114,10 @@ describe('Job.stream (unit)', () => {
     const job = new Job(mockClient as any, keys, '42', 'llm-stream', {}, {});
     await job.streamChunk('content', 'answer');
 
-    expect(mockClient.xadd).toHaveBeenCalledWith(
-      keys.jstream('42'),
-      [['type', 'content'], ['content', 'answer']],
-    );
+    expect(mockClient.xadd).toHaveBeenCalledWith(keys.jstream('42'), [
+      ['type', 'content'],
+      ['content', 'answer'],
+    ]);
   });
 });
 
@@ -266,11 +260,15 @@ describe('SSE proxy endpoint', () => {
   it('SSE proxy returns stream chunks for a job', async () => {
     const Q = 'test-jstream-sse-' + Date.now();
     const queue = new QueueImpl(Q, { connection: STANDALONE });
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.stream({ token: 'Hello' });
-      await job.stream({ token: ' world' });
-      return 'done';
-    }, { connection: STANDALONE });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.stream({ token: 'Hello' });
+        await job.stream({ token: ' world' });
+        return 'done';
+      },
+      { connection: STANDALONE },
+    );
 
     try {
       const job = await queue.add('sse-test', {});
@@ -309,11 +307,15 @@ describeEachMode('Job streaming integration', (CONNECTION) => {
   it('stream() + readStream() round-trip on real Valkey', async () => {
     const Q = 'test-jstream-rt-' + Date.now();
     const queue = new QueueImpl(Q, { connection: CONNECTION });
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.stream({ token: 'Hello' });
-      await job.stream({ token: ' world' });
-      return 'done';
-    }, { connection: CONNECTION });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.stream({ token: 'Hello' });
+        await job.stream({ token: ' world' });
+        return 'done';
+      },
+      { connection: CONNECTION },
+    );
 
     try {
       const job = await queue.add('stream-test', { prompt: 'hi' });
@@ -336,12 +338,16 @@ describeEachMode('Job streaming integration', (CONNECTION) => {
   it('readStream with lastId resume', async () => {
     const Q = 'test-jstream-lid-' + Date.now();
     const queue = new QueueImpl(Q, { connection: CONNECTION });
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.stream({ token: 'a' });
-      await job.stream({ token: 'b' });
-      await job.stream({ token: 'c' });
-      return 'done';
-    }, { connection: CONNECTION });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.stream({ token: 'a' });
+        await job.stream({ token: 'b' });
+        await job.stream({ token: 'c' });
+        return 'done';
+      },
+      { connection: CONNECTION },
+    );
 
     try {
       const job = await queue.add('stream-resume', {});
@@ -368,12 +374,16 @@ describeEachMode('Job streaming integration', (CONNECTION) => {
     const Q = 'test-jstream-ord-' + Date.now();
     const queue = new QueueImpl(Q, { connection: CONNECTION });
     const CHUNK_COUNT = 10;
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      for (let i = 0; i < CHUNK_COUNT; i++) {
-        await job.stream({ index: String(i) });
-      }
-      return 'done';
-    }, { connection: CONNECTION });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        for (let i = 0; i < CHUNK_COUNT; i++) {
+          await job.stream({ index: String(i) });
+        }
+        return 'done';
+      },
+      { connection: CONNECTION },
+    );
 
     try {
       const job = await queue.add('stream-order', {});
@@ -397,10 +407,14 @@ describeEachMode('Job streaming integration', (CONNECTION) => {
   it('stream survives job completion', async () => {
     const Q = 'test-jstream-sv-' + Date.now();
     const queue = new QueueImpl(Q, { connection: CONNECTION });
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.stream({ token: 'persisted' });
-      return 'done';
-    }, { connection: CONNECTION });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.stream({ token: 'persisted' });
+        return 'done';
+      },
+      { connection: CONNECTION },
+    );
 
     try {
       const job = await queue.add('stream-survive', {});
@@ -422,10 +436,14 @@ describeEachMode('Job streaming integration', (CONNECTION) => {
   it('stream cleaned up on job.remove()', async () => {
     const Q = 'test-jstream-rm-' + Date.now();
     const queue = new QueueImpl(Q, { connection: CONNECTION });
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.stream({ token: 'to-be-removed' });
-      return 'done';
-    }, { connection: CONNECTION });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.stream({ token: 'to-be-removed' });
+        return 'done';
+      },
+      { connection: CONNECTION },
+    );
 
     try {
       const job = await queue.add('stream-cleanup', {});
@@ -449,4 +467,3 @@ describeEachMode('Job streaming integration', (CONNECTION) => {
     }
   });
 });
-

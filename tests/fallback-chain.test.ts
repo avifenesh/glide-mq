@@ -33,10 +33,14 @@ describeEachMode('Fallback chains', (CONNECTION) => {
 
   afterEach(async () => {
     if (worker) {
-      try { await worker.close(true); } catch {}
+      try {
+        await worker.close(true);
+      } catch {}
     }
     if (queue) {
-      try { await queue.close(); } catch {}
+      try {
+        await queue.close();
+      } catch {}
     }
     if (queueName) await flushQueue(cleanupClient, queueName);
   });
@@ -57,26 +61,36 @@ describeEachMode('Fallback chains', (CONNECTION) => {
 
     const seenFallbacks: any[] = [];
 
-    await queue.add('llm-call', { prompt: 'hello' }, {
-      attempts: 3,
-      backoff: { type: 'fixed', delay: 100 },
-      fallbacks,
-    });
+    await queue.add(
+      'llm-call',
+      { prompt: 'hello' },
+      {
+        attempts: 3,
+        backoff: { type: 'fixed', delay: 100 },
+        fallbacks,
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
 
-      worker = new Worker(queueName, async (job: any) => {
-        seenFallbacks.push(job.currentFallback ?? 'original');
-        if (job.attemptsMade < 2) {
-          throw new Error('model down');
-        }
-        return { ok: true };
-      }, { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          seenFallbacks.push(job.currentFallback ?? 'original');
+          if (job.attemptsMade < 2) {
+            throw new Error('model down');
+          }
+          return { ok: true };
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
+      );
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 200);
       });
 
@@ -107,26 +121,36 @@ describeEachMode('Fallback chains', (CONNECTION) => {
 
     const positions: number[] = [];
 
-    await queue.add('pos-check', {}, {
-      attempts: 3,
-      backoff: { type: 'fixed', delay: 100 },
-      fallbacks,
-    });
+    await queue.add(
+      'pos-check',
+      {},
+      {
+        attempts: 3,
+        backoff: { type: 'fixed', delay: 100 },
+        fallbacks,
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
 
-      worker = new Worker(queueName, async (job: any) => {
-        positions.push(job.fallbackIndex);
-        if (positions.length < 3) {
-          throw new Error('retry');
-        }
-        return 'done';
-      }, { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          positions.push(job.fallbackIndex);
+          if (positions.length < 3) {
+            throw new Error('retry');
+          }
+          return 'done';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
+      );
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 200);
       });
 
@@ -148,31 +172,38 @@ describeEachMode('Fallback chains', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
     const k = buildKeys(queueName);
 
-    const fallbacks = [
-      { model: 'fb1' },
-      { model: 'fb2' },
-    ];
+    const fallbacks = [{ model: 'fb1' }, { model: 'fb2' }];
 
     const indices: number[] = [];
 
-    await queue.add('idx-check', {}, {
-      attempts: 3,
-      backoff: { type: 'fixed', delay: 100 },
-      fallbacks,
-    });
+    await queue.add(
+      'idx-check',
+      {},
+      {
+        attempts: 3,
+        backoff: { type: 'fixed', delay: 100 },
+        fallbacks,
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
 
-      worker = new Worker(queueName, async (job: any) => {
-        indices.push(job.fallbackIndex);
-        if (indices.length < 3) throw new Error('down');
-        return 'ok';
-      }, { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          indices.push(job.fallbackIndex);
+          if (indices.length < 3) throw new Error('down');
+          return 'ok';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
+      );
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 200);
       });
 
@@ -195,25 +226,35 @@ describeEachMode('Fallback chains', (CONNECTION) => {
 
     const fallbacks = [{ model: 'fb1' }];
 
-    const job = await queue.add('exhaust', {}, {
-      attempts: 2,
-      backoff: { type: 'fixed', delay: 100 },
-      fallbacks,
-    });
+    const job = await queue.add(
+      'exhaust',
+      {},
+      {
+        attempts: 2,
+        backoff: { type: 'fixed', delay: 100 },
+        fallbacks,
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
       let failCount = 0;
 
-      worker = new Worker(queueName, async () => {
-        throw new Error('always fails');
-      }, { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 });
+      worker = new Worker(
+        queueName,
+        async () => {
+          throw new Error('always fails');
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
+      );
 
       worker.on('failed', (j: any) => {
         failCount++;
         if (failCount < 2) {
           setTimeout(async () => {
-            try { await promote(cleanupClient, k, Date.now()); } catch {}
+            try {
+              await promote(cleanupClient, k, Date.now());
+            } catch {}
           }, 200);
         } else {
           clearTimeout(timeout);
@@ -237,26 +278,31 @@ describeEachMode('Fallback chains', (CONNECTION) => {
     queueName = uid();
     queue = new Queue(queueName, { connection: CONNECTION });
 
-    const fallbacks = [
-      { model: 'fb1' },
-      { model: 'fb2' },
-    ];
+    const fallbacks = [{ model: 'fb1' }, { model: 'fb2' }];
 
     const seenIndices: number[] = [];
 
-    await queue.add('unrecoverable', {}, {
-      attempts: 3,
-      backoff: { type: 'fixed', delay: 100 },
-      fallbacks,
-    });
+    await queue.add(
+      'unrecoverable',
+      {},
+      {
+        attempts: 3,
+        backoff: { type: 'fixed', delay: 100 },
+        fallbacks,
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
 
-      worker = new Worker(queueName, async (job: any) => {
-        seenIndices.push(job.fallbackIndex);
-        throw new UnrecoverableError('fatal');
-      }, { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          seenIndices.push(job.fallbackIndex);
+          throw new UnrecoverableError('fatal');
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
+      );
 
       worker.on('failed', () => {
         clearTimeout(timeout);
@@ -277,31 +323,38 @@ describeEachMode('Fallback chains', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
     const k = buildKeys(queueName);
 
-    const fallbacks = [
-      { model: 'exp-fb1' },
-      { model: 'exp-fb2' },
-    ];
+    const fallbacks = [{ model: 'exp-fb1' }, { model: 'exp-fb2' }];
 
     const seenModels: (string | undefined)[] = [];
 
-    await queue.add('exp-backoff', {}, {
-      attempts: 3,
-      backoff: { type: 'exponential', delay: 50 },
-      fallbacks,
-    });
+    await queue.add(
+      'exp-backoff',
+      {},
+      {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 50 },
+        fallbacks,
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
 
-      worker = new Worker(queueName, async (job: any) => {
-        seenModels.push(job.currentFallback?.model);
-        if (seenModels.length < 3) throw new Error('retry');
-        return 'done';
-      }, { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          seenModels.push(job.currentFallback?.model);
+          if (seenModels.length < 3) throw new Error('retry');
+          return 'done';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
+      );
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 300);
       });
 
@@ -326,23 +379,33 @@ describeEachMode('Fallback chains', (CONNECTION) => {
     const fallbacks = [{ model: 'no-backoff-fb' }];
     const seenIndices: number[] = [];
 
-    await queue.add('no-backoff', {}, {
-      attempts: 2,
-      fallbacks,
-    });
+    await queue.add(
+      'no-backoff',
+      {},
+      {
+        attempts: 2,
+        fallbacks,
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
 
-      worker = new Worker(queueName, async (job: any) => {
-        seenIndices.push(job.fallbackIndex);
-        if (seenIndices.length < 2) throw new Error('fail');
-        return 'ok';
-      }, { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          seenIndices.push(job.fallbackIndex);
+          if (seenIndices.length < 2) throw new Error('fail');
+          return 'ok';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
+      );
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 200);
       });
 
@@ -365,25 +428,35 @@ describeEachMode('Fallback chains', (CONNECTION) => {
 
     const indices: number[] = [];
 
-    await queue.add('empty-fb', {}, {
-      attempts: 2,
-      backoff: { type: 'fixed', delay: 100 },
-      fallbacks: [],
-    });
+    await queue.add(
+      'empty-fb',
+      {},
+      {
+        attempts: 2,
+        backoff: { type: 'fixed', delay: 100 },
+        fallbacks: [],
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
 
-      worker = new Worker(queueName, async (job: any) => {
-        indices.push(job.fallbackIndex);
-        expect(job.currentFallback).toBeUndefined();
-        if (indices.length < 2) throw new Error('fail');
-        return 'ok';
-      }, { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          indices.push(job.fallbackIndex);
+          expect(job.currentFallback).toBeUndefined();
+          if (indices.length < 2) throw new Error('fail');
+          return 'ok';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
+      );
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 200);
       });
 
@@ -409,32 +482,40 @@ describeEachMode('Fallback chains', (CONNECTION) => {
     queue = new Queue(queueName, { connection: CONNECTION });
     const k = buildKeys(queueName);
 
-    const fallbacks = [
-      { model: 'gpt-4o-mini', provider: 'openai', metadata: { temperature: 0.7, maxTokens: 100 } },
-    ];
+    const fallbacks = [{ model: 'gpt-4o-mini', provider: 'openai', metadata: { temperature: 0.7, maxTokens: 100 } }];
 
     let capturedFallback: any = null;
 
-    await queue.add('metadata', {}, {
-      attempts: 2,
-      backoff: { type: 'fixed', delay: 100 },
-      fallbacks,
-    });
+    await queue.add(
+      'metadata',
+      {},
+      {
+        attempts: 2,
+        backoff: { type: 'fixed', delay: 100 },
+        fallbacks,
+      },
+    );
 
     const done = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('timeout')), 20000);
 
-      worker = new Worker(queueName, async (job: any) => {
-        if (job.fallbackIndex === 0) {
-          throw new Error('primary down');
-        }
-        capturedFallback = job.currentFallback;
-        return 'done';
-      }, { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 });
+      worker = new Worker(
+        queueName,
+        async (job: any) => {
+          if (job.fallbackIndex === 0) {
+            throw new Error('primary down');
+          }
+          capturedFallback = job.currentFallback;
+          return 'done';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
+      );
 
       worker.on('failed', () => {
         setTimeout(async () => {
-          try { await promote(cleanupClient, k, Date.now()); } catch {}
+          try {
+            await promote(cleanupClient, k, Date.now());
+          } catch {}
         }, 200);
       });
 
@@ -483,10 +564,14 @@ describe('Fallback chains [testing mode]', () => {
       tw.on('completed', () => resolve());
     });
 
-    await tq.add('llm-call', { prompt: 'test' }, {
-      attempts: 3,
-      fallbacks,
-    });
+    await tq.add(
+      'llm-call',
+      { prompt: 'test' },
+      {
+        attempts: 3,
+        fallbacks,
+      },
+    );
 
     await completed;
     await tw.close();
@@ -551,9 +636,7 @@ describe('Fallback chains [testing mode]', () => {
     const tq = new TestQueue('fb-metadata');
 
     let capturedFallback: any = null;
-    const fallbacks = [
-      { model: 'gpt-4o-mini', provider: 'openai', metadata: { temperature: 0.5, region: 'us-east' } },
-    ];
+    const fallbacks = [{ model: 'gpt-4o-mini', provider: 'openai', metadata: { temperature: 0.5, region: 'us-east' } }];
 
     const tw = new TestWorker(tq, async (job: any) => {
       if (job.fallbackIndex === 0) throw new Error('primary down');

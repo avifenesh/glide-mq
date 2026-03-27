@@ -66,10 +66,7 @@ describe('Job.reportUsage (unit)', () => {
     await job.reportUsage({ tokens: { input: 200, output: 80 } });
 
     expect(job.usage?.totalTokens).toBe(280);
-    expect(mockBatch.hset).toHaveBeenCalledWith(
-      keys.job('1'),
-      expect.objectContaining({ 'usage:totalTokens': '280' }),
-    );
+    expect(mockBatch.hset).toHaveBeenCalledWith(keys.job('1'), expect.objectContaining({ 'usage:totalTokens': '280' }));
   });
 
   it('preserves explicit totalTokens when provided', async () => {
@@ -127,12 +124,16 @@ describe('Job.reportUsage (unit)', () => {
 
   it('rejects negative value in tokens map', async () => {
     const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
-    await expect(job.reportUsage({ tokens: { input: -1 } })).rejects.toThrow("Token count for 'input' must not be negative");
+    await expect(job.reportUsage({ tokens: { input: -1 } })).rejects.toThrow(
+      "Token count for 'input' must not be negative",
+    );
   });
 
   it('rejects negative output in tokens map', async () => {
     const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
-    await expect(job.reportUsage({ tokens: { output: -5 } })).rejects.toThrow("Token count for 'output' must not be negative");
+    await expect(job.reportUsage({ tokens: { output: -5 } })).rejects.toThrow(
+      "Token count for 'output' must not be negative",
+    );
   });
 
   it('rejects negative totalTokens', async () => {
@@ -179,7 +180,9 @@ describe('Job.reportUsage (unit)', () => {
 
   it('rejects negative value for arbitrary key in tokens map', async () => {
     const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
-    await expect(job.reportUsage({ tokens: { reasoning: -100 } })).rejects.toThrow("Token count for 'reasoning' must not be negative");
+    await expect(job.reportUsage({ tokens: { reasoning: -100 } })).rejects.toThrow(
+      "Token count for 'reasoning' must not be negative",
+    );
   });
 
   it('emits usage event to events stream', async () => {
@@ -289,7 +292,9 @@ describe('TestJob.reportUsage', () => {
   it('rejects negative token counts', async () => {
     queue = new TestQueue('test-usage-neg');
     const job = await queue.add('llm-call', {});
-    await expect(job!.reportUsage({ tokens: { input: -1 } })).rejects.toThrow("Token count for 'input' must not be negative");
+    await expect(job!.reportUsage({ tokens: { input: -1 } })).rejects.toThrow(
+      "Token count for 'input' must not be negative",
+    );
   });
 });
 
@@ -318,17 +323,21 @@ describeEachMode('AI Metadata integration', (CONNECTION) => {
   });
 
   it('reportUsage persists and survives getJob round-trip', async () => {
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.reportUsage({
-        model: 'gpt-4o',
-        provider: 'openai',
-        tokens: { input: 500, output: 200 },
-        costs: { total: 0.012 },
-        latencyMs: 850,
-        cached: false,
-      });
-      return 'done';
-    }, { connection: CONNECTION });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.reportUsage({
+          model: 'gpt-4o',
+          provider: 'openai',
+          tokens: { input: 500, output: 200 },
+          costs: { total: 0.012 },
+          latencyMs: 850,
+          cached: false,
+        });
+        return 'done';
+      },
+      { connection: CONNECTION },
+    );
 
     const job = await queue.add('test-usage-persist', { prompt: 'hello world' });
     await waitFor(async () => {
@@ -376,16 +385,35 @@ describeEachMode('AI Metadata integration', (CONNECTION) => {
       ],
     });
 
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      if (job.name === 'child-1') {
-        await job.reportUsage({ model: 'text-embedding-3-small', provider: 'openai', tokens: { input: 200 }, costs: { total: 0.001 } });
-      } else if (job.name === 'child-2') {
-        await job.reportUsage({ model: 'gpt-4o', provider: 'openai', tokens: { input: 1000, output: 500 }, costs: { total: 0.025 } });
-      } else if (job.name === 'parent') {
-        await job.reportUsage({ model: 'gpt-4o', provider: 'openai', tokens: { input: 50, output: 20 }, costs: { total: 0.001 } });
-      }
-      return 'ok';
-    }, { connection: CONNECTION });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        if (job.name === 'child-1') {
+          await job.reportUsage({
+            model: 'text-embedding-3-small',
+            provider: 'openai',
+            tokens: { input: 200 },
+            costs: { total: 0.001 },
+          });
+        } else if (job.name === 'child-2') {
+          await job.reportUsage({
+            model: 'gpt-4o',
+            provider: 'openai',
+            tokens: { input: 1000, output: 500 },
+            costs: { total: 0.025 },
+          });
+        } else if (job.name === 'parent') {
+          await job.reportUsage({
+            model: 'gpt-4o',
+            provider: 'openai',
+            tokens: { input: 50, output: 20 },
+            costs: { total: 0.001 },
+          });
+        }
+        return 'ok';
+      },
+      { connection: CONNECTION },
+    );
 
     // Wait for all jobs to complete
     await waitFor(async () => {
@@ -396,8 +424,8 @@ describeEachMode('AI Metadata integration', (CONNECTION) => {
     const usage = await queue.getFlowUsage(flow.job.id);
     expect(usage.jobCount).toBe(3);
     expect(usage.tokens.input).toBe(1250); // 200 + 1000 + 50
-    expect(usage.tokens.output).toBe(520);  // 0 + 500 + 20
-    expect(usage.totalTokens).toBe(1770);  // 1250 + 520
+    expect(usage.tokens.output).toBe(520); // 0 + 500 + 20
+    expect(usage.totalTokens).toBe(1770); // 1250 + 520
     expect(usage.costs.total).toBeCloseTo(0.027, 4); // 0.001 + 0.025 + 0.001
     expect(usage.totalCost).toBeCloseTo(0.027, 4);
     expect(usage.models['gpt-4o']).toBe(2);

@@ -346,8 +346,16 @@ describe('Valkey Search integration', () => {
     const k = buildKeys(qName);
     try {
       await cleanupClient.del([
-        k.id, k.stream, k.scheduled, k.completed, k.failed,
-        k.events, k.meta, k.dedup, k.rate, k.schedulers,
+        k.id,
+        k.stream,
+        k.scheduled,
+        k.completed,
+        k.failed,
+        k.events,
+        k.meta,
+        k.dedup,
+        k.rate,
+        k.schedulers,
       ]);
     } catch {}
     const pfx = keyPrefix('glide', qName);
