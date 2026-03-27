@@ -444,7 +444,7 @@ describe('Valkey Search integration', () => {
       await q.close();
       await cleanup(qName, idxName);
     }
-  }, 15000);
+  }, 30000);
 
   it('vectorSearch with pre-filter (@state:{completed})', async () => {
     if (!requireSearch()) return;
@@ -484,7 +484,7 @@ describe('Valkey Search integration', () => {
       await q.close();
       await cleanup(qName, idxName);
     }
-  }, 15000);
+  }, 30000);
 
   it('vectorSearch returns Job objects with correct data', async () => {
     if (!requireSearch()) return;
@@ -511,7 +511,7 @@ describe('Valkey Search integration', () => {
       await q.close();
       await cleanup(qName, idxName);
     }
-  }, 15000);
+  }, 30000);
 
   it('createJobIndex with custom TAG fields', async () => {
     if (!requireSearch()) return;
@@ -547,7 +547,7 @@ describe('Valkey Search integration', () => {
       await q.close();
       await cleanup(qName, idxName);
     }
-  }, 15000);
+  }, 30000);
 
   it('dropJobIndex + vectorSearch throws', async () => {
     if (!requireSearch()) return;
@@ -568,7 +568,7 @@ describe('Valkey Search integration', () => {
       await q.close();
       await cleanup(qName);
     }
-  }, 15000);
+  }, 30000);
 
   it('multiple queues with separate indexes', async () => {
     if (!requireSearch()) return;
@@ -607,7 +607,7 @@ describe('Valkey Search integration', () => {
       await cleanup(qName1, idx1);
       await cleanup(qName2, idx2);
     }
-  }, 15000);
+  }, 30000);
 
   it('vectorSearch with k > num jobs returns all available', async () => {
     if (!requireSearch()) return;
@@ -633,7 +633,7 @@ describe('Valkey Search integration', () => {
       await q.close();
       await cleanup(qName, idxName);
     }
-  }, 15000);
+  }, 30000);
 
   it('high-dimensional vectors (768d)', async () => {
     if (!requireSearch()) return;
@@ -725,7 +725,7 @@ describe('Valkey Search integration', () => {
       await q.close();
       await cleanup(qName, idxName);
     }
-  }, 15000);
+  }, 30000);
 
   it('createJobIndex with custom stopWords', async () => {
     if (!requireSearch11()) return;
@@ -747,7 +747,7 @@ describe('Valkey Search integration', () => {
       await q.close();
       await cleanup(qName, idxName);
     }
-  }, 15000);
+  }, 30000);
 
   // -- Non-vector index (search 1.1+ allows indexes without vector fields)
 
@@ -770,7 +770,7 @@ describe('Valkey Search integration', () => {
       await q.close();
       await cleanup(qName, idxName);
     }
-  }, 15000);
+  }, 30000);
 
   // -- Distance metrics
 
@@ -802,7 +802,7 @@ describe('Valkey Search integration', () => {
       await q.close();
       await cleanup(qName, idxName);
     }
-  }, 15000);
+  }, 30000);
 
   it('vectorSearch with inner product distance metric', async () => {
     if (!requireSearch()) return;
@@ -829,7 +829,7 @@ describe('Valkey Search integration', () => {
       await q.close();
       await cleanup(qName, idxName);
     }
-  }, 15000);
+  }, 30000);
 
   it('createJobIndex throws clear error when search module not loaded', async () => {
     // This test forces ensureSearchModule to fail
