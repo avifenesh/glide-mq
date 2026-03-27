@@ -52,6 +52,7 @@ const result = await queue.addAndWait(name, data, {
 | `deduplication` | `{ id, mode, ttl? }` | - | Modes: `'simple'`, `'throttle'`, `'debounce'`. Returns `null` when skipped. |
 | `ordering` | `{ key, concurrency?, rateLimit?, tokenBucket? }` | - | Per-key sequential/grouped processing |
 | `cost` | `number` | 1 | Token cost for token bucket rate limiting |
+| `fallbacks` | `Array<{ model, provider?, metadata? }>` | - | Ordered fallback chain for model/provider failover |
 
 > **Note:** Compression is not a per-job option. Set `compression: 'gzip'` at Queue level in the Queue constructor.
 
@@ -127,6 +128,87 @@ const worker = new Worker('tasks', processor, {
 // Inspect DLQ
 const dlqJobs = await queue.getDeadLetterJobs(0, 49);
 ```
+
+## Token Streaming
+
+```typescript
+// Read entries from a job's streaming channel
+const entries = await queue.readStream(jobId);
+// entries: { id: string; fields: Record<string, string> }[]
+
+// Resume from last position
+const more = await queue.readStream(jobId, { lastId: entries.at(-1)?.id });
+
+// Long-polling (blocks until new entries or timeout)
+const live = await queue.readStream(jobId, {
+  lastId: '0-0',
+  count: 50,        // max entries (default: 100)
+  block: 5000,      // XREAD BLOCK ms
+});
+```
+
+## Flow Usage Aggregation
+
+```typescript
+const usage = await queue.getFlowUsage(parentJobId);
+// {
+//   totalInputTokens: number,
+//   totalOutputTokens: number,
+//   totalCostUsd: number,
+//   jobCount: number,
+//   models: Record<string, number>  // model -> call count
+// }
+```
+
+## Flow Budget
+
+```typescript
+const budget = await queue.getFlowBudget(flowId);
+// null if no budget set, otherwise:
+// {
+//   maxTotalTokens?: number,
+//   maxCostUsd?: number,
+//   usedTokens: number,
+//   usedCost: number,
+//   exceeded: boolean,
+//   onExceeded: 'pause' | 'fail'
+// }
+```
+
+## Suspend / Resume
+
+```typescript
+// Send a signal to resume a suspended job
+const resumed = await queue.signal(jobId, 'approve', { approvedBy: 'alice' });
+// true if job was resumed, false if not suspended
+
+// Inspect suspension state
+const info = await queue.getSuspendInfo(jobId);
+// null if not suspended, otherwise:
+// { reason?, suspendedAt, timeout?, signals: SignalEntry[] }
+```
+
+## Vector Search
+
+```typescript
+// Create a search index over job hashes
+await queue.createJobIndex({
+  vectorField: { name: 'embedding', dimensions: 1536 },
+  fields: [{ type: 'TAG', name: 'category' }],
+});
+
+// Search by vector similarity
+const results = await queue.vectorSearch(embedding, {
+  k: 10,
+  filter: '@state:{completed}',
+});
+// results: { job: Job, score: number }[]
+
+// Drop the index (does not delete jobs)
+await queue.dropJobIndex();
+```
+
+See [references/ai-native.md](ai-native.md) and [references/search.md](search.md) for full details.
 
 ## Gotchas
 

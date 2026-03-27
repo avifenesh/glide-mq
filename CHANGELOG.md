@@ -6,6 +6,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.13.0] - 2026-03-27
+
+### Added
+
+- **Structured AI metadata** (#168): `job.reportUsage({ model, promptTokens, completionTokens, cost })` records LLM usage on any job. `queue.getFlowUsage(flowId)` aggregates token counts and cost across an entire flow.
+- **Per-job streaming channel** (#169): `job.stream(chunk)` publishes incremental data (LLM tokens, progress events) to a dedicated channel. `queue.readStream(jobId, opts?)` consumes chunks in real time. Blocking reads via XREAD BLOCK.
+- **Suspend/resume with signals** (#170): `job.suspend(opts?)` pauses a job mid-processor; `queue.signal(jobId, name, data?)` resumes it with an external event. Enables human-in-the-loop approval gates, webhook callbacks, and any pattern requiring external input before a job can continue.
+  - `SuspendOptions`: `reason` (label), `timeout` (auto-fail after N ms)
+  - `onResume` callback: best-effort same-worker continuation called with `signals[]` on resume
+  - `queue.getSuspendInfo(jobId)`: returns suspension metadata and signals delivered so far
+  - `glidemq_suspend` FCALL: moves active job to suspended sorted set, releases group slot
+  - `glidemq_signal` FCALL: appends signal, re-queues job to stream
+  - `glidemq_sweepSuspended` FCALL: fails timed-out suspended jobs on each stalled recovery tick
+  - Proxy: `POST /queues/:name/jobs/:id/signal` endpoint
+  - Testing: `TestJob.suspend()` and `TestQueue.signal()` with full parity (no Valkey)
+- **Per-job lockDuration override** (#172): set `lockDuration` per job to control heartbeat interval and stall detection timeout independently of the worker default.
+- **Fallback chains** (#173): ordered list of model/provider alternatives via `opts.fallbacks`. On processor failure, the job automatically retries with the next fallback entry. Each fallback can override `data` and `metadata`.
+- **Budget middleware** (#174): flow-level token and cost caps. Set `budget: { maxTokens, maxCost }` on a flow; jobs that would exceed the budget are failed before execution.
+- **Dual-axis rate limiting (RPM + TPM)** (#175): enforce both requests-per-minute and tokens-per-minute limits on a queue. Designed for LLM API compliance where providers impose concurrent rate ceilings.
+- **18 real-world AI examples** (#176): framework integrations covering LangChain, Vercel AI SDK, OpenAI, Anthropic, multi-model routing, RAG pipelines, and more.
+- **Valkey Search integration** (#177): vector search over jobs using Valkey Search module. `queue.createIndex(schema, opts?)` defines indexes; `queue.search(query, opts?)` runs hybrid vector + filter queries. `IndexCreateOptions` and `SearchQueryOptions` types decoupled from speedkey.
+- `SuspendError`, `SuspendOptions`, `SignalEntry` exported from public API.
+- Stress tests: 38 tests for correctness under concurrent load and edge-case pressure.
+- Docker: `compose.yaml` uses `valkey-bundle` image (search + json + bloom modules).
+- CI: `test-search` job with `valkey-bundle` for search integration tests.
+
+### Fixed
+
+- OTel `SpanStatusCode` values corrected (OK=1, ERROR=2) - previously swapped.
+- Signal data auto-deserialization: signals received via `onResume` are now parsed from JSON automatically.
+- Fallback type uses explicit `metadata` field instead of index signature.
+- `glidemq_clean` and `glidemq_drain` now delete `signals:{id}` LIST keys when removing jobs, preventing a key leak when suspended jobs time out or are cleaned after failure.
+
+---
+
 ## [0.12.0] - 2026-03-20
 
 ### Added
@@ -43,26 +78,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Breaking
 
 - `groupq` key type changed from LIST to ZSET. Existing groups with queued jobs need migration (drain before upgrade). Pre-stable, acceptable.
-
-## [Unreleased]
-
-### Added
-
-- **Suspend/Resume with signals**: `job.suspend(opts?)` pauses a job mid-processor; `queue.signal(jobId, name, data?)` resumes it with an external event. Enables human-in-the-loop approval gates, webhook callbacks, and any pattern requiring external input before a job can continue.
-  - `SuspendOptions`: `reason` (label), `timeout` (auto-fail after N ms)
-  - `onResume` callback: best-effort same-worker continuation called with `signals[]` on resume
-  - `queue.getSuspendInfo(jobId)`: returns suspension metadata and signals delivered so far
-  - `glidemq_suspend` FCALL: moves active job to suspended sorted set, releases group slot
-  - `glidemq_signal` FCALL: appends signal, re-queues job to stream
-  - `glidemq_sweepSuspended` FCALL: fails timed-out suspended jobs on each stalled recovery tick
-  - Proxy: `POST /queues/:name/jobs/:id/signal` endpoint
-  - Testing: `TestJob.suspend()` and `TestQueue.signal()` with full parity (no Valkey)
-  - Library version bumped to 75 (suspend/resume) then 76 (signals key cleanup in clean/drain).
-- `SuspendError`, `SuspendOptions`, `SignalEntry` exported from public API.
-
-### Fixed
-
-- `glidemq_clean` and `glidemq_drain` now delete `signals:{id}` LIST keys when removing jobs, preventing a key leak when suspended jobs time out or are cleaned after failure.
 
 ---
 

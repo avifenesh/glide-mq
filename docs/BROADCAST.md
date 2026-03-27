@@ -23,7 +23,7 @@ const emailWorker = new BroadcastWorker('events', async (job) => {
   console.log('Send notification:', job.data);
 }, { connection, subscription: 'email-service' });
 
-// Publish -- every subscriber receives this message
+// Publish - every subscriber receives this message
 await broadcast.publish('order.placed', { event: 'order.placed', orderId: 42 });
 ```
 
@@ -42,11 +42,11 @@ await broadcast.publish('order.placed', { event: 'order.placed', orderId: 42 });
 
 Each `BroadcastWorker` supports the same options as `Worker` (concurrency, limiter, backoff, etc.) plus:
 
-- `subscription` (required) -- unique name for this subscriber. Becomes the consumer group.
-- `startFrom` -- stream ID to start reading from when the subscription is first created:
-  - `'$'` (default) -- only new messages published after subscription creation.
-  - `'0-0'` -- replay all retained history (backfill).
-- `subjects` -- array of subject patterns for filtering (see below).
+- `subscription` (required) - unique name for this subscriber. Becomes the consumer group.
+- `startFrom` - stream ID to start reading from when the subscription is first created:
+  - `'$'` (default) - only new messages published after subscription creation.
+  - `'0-0'` - replay all retained history (backfill).
+- `subjects` - array of subject patterns for filtering (see below).
 
 ```typescript
 const replayWorker = new BroadcastWorker('events', processor, {
@@ -114,7 +114,7 @@ const mixedWorker = new BroadcastWorker('events', async (job) => {
 
 1. `BroadcastWorker` compiles the `subjects` array into a matcher function at construction time using `compileSubjectMatcher`.
 2. On each poll, after reading messages from the stream, the worker checks each job's `name` field against the matcher.
-3. Non-matching messages are immediately acknowledged (`XACK`) and skipped -- they never reach the processor.
+3. Non-matching messages are immediately acknowledged (`XACK`) and skipped - they never reach the processor.
 4. If `subjects` is not set or empty, all messages are processed (no filtering).
 
 ### Publishing with names

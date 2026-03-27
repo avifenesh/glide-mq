@@ -17,7 +17,7 @@ In cluster mode, `FUNCTION LOAD` must be sent to all primary nodes.
 
 ### 2. Verify Library Version
 
-```
+```bash
 FCALL glidemq_version 1 {glidemq}:_
 ```
 
@@ -47,6 +47,11 @@ All keys share a hash tag `{queueName}` to ensure cluster slot co-location. Defa
 | `glide:{queueName}:groupq:{key}` | List | FIFO wait list for group-limited jobs |
 | `glide:{queueName}:ratelimited` | Sorted Set | Rate-limited group promotion queue |
 | `glide:{queueName}:schedulers` | Hash | Job scheduler configs |
+| `glide:{queueName}:jstream:{id}` | Stream | Per-job streaming channel |
+| `glide:{queueName}:signals:{id}` | List | Signals delivered to a suspended job |
+| `glide:{queueName}:suspended` | Sorted Set | Suspended jobs (score = timeout deadline) |
+| `glide:{queueName}:budget:{flowId}` | Hash | Flow-level budget state |
+| `glide:{queueName}:tpm` | Hash | Token-per-minute rate limiter state |
 
 ---
 
@@ -79,6 +84,20 @@ Each job is stored as a hash at `glide:{queueName}:job:{id}` with these fields:
 | `cost` | string (int) | Token cost in millitokens |
 | `expireAt` | string (int) | TTL deadline (timestamp + ttl) |
 | `revoked` | string | `"1"` if revoked |
+| `usage:model` | string | AI model identifier |
+| `usage:inputTokens` | string (int) | Input token count |
+| `usage:outputTokens` | string (int) | Output token count |
+| `usage:totalTokens` | string (int) | Total tokens |
+| `usage:costUsd` | string (float) | Cost in USD |
+| `usage:latencyMs` | string (int) | Inference latency ms |
+| `usage:cached` | string | true if cached |
+| `tpmTokens` | string (int) | Tokens for TPM rate limiting |
+| `suspendReason` | string | Reason for suspension |
+| `suspendedAt` | string (int) | Suspension timestamp |
+| `suspendTimeout` | string (int) | Suspend timeout in ms |
+| `signals` | string (JSON) | Array of signal entries |
+| `fallbackIndex` | string (int) | Current fallback chain position |
+| `budgetKey` | string | Budget hash key for flow budget |
 
 ---
 
@@ -95,7 +114,7 @@ Atomically creates a job hash and enqueues it to the stream (or scheduled ZSet i
 | 3 | `glide:{queueName}:scheduled` |
 | 4 | `glide:{queueName}:events` |
 
-### Args (17)
+### Args (21)
 
 | Position | Name | Type | Description |
 |----------|------|------|-------------|
@@ -116,6 +135,10 @@ Atomically creates a job hash and enqueues it to the stream (or scheduled ZSet i
 | 15 | jobCost | string (int) | Job cost in millitokens, `"0"` for default (1000 = 1 token) |
 | 16 | ttl | string (int) | Time-to-live in ms, `"0"` for no expiry |
 | 17 | customJobId | string | Custom job ID, `""` for auto-generated |
+| 18 | lifo | string (int) | `"1"` for LIFO mode, `"0"` for FIFO |
+| 19 | parentQueue | string | Parent queue prefix (for flows) |
+| 20 | schedulerName | string | Scheduler name (for repeatable jobs) |
+| 21 | skipEvents | string | `"1"` to skip event emission |
 
 ### Return Values
 
@@ -135,7 +158,7 @@ Atomically creates a job hash and enqueues it to the stream (or scheduled ZSet i
 
 ### Example (redis-cli)
 
-```
+```bash
 FCALL glidemq_addJob 4
   glide:{myqueue}:id
   glide:{myqueue}:stream
@@ -280,7 +303,7 @@ None.
 
 ### Example
 
-```
+```bash
 FCALL glidemq_pause 2 glide:{myqueue}:meta glide:{myqueue}:events
 FCALL glidemq_resume 2 glide:{myqueue}:meta glide:{myqueue}:events
 ```
@@ -338,25 +361,25 @@ When a custom job ID is provided and a job with that ID already exists, `glidemq
 
 ### Get a single job
 
-```
+```bash
 HGETALL glide:{queueName}:job:{id}
 ```
 
 ### Get job counts
 
 ```
-XLEN glide:{queueName}:stream          -- waiting + active
-ZCARD glide:{queueName}:completed      -- completed
-ZCARD glide:{queueName}:failed         -- failed
-ZCARD glide:{queueName}:scheduled      -- delayed + prioritized
-XPENDING glide:{queueName}:stream workers  -- active count is first element
+XLEN glide:{queueName}:stream          # waiting + active
+ZCARD glide:{queueName}:completed      # completed
+ZCARD glide:{queueName}:failed         # failed
+ZCARD glide:{queueName}:scheduled      # delayed + prioritized
+XPENDING glide:{queueName}:stream workers  # active count is first element
 ```
 
 Waiting count = `XLEN(stream) - activeCount`.
 
 ### Check if queue is paused
 
-```
+```bash
 HGET glide:{queueName}:meta paused
 ```
 
@@ -524,6 +547,98 @@ func main() {
 ```
 
 ---
+
+
+
+---
+
+## FCALL glidemq_suspend
+
+Moves an active job to the suspended state.
+
+### Keys (4)
+
+| Position | Key |
+|----------|-----|
+| 1 | glide:{queueName}:job:{id} |
+| 2 | glide:{queueName}:stream |
+| 3 | glide:{queueName}:events |
+| 4 | glide:{queueName}:suspended |
+
+### Args (7)
+
+| Position | Name | Type | Description |
+|----------|------|------|-------------|
+| 1 | jobId | string | Job ID |
+| 2 | entryId | string | Stream entry ID (for XACK) |
+| 3 | group | string | Consumer group name |
+| 4 | now | string (int) | Current timestamp in ms |
+| 5 | reason | string | Suspension reason |
+| 6 | timeout | string (int) | Timeout in ms (0 for infinite) |
+| 7 | broadcastMode | string | 1 for broadcast, 0 for normal |
+
+Returns "ok", "error:not_found", or "error:not_active".
+
+---
+
+## FCALL glidemq_signal
+
+Sends a signal to a suspended job and re-queues it.
+
+### Keys (5)
+
+| Position | Key |
+|----------|-----|
+| 1 | glide:{queueName}:job:{id} |
+| 2 | glide:{queueName}:stream |
+| 3 | glide:{queueName}:events |
+| 4 | glide:{queueName}:suspended |
+| 5 | glide:{queueName}:signals:{id} |
+
+### Args (4)
+
+| Position | Name | Type | Description |
+|----------|------|------|-------------|
+| 1 | jobId | string | Job ID |
+| 2 | signalName | string | Signal name |
+| 3 | signalData | string | JSON-serialized payload |
+| 4 | now | string (int) | Current timestamp in ms |
+
+Returns "ok" or "not_suspended".
+
+---
+
+## FCALL glidemq_sweepSuspended
+
+Fails suspended jobs whose timeout has passed.
+
+### Keys (2): glide:{queueName}:suspended, glide:{queueName}:events
+
+### Args (2): now (string int), keyPrefix (string)
+
+Returns integer: number of jobs timed out.
+
+---
+
+## FCALL glidemq_checkBudget
+
+Checks if a flow budget has been exceeded.
+
+### Keys (1): glide:{queueName}:budget:{flowId}
+
+Returns "no_budget", "ok", or "exceeded".
+
+---
+
+## FCALL glidemq_recordUsageAndCheckBudget
+
+Atomically increments usage counters and checks budget limits.
+
+### Keys (1): glide:{queueName}:budget:{flowId}
+
+### Args (2): tokens (string number), cost (string number)
+
+Returns "no_budget", "ok", or "exceeded".
 
 ## Authentication Note
 

@@ -156,6 +156,20 @@ const connection = {
 };
 ```
 
+## Valkey Modules (Search / JSON / Bloom)
+
+Vector search (`queue.createJobIndex()`, `queue.vectorSearch()`) requires the `valkey-search` module loaded on the server. The easiest way to get all modules is to use `valkey-bundle`, which bundles search, JSON, bloom, and other modules:
+
+```bash
+# Docker (standalone with all modules)
+docker run -p 6379:6379 valkey/valkey-bundle:latest
+
+# Or load the search module explicitly
+valkey-server --loadmodule /path/to/valkeysearch.so
+```
+
+Vector search is supported in standalone mode only (not cluster mode) due to Valkey Search module limitations.
+
 ## Gotchas
 
 - `addresses` is an **array** of `{ host, port }` objects, not a single host/port.

@@ -4,27 +4,24 @@ description: >-
   Creates message queues, workers, job workflows, and fan-out broadcasts using
   glide-mq on Valkey/Redis Streams. Provides API reference, code patterns, and
   configuration for queues, workers, delayed/priority jobs, schedulers, batch
-  processing, DAG workflows, request-reply, and serverless producers. Triggers
-  on "glide-mq", "glidemq", "job queue valkey", "background tasks valkey",
-  "message queue redis streams".
+  processing, DAG workflows, request-reply, serverless producers, and AI-native
+  primitives (usage tracking, token streaming, suspend/resume, budget caps,
+  fallback chains, dual-axis rate limiting, vector search). Triggers on
+  "glide-mq", "glidemq", "job queue valkey", "background tasks valkey",
+  "message queue redis streams", "LLM queue", "AI orchestration queue",
+  "token rate limiting", "model fallback", "human-in-the-loop queue",
+  "vector search jobs", "AI pipeline queue".
 license: Apache-2.0
 metadata:
   author: glide-mq
-  version: "0.11.1"
-  tags: glide-mq, message-queue, valkey, redis, job-queue, worker, streams
-  sources:
-    - docs/USAGE.md
-    - docs/ADVANCED.md
-    - docs/WORKFLOWS.md
-    - docs/BROADCAST.md
-    - docs/SERVERLESS.md
-    - docs/TESTING.md
-    - docs/OBSERVABILITY.md
+  version: "0.13.0"
+  tags: glide-mq, message-queue, valkey, redis, job-queue, worker, streams, ai-native, llm, vector-search
+  sources: docs/USAGE.md, docs/ADVANCED.md, docs/WORKFLOWS.md, docs/BROADCAST.md, docs/SERVERLESS.md, docs/TESTING.md, docs/OBSERVABILITY.md
 ---
 
 # glide-mq
 
-High-performance message queue for Node.js on Valkey/Redis Streams with a Rust NAPI core.
+High-performance AI-native message queue for Node.js on Valkey/Redis Streams with a Rust NAPI core.
 
 ## Quick Start
 
@@ -56,6 +53,13 @@ Use this skill when:
 - Configuring cron/interval schedulers
 - Setting up connection options (TLS, IAM, AZ-affinity)
 - Working with batch processing or rate limiting
+- Tracking AI/LLM usage (tokens, cost, model) per job or flow
+- Streaming LLM output tokens in real-time
+- Implementing human-in-the-loop approval with suspend/resume
+- Setting budget caps (tokens, cost) on workflow flows
+- Configuring fallback chains for model/provider failover
+- Dual-axis rate limiting (RPM + TPM) for LLM API compliance
+- Searching jobs by vector similarity (KNN) with Valkey Search
 - Integrating with frameworks (Hono, Fastify, NestJS, Hapi)
 - Deploying in serverless environments (Lambda, Vercel Edge)
 
@@ -70,7 +74,9 @@ Use this skill when:
 | 5 | Broadcast (Fan-Out) | MEDIUM | [references/broadcast.md](references/broadcast.md) |
 | 6 | Schedulers (Cron/Interval) | MEDIUM | [references/schedulers.md](references/schedulers.md) |
 | 7 | Observability & Events | MEDIUM | [references/observability.md](references/observability.md) |
-| 8 | Serverless & Testing | LOW | [references/serverless.md](references/serverless.md) |
+| 8 | AI-Native Primitives | HIGH | [references/ai-native.md](references/ai-native.md) |
+| 9 | Vector Search | MEDIUM | [references/search.md](references/search.md) |
+| 10 | Serverless & Testing | LOW | [references/serverless.md](references/serverless.md) |
 
 ## Key Patterns
 
@@ -176,6 +182,14 @@ await worker.run();
 | Need deduplication or idempotent jobs | [references/queue.md](references/queue.md) - Dedup |
 | Need rate limiting | [references/queue.md](references/queue.md) - Rate Limit |
 | Running tests without Valkey | [references/serverless.md](references/serverless.md) - Testing |
+| Need to track LLM tokens/cost per job | [references/ai-native.md](references/ai-native.md) - Usage Metadata |
+| Need to stream LLM output tokens | [references/ai-native.md](references/ai-native.md) - Token Streaming |
+| Need human approval before proceeding | [references/ai-native.md](references/ai-native.md) - Suspend/Resume |
+| Need to cap token/cost budget on a flow | [references/ai-native.md](references/ai-native.md) - Budget |
+| Need model fallback on failure | [references/ai-native.md](references/ai-native.md) - Fallback Chains |
+| Need RPM + TPM rate limiting for LLM APIs | [references/ai-native.md](references/ai-native.md) - Dual-Axis Rate Limiting |
+| Need vector similarity search over jobs | [references/search.md](references/search.md) |
+| Need to aggregate usage across a flow | [references/ai-native.md](references/ai-native.md) - Flow Usage |
 
 ## Critical Notes
 

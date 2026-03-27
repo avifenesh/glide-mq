@@ -17,6 +17,10 @@
 - [Transparent Compression](#transparent-compression)
 - [Retries and Backoff](#retries-and-backoff)
 - [Dead Letter Queues](#dead-letter-queues)
+- [Fallback Chains](#fallback-chains)
+- [Dual-axis Rate Limiting (RPM + TPM)](#dual-axis-rate-limiting-rpm--tpm)
+- [Per-job Lock Duration](#per-job-lock-duration)
+- [Vector Search Index Management](#vector-search-index-management)
 
 ---
 
@@ -718,3 +722,63 @@ const dlqJobs = await queue.getDeadLetterJobs(0, 49);
 ```
 
 Jobs in the DLQ are ordinary jobs — you can inspect, retry, or remove them like any other job.
+
+
+---
+
+## Fallback Chains
+
+Configure ordered fallback models/providers on a per-job basis. On each retryable failure, the worker advances to the next entry in the chain.
+
+- job.fallbackIndex starts at 0. currentFallback returns undefined (use your default model).
+- On the first retry failure, glidemq_fail sets fallbackIndex to 1. currentFallback returns fallbacks[0].
+- If fallbackIndex exceeds the array length, currentFallback returns the last entry (sticky).
+- Each entry supports metadata for provider-specific parameters.
+
+See [USAGE.md](./USAGE.md#fallback-chains) for usage examples.
+
+---
+
+## Dual-axis Rate Limiting (RPM + TPM)
+
+The existing limiter option on WorkerOptions caps requests per time window (RPM). The tokenLimiter option adds a parallel token-per-minute (TPM) limit. Both compose - the worker pauses when either limit is hit.
+
+Jobs report tokens via job.reportTokens(count) or via job.reportUsage() (which auto-extracts totalTokens).
+
+### Scope options
+
+| Scope | Where tracked | When to use |
+|-------|--------------|-------------|
+| queue | glide:{queueName}:tpm hash | Multi-worker, strict global limit |
+| worker | In-memory counter | Single worker, zero-latency checks |
+| both (default) | Local first, then Valkey | Fast local check avoids Valkey when under limit |
+
+See [USAGE.md](./USAGE.md#dual-axis-rate-limiting-rpm--tpm) for configuration examples.
+
+---
+
+## Per-job Lock Duration
+
+By default, all jobs share the worker-level lockDuration (default: 30000ms). Override per job via opts.lockDuration. The per-job value is stored in the job opts JSON field and read by glidemq_reclaimStalled and glidemq_reclaimStalledListJobs at stall-recovery time.
+
+Constraints: must be a positive integer; values below 5000ms risk false stall detection under load.
+
+See [USAGE.md](./USAGE.md#per-job-lock-duration) for examples.
+
+---
+
+## Vector Search Index Management
+
+queue.createJobIndex() creates a Valkey Search index over job hashes. The index enables both full-text search and vector similarity queries.
+
+Base fields (name, state, timestamp, priority) are always included. Users add custom fields and a vector field via the fields and vectorField options.
+
+### Distance metrics
+
+| Metric | Score interpretation | Use case |
+|--------|---------------------|----------|
+| COSINE | 0 = identical, 2 = opposite (lower = better) | Text embeddings, semantic similarity |
+| L2 | 0 = identical (lower = better) | Image features, spatial data |
+| IP | Higher = more similar | Normalized embeddings, recommendation |
+
+See [USAGE.md](./USAGE.md#vector-search-createjobindex--storevector--vectorsearch) for full API and examples.

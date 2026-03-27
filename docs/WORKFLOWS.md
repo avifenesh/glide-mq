@@ -9,6 +9,9 @@
 - [`chain` — Sequential Pipeline](#chain)
 - [`group` — Parallel Execution](#group)
 - [`chord` — Parallel + Callback](#chord)
+- [Suspend/Resume as a Workflow Primitive](#suspendresume-as-a-workflow-primitive)
+- [Budget on Flows](#budget-on-flows)
+- [AI Workflow Patterns](#ai-workflow-patterns)
 - [Broadcast](#broadcast)
 
 ---
@@ -347,10 +350,58 @@ const worker = new Worker('tasks', async (job) => {
 
 ---
 
+
+---
+
+## Suspend/Resume as a Workflow Primitive
+
+job.suspend() can be used within any workflow pattern (chain, group, chord, DAG) to introduce external wait points. This is fundamentally different from moveToDelayed (timer-based) and moveToWaitingChildren (child-completion-based) - suspend waits for an explicit signal from outside the queue system.
+
+### Use cases
+
+- **Approval gates**: A content pipeline generates a draft, suspends for review, then publishes on approval.
+- **Webhook callbacks**: An order flow suspends after sending a payment request, resumes when the webhook arrives.
+- **Agent loops**: An AI agent suspends after presenting options to the user, resumes with the user's choice.
+
+In a DAG, suspending a node does not block sibling branches. Other branches with satisfied dependencies continue executing. The suspended node resumes only when queue.signal() is called.
+
+---
+
+## Budget on Flows
+
+FlowProducer.add() accepts an optional budget parameter that creates a shared budget hash for the entire flow. Every job in the flow (parent and children) shares this budget.
+
+Each child job has a budgetKey that points to the shared budget hash. When reportUsage() is called, the worker atomically increments the budget counters via glidemq_recordUsageAndCheckBudget. If limits are exceeded:
+
+- **fail**: The current job completes normally, subsequent jobs fail with a budget error.
+- **pause**: Subsequent jobs are paused.
+
+---
+
+## AI Workflow Patterns
+
+### RAG pipeline (chain)
+
+Use chain() to model embed -> retrieve -> generate as a sequential pipeline with budget caps.
+
+### Agent loop (suspend/resume cycle)
+
+The processor checks job.signals on re-entry. If empty, it suspends and waits for user input. When the signal arrives, the processor continues with the user's response.
+
+### Content pipeline with approval (chain + suspend)
+
+Combine chain() with job.suspend() at the review step. The pipeline halts until an editor approves.
+
+### Parallel model comparison (group + budget)
+
+Use FlowProducer.add() with multiple child jobs (one per model) and a shared budget to compare model outputs while enforcing cost limits across all calls.
+
+---
+
 ## Broadcast
 
 The workflow patterns above (`FlowProducer`, DAG, `chain`, `group`, `chord`, `moveToWaitingChildren`) all model **dependency graphs** — jobs wait for other jobs to complete before running.
 
-glide-mq also supports a **Broadcast / BroadcastWorker** pub/sub pattern for real-time fan-out where every subscriber receives every message. This is a fundamentally different paradigm: no job state, no retries, no dependencies — just fire-and-forget delivery to all connected workers.
+glide-mq also supports a **Broadcast / BroadcastWorker** pub/sub pattern for real-time fan-out where every subscriber receives every message. This is a fundamentally different paradigm: no dependencies between messages — just fire-and-forget delivery to all connected workers.
 
 See [USAGE.md](./USAGE.md) for the `Broadcast` and `BroadcastWorker` API.
