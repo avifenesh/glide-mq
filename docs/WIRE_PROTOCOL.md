@@ -21,7 +21,7 @@ In cluster mode, `FUNCTION LOAD` must be sent to all primary nodes.
 FCALL glidemq_version 1 {glidemq}:_
 ```
 
-Returns the library version as a string (e.g. `"40"`). The dummy key `{glidemq}:_` is required for cluster slot routing.
+Returns the current library version as a string (e.g. `"80"`). The dummy key `{glidemq}:_` is required for cluster slot routing.
 
 ---
 
@@ -182,6 +182,10 @@ FCALL glidemq_addJob 4
   "0"
   "0"
   ""
+  "0"
+  ""
+  ""
+  "0"
 ```
 
 ---
@@ -200,14 +204,14 @@ Adds a job with deduplication. Checks the dedup hash first and either skips or c
 | 4        | `glide:{queueName}:scheduled` |
 | 5        | `glide:{queueName}:events`    |
 
-### Args (20)
+### Args (24)
 
 | Position | Name                       | Type         | Description                                    |
 | -------- | -------------------------- | ------------ | ---------------------------------------------- |
 | 1        | dedupId                    | string       | Deduplication identifier                       |
 | 2        | ttlMs                      | string (int) | TTL for throttle mode in ms, `"0"` if not used |
 | 3        | mode                       | string       | `"simple"`, `"throttle"`, or `"debounce"`      |
-| 4-20     | (same as addJob args 1-17) |              | Same 17 args as glidemq_addJob                 |
+| 4-24     | (same as addJob args 1-21) |              | Same 21 args as glidemq_addJob                 |
 
 ### Return Values
 
@@ -463,6 +467,10 @@ result = r.fcall(
     '0',                            # arg 15: jobCost
     '0',                            # arg 16: ttl
     '',                             # arg 17: customJobId
+    '0',                            # arg 18: lifo
+    '',                             # arg 19: parentQueue
+    '',                             # arg 20: schedulerName
+    '0',                            # arg 21: skipEvents
 )
 
 print(f'Job created with ID: {result}')
@@ -539,6 +547,10 @@ func main() {
         Arg("0").             // jobCost
         Arg("0").             // ttl
         Arg("").              // customJobId
+        Arg("0").             // lifo
+        Arg("").              // parentQueue
+        Arg("").              // schedulerName
+        Arg("0").             // skipEvents
         Build(),
     )
 

@@ -133,7 +133,7 @@ Reproduce with `npm run bench` or `npx tsx benchmarks/elasticache-head-to-head.t
 
 ## Examples
 
-28 runnable examples in `examples/`. Run any with `npx tsx examples/<name>.ts`.
+27 runnable examples in `examples/`. Run any with `npx tsx examples/<name>.ts`.
 
 | Example                 | What it shows                                   |
 | ----------------------- | ----------------------------------------------- |
@@ -158,6 +158,12 @@ Reproduce with `npm run bench` or `npx tsx benchmarks/elasticache-head-to-head.t
 | `cost-breakdown.ts`     | Detailed per-category cost breakdown            |
 | `budget-weighted.ts`    | Weighted budget allocation across flow steps    |
 | `reasoning-stream.ts`   | Streaming reasoning/chain-of-thought tokens     |
+| `adaptive-timeout.ts`   | Adaptive lock duration based on model complexity |
+| `broadcast-events.ts`   | Fan-out event publishing with subject filtering  |
+| `agent-memory.ts`       | Multi-turn agent with persistent memory          |
+| `search-dashboard.ts`   | Job search and monitoring dashboard              |
+| `embedding-pipeline.ts` | Batch document embedding with rate limiting      |
+| `content-pipeline.ts`   | Content moderation with streaming and approval   |
 
 ## When NOT to use glide-mq
 
@@ -178,6 +184,9 @@ Reproduce with `npm run bench` or `npx tsx benchmarks/elasticache-head-to-head.t
 | [Serverless](docs/SERVERLESS.md)       | Producer, ServerlessPool, Lambda/Edge                       |
 | [Testing](docs/TESTING.md)             | In-memory TestQueue and TestWorker                          |
 | [Wire Protocol](docs/WIRE_PROTOCOL.md) | Cross-language FCALL specs, Python/Go examples              |
+| [Step Jobs](docs/STEP_JOBS.md)         | Step-job workflows with moveToDelayed                       |
+| [Durability](docs/DURABILITY.md)       | Durability guarantees, persistence, delivery semantics      |
+| [Architecture](docs/ARCHITECTURE.md)   | Internal architecture and design reference                  |
 | [Migration](docs/MIGRATION.md)         | Coming from BullMQ - API mapping guide                      |
 
 ## Ecosystem

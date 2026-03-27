@@ -800,7 +800,17 @@ Enforce hard caps on total tokens and/or cost across all jobs in a flow. Pass a 
 
 Query budget state via queue.getFlowBudget(flowId). Budget state is stored in glide:{queueName}:budget:{flowId}.
 
-See [USAGE.md AI-native Primitives section](#budget-middleware-flow-level-tokencost-caps) in the main usage guide for full examples.
+```typescript
+const flow = new FlowProducer({ connection });
+const node = await flow.add(
+  { name: 'parent', queueName: 'ai-tasks', data: {}, children: [...] },
+  { budget: { maxTotalTokens: 10000, maxTotalCost: 0.50, costUnit: 'usd', onExceeded: 'fail' } },
+);
+
+// Check budget state
+const budget = await queue.getFlowBudget(node.job.id);
+// { maxTotalTokens: 10000, maxTotalCost: 0.50, usedTokens: 0, usedCost: 0, exceeded: false, ... }
+```
 
 ### Dual-axis Rate Limiting (RPM + TPM)
 
