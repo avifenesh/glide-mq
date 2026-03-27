@@ -454,7 +454,7 @@ Track model, tokens, cost, and latency per job. Persisted to the job hash and em
 const worker = new Worker('inference', async (job) => {
   const result = await callLLM(job.data);
   await job.reportUsage({
-    model: 'gpt-4o',
+    model: 'gpt-5.4',
     provider: 'openai',
     inputTokens: result.promptTokens,
     outputTokens: result.completionTokens,
@@ -516,7 +516,7 @@ Ordered model/provider alternatives tried on retryable failure.
 await queue.add('inference', { prompt: '...' }, {
   attempts: 4,
   fallbacks: [
-    { model: 'gpt-4o', provider: 'openai' },
+    { model: 'gpt-5.4', provider: 'openai' },
     { model: 'claude-sonnet-4-20250514', provider: 'anthropic' },
     { model: 'llama-3-70b', provider: 'groq' },
   ],

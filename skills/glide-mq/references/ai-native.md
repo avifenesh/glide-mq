@@ -11,7 +11,7 @@ const worker = new Worker('inference', async (job) => {
   const response = await openai.chat.completions.create({ ... });
 
   await job.reportUsage({
-    model: 'gpt-4o',
+    model: 'gpt-5.4',
     provider: 'openai',
     inputTokens: response.usage.prompt_tokens,
     outputTokens: response.usage.completion_tokens,
@@ -29,7 +29,7 @@ const worker = new Worker('inference', async (job) => {
 
 ```typescript
 interface JobUsage {
-  model?: string;           // e.g. 'gpt-4o', 'claude-sonnet-4-20250514'
+  model?: string;           // e.g. 'gpt-5.4', 'claude-sonnet-4-20250514'
   provider?: string;        // e.g. 'openai', 'anthropic'
   inputTokens?: number;     // prompt tokens
   outputTokens?: number;    // completion tokens
@@ -226,7 +226,7 @@ Ordered list of model/provider alternatives tried on retryable failure.
 await queue.add('inference', { prompt: 'Explain quantum entanglement' }, {
   attempts: 4,  // 1 original + 3 fallbacks
   fallbacks: [
-    { model: 'gpt-4o', provider: 'openai' },
+    { model: 'gpt-5.4', provider: 'openai' },
     { model: 'claude-sonnet-4-20250514', provider: 'anthropic' },
     { model: 'llama-3-70b', provider: 'groq', metadata: { temperature: 0.7 } },
   ],
@@ -239,7 +239,7 @@ await queue.add('inference', { prompt: 'Explain quantum entanglement' }, {
 const worker = new Worker('inference', async (job) => {
   const fallback = job.currentFallback;
   // undefined on first attempt (original request)
-  // { model: 'gpt-4o', provider: 'openai' } on first fallback
+  // { model: 'gpt-5.4', provider: 'openai' } on first fallback
   // { model: 'claude-sonnet-4-20250514', provider: 'anthropic' } on second, etc.
 
   const model = fallback?.model ?? job.data.defaultModel;
@@ -295,7 +295,7 @@ const worker = new Worker('inference', async (job) => {
 
   // Option 2: reportUsage auto-extracts totalTokens for TPM
   await job.reportUsage({
-    model: 'gpt-4o',
+    model: 'gpt-5.4',
     inputTokens: result.promptTokens,
     outputTokens: result.completionTokens,
   });

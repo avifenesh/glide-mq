@@ -123,7 +123,7 @@ const result = await queue.addAndWait('inference', data, { waitTimeout: 30_000 }
 ```typescript
 // Report usage inside a processor
 await job.reportUsage({
-  model: 'gpt-4o',
+  model: 'gpt-5.4',
   provider: 'openai',
   inputTokens: 500,
   outputTokens: 200,
@@ -153,7 +153,7 @@ const usage = await queue.getFlowUsage(parentJobId);
 //   totalOutputTokens: 1200,
 //   totalCostUsd: 0.015,
 //   jobCount: 4,
-//   models: { 'gpt-4o': 3, 'claude-sonnet-4-20250514': 1 }
+//   models: { 'gpt-5.4': 3, 'claude-sonnet-4-20250514': 1 }
 // }
 ```
 

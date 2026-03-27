@@ -632,7 +632,7 @@ const worker = new Worker('llm-tasks', async (job) => {
   const result = await callLLM(job.data.prompt);
 
   await job.reportUsage({
-    model: 'gpt-4o',
+    model: 'gpt-5.4',
     provider: 'openai',
     inputTokens: result.usage.prompt_tokens,
     outputTokens: result.usage.completion_tokens,

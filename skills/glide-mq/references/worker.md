@@ -141,7 +141,7 @@ const worker = new Worker('inference', async (job) => {
 
   // Report AI usage metadata (persisted to job hash, emits 'usage' event)
   await job.reportUsage({
-    model: 'gpt-4o',
+    model: 'gpt-5.4',
     provider: 'openai',
     inputTokens: result.promptTokens,
     outputTokens: result.completionTokens,

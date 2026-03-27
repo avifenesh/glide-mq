@@ -357,7 +357,7 @@ Track model, tokens, cost, and latency per job.
 
 ```typescript
 await job.reportUsage({
-  model: 'gpt-4o',
+  model: 'gpt-5.4',
   provider: 'openai',
   inputTokens: 500,
   outputTokens: 200,
@@ -406,7 +406,7 @@ Ordered model/provider alternatives on retryable failure.
 await queue.add('inference', data, {
   attempts: 4,
   fallbacks: [
-    { model: 'gpt-4o', provider: 'openai' },
+    { model: 'gpt-5.4', provider: 'openai' },
     { model: 'claude-sonnet-4-20250514', provider: 'anthropic' },
     { model: 'llama-3-70b', provider: 'groq' },
   ],

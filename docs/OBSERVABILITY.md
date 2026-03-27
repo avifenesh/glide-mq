@@ -163,7 +163,7 @@ When job.reportUsage() is called inside a processor, the usage metadata is persi
 
 | Hash field | Type | Description |
 |------------|------|-------------|
-| usage:model | string | Model identifier (e.g. gpt-4o) |
+| usage:model | string | Model identifier (e.g. gpt-5.4) |
 | usage:provider | string | Provider identifier (e.g. openai) |
 | usage:inputTokens | string (int) | Input/prompt token count |
 | usage:outputTokens | string (int) | Output/completion token count |
