@@ -16,12 +16,19 @@ npm install glide-mq
 import { Queue, Worker } from 'glide-mq';
 
 const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
-const queue = new Queue('tasks', { connection });
-await queue.add('greet', { name: 'world' });
+const queue = new Queue('ai', { connection });
 
-const worker = new Worker('tasks', async (job) => {
-  console.log(`Hello, ${job.data.name}!`);
-}, { connection });
+await queue.add('inference', { prompt: 'Explain message queues' }, {
+  fallbacks: [{ model: 'gpt-4o-mini', provider: 'openai' }],
+  lockDuration: 120000,
+});
+
+const worker = new Worker('ai', async (job) => {
+  const result = await callLLM(job.data.prompt);
+  await job.reportUsage({ model: 'gpt-4o', inputTokens: 50, outputTokens: 200, costUsd: 0.003 });
+  await job.stream({ type: 'token', content: result });
+  return result;
+}, { connection, tokenLimiter: { maxTokens: 100000, duration: 60000 } });
 ```
 
 ## When to use glide-mq
