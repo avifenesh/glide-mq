@@ -145,7 +145,7 @@ jobs:
     timeout-minutes: 15
     services:
       valkey:
-        image: valkey/valkey-bundle:latest
+        image: valkey/valkey-bundle:9.1.0-rc1
         options: >-
           --health-cmd "valkey-cli ping"
           --health-interval 10s
