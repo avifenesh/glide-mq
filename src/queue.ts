@@ -1735,21 +1735,23 @@ export class Queue<D = any, R = any> extends EventEmitter {
       'usage:costUnit',
     ];
     const agg = {
-      tokens: {} as Record<string, number>,
+      tokens: Object.create(null) as Record<string, number>,
       totalTokens: 0,
-      costs: {} as Record<string, number>,
+      costs: Object.create(null) as Record<string, number>,
       totalCost: 0,
       costUnit: undefined as string | undefined,
       jobCount: 0,
-      models: {} as Record<string, number>,
+      models: Object.create(null) as Record<string, number>,
     };
 
     const mergeJob = (values: (unknown | null)[]) => {
       const model = values[0] ? String(values[0]) : undefined;
       const tokensStr = values[1] ? String(values[1]) : undefined;
       const costsStr = values[2] ? String(values[2]) : undefined;
-      const totalTokens = values[3] ? parseFloat(String(values[3])) : 0;
-      const totalCost = values[4] ? parseFloat(String(values[4])) : 0;
+      const rawTotal = values[3] ? parseFloat(String(values[3])) : 0;
+      const totalTokens = Number.isFinite(rawTotal) ? rawTotal : 0;
+      const rawCost = values[4] ? parseFloat(String(values[4])) : 0;
+      const totalCost = Number.isFinite(rawCost) ? rawCost : 0;
       const costUnit = values[5] ? String(values[5]) : undefined;
 
       if (!model && !tokensStr && !costsStr && !totalTokens && !totalCost) return;
@@ -1765,7 +1767,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
           const p = JSON.parse(tokensStr);
           if (p && typeof p === 'object') {
             for (const [k, v] of Object.entries(p as Record<string, number>)) {
-              agg.tokens[k] = (agg.tokens[k] || 0) + v;
+              if (Number.isFinite(v)) {
+                agg.tokens[k] = (agg.tokens[k] || 0) + (v as number);
+              }
             }
           }
         } catch {
@@ -1777,7 +1781,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
           const p = JSON.parse(costsStr);
           if (p && typeof p === 'object') {
             for (const [k, v] of Object.entries(p as Record<string, number>)) {
-              agg.costs[k] = (agg.costs[k] || 0) + v;
+              if (Number.isFinite(v)) {
+                agg.costs[k] = (agg.costs[k] || 0) + (v as number);
+              }
             }
           }
         } catch {

@@ -1456,9 +1456,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           }
 
           // Compute weighted total: sum of tokens[cat] * (weights[cat] ?? 1)
+          // When no per-category tokens are reported, fall back to rawTotal (weight 1).
           let weightedTotal = 0;
           for (const [cat, val] of Object.entries(usageTokens)) {
             weightedTotal += val * (weights[cat] ?? 1);
+          }
+          if (weightedTotal === 0 && rawTotal > 0) {
+            weightedTotal = rawTotal;
           }
 
           const budgetResult = await recordUsageAndCheckBudget(

@@ -170,11 +170,23 @@ export class TestJob<D = any, R = any> {
   async reportUsage(usage: JobUsage): Promise<void> {
     if (usage.tokens) {
       for (const [key, val] of Object.entries(usage.tokens)) {
-        if (val < 0) throw new Error(`Token count for '${key}' must not be negative`);
+        if (!Number.isFinite(val) || val < 0) {
+          throw new Error(`Token count for '${key}' must be a finite non-negative number`);
+        }
       }
     }
-    if (usage.totalTokens !== undefined && usage.totalTokens < 0) {
-      throw new Error('totalTokens must not be negative');
+    if (usage.totalTokens !== undefined && (!Number.isFinite(usage.totalTokens) || usage.totalTokens < 0)) {
+      throw new Error('totalTokens must be a finite non-negative number');
+    }
+    if (usage.costs) {
+      for (const [key, val] of Object.entries(usage.costs)) {
+        if (!Number.isFinite(val) || val < 0) {
+          throw new Error(`Cost for '${key}' must be a finite non-negative number`);
+        }
+      }
+    }
+    if (usage.totalCost !== undefined && (!Number.isFinite(usage.totalCost) || usage.totalCost < 0)) {
+      throw new Error('totalCost must be a finite non-negative number');
     }
     const resolved = { ...usage };
     if (resolved.totalTokens === undefined && resolved.tokens && Object.keys(resolved.tokens).length > 0) {
@@ -740,32 +752,38 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     models: Record<string, number>;
   }> {
     const agg = {
-      tokens: {} as Record<string, number>,
+      tokens: Object.create(null) as Record<string, number>,
       totalTokens: 0,
-      costs: {} as Record<string, number>,
+      costs: Object.create(null) as Record<string, number>,
       totalCost: 0,
       costUnit: undefined as string | undefined,
       jobCount: 0,
-      models: {} as Record<string, number>,
+      models: Object.create(null) as Record<string, number>,
     };
     const parentJob = this.jobs.get(parentJobId);
     if (!parentJob) return agg;
 
     const mergeUsage = (usage: JobUsage | undefined) => {
       if (!usage) return;
-      agg.totalTokens += usage.totalTokens ?? 0;
-      agg.totalCost += usage.totalCost ?? 0;
+      const totalTokens = Number.isFinite(usage.totalTokens) ? usage.totalTokens! : 0;
+      const totalCost = Number.isFinite(usage.totalCost) ? usage.totalCost! : 0;
+      agg.totalTokens += totalTokens;
+      agg.totalCost += totalCost;
       agg.jobCount++;
       if (usage.costUnit && !agg.costUnit) agg.costUnit = usage.costUnit;
       if (usage.model) agg.models[usage.model] = (agg.models[usage.model] || 0) + 1;
       if (usage.tokens) {
         for (const [k, v] of Object.entries(usage.tokens)) {
-          agg.tokens[k] = (agg.tokens[k] || 0) + v;
+          if (Number.isFinite(v)) {
+            agg.tokens[k] = (agg.tokens[k] || 0) + v;
+          }
         }
       }
       if (usage.costs) {
         for (const [k, v] of Object.entries(usage.costs)) {
-          agg.costs[k] = (agg.costs[k] || 0) + v;
+          if (Number.isFinite(v)) {
+            agg.costs[k] = (agg.costs[k] || 0) + v;
+          }
         }
       }
     };
@@ -1395,15 +1413,25 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         if (record.budgetKey && job.usage) {
           const usageTokens = job.usage.tokens ?? {};
           const usageCosts = job.usage.costs ?? {};
+          const rawTotal = job.usage.totalTokens ?? 0;
           const totalCost = job.usage.totalCost ?? 0;
 
-          if (Object.keys(usageTokens).length > 0 || Object.keys(usageCosts).length > 0 || totalCost > 0) {
+          if (
+            rawTotal > 0 ||
+            Object.keys(usageTokens).length > 0 ||
+            Object.keys(usageCosts).length > 0 ||
+            totalCost > 0
+          ) {
             // Compute weighted total using budget weights
+            // When no per-category tokens are reported, fall back to rawTotal (weight 1).
             const budgetState = this.queue.budgets.get(record.budgetKey);
             const weights = budgetState?.tokenWeights ?? {};
             let weightedTotal = 0;
             for (const [cat, val] of Object.entries(usageTokens)) {
               weightedTotal += val * (weights[cat] ?? 1);
+            }
+            if (weightedTotal === 0 && rawTotal > 0) {
+              weightedTotal = rawTotal;
             }
 
             const budgetResult = this.queue.recordBudgetUsage(

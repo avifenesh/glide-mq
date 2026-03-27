@@ -196,11 +196,23 @@ export class Job<D = any, R = any> {
   async reportUsage(usage: JobUsage): Promise<void> {
     if (usage.tokens) {
       for (const [key, val] of Object.entries(usage.tokens)) {
-        if (val < 0) throw new Error(`Token count for '${key}' must not be negative`);
+        if (!Number.isFinite(val) || val < 0) {
+          throw new Error(`Token count for '${key}' must be a finite non-negative number`);
+        }
       }
     }
-    if (usage.totalTokens !== undefined && usage.totalTokens < 0) {
-      throw new Error('totalTokens must not be negative');
+    if (usage.totalTokens !== undefined && (!Number.isFinite(usage.totalTokens) || usage.totalTokens < 0)) {
+      throw new Error('totalTokens must be a finite non-negative number');
+    }
+    if (usage.costs) {
+      for (const [key, val] of Object.entries(usage.costs)) {
+        if (!Number.isFinite(val) || val < 0) {
+          throw new Error(`Cost for '${key}' must be a finite non-negative number`);
+        }
+      }
+    }
+    if (usage.totalCost !== undefined && (!Number.isFinite(usage.totalCost) || usage.totalCost < 0)) {
+      throw new Error('totalCost must be a finite non-negative number');
     }
 
     const resolved: JobUsage = { ...usage };
@@ -798,7 +810,8 @@ export class Job<D = any, R = any> {
       hash['usage:tokens'] ||
       hash['usage:provider'] ||
       hash['usage:costs'] ||
-      hash['usage:totalTokens']
+      hash['usage:totalTokens'] ||
+      hash['usage:totalCost']
     ) {
       let tokens: Record<string, number> | undefined;
       let costs: Record<string, number> | undefined;

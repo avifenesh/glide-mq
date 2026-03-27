@@ -125,20 +125,22 @@ describe('Job.reportUsage (unit)', () => {
   it('rejects negative value in tokens map', async () => {
     const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
     await expect(job.reportUsage({ tokens: { input: -1 } })).rejects.toThrow(
-      "Token count for 'input' must not be negative",
+      "Token count for 'input' must be a finite non-negative number",
     );
   });
 
   it('rejects negative output in tokens map', async () => {
     const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
     await expect(job.reportUsage({ tokens: { output: -5 } })).rejects.toThrow(
-      "Token count for 'output' must not be negative",
+      "Token count for 'output' must be a finite non-negative number",
     );
   });
 
   it('rejects negative totalTokens', async () => {
     const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
-    await expect(job.reportUsage({ totalTokens: -10 })).rejects.toThrow('totalTokens must not be negative');
+    await expect(job.reportUsage({ totalTokens: -10 })).rejects.toThrow(
+      'totalTokens must be a finite non-negative number',
+    );
   });
 
   it('auto-computes totalTokens with reasoning tokens', async () => {
@@ -181,7 +183,7 @@ describe('Job.reportUsage (unit)', () => {
   it('rejects negative value for arbitrary key in tokens map', async () => {
     const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
     await expect(job.reportUsage({ tokens: { reasoning: -100 } })).rejects.toThrow(
-      "Token count for 'reasoning' must not be negative",
+      "Token count for 'reasoning' must be a finite non-negative number",
     );
   });
 
@@ -293,7 +295,7 @@ describe('TestJob.reportUsage', () => {
     queue = new TestQueue('test-usage-neg');
     const job = await queue.add('llm-call', {});
     await expect(job!.reportUsage({ tokens: { input: -1 } })).rejects.toThrow(
-      "Token count for 'input' must not be negative",
+      "Token count for 'input' must be a finite non-negative number",
     );
   });
 });
