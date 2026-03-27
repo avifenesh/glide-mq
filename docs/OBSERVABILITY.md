@@ -5,6 +5,7 @@
 - [Job Logs](#job-logs)
 - [Job Counts and Metrics](#job-counts-and-metrics)
 - [OpenTelemetry Integration](#opentelemetry-integration)
+- [AI Usage Telemetry](#ai-usage-telemetry)
 - [`@glidemq/dashboard`](#glidemqdashboard)
 
 ---
@@ -148,6 +149,42 @@ console.log('Tracing active:', isTracingEnabled());
 | -------------------- | -------------------- | ------------------------------------------------------------------------------------------------------- |
 | `queue.add()`        | `glide-mq.queue.add` | `glide-mq.queue`, `glide-mq.job.name`, `glide-mq.job.id`, `glide-mq.job.delay`, `glide-mq.job.priority` |
 | `flowProducer.add()` | `glide-mq.flow.add`  | `glide-mq.queue`, `glide-mq.flow.name`, `glide-mq.flow.childCount`                                      |
+
+---
+
+
+---
+
+## AI Usage Telemetry
+
+### reportUsage and span attributes
+
+When job.reportUsage() is called inside a processor, the usage metadata is persisted to the job hash. Usage data is stored as hash fields on the job key:
+
+| Hash field | Type | Description |
+|------------|------|-------------|
+| usage:model | string | Model identifier (e.g. gpt-4o) |
+| usage:provider | string | Provider identifier (e.g. openai) |
+| usage:inputTokens | string (int) | Input/prompt token count |
+| usage:outputTokens | string (int) | Output/completion token count |
+| usage:totalTokens | string (int) | Total tokens (auto-computed if not set) |
+| usage:costUsd | string (float) | Cost in USD |
+| usage:latencyMs | string (int) | Inference latency in ms |
+| usage:cached | string | true if response was cached |
+
+### Flow-level usage aggregation
+
+queue.getFlowUsage(parentJobId) traverses the job tree and returns totals for inputTokens, outputTokens, costUsd, plus a models map (model name to job count) and jobCount.
+
+### Budget exceeded events
+
+When a flow budget is exceeded (via glidemq_recordUsageAndCheckBudget), the budget hash exceeded field is set to 1. Subsequent jobs in the flow are either failed or paused depending on the onExceeded setting.
+
+Budget state can be queried via queue.getFlowBudget(flowId) which returns { maxTotalTokens, maxCostUsd, usedTokens, usedCost, exceeded, onExceeded }.
+
+### Token-per-minute (TPM) metrics
+
+When tokenLimiter is configured on a worker, token consumption is tracked either locally (in-memory), in Valkey (glide:{queueName}:tpm), or both (default). This enables dual-axis monitoring: RPM (jobs per window) and TPM (tokens per window).
 
 ---
 

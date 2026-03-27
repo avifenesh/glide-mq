@@ -10,11 +10,9 @@ description: >-
 license: Apache-2.0
 metadata:
   author: glide-mq
-  version: "0.11.1"
+  version: "0.13.0"
   tags: bee-queue, migration, glide-mq, valkey, redis, job-queue
-  sources:
-    - agent-knowledge/bee-queue-api.md
-    - docs/USAGE.md
+  sources: docs/USAGE.md
 ---
 
 # Migrate from Bee-Queue to glide-mq
@@ -283,6 +281,13 @@ Features Bee-Queue does not have that are available after migration:
 | Cluster support | Hash-tagged keys, AZ-affinity routing |
 | TLS / IAM auth | `useTLS: true`, IAM credentials for ElastiCache |
 | Native TypeScript | Full generic type support throughout |
+| **AI usage tracking** | `job.reportUsage({ model, inputTokens, ... })` |
+| **Token streaming** | `job.stream()` / `queue.readStream()` for real-time LLM output |
+| **Suspend/resume** | `job.suspend()` / `queue.signal()` for human-in-the-loop |
+| **Flow budget** | `flow.add(tree, { budget: { maxTotalTokens } })` |
+| **Fallback chains** | `opts.fallbacks: [{ model, provider }]` |
+| **Dual-axis rate limiting** | `tokenLimiter` for RPM + TPM compliance |
+| **Vector search** | `queue.createJobIndex()` / `queue.vectorSearch()` |
 
 ## Migration Checklist
 

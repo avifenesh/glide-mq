@@ -1,4 +1,4 @@
-# glide-mq Architecture Plan
+# glide-mq Architecture
 
 ## Context
 
@@ -8,7 +8,7 @@ Building a Node.js message queue library to replace BullMQ. Built exclusively on
 
 All keys share a hash tag `{queueName}` where `queueName` is the queue name. This ensures all keys for a given queue hash to the same cluster slot. Default prefix is `glide`.
 
-```
+`glide-mq``
 glide:{queueName}:id            # String - auto-increment job ID counter
 glide:{queueName}:stream        # Stream - ready jobs (primary queue)
 glide:{queueName}:scheduled     # ZSet - delayed + priority staging (score = timestamp | priority-encoded)
@@ -30,13 +30,18 @@ glide:{queueName}:group:{key}           # Hash - group state (active count, maxC
                                 #        tbCapacity, tbTokens, tbRefillRate, tbLastRefill,
                                 #        tbRefillRemainder)
 glide:{queueName}:groupq:{key}          # List - FIFO wait list for group-limited jobs
+glide:{queueName}:jstream:{id}           # Stream - per-job streaming channel (LLM token output)
+glide:{queueName}:signals:{id}           # List - signals delivered to a suspended job
+glide:{queueName}:suspended              # ZSet - suspended jobs (score = timeout deadline)
+glide:{queueName}:budget:{flowId}        # Hash - flow-level budget state
+glide:{queueName}:tpm                    # Hash - token-per-minute rate limiter state
 glide:{queueName}:ratelimited           # ZSet - scheduler-managed promotion queue for rate-limited jobs
                                 #        (score = earliest eligible timestamp)
-```
+`glide-mq``
 
 ## Job State Machine
 
-```
+`glide-mq``
              scheduled (ZSet)
                |
                v (promotion loop)
@@ -61,9 +66,7 @@ added --> stream (ready) --> PEL (active) --> completed (ZSet)
                        |
                        v (window reset, scheduler promotes)
                      stream (re-queued)
-```
-
-`moveToActive` may return `GROUP_RATE_LIMITED` when a job's ordering-key sliding window rate limit is exceeded, or `GROUP_TOKEN_LIMITED` when the token bucket has insufficient tokens. In both cases, the job is parked in the `glide:{queueName}:ratelimited` ZSet with a score equal to the earliest eligible timestamp. The scheduler's promotion loop picks it up once capacity is available. If a job's `cost` exceeds the bucket's `tbCapacity`, `moveToActive` moves the job to the DLQ instead.
+`glide-mq``glide-mq`moveToActive` may return `GROUP_RATE_LIMITED` when a job's ordering-key sliding window rate limit is exceeded, or `GROUP_TOKEN_LIMITED` when the token bucket has insufficient tokens. In both cases, the job is parked in the `glide:{queueName}:ratelimited` ZSet with a score equal to the earliest eligible timestamp. The scheduler's promotion loop picks it up once capacity is available. If a job's `cost` exceeds the bucket's `tbCapacity`, `moveToActive` moves the job to the DLQ instead.
 
 ### LIFO Mode
 
@@ -121,7 +124,7 @@ redis.register_function('glidemq_complete', function(keys, args) ... end)
 ...
 ```
 
-### Functions (37 in 1 library, not 53 scripts)
+### Functions (44 in 1 library, not 53 scripts)
 
 | Function                         | Keys | Purpose                                                                                 |
 | -------------------------------- | ---- | --------------------------------------------------------------------------------------- |
@@ -161,6 +164,13 @@ redis.register_function('glidemq_complete', function(keys, args) ... end)
 | glidemq_drain                    | 6    | Remove all waiting (and optionally delayed) jobs                                        |
 | glidemq_retryJobs                | 4    | Bulk-retry failed jobs                                                                  |
 | glidemq_healListActive           | 1    | Self-heal list-active counter drift caused by worker crashes                            |
+| glidemq_suspend                  | 4    | Move active job to suspended state, release group slot                       |
+| glidemq_signal                   | 5    | Deliver a signal to a suspended job and re-queue it                          |
+| glidemq_sweepSuspended           | 2    | Fail suspended jobs whose timeout has passed                                 |
+| glidemq_checkBudget              | 1    | Check if a flow budget has been exceeded                                     |
+| glidemq_recordUsageAndCheckBudget| 1    | Atomically increment usage counters and check budget limits                  |
+| glidemq_rateLimitGroup           | N    | Per-group rate limiting for ordering keys                                    |
+| glidemq_rateLimitGroupExternal   | 2    | External rate limit trigger for groups                                       |
 | glidemq_popLists                 | 2    | Check priority + LIFO lists in a single FCALL instead of 2 separate RPOPs               |
 
 ### speedkey API for Functions
@@ -392,6 +402,14 @@ interface FlowJob {
 }
 ```
 
+## Search Module Integration
+
+When the Valkey Search module is available,  uses FT.CREATE to build a secondary index over job hashes. The index prefix is derived from the queue key prefix (e.g. ) and covers all  hashes.
+
+Base schema fields ( as TAG,  as TAG,  as NUMERIC,  as NUMERIC) are always included. Users can add custom fields and a vector field for KNN similarity search via .
+
+Vector embeddings are stored directly in the job hash via  as raw Float32 binary blobs.  constructs a KNN query with optional pre-filter expressions.
+
 ## Project Structure
 
 ```
@@ -431,7 +449,7 @@ glide-mq/
 │   ├── workflows.ts            # chain, group, chord, dag helpers
 │   ├── telemetry.ts            # OpenTelemetry integration
 │   └── graceful-shutdown.ts    # Process signal handling
-├── tests/                      # 82 test files (vitest)
+├── tests/                      # 94 test files (vitest)
 │   ├── integration.test.ts     # Full integration tests
 │   ├── testing-mode.test.ts    # In-memory mode tests (no Valkey)
 │   ├── search.test.ts          # Search feature tests
@@ -476,7 +494,7 @@ Complex workflows with arbitrary dependency graphs are submitted via `FlowProduc
 
 ## Differentiators vs BullMQ
 
-1. **Streams-first**: PEL replaces active list + lock tokens. XAUTOCLAIM replaces stalled job checker scripts. Single function library (37 functions vs 53 EVAL scripts).
+1. **Streams-first**: PEL replaces active list + lock tokens. XAUTOCLAIM replaces stalled job checker scripts. Single function library (44 functions vs 53 EVAL scripts).
 2. **Native NAPI performance**: speedkey's Rust core handles I/O, freeing Node.js event loop. No ioredis overhead.
 3. **Cluster-native**: Hash tags enforced at queue creation. No afterthought `{braces}` requirement.
 4. **Batch API**: Use speedkey's non-atomic Batch for pipelined multi-command operations (auto-splits across cluster nodes).

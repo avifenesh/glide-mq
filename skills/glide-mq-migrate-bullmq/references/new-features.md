@@ -439,3 +439,132 @@ await queue.add('job', data, {
   backoff: { type: 'exponential', delay: 1000, jitter: 0.25 }, // +/- 25% random jitter
 });
 ```
+
+---
+
+## AI-Native Primitives
+
+The following features are purpose-built for LLM/AI orchestration pipelines. None of them exist in BullMQ.
+
+### Usage Metadata (job.reportUsage)
+
+Track model, tokens, cost, and latency per job. Persisted to the job hash and emitted as a `'usage'` event.
+
+```ts
+const worker = new Worker('inference', async (job) => {
+  const result = await callLLM(job.data);
+  await job.reportUsage({
+    model: 'gpt-4o',
+    provider: 'openai',
+    inputTokens: result.promptTokens,
+    outputTokens: result.completionTokens,
+    costUsd: 0.003,
+    latencyMs: 800,
+  });
+  return result.content;
+}, { connection });
+```
+
+### Token Streaming (job.stream / queue.readStream)
+
+Stream LLM output tokens in real-time via per-job Valkey Streams.
+
+```ts
+// Worker side
+const worker = new Worker('chat', async (job) => {
+  for await (const chunk of llmStream) {
+    await job.stream({ token: chunk.text });
+  }
+  return { done: true };
+}, { connection });
+
+// Consumer side
+const entries = await queue.readStream(jobId, { block: 5000 });
+```
+
+### Suspend / Resume (Human-in-the-Loop)
+
+Pause a job to wait for external approval, then resume with signals.
+
+```ts
+// Suspend in processor
+await job.suspend({ reason: 'Needs review', timeout: 86_400_000 });
+
+// Resume externally
+await queue.signal(jobId, 'approve', { reviewer: 'alice' });
+
+// On resume, job.signals contains all received signals
+```
+
+### Budget Middleware (Flow-Level Caps)
+
+Cap total tokens and/or USD cost across all jobs in a flow.
+
+```ts
+await flow.add(flowTree, {
+  budget: { maxTotalTokens: 50_000, maxCostUsd: 0.50, onExceeded: 'fail' },
+});
+
+const budget = await queue.getFlowBudget(parentJobId);
+```
+
+### Fallback Chains
+
+Ordered model/provider alternatives tried on retryable failure.
+
+```ts
+await queue.add('inference', { prompt: '...' }, {
+  attempts: 4,
+  fallbacks: [
+    { model: 'gpt-4o', provider: 'openai' },
+    { model: 'claude-sonnet-4-20250514', provider: 'anthropic' },
+    { model: 'llama-3-70b', provider: 'groq' },
+  ],
+});
+
+// Worker reads job.currentFallback for the active model/provider
+```
+
+### Dual-Axis Rate Limiting (RPM + TPM)
+
+Rate-limit by both requests and tokens per minute for LLM API compliance.
+
+```ts
+const worker = new Worker('inference', processor, {
+  connection,
+  limiter: { max: 60, duration: 60_000 },           // RPM
+  tokenLimiter: { maxTokens: 100_000, duration: 60_000 },  // TPM
+});
+
+// Report tokens in processor
+await job.reportTokens(totalTokens);
+```
+
+### Flow Usage Aggregation
+
+Aggregate AI usage across all jobs in a flow.
+
+```ts
+const usage = await queue.getFlowUsage(parentJobId);
+// { totalInputTokens, totalOutputTokens, totalCostUsd, jobCount, models }
+```
+
+### Vector Search (Valkey Search)
+
+Create search indexes and run KNN vector similarity queries over job hashes.
+
+```ts
+await queue.createJobIndex({
+  vectorField: { name: 'embedding', dimensions: 1536 },
+});
+
+const results = await queue.vectorSearch(queryEmbedding, {
+  k: 10,
+  filter: '@state:{completed}',
+});
+// results: { job, score }[]
+
+await queue.dropJobIndex();
+```
+
+Requires `valkey-search` module on the server (standalone mode).

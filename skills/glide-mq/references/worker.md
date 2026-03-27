@@ -28,6 +28,11 @@ const worker = new Worker(
     metrics?: boolean,                   // record metrics (default: true)
     prefix?: string,
     serializer?: Serializer,
+    tokenLimiter?: {
+      maxTokens: number,          // max tokens per window
+      duration: number,           // window duration in ms
+      scope?: 'queue' | 'worker' | 'both',  // default: 'both'
+    },
     backoffStrategies?: Record<string, (attemptsMade: number, err: Error) => number>,
   },
 );
@@ -128,6 +133,84 @@ await worker.close();        // graceful: waits for active jobs
 await worker.close(true);    // force-close immediately
 ```
 
+## AI Usage & Token Tracking
+
+```typescript
+const worker = new Worker('inference', async (job) => {
+  const result = await callLLM(job.data.prompt);
+
+  // Report AI usage metadata (persisted to job hash, emits 'usage' event)
+  await job.reportUsage({
+    model: 'gpt-4o',
+    provider: 'openai',
+    inputTokens: result.promptTokens,
+    outputTokens: result.completionTokens,
+    costUsd: 0.003,
+    latencyMs: 800,
+  });
+
+  // Or report just tokens for TPM rate limiting
+  await job.reportTokens(result.totalTokens);
+
+  return result.content;
+}, {
+  connection,
+  limiter: { max: 60, duration: 60_000 },        // RPM limit
+  tokenLimiter: { maxTokens: 100_000, duration: 60_000 },  // TPM limit
+});
+```
+
+Worker pauses fetching when either RPM limiter or TPM tokenLimiter is exceeded.
+
+## Token Streaming
+
+```typescript
+const worker = new Worker('chat', async (job) => {
+  const stream = await openai.chat.completions.create({ stream: true, ... });
+  for await (const chunk of stream) {
+    const token = chunk.choices[0]?.delta?.content;
+    if (token) {
+      await job.stream({ token });  // XADD to per-job stream
+    }
+  }
+  return { done: true };
+}, { connection });
+```
+
+Consumers read via `queue.readStream(jobId, opts)`.
+
+## Suspend / Resume (Human-in-the-Loop)
+
+```typescript
+const worker = new Worker('review', async (job) => {
+  // On resume, signals are populated
+  if (job.signals.length > 0) {
+    const approval = job.signals.find(s => s.name === 'approve');
+    if (approval) return { approved: true };
+    return { rejected: true };
+  }
+
+  // First run - suspend for human review
+  await job.suspend({ reason: 'Needs approval', timeout: 86_400_000 });
+  // throws SuspendError - no code after this executes
+}, { connection });
+```
+
+Resume externally via `queue.signal(jobId, 'approve', { ... })`.
+
+## Fallback Chains
+
+```typescript
+const worker = new Worker('inference', async (job) => {
+  const fallback = job.currentFallback;
+  // undefined on first attempt, then fallbacks[0], fallbacks[1], etc.
+  const model = fallback?.model ?? 'gpt-4o-mini';
+  return await callLLM(model, job.data.prompt);
+}, { connection });
+```
+
+Set via `queue.add('inference', data, { fallbacks: [...], attempts: 4 })`.
+
 ## Skipping Retries
 
 ```typescript
@@ -174,3 +257,8 @@ await handle.shutdown(); // programmatic trigger
 - Don't close shared client while worker is alive. Close worker first.
 - Batch processor must return array with length === jobs.length.
 - `moveToDelayed()` must be called from active processor. Throws `DelayedError` internally.
+- `job.suspend()` throws `SuspendError` internally - no code after it executes.
+- `job.reportUsage()` and `job.reportTokens()` reject negative values.
+- `reportTokens()` overwrites previous value (does not accumulate).
+- `tokenLimiter` scope `'both'` checks local counter first, then Valkey (optimal for most setups).
+- Fallback chains require `attempts >= fallbacks.length + 1`.

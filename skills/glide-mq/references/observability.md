@@ -16,6 +16,7 @@ events.on('failed', ({ jobId, failedReason }) => { ... });
 events.on('stalled', ({ jobId }) => { ... });
 events.on('paused', () => { ... });
 events.on('resumed', () => { ... });
+events.on('usage', ({ jobId, data }) => { ... });  // AI usage reported
 
 await events.close();
 ```
@@ -115,6 +116,58 @@ const state = await job.waitUntilFinished(pollIntervalMs, timeoutMs);
 const result = await queue.addAndWait('inference', data, { waitTimeout: 30_000 });
 ```
 
+## AI Usage Telemetry
+
+### Per-Job Usage
+
+```typescript
+// Report usage inside a processor
+await job.reportUsage({
+  model: 'gpt-4o',
+  provider: 'openai',
+  inputTokens: 500,
+  outputTokens: 200,
+  costUsd: 0.003,
+  latencyMs: 800,
+  cached: false,
+});
+
+// Emits a 'usage' event on the events stream
+events.on('usage', ({ jobId, data }) => {
+  const usage = JSON.parse(data);
+  console.log(`Job ${jobId}: ${usage.model} - ${usage.totalTokens} tokens`);
+});
+
+// Read usage from a completed job
+const job = await queue.getJob(jobId);
+console.log(job.usage);
+// { model, provider, inputTokens, outputTokens, totalTokens, costUsd, latencyMs, cached }
+```
+
+### Flow-Level Aggregation
+
+```typescript
+const usage = await queue.getFlowUsage(parentJobId);
+// {
+//   totalInputTokens: 2500,
+//   totalOutputTokens: 1200,
+//   totalCostUsd: 0.015,
+//   jobCount: 4,
+//   models: { 'gpt-4o': 3, 'claude-sonnet-4-20250514': 1 }
+// }
+```
+
+Walks the parent job and all children via the deps set. Includes usage from the parent itself.
+
+### Budget Monitoring
+
+```typescript
+const budget = await queue.getFlowBudget(flowId);
+if (budget && budget.exceeded) {
+  console.warn(`Flow ${flowId} exceeded budget: ${budget.usedTokens} tokens, $${budget.usedCost}`);
+}
+```
+
 ## OpenTelemetry
 
 Auto-emits spans when `@opentelemetry/api` is installed. No code changes needed.
@@ -141,6 +194,7 @@ console.log('Tracing:', isTracingEnabled());
 |-----------|-----------|----------------|
 | `queue.add()` | `glide-mq.queue.add` | `glide-mq.queue`, `glide-mq.job.name`, `glide-mq.job.id`, `.delay`, `.priority` |
 | `flowProducer.add()` | `glide-mq.flow.add` | `glide-mq.queue`, `glide-mq.flow.name`, `.childCount` |
+| `flowProducer.addDAG()` | `glide-mq.flow.addDAG` | `glide-mq.flow.nodeCount` |
 
 ## Gotchas
 

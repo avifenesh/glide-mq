@@ -52,6 +52,8 @@ export type {
   SuspendOptions,
   SignalEntry,
   BudgetOptions,
+  IndexCreateOptions,
+  SearchQueryOptions,
   JobIndexOptions,
   VectorSearchOptions,
   VectorSearchResult,

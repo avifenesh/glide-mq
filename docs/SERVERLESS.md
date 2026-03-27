@@ -210,3 +210,13 @@ await pool.closeAll();
 - **Warm invocation**: Returns the cached client immediately
 - **Container freeze/thaw**: GLIDE auto-reconnects on next command
 - **SIGTERM**: Call `serverlessPool.closeAll()` or `producer.close()` for clean shutdown
+
+## AI Primitives in Serverless
+
+The Producer class supports all job options including fallbacks and lockDuration. However, AI-specific runtime operations (reportUsage, stream, suspend) are only available inside a Worker processor.
+
+For serverless AI patterns:
+
+- **Enqueue with fallbacks**: Set fallbacks in JobOptions when adding jobs from Lambda/Edge.
+- **Budget on flows**: Create flows via FlowProducer with budget options from any environment.
+- **Read results**: Use queue.getFlowUsage() or queue.readStream() from a serverless function to read back AI usage or streaming output after the worker processes the job.

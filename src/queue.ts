@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
-import { InfBoundary, Batch, ClusterBatch, ClusterScanCursor, GlideFt } from '@glidemq/speedkey';
-import type { GlideClient, GlideClusterClient, Field } from '@glidemq/speedkey';
+import { InfBoundary, Batch, ClusterBatch, ClusterScanCursor, GlideFt, SortOrder } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient, Field, FtCreateOptions } from '@glidemq/speedkey';
 import type {
   QueueOptions,
   JobOptions,
@@ -21,6 +21,8 @@ import type {
   WorkerInfo,
   Serializer,
   SignalEntry,
+  IndexCreateOptions,
+  SearchQueryOptions,
   JobIndexOptions,
   VectorSearchOptions,
   VectorSearchResult,
@@ -95,6 +97,23 @@ function matchesData(data: Record<string, unknown>, filter: Record<string, unkno
     if (data[key] !== value) return false;
   }
   return true;
+}
+
+/** Map glide-mq IndexCreateOptions to speedkey FtCreateOptions (minus dataType/prefixes). */
+function mapIndexCreateOptions(opts: IndexCreateOptions): Omit<FtCreateOptions, 'dataType' | 'prefixes'> {
+  return { ...opts };
+}
+
+/** Map glide-mq SearchQueryOptions to speedkey FtSearchOptions format. */
+function mapSearchQueryOptions(opts: SearchQueryOptions): Record<string, any> {
+  const result: Record<string, any> = { ...opts };
+  if (opts.sortby) {
+    result.sortby = {
+      field: opts.sortby.field,
+      ...(opts.sortby.order ? { order: opts.sortby.order === 'ASC' ? SortOrder.ASC : SortOrder.DESC } : {}),
+    };
+  }
+  return result;
 }
 
 export class Queue<D = any, R = any> extends EventEmitter {
@@ -1793,7 +1812,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   /**
    * Read entries from a job's streaming channel.
-   * Uses XRANGE for non-blocking reads. Pass lastId to resume from a known position.
+   * Uses XRANGE for non-blocking reads by default.
+   * When `block` is set and > 0, uses XREAD with BLOCK for long-polling.
+   * Pass lastId to resume from a known position.
    */
   async readStream(
     jobId: string,
@@ -1802,6 +1823,34 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const client = await this.getClient();
     const lastId = opts?.lastId;
     const count = opts?.count ?? 100;
+    const blockMs = opts?.block;
+
+    if (blockMs !== undefined && blockMs > 0) {
+      // Use XREAD with BLOCK for long-polling
+      const streamId = lastId ?? '0-0';
+      const xreadResult = await client.xread(
+        { [this.keys.jstream(jobId)]: streamId },
+        { block: blockMs, count },
+      );
+      if (!xreadResult) return [];
+      const result: { id: string; fields: Record<string, string> }[] = [];
+      for (const streamEntry of xreadResult) {
+        const entries = streamEntry.value;
+        for (const entryId in entries) {
+          if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
+          const fieldPairs = entries[entryId];
+          if (!fieldPairs) continue;
+          const fields: Record<string, string> = Object.create(null);
+          for (const [k, v] of fieldPairs) {
+            fields[String(k)] = String(v);
+          }
+          result.push({ id: String(entryId), fields });
+        }
+      }
+      return result;
+    }
+
+    // Non-blocking: use XRANGE
     const start = lastId
       ? ({ value: lastId, isInclusive: false } as const)
       : InfBoundary.NegativeInfinity;
@@ -1919,7 +1968,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
     let signals: SignalEntry[] = [];
     if (values[4]) {
       try {
-        signals = JSON.parse(String(values[4]));
+        const raw = JSON.parse(String(values[4])) as any[];
+        signals = raw.map(s => ({
+          ...s,
+          data: typeof s.data === 'string' ? (() => { try { return JSON.parse(s.data); } catch { return s.data; } })() : s.data,
+        }));
       } catch {
         // ignore parse errors
       }
@@ -2006,6 +2059,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     }
 
     await GlideFt.create(client, indexName, schema, {
+      ...(opts?.createOptions ? mapIndexCreateOptions(opts.createOptions) : {}),
       dataType: 'HASH',
       prefixes: [searchPrefix],
     });
@@ -2073,11 +2127,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     const query = `${filter}=>[KNN ${k} @${vecFieldName} $BLOB AS ${scoreField}]`;
     const searchOpts: Record<string, any> = {
+      ...(opts?.searchOptions ? mapSearchQueryOptions(opts.searchOptions) : {}),
       params: [{ key: 'BLOB', value: vecBuf }],
       dialect: 2,
       // Request only the score field from the search result to avoid
       // binary vector data causing UTF-8 decode errors. Full job data
-      // is fetched separately via HGETALL.
+      // is fetched separately via HMGET.
       returnFields: [{ fieldIdentifier: scoreField }],
     };
 
