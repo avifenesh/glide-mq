@@ -56,7 +56,7 @@ const parentWorker = new Worker('orchestrator', async (job) => {
     await childQueue.add('chunk-2', { chunk: 2 }, { parent: { queue: 'orchestrator', id: job.id } });
     await childQueue.close();
 
-    // Pause -- throws WaitingChildrenError internally
+    // Pause - throws WaitingChildrenError internally
     await job.moveToWaitingChildren();
   }
 
@@ -90,7 +90,7 @@ const worker = new Worker('pipeline', async (job) => {
       break;
 
     default:
-      // All children done -- collect results
+      // All children done - collect results
       const results = await job.getChildrenValues();
       return { processed: Object.keys(results).length };
   }
@@ -111,4 +111,4 @@ const worker = new Worker('manual', async (job) => {
 }, { connection });
 ```
 
-In practice, use `job.moveToDelayed()` -- it handles the data update and delay scheduling in one call.
+In practice, use `job.moveToDelayed()` - it handles the data update and delay scheduling in one call.

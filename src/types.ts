@@ -1,4 +1,4 @@
-import type { GlideClient, GlideClusterClient, ReadFrom } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient, ReadFrom, Field } from '@glidemq/speedkey';
 
 export type Client = GlideClient | GlideClusterClient;
 
@@ -110,6 +110,20 @@ export interface WorkerOptions extends QueueOptions {
   maxStalledCount?: number;
   promotionInterval?: number;
   limiter?: { max: number; duration: number };
+  /** Token-per-minute rate limiting. Tracks total tokens consumed per time window.
+   *  Worker pauses fetching when either RPM limiter or TPM tokenLimiter is exceeded.
+   *  Tokens reported via job.reportTokens() or auto-extracted from job.reportUsage(). */
+  tokenLimiter?: {
+    /** Max tokens per window. */
+    maxTokens: number;
+    /** Window duration in milliseconds. */
+    duration: number;
+    /** Enforcement scope. Default: 'both'.
+     *  - 'queue': Valkey counter shared across all workers.
+     *  - 'worker': In-memory counter per worker.
+     *  - 'both': Local check first, then Valkey (optimal). */
+    scope?: 'queue' | 'worker' | 'both';
+  };
   backoffStrategies?: Record<string, (attemptsMade: number, err: Error) => number>;
   /** Lock duration in ms. The worker sends a heartbeat every lockDuration/2.
    *  Jobs with a recent heartbeat are not reclaimed as stalled.
@@ -196,6 +210,9 @@ export interface JobOptions {
   attempts?: number;
   backoff?: { type: 'fixed' | 'exponential' | string; delay: number; jitter?: number };
   timeout?: number;
+  /** Override worker-level lockDuration for this specific job (ms).
+   *  Controls heartbeat frequency and stall detection threshold. */
+  lockDuration?: number;
   removeOnComplete?: boolean | number | { age: number; count: number };
   removeOnFail?: boolean | number | { age: number; count: number };
   deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
@@ -209,6 +226,13 @@ export interface JobOptions {
   parents?: Array<{ queue: string; id: string }>;
   /** Time-to-live in milliseconds. Jobs not processed within this window are failed as 'expired'. */
   ttl?: number;
+  /** Ordered list of fallback configurations tried on retryable failure.
+   *  Each entry provides model/provider info the processor reads via job.currentFallback. */
+  fallbacks?: Array<{
+    model: string;
+    provider?: string;
+    metadata?: Record<string, unknown>;
+  }>;
 }
 
 export interface AddAndWaitOptions extends JobOptions {
@@ -267,6 +291,107 @@ export interface BatchOptions {
 }
 
 export type BatchProcessor<D = any, R = any> = (jobs: import('./job').Job<D, R>[]) => Promise<R[]>;
+
+/** Budget constraints for a flow. Caps total token usage and/or USD cost across all jobs. */
+export interface BudgetOptions {
+  /** Hard cap on total tokens across all jobs in this flow. */
+  maxTotalTokens?: number;
+  /** Hard cap on total USD cost across all jobs in this flow. */
+  maxCostUsd?: number;
+  /** What happens when budget is exceeded. Default: 'fail'. */
+  onExceeded?: 'pause' | 'fail';
+}
+
+/** Options passed through to FT.CREATE (glide-mq owned, decoupled from speedkey). */
+export interface IndexCreateOptions {
+  /** Default score for documents. */
+  score?: number;
+  /** Default language for stemming. */
+  language?: string;
+  /** Skip indexing existing documents on creation. */
+  skipInitialScan?: boolean;
+  /** Minimum word length for stemming. */
+  minStemSize?: number;
+  /** Store term offsets. */
+  withOffsets?: boolean;
+  /** Do not store term offsets. */
+  noOffsets?: boolean;
+  /** Disable stop-word filtering. */
+  noStopWords?: boolean;
+  /** Custom stop words. */
+  stopWords?: string[];
+  /** Custom punctuation characters. */
+  punctuation?: string;
+}
+
+/** Options passed through to FT.SEARCH (glide-mq owned, decoupled from speedkey). */
+export interface SearchQueryOptions {
+  /** Return only document IDs, no field content. */
+  nocontent?: boolean;
+  /** Query dialect version. */
+  dialect?: number;
+  /** Disable stemming in query. */
+  verbatim?: boolean;
+  /** Proximity terms must be in order. */
+  inorder?: boolean;
+  /** Slop value for proximity matching. */
+  slop?: number;
+  /** Sort results by field. */
+  sortby?: { field: string; order?: 'ASC' | 'DESC' };
+  /** Scoring function name. */
+  scorer?: string;
+}
+
+/** Options for creating a Valkey Search index over job hashes. */
+export interface JobIndexOptions {
+  /** Index name. Defaults to `{queueName}-idx`. */
+  name?: string;
+  /** Additional schema fields beyond the auto-included base fields (name, state, timestamp, priority). */
+  fields?: Field[];
+  /** Vector field configuration. When omitted, a minimal placeholder vector field is added (required by valkey-search). */
+  vectorField?: {
+    /** Field name in the job hash where the vector is stored. */
+    name: string;
+    /** Number of dimensions in the vector. */
+    dimensions: number;
+    /** Indexing algorithm. Default: 'HNSW'. */
+    algorithm?: 'HNSW' | 'FLAT';
+    /** Distance metric. Default: 'COSINE'. */
+    distanceMetric?: 'COSINE' | 'L2' | 'IP';
+  };
+  /** Pass-through options for FT.CREATE (dataType and prefixes are set automatically). */
+  createOptions?: IndexCreateOptions;
+}
+
+/** Options for vector similarity search over indexed jobs. */
+export interface VectorSearchOptions {
+  /** Index name to search. Defaults to `{queueName}-idx`. */
+  indexName?: string;
+  /** Number of nearest neighbours to return. Default: 10. */
+  k?: number;
+  /** Pre-filter expression applied before KNN (e.g. `@state:{completed}`). */
+  filter?: string;
+  /** Fields to return from each result. When omitted, all indexed fields are returned. */
+  returnFields?: string[];
+  /** Name of the score field in results. Default: `__score`. */
+  scoreField?: string;
+  /** Pass-through options for FT.SEARCH (params are set automatically for vector query). */
+  searchOptions?: SearchQueryOptions;
+}
+
+/** A single result from a vector similarity search. */
+export interface VectorSearchResult<D = any, R = any> {
+  /** The hydrated Job object. */
+  job: import('./job').Job<D, R>;
+  /**
+   * Distance/similarity score from the vector search.
+   * Interpretation depends on the distance metric used in the index:
+   * - COSINE: 0 = identical, 2 = opposite (lower = more similar)
+   * - L2: 0 = identical (lower = more similar)
+   * - IP (inner product): higher = more similar
+   */
+  score: number;
+}
 
 export interface FlowJob {
   name: string;
@@ -429,6 +554,9 @@ export interface DAGFlow {
 export interface ReadStreamOptions {
   lastId?: string;
   count?: number;
+  /** When set and > 0, use XREAD with BLOCK for long-polling (milliseconds).
+   *  A value of 0 means non-blocking (equivalent to omitting). */
+  block?: number;
 }
 
 /** AI-specific usage metadata reported by a job processor. */

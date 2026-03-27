@@ -30,6 +30,8 @@ import type {
   Serializer,
   SignalEntry,
   SuspendOptions,
+  JobIndexOptions,
+  VectorSearchOptions,
 } from './types';
 import { JSON_SERIALIZER } from './types';
 import { GlideMQError, UnrecoverableError, BatchError, SuspendError } from './errors';
@@ -61,6 +63,8 @@ export interface TestJobRecord<D = any, R = any> {
   finishedOn: number | undefined;
   processedOn: number | undefined;
   expireAt?: number;
+  /** Current position in the fallback chain. */
+  fallbackIndex: number;
   /** @internal Per-job streaming channel chunks. */
   streamChunks?: { id: string; fields: Record<string, string> }[];
   /** @internal Counter for synthetic stream entry IDs. */
@@ -73,6 +77,10 @@ export interface TestJobRecord<D = any, R = any> {
   suspendedAt?: number;
   /** @internal Suspend timeout in ms. */
   suspendTimeout?: number;
+  /** @internal Budget key for flow-level budget enforcement. */
+  budgetKey?: string;
+  /** @internal Stored vectors for vector search testing. */
+  vectors?: Map<string, number[]>;
 }
 
 /**
@@ -92,8 +100,11 @@ export class TestJob<D = any, R = any> {
   finishedOn: number | undefined;
   processedOn: number | undefined;
   expireAt?: number;
+  fallbackIndex: number = 0;
   usage?: JobUsage;
+  tpmTokens?: number;
   signals: SignalEntry[] = [];
+  budgetKey?: string;
   /** @internal */ private _record: TestJobRecord<D, R>;
 
   constructor(record: TestJobRecord<D, R>) {
@@ -110,7 +121,14 @@ export class TestJob<D = any, R = any> {
     this.finishedOn = record.finishedOn;
     this.processedOn = record.processedOn;
     this.expireAt = record.expireAt;
+    this.fallbackIndex = record.fallbackIndex;
     this.signals = record.signals ?? [];
+    this.budgetKey = record.budgetKey;
+  }
+
+  get currentFallback(): { model: string; provider?: string; metadata?: Record<string, unknown> } | undefined {
+    if (!this.opts.fallbacks || this.fallbackIndex === 0) return undefined;
+    return this.opts.fallbacks[this.fallbackIndex - 1];
   }
 
   async log(_message: string): Promise<void> {
@@ -164,6 +182,11 @@ export class TestJob<D = any, R = any> {
     this.usage = resolved;
   }
 
+  async reportTokens(count: number): Promise<void> {
+    if (count < 0) throw new Error('Token count must not be negative');
+    this.tpmTokens = count;
+  }
+
   async stream(chunk: Record<string, string>): Promise<string> {
     if (Object.keys(chunk).length === 0) {
       throw new Error('Stream chunk must not be empty');
@@ -193,6 +216,15 @@ export class TestJob<D = any, R = any> {
     if (!this._record.signals) this._record.signals = [];
     throw new SuspendError();
   }
+
+  /**
+   * Store a vector embedding on this job (in-memory for testing mode).
+   */
+  async storeVector(field: string, embedding: number[] | Float32Array): Promise<void> {
+    if (!this._record.vectors) this._record.vectors = new Map();
+    const arr = embedding instanceof Float32Array ? Array.from(embedding) : embedding;
+    this._record.vectors.set(field, arr);
+  }
 }
 
 // ---- Search options ----
@@ -211,6 +243,21 @@ function matchesData(data: Record<string, unknown>, filter: Record<string, unkno
     if (data[key] !== value) return false;
   }
   return true;
+}
+
+/** Compute cosine similarity between two vectors. Returns value in [-1, 1]. */
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denom === 0) return 0;
+  return dot / denom;
 }
 
 // ---- TestQueue ----
@@ -233,15 +280,27 @@ export interface TestQueueOptions {
  * - repeatAfterComplete behaves like 'every'
  * - No sandbox processor support
  */
+/** Budget state stored in-memory for testing mode. */
+interface TestBudgetState {
+  maxTotalTokens?: number;
+  maxCostUsd?: number;
+  usedTokens: number;
+  usedCost: number;
+  exceeded: boolean;
+  onExceeded: 'pause' | 'fail';
+}
+
 export class TestQueue<D = any, R = any> extends EventEmitter {
   readonly name: string;
   /** @internal */ readonly jobs: Map<string, TestJobRecord<D, R>> = new Map();
   /** @internal */ readonly dedupSet: Set<string> = new Set();
   /** @internal */ readonly waitingQueue: TestJobRecord<D, R>[] = [];
+  /** @internal */ readonly budgets: Map<string, TestBudgetState> = new Map();
   private idCounter = 0;
   private paused = false;
   private opts: TestQueueOptions;
   /** @internal */ readonly serializer: Serializer;
+  /** @internal */ private indexConfig: JobIndexOptions | null = null;
 
   /** @internal */ readonly metricsData: Map<string, Map<number, { count: number; totalDuration: number }>> = new Map([
     ['completed', new Map()],
@@ -309,6 +368,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       finishedOn: undefined,
       processedOn: undefined,
       expireAt: ttl > 0 ? now + ttl : undefined,
+      fallbackIndex: 0,
     };
     this.jobs.set(id, record);
     this.waitingQueue.push(record);
@@ -688,21 +748,103 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     return agg;
   }
 
+  /**
+   * Read the budget state for a flow. Returns null if no budget was set.
+   */
+  async getFlowBudget(flowId: string): Promise<{
+    maxTotalTokens?: number;
+    maxCostUsd?: number;
+    usedTokens: number;
+    usedCost: number;
+    exceeded: boolean;
+    onExceeded: 'pause' | 'fail';
+  } | null> {
+    const budget = this.budgets.get(flowId);
+    if (!budget) return null;
+    return { ...budget };
+  }
+
+  /**
+   * @internal Set a budget for a flow (used by test setup).
+   */
+  setBudget(flowId: string, budget: {
+    maxTotalTokens?: number;
+    maxCostUsd?: number;
+    onExceeded?: 'pause' | 'fail';
+  }): void {
+    this.budgets.set(flowId, {
+      maxTotalTokens: budget.maxTotalTokens,
+      maxCostUsd: budget.maxCostUsd,
+      usedTokens: 0,
+      usedCost: 0,
+      exceeded: false,
+      onExceeded: budget.onExceeded ?? 'fail',
+    });
+  }
+
+  /**
+   * @internal Record usage against a budget and check if exceeded.
+   * Returns 'ok', 'exceeded', or 'no_budget'.
+   */
+  recordBudgetUsage(budgetKey: string, tokens: number, costUsd: number): string {
+    const budget = this.budgets.get(budgetKey);
+    if (!budget) return 'no_budget';
+
+    budget.usedTokens += tokens;
+    budget.usedCost += costUsd;
+
+    const tokenExceeded = (budget.maxTotalTokens ?? 0) > 0 && budget.usedTokens > budget.maxTotalTokens!;
+    const costExceeded = (budget.maxCostUsd ?? 0) > 0 && budget.usedCost > budget.maxCostUsd!;
+
+    if (tokenExceeded || costExceeded) {
+      budget.exceeded = true;
+      return 'exceeded';
+    }
+    return 'ok';
+  }
+
+  /**
+   * @internal Check if a budget is exceeded. Returns 'ok', 'exceeded', or 'no_budget'.
+   */
+  checkBudget(budgetKey: string): string {
+    const budget = this.budgets.get(budgetKey);
+    if (!budget) return 'no_budget';
+    return budget.exceeded ? 'exceeded' : 'ok';
+  }
+
   async readStream(
     jobId: string,
-    opts?: { lastId?: string; count?: number },
+    opts?: { lastId?: string; count?: number; block?: number },
   ): Promise<{ id: string; fields: Record<string, string> }[]> {
     const record = this.jobs.get(jobId);
     if (!record) return [];
-    const chunks = record.streamChunks ?? [];
     const lastId = opts?.lastId;
     const count = opts?.count ?? 100;
-    let filtered = chunks;
-    if (lastId) {
-      const idx = chunks.findIndex((c) => c.id === lastId);
-      filtered = idx >= 0 ? chunks.slice(idx + 1) : chunks;
+    const blockMs = opts?.block;
+
+    const readChunks = (): { id: string; fields: Record<string, string> }[] => {
+      const chunks = record.streamChunks ?? [];
+      let filtered = chunks;
+      if (lastId) {
+        const idx = chunks.findIndex((c) => c.id === lastId);
+        filtered = idx >= 0 ? chunks.slice(idx + 1) : chunks;
+      }
+      return filtered.slice(0, count);
+    };
+
+    const immediate = readChunks();
+    if (immediate.length > 0 || !blockMs || blockMs <= 0) {
+      return immediate;
     }
-    return filtered.slice(0, count);
+
+    // Simulate blocking: poll at 50ms intervals until timeout
+    const deadline = Date.now() + blockMs;
+    while (Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, Math.min(50, deadline - Date.now())));
+      const result = readChunks();
+      if (result.length > 0) return result;
+    }
+    return [];
   }
 
   /**
@@ -747,6 +889,61 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       timeout: record.suspendTimeout,
       signals: record.signals ?? [],
     };
+  }
+
+  /**
+   * Create a job index (in-memory no-op, stores config for vectorSearch).
+   */
+  async createJobIndex(opts?: JobIndexOptions): Promise<void> {
+    this.indexConfig = opts ?? {};
+  }
+
+  /**
+   * Drop the job index (clears stored config).
+   */
+  async dropJobIndex(_name?: string): Promise<void> {
+    this.indexConfig = null;
+  }
+
+  /**
+   * Vector similarity search over jobs with stored vectors (brute-force cosine similarity).
+   * Requires prior createJobIndex call.
+   */
+  async vectorSearch(
+    embedding: number[] | Float32Array,
+    opts?: VectorSearchOptions,
+  ): Promise<{ job: TestJob<D, R>; score: number }[]> {
+    if (!this.indexConfig) {
+      throw new Error('No index created. Call createJobIndex() first.');
+    }
+    const k = opts?.k ?? 10;
+    const query = Array.from(embedding);
+    const vecFieldName = this.indexConfig.vectorField?.name ?? '_vec';
+
+    const candidates: { record: TestJobRecord<D, R>; score: number }[] = [];
+    for (const record of this.jobs.values()) {
+      // Apply pre-filter if provided
+      if (opts?.filter) {
+        const stateMatch = opts.filter.match(/@state:\{(\w+)\}/);
+        if (stateMatch && record.state !== stateMatch[1]) continue;
+      }
+      const vectors = record.vectors;
+      if (!vectors) continue;
+      const vec = vectors.get(vecFieldName);
+      if (!vec || vec.length !== query.length) continue;
+      const sim = cosineSimilarity(query, vec);
+      // Convert similarity to distance (lower = more similar, matching Valkey COSINE behavior)
+      const distance = 1 - sim;
+      candidates.push({ record, score: distance });
+    }
+
+    candidates.sort((a, b) => a.score - b.score);
+    const topK = candidates.slice(0, k);
+
+    return topK.map((c) => ({
+      job: new TestJob<D, R>(c.record),
+      score: c.score,
+    }));
   }
 
   async close(): Promise<void> {
@@ -887,6 +1084,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 export interface TestWorkerOptions {
   concurrency?: number;
   batch?: { size: number; timeout?: number };
+  /** Token-per-minute rate limiting (in-memory only for testing mode). */
+  tokenLimiter?: {
+    maxTokens: number;
+    duration: number;
+  };
 }
 
 export class TestWorker<D = any, R = any> extends EventEmitter {
@@ -905,6 +1107,9 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private readonly batchTimeout: number;
   private readonly batchProcessor: ((jobs: TestJob<D, R>[]) => Promise<R[]>) | null;
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly tokenLimiter: TestWorkerOptions['tokenLimiter'];
+  private tpmLocalCounter = 0;
+  private tpmWindowStart = 0;
 
   constructor(
     queue: TestQueue<D, R>,
@@ -956,6 +1161,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       }
     }
     this.concurrency = opts?.concurrency ?? 1;
+    this.tokenLimiter = opts?.tokenLimiter;
     this.id = `test-worker-${++TestWorker.idCounter}`;
     this.startedAt = Date.now();
 
@@ -1040,7 +1246,39 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       }
       return;
     }
-    this.processor(job as any)
+    // Pre-dispatch budget check
+    if (record.budgetKey) {
+      const budgetStatus = this.queue.checkBudget(record.budgetKey);
+      if (budgetStatus === 'exceeded') {
+        const budget = this.queue.budgets.get(record.budgetKey);
+        this.emit('budget-exceeded', job, record.id);
+        if (budget?.onExceeded === 'pause') {
+          // Move back to waiting for later retry
+          record.state = 'waiting';
+          this.activeCount--;
+          if (this.running && !this.queue.isPaused()) {
+            this.processAvailable();
+          }
+          return;
+        }
+        record.state = 'failed';
+        record.failedReason = 'Budget exceeded';
+        record.finishedOn = Date.now();
+        job.failedReason = 'Budget exceeded';
+        job.finishedOn = record.finishedOn;
+        this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
+        const err = new Error('Budget exceeded');
+        this.emit('failed', job, err);
+        this.queue.emit('failed', job, err);
+        this.activeCount--;
+        if (this.running && !this.queue.isPaused()) {
+          this.processAvailable();
+        }
+        return;
+      }
+    }
+    this.waitForTokenLimitIfNeeded()
+      .then(() => this.processor(job as any))
       .then((result) => {
         // Roundtrip returnvalue through serializer to match production behavior
         const s = this.queue.serializer;
@@ -1053,6 +1291,24 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
         this.emit('completed', job, roundtripped);
         this.queue.emit('completed', job, roundtripped);
+
+        // Post-completion TPM tracking
+        if (this.tokenLimiter) {
+          const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
+          this.incrementLocalTpm(tpmTokens);
+        }
+
+        // Post-completion budget check
+        if (record.budgetKey && job.usage) {
+          const tokens = job.usage.totalTokens ?? 0;
+          const cost = job.usage.costUsd ?? 0;
+          if (tokens > 0 || cost > 0) {
+            const budgetResult = this.queue.recordBudgetUsage(record.budgetKey, tokens, cost);
+            if (budgetResult === 'exceeded') {
+              this.emit('budget-exceeded', job, record.id);
+            }
+          }
+        }
       })
       .catch((err: Error) => {
         // Handle suspend: the job is already marked suspended by TestJob.suspend()
@@ -1067,6 +1323,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
         const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
         if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
+          // Advance fallback chain if configured
+          if (record.opts.fallbacks && record.opts.fallbacks.length > 0) {
+            record.fallbackIndex++;
+          }
           // Retry: put back to waiting
           record.state = 'waiting';
           this.queue.waitingQueue.push(record);
@@ -1212,6 +1472,9 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
               const skipRetry =
                 job.discarded || result instanceof UnrecoverableError || result.name === 'UnrecoverableError';
               if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
+                if (record.opts.fallbacks && record.opts.fallbacks.length > 0) {
+                  record.fallbackIndex++;
+                }
                 record.state = 'waiting';
                 this.queue.waitingQueue.push(record);
                 queueMicrotask(() => this.processAvailable());
@@ -1248,6 +1511,9 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
             const maxAttempts = record.opts.attempts ?? 0;
             const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
             if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
+              if (record.opts.fallbacks && record.opts.fallbacks.length > 0) {
+                record.fallbackIndex++;
+              }
               record.state = 'waiting';
               this.queue.waitingQueue.push(record);
               queueMicrotask(() => this.processAvailable());
@@ -1270,6 +1536,36 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           this.processAvailable();
         }
       });
+  }
+
+  /** Wait if the TPM counter exceeds the limit for the current window. */
+  private async waitForTokenLimitIfNeeded(): Promise<void> {
+    if (!this.tokenLimiter) return;
+    const tl = this.tokenLimiter;
+
+    while (true) {
+      const now = Date.now();
+      // Reset window if expired
+      if (now >= this.tpmWindowStart + tl.duration) {
+        this.tpmLocalCounter = 0;
+        this.tpmWindowStart = now - (now % tl.duration);
+      }
+      if (this.tpmLocalCounter < tl.maxTokens) break;
+      const sleepMs = this.tpmWindowStart + tl.duration - now;
+      if (sleepMs <= 0) continue;
+      await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+    }
+  }
+
+  /** Increment the local TPM counter after a job completes. */
+  private incrementLocalTpm(tokens: number): void {
+    if (tokens <= 0 || !this.tokenLimiter) return;
+    const now = Date.now();
+    if (now >= this.tpmWindowStart + this.tokenLimiter.duration) {
+      this.tpmLocalCounter = 0;
+      this.tpmWindowStart = now - (now % this.tokenLimiter.duration);
+    }
+    this.tpmLocalCounter += tokens;
   }
 
   /** Return the number of jobs currently being processed. */

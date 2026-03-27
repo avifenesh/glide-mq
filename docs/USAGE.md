@@ -10,7 +10,15 @@
 - [Broadcast / BroadcastWorker](#broadcast--broadcastworker)
 - [Event Listeners](#event-listeners)
 - [AI-native Primitives](#ai-native-primitives)
+  - [Job Metadata (reportUsage / getFlowUsage)](#job-metadata-reportusage--getflowusage)
+  - [Job Streaming Channel (stream / readStream)](#job-streaming-channel-stream--readstream)
   - [Suspend/Resume with Signals](#suspendresume-with-signals)
+  - [Fallback Chains](#fallback-chains)
+  - [Budget Middleware](#budget-middleware-flow-level-tokencost-caps)
+  - [Dual-axis Rate Limiting (RPM + TPM)](#dual-axis-rate-limiting-rpm--tpm)
+  - [Per-job Lock Duration](#per-job-lock-duration)
+  - [Vector Search](#vector-search-createjobindex--storevector--vectorsearch)
+  - [Proxy Endpoints](#proxy-endpoints)
 
 ---
 
@@ -611,6 +619,8 @@ The job is marked as permanently failed regardless of the `attempts` configurati
 
 ## AI-native Primitives
 
+glide-mq ships 7 AI-native primitives plus vector search. They work in both production (Valkey) and testing mode (in-memory).
+
 ### Job Metadata (reportUsage / getFlowUsage)
 
 Track token usage, cost, and latency per job for cost attribution and observability.
@@ -635,10 +645,10 @@ const worker = new Worker('llm-tasks', async (job) => {
 
 // Aggregate usage for a job flow (parent + all children)
 const usage = await queue.getFlowUsage(parentJobId);
-console.log(usage.totalTokens, usage.costUsd);
+console.log(usage.totalInputTokens + usage.totalOutputTokens, usage.totalCostUsd);
 ```
 
-`reportUsage()` persists usage to the job hash in Valkey. `job.usage` is populated when the job is fetched via `getJob()`. `getFlowUsage()` walks the DAG upward and sums all fields.
+`reportUsage()` persists usage to the job hash in Valkey. `job.usage` is populated when the job is fetched via `getJob()`. `getFlowUsage()` walks the job tree downward from the parent and sums all fields.
 
 ### Job Streaming Channel (stream / readStream)
 
@@ -756,3 +766,50 @@ const worker = new TestWorker(queue, async (job) => {
 // Signal from outside
 const resumed = await queue.signal(jobId, 'approve');
 ```
+
+
+### Fallback Chains
+
+Ordered list of model/provider alternatives tried on retryable failure. The worker auto-advances through the chain on each retry.
+
+Set fallbacks in JobOptions when adding a job. Inside the processor, read job.currentFallback to determine which model to use. job.fallbackIndex starts at 0 (original request). On each retry failure, glidemq_fail increments the index by 1. Each fallback entry can carry arbitrary metadata for provider-specific configuration.
+
+See [ADVANCED.md](./ADVANCED.md#fallback-chains) for details on how the chain advances.
+
+### Budget Middleware (Flow-level Token/Cost Caps)
+
+Enforce hard caps on total tokens and/or USD cost across all jobs in a flow. Pass a budget option to FlowProducer.add() with maxTotalTokens, maxCostUsd, and onExceeded (fail or pause). When a job calls reportUsage() inside a budgeted flow, the worker calls glidemq_recordUsageAndCheckBudget to atomically increment counters and check limits.
+
+Query budget state via queue.getFlowBudget(flowId). Budget state is stored in glide:{queueName}:budget:{flowId}.
+
+See [USAGE.md AI-native Primitives section](#budget-middleware-flow-level-tokencost-caps) in the main usage guide for full examples.
+
+### Dual-axis Rate Limiting (RPM + TPM)
+
+The tokenLimiter on WorkerOptions adds token-per-minute (TPM) rate limiting alongside the existing RPM limiter. Both limits compose - the worker pauses fetching when either is exceeded.
+
+Jobs report token consumption via job.reportTokens(count) or automatically via job.reportUsage() (which extracts totalTokens). Supports three scopes: queue (shared Valkey counter), worker (in-memory), or both (default - local check first, then Valkey).
+
+### Per-job Lock Duration
+
+Override the worker-level lockDuration for individual jobs via opts.lockDuration. Useful for mixed workloads where some jobs are fast and others are long-running. The per-job lockDuration is read by glidemq_reclaimStalled and glidemq_reclaimStalledListJobs to set the stall threshold per job.
+
+### Vector Search (createJobIndex / storeVector / vectorSearch)
+
+Create a Valkey Search index over job hashes, store vector embeddings, and run KNN similarity search. Requires the Valkey Search module.
+
+Use queue.createJobIndex() to create an index with optional vector fields. Inside the processor, call job.storeVector(field, embedding) to store Float32 vectors. Query with queue.vectorSearch(embedding, opts) for KNN results.
+
+The index is built over job hashes using FT.CREATE. Base fields (name, state, timestamp, priority) are always included. Testing mode provides in-memory parity via TestJob.storeVector(), TestQueue.createJobIndex(), and TestQueue.vectorSearch().
+
+See [ADVANCED.md](./ADVANCED.md#vector-search-index-management) for index management details.
+
+### Proxy Endpoints
+
+The proxy (glide-mq/proxy) exposes two AI-specific endpoints:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /queues/:name/jobs/:id/stream | SSE stream of job output chunks. Supports Last-Event-ID header and ?lastId query param. |
+| POST | /queues/:name/jobs/:id/signal | Send a signal to a suspended job. Body: { "name": "...", "data": ... }. Returns { "resumed": true/false }. |
+

@@ -71,9 +71,7 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
     // i.e. { key, value }[] where value is Record<entryId, fieldPairs | null>
     for (const streamEntry of result) {
       const entries = streamEntry.value;
-      for (const entryId in entries) {
-        if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
-        const fieldPairs = entries[entryId];
+      for (const [entryId, fieldPairs] of Object.entries(entries)) {
         if (!fieldPairs) continue; // deleted entry
 
         // Parse the stream entry fields to extract jobId
@@ -182,9 +180,7 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
 
     for (const streamEntry of initialResult) {
       const entries = streamEntry.value;
-      for (const entryId in entries) {
-        if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
-        const fieldPairs = entries[entryId];
+      for (const [entryId, fieldPairs] of Object.entries(entries)) {
         if (!fieldPairs) continue;
 
         let jobId: string | null = null;
@@ -218,9 +214,7 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
         if (!moreResult) continue;
         for (const streamEntry of moreResult) {
           const entries = streamEntry.value;
-          for (const entryId in entries) {
-            if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
-            const fieldPairs = entries[entryId];
+          for (const [entryId, fieldPairs] of Object.entries(entries)) {
             if (!fieldPairs) continue;
             let jobId: string | null = null;
             for (let i = 0; i < fieldPairs.length; i++) {

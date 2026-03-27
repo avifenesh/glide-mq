@@ -1,6 +1,6 @@
 services:
   valkey:
-    image: valkey/valkey:8.0
+    image: valkey/valkey-bundle:latest
     ports:
       - "6379:6379"
     command: valkey-server --save "" --appendonly no --maxmemory-policy noeviction

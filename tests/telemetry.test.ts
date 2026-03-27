@@ -93,7 +93,7 @@ describe('Telemetry', () => {
       expect(span.setAttribute).toHaveBeenCalledWith('glide-mq.job.delay', 0);
       expect(span.setAttribute).toHaveBeenCalledWith('glide-mq.job.priority', 0);
       expect(span.setAttribute).toHaveBeenCalledWith('glide-mq.job.id', '42');
-      expect(span.setStatus).toHaveBeenCalledWith({ code: 0 });
+      expect(span.setStatus).toHaveBeenCalledWith({ code: 1 });
       expect(span.end).toHaveBeenCalled();
       expect(job).not.toBeNull();
       expect(job!.id).toBe('42');
@@ -142,7 +142,7 @@ describe('Telemetry', () => {
 
       await expect(queue.add('email', {})).rejects.toThrow('connection lost');
 
-      expect(span.setStatus).toHaveBeenCalledWith(expect.objectContaining({ code: 1, message: 'connection lost' }));
+      expect(span.setStatus).toHaveBeenCalledWith(expect.objectContaining({ code: 2, message: 'connection lost' }));
       expect(span.recordException).toHaveBeenCalled();
       expect(span.end).toHaveBeenCalled();
 
@@ -237,7 +237,7 @@ describe('Telemetry', () => {
       expect(tracer.startSpan).toHaveBeenCalledWith('test.operation');
       expect(span.setAttribute).toHaveBeenCalledWith('attr1', 'value1');
       expect(span.setAttribute).toHaveBeenCalledWith('attr2', 42);
-      expect(span.setStatus).toHaveBeenCalledWith({ code: 0 });
+      expect(span.setStatus).toHaveBeenCalledWith({ code: 1 });
       expect(span.end).toHaveBeenCalled();
       expect(result).toBe('done');
 
@@ -258,7 +258,7 @@ describe('Telemetry', () => {
         }),
       ).rejects.toThrow('boom');
 
-      expect(span.setStatus).toHaveBeenCalledWith(expect.objectContaining({ code: 1, message: 'boom' }));
+      expect(span.setStatus).toHaveBeenCalledWith(expect.objectContaining({ code: 2, message: 'boom' }));
       expect(span.recordException).toHaveBeenCalledWith(error);
       expect(span.end).toHaveBeenCalled();
 

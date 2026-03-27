@@ -10,10 +10,9 @@ description: >-
 license: Apache-2.0
 metadata:
   author: glide-mq
-  version: "0.11.1"
+  version: "0.13.0"
   tags: glide-mq, bullmq, migration, queue, valkey, redis
-  sources:
-    - docs/MIGRATION.md
+  sources: docs/MIGRATION.md
 ---
 
 # Migrate from BullMQ to glide-mq
@@ -309,6 +308,14 @@ await queue.add('job', data, {
 | Job search | `queue.searchJobs(opts)` | Full-text search over job data |
 | excludeData | `queue.getJobs(type, start, end, { excludeData: true })` | Lightweight listings |
 | `globalConcurrency` | On WorkerOptions | Set queue-wide cap at worker startup |
+| **AI usage tracking** | `job.reportUsage({ model, inputTokens, ... })` | Per-job LLM usage metadata |
+| **Token streaming** | `job.stream({ token })` / `queue.readStream(jobId)` | Real-time LLM output via per-job streams |
+| **Suspend/resume** | `job.suspend()` / `queue.signal(jobId, name, data)` | Human-in-the-loop approval |
+| **Flow budget** | `flow.add(tree, { budget: { maxTotalTokens } })` | Cap tokens/cost across a flow |
+| **Fallback chains** | `opts.fallbacks: [{ model, provider }]` | Ordered model/provider failover |
+| **Dual-axis rate limiting** | `tokenLimiter: { maxTokens, duration }` | RPM + TPM for LLM API compliance |
+| **Flow usage aggregation** | `queue.getFlowUsage(parentJobId)` | Aggregate tokens/cost across a flow |
+| **Vector search** | `queue.createJobIndex()` / `queue.vectorSearch()` | KNN similarity search over job hashes |
 
 See [references/new-features.md](references/new-features.md) for detailed documentation.
 

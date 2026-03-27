@@ -346,3 +346,101 @@ Custom serialization for job data (e.g., MessagePack, Protocol Buffers).
 const queue = new Queue('tasks', { connection, serializer: customSerializer });
 const worker = new Worker('tasks', processor, { connection, serializer: customSerializer });
 ```
+
+## AI-Native Primitives
+
+glide-mq is purpose-built for LLM/AI orchestration. None of these exist in Bee-Queue.
+
+### Usage Metadata
+
+Track model, tokens, cost, and latency per job.
+
+```typescript
+await job.reportUsage({
+  model: 'gpt-4o',
+  provider: 'openai',
+  inputTokens: 500,
+  outputTokens: 200,
+  costUsd: 0.003,
+  latencyMs: 800,
+});
+```
+
+### Token Streaming
+
+Stream LLM output tokens in real-time via per-job Valkey Streams.
+
+```typescript
+// Worker: emit chunks
+await job.stream({ token: 'Hello' });
+
+// Consumer: read chunks (supports long-polling)
+const entries = await queue.readStream(jobId, { block: 5000 });
+```
+
+### Suspend / Resume (Human-in-the-Loop)
+
+Pause a job for external approval, resume with signals.
+
+```typescript
+await job.suspend({ reason: 'Needs review', timeout: 86_400_000 });
+// Externally:
+await queue.signal(jobId, 'approve', { reviewer: 'alice' });
+```
+
+### Flow Budget
+
+Cap total tokens/cost across all jobs in a workflow flow.
+
+```typescript
+await flow.add(flowTree, {
+  budget: { maxTotalTokens: 50_000, maxCostUsd: 0.50 },
+});
+```
+
+### Fallback Chains
+
+Ordered model/provider alternatives on retryable failure.
+
+```typescript
+await queue.add('inference', data, {
+  attempts: 4,
+  fallbacks: [
+    { model: 'gpt-4o', provider: 'openai' },
+    { model: 'claude-sonnet-4-20250514', provider: 'anthropic' },
+    { model: 'llama-3-70b', provider: 'groq' },
+  ],
+});
+```
+
+### Dual-Axis Rate Limiting (RPM + TPM)
+
+Rate-limit by both requests and tokens per minute for LLM API compliance.
+
+```typescript
+const worker = new Worker('inference', processor, {
+  connection,
+  limiter: { max: 60, duration: 60_000 },
+  tokenLimiter: { maxTokens: 100_000, duration: 60_000 },
+});
+```
+
+### Flow Usage Aggregation
+
+Aggregate AI usage across all jobs in a flow.
+
+```typescript
+const usage = await queue.getFlowUsage(parentJobId);
+// { totalInputTokens, totalOutputTokens, totalCostUsd, jobCount, models }
+```
+
+### Vector Search
+
+KNN similarity search over job hashes via Valkey Search.
+
+```typescript
+await queue.createJobIndex({
+  vectorField: { name: 'embedding', dimensions: 1536 },
+});
+const results = await queue.vectorSearch(queryEmbedding, { k: 10 });
+```

@@ -12,6 +12,7 @@ glide-mq ships a built-in in-memory backend so you can unit-test job processors 
 - [Batch Testing](#batch-testing)
 - [Deduplication Testing](#deduplication-testing)
 - [Step Jobs in Tests](#step-jobs-in-tests)
+- [AI Primitives in Tests](#ai-primitives-in-tests)
 - [Tips](#tips)
 
 ---
@@ -300,6 +301,58 @@ const worker = new Worker('steps', async (job) => {
 ```
 
 For unit-testing the logic *around* steps (data transformations, branching decisions), you can still use `TestQueue` and `TestWorker` — just skip the `moveToDelayed` call in test mode or guard it behind an environment check.
+
+---
+
+
+---
+
+## AI Primitives in Tests
+
+All AI-native primitives have full testing mode parity - no Valkey needed.
+
+### TestJob methods
+
+| Method | Description |
+|--------|-------------|
+| `reportUsage(usage)` | Store AI usage metadata (model, tokens, cost, latency). Validates non-negative token counts. |
+| `stream(chunk)` | Append a chunk to the in-memory streaming channel. Returns a synthetic stream entry ID. |
+| `storeVector(field, embedding)` | Store a vector embedding for later similarity search. Accepts number[] or Float32Array. |
+| `suspend(opts?)` | Move the job to suspended state. Throws SuspendError to halt the processor. |
+
+### TestQueue methods
+
+| Method | Description |
+|--------|-------------|
+| `readStream(jobId, opts?)` | Read chunks from a streaming channel. Supports lastId, count, and block. |
+| `signal(jobId, name, data?)` | Send a signal to a suspended job. Returns true if the job was suspended. |
+| `getSuspendInfo(jobId)` | Get suspension state or null. |
+| `getFlowUsage(parentJobId)` | Aggregate usage across parent and children. |
+| `getFlowBudget(flowId)` | Get budget state for a flow or null. |
+| `createJobIndex(opts?)` | Store index configuration in memory. |
+| `vectorSearch(embedding, opts?)` | Run cosine-similarity KNN search over stored vectors. |
+
+### Example: testing an AI workflow
+
+The TestJob and TestQueue classes mirror the real API:
+
+```ts
+const queue = new TestQueue('test');
+const worker = new TestWorker('test', async (job) => {
+  await job.reportUsage({ model: 'gpt-4o', inputTokens: 100, outputTokens: 50 });
+  await job.stream({ type: 'token', content: 'hello' });
+  return 'done';
+});
+worker.start();
+const job = await queue.add('ai-task', { prompt: 'test' });
+// After processing: job.usage.model === 'gpt-4o'
+// queue.readStream(job.id) returns streamed chunks
+```
+. Call stream(), reportUsage(), storeVector() inside the processor, then verify with readStream(), getFlowUsage(), and vectorSearch() on the queue.
+
+### Example: testing suspend/resume
+
+Call job.suspend() inside the processor, then queue.signal() from outside. Use getSuspendInfo() to verify state between the two calls.
 
 ---
 

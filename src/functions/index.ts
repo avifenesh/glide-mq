@@ -36,7 +36,10 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 74: glidemq_removeJob/clean/drain delete per-job streaming channel keys (jstream:).
 // Version 75: Suspend/resume with signals: glidemq_suspend, glidemq_signal, glidemq_sweepSuspended.
 // Version 76: glidemq_clean and glidemq_drain delete signals: keys to prevent key leaks.
-export const LIBRARY_VERSION = '76';
+// Version 77: Per-job lockDuration: reclaimStalled/reclaimStalledListJobs read lockDuration from job opts for per-job stall threshold.
+// Version 78: glidemq_fail increments fallbackIndex on retry when job has fallbacks configured.
+// Version 79: Budget middleware: glidemq_checkBudget, glidemq_recordUsageAndCheckBudget.
+export const LIBRARY_VERSION = '79';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -438,6 +441,13 @@ local function extractTtlFromOpts(optsJson)
   local ok, decoded = pcall(cjson.decode, optsJson)
   if not ok or type(decoded) ~= 'table' then return 0 end
   return tonumber(decoded['ttl']) or 0
+end
+
+local function extractLockDurationFromOpts(optsJson)
+  if not optsJson or optsJson == '' then return 0 end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then return 0 end
+  return tonumber(decoded['lockDuration']) or 0
 end
 
 -- Apply stall logic to a job: increment stalledCount, fail if over max, else emit stalled event.
@@ -1340,6 +1350,12 @@ redis.register_function('glidemq_fail', function(keys, args)
     attemptsMade = redis.call('HINCRBY', jobKey, 'attemptsMade', 1)
   end
   if maxAttempts > 0 and attemptsMade < maxAttempts then
+    -- Advance fallback chain if the job has fallbacks configured
+    local optsRaw = redis.call('HGET', jobKey, 'opts')
+    if optsRaw and string.find(optsRaw, '"fallbacks"') then
+      local fbIdx = tonumber(redis.call('HGET', jobKey, 'fallbackIndex') or '0') or 0
+      redis.call('HSET', jobKey, 'fallbackIndex', tostring(fbIdx + 1))
+    end
     local retryAt = timestamp + backoffDelay
     local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
     local score = priority * PRIORITY_SHIFT + retryAt
@@ -1442,8 +1458,11 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
         if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
         count = count + 1
       else
-      local lastActive = tonumber(redis.call('HGET', jobKey, 'lastActive'))
-      if lastActive and (timestamp - lastActive) < minIdleMs then
+      local vals = redis.call('HMGET', jobKey, 'lastActive', 'opts')
+      local lastActive = tonumber(vals[1])
+      local jobLockDuration = extractLockDurationFromOpts(vals[2])
+      local effectiveIdle = (jobLockDuration > 0) and jobLockDuration or minIdleMs
+      if lastActive and (timestamp - lastActive) < effectiveIdle then
         count = count + 1
       else
       local failed = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp)
@@ -1491,10 +1510,12 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
       local jk = scannedKeys[i]
       local state = redis.call('HGET', jk, 'state')
       if state == 'active' then
-        local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority')
+        local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority', 'opts')
         local lastActive = tonumber(vals[1])
         local isListSourced = vals[2] == '1' or (tonumber(vals[3]) or 0) > 0
-        if isListSourced and lastActive and (timestamp - lastActive) >= minIdleMs then
+        local jobLockDuration = extractLockDurationFromOpts(vals[4])
+        local effectiveIdle = (jobLockDuration > 0) and jobLockDuration or minIdleMs
+        if isListSourced and lastActive and (timestamp - lastActive) >= effectiveIdle then
           local jobId = string.sub(jk, #prefix + 5)
           local shouldDecr = false
           if checkExpired(jk, jobId, prefix, timestamp) then
@@ -3411,6 +3432,41 @@ redis.register_function('glidemq_sweepSuspended', function(keys, args)
   end
   return count
 end)
+
+redis.register_function('glidemq_checkBudget', function(keys, args)
+  local budgetKey = keys[1]
+  local exists = redis.call('EXISTS', budgetKey)
+  if exists == 0 then return 'no_budget' end
+  local exceeded = redis.call('HGET', budgetKey, 'exceeded')
+  if exceeded == '1' then return 'exceeded' end
+  return 'ok'
+end)
+
+redis.register_function('glidemq_recordUsageAndCheckBudget', function(keys, args)
+  local budgetKey = keys[1]
+  local tokens = tonumber(args[1]) or 0
+  local cost = tonumber(args[2]) or 0
+
+  local exists = redis.call('EXISTS', budgetKey)
+  if exists == 0 then return 'no_budget' end
+
+  if tokens > 0 then redis.call('HINCRBYFLOAT', budgetKey, 'usedTokens', tokens) end
+  if cost > 0 then redis.call('HINCRBYFLOAT', budgetKey, 'usedCost', cost) end
+
+  local maxTokens = tonumber(redis.call('HGET', budgetKey, 'maxTotalTokens')) or 0
+  local maxCost = tonumber(redis.call('HGET', budgetKey, 'maxCostUsd')) or 0
+  local usedTokens = tonumber(redis.call('HGET', budgetKey, 'usedTokens')) or 0
+  local usedCost = tonumber(redis.call('HGET', budgetKey, 'usedCost')) or 0
+
+  local tokenExceeded = maxTokens > 0 and usedTokens > maxTokens
+  local costExceeded = maxCost > 0 and usedCost > maxCost
+
+  if tokenExceeded or costExceeded then
+    redis.call('HSET', budgetKey, 'exceeded', '1')
+    return 'exceeded'
+  end
+  return 'ok'
+end)
 `;
 
 // ---- Key set type ----
@@ -4560,4 +4616,30 @@ export async function sweepSuspended(
     [timestamp.toString(), keyPrefix],
   );
   return Number(result) || 0;
+}
+
+/**
+ * Check whether a budget has been exceeded. Returns 'ok', 'exceeded', or 'no_budget'.
+ */
+export async function checkBudget(client: Client, budgetKey: string): Promise<string> {
+  const result = await client.fcall('glidemq_checkBudget', [budgetKey], []);
+  return result as string;
+}
+
+/**
+ * Atomically record usage and check whether the budget is now exceeded.
+ * Returns 'ok', 'exceeded', or 'no_budget'.
+ */
+export async function recordUsageAndCheckBudget(
+  client: Client,
+  budgetKey: string,
+  tokens: number,
+  costUsd: number,
+): Promise<string> {
+  const result = await client.fcall(
+    'glidemq_recordUsageAndCheckBudget',
+    [budgetKey],
+    [tokens.toString(), costUsd.toString()],
+  );
+  return result as string;
 }

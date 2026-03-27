@@ -44,11 +44,13 @@ import {
   moveToWaitingChildren,
   suspendJob,
   deferActive,
+  checkBudget,
+  recordUsageAndCheckBudget,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
 
-export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained';
+export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained' | 'budget-exceeded';
 
 /**
  * Configuration that differs between Worker and BroadcastWorker.
@@ -107,6 +109,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected globalRateLimitEnabled = false;
   protected cachedRateLimitMax = 0;
   protected cachedRateLimitDuration = 0;
+
+  // TPM (token-per-minute) rate limiting state
+  protected tpmLocalCounter = 0;
+  protected tpmWindowStart = 0;
   protected sandboxClose?: (force?: boolean) => Promise<void>;
   protected workerHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   protected pollLoopPromise: Promise<void> | null = null;
@@ -527,7 +533,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         continue;
       }
 
-      this.startHeartbeat(entry.jobId);
+      this.startHeartbeat(entry.jobId, job.opts.lockDuration);
       batch.push({ jobId: entry.jobId, entryId: entry.entryId, job });
     }
 
@@ -571,6 +577,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
     // Rate limit check (once per batch)
     if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
+    if (this.opts.tokenLimiter) await this.waitForTokenLimit();
 
     // Set up abort controllers for all jobs
     const batchAc = new AbortController();
@@ -683,6 +690,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         entry.job.returnvalue = result;
         entry.job.finishedOn = Date.now();
         if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
+
+        // TPM tracking for batch jobs
+        if (this.opts.tokenLimiter) {
+          const tpmTokens = Math.max(entry.job.usage?.totalTokens ?? 0, entry.job.tpmTokens ?? 0);
+          if (tpmTokens > 0) {
+            await this.incrementTpmCounter(tpmTokens);
+          }
+        }
       }
     } else if (batchError) {
       // Partial failure: process each result individually
@@ -736,6 +751,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           entry.job.returnvalue = result as R;
           entry.job.finishedOn = Date.now();
           if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
+
+          // TPM tracking for batch jobs (partial success)
+          if (this.opts.tokenLimiter) {
+            const tpmTokens = Math.max(entry.job.usage?.totalTokens ?? 0, entry.job.tpmTokens ?? 0);
+            if (tpmTokens > 0) {
+              await this.incrementTpmCounter(tpmTokens);
+            }
+          }
         }
       }
     } else if (thrownError) {
@@ -833,11 +856,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     jobId: string,
   ): Promise<{ result?: R; error?: Error; aborted: boolean }> {
     if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
+    if (this.opts.tokenLimiter) await this.waitForTokenLimit();
 
     const ac = new AbortController();
     this.activeAbortControllers.set(jobId, ac);
     job.abortSignal = ac.signal;
-    this.startHeartbeat(jobId);
+    this.startHeartbeat(jobId, job.opts.lockDuration);
 
     let result: R | undefined;
     let error: Error | undefined;
@@ -1162,6 +1186,42 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.isDrained = false;
       if (this.hasActiveListeners) this.emit('active', job, currentJobId);
 
+      // Pre-dispatch budget check: if budget already exceeded, fail immediately
+      if (job.budgetKey && this.commandClient) {
+        const budgetStatus = await checkBudget(this.commandClient, job.budgetKey);
+        if (budgetStatus === 'exceeded') {
+          const onExceeded = await this.getBudgetOnExceeded(job.budgetKey);
+          this.emit('budget-exceeded', job, currentJobId);
+          if (onExceeded === 'pause') {
+            // Move to delayed with a long backoff so it can be resumed
+            try {
+              await moveActiveToDelayed(
+                this.commandClient,
+                this.queueKeys,
+                currentJobId,
+                currentEntryId,
+                Date.now() + 86400000,
+                undefined,
+                Date.now(),
+                this.consumerGroup,
+                this.broadcastMode ? true : undefined,
+              );
+            } catch (err) {
+              const e = err instanceof Error ? err : new Error(String(err));
+              await this.handleJobFailure(job, currentJobId, currentEntryId, e);
+            }
+          } else {
+            await this.handleJobFailure(
+              job,
+              currentJobId,
+              currentEntryId,
+              new Error('Budget exceeded'),
+            );
+          }
+          return;
+        }
+      }
+
       // Check for suspend continuation: if this job was previously suspended on this
       // worker and has an onResume callback, run it instead of the main processor.
       let processResult: R | undefined;
@@ -1171,7 +1231,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       if (hasContinuation) {
         const onResume = this.suspendContinuations.get(currentJobId)!;
         this.suspendContinuations.delete(currentJobId);
-        this.startHeartbeat(currentJobId);
+        this.startHeartbeat(currentJobId, job.opts.lockDuration);
         try {
           processResult = await onResume(job.signals);
           processError = undefined;
@@ -1342,6 +1402,32 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       job.finishedOn = now;
       if (this.hasCompletedListeners) this.emit('completed', job, processResult);
 
+      // Post-completion budget check: record usage and detect exceeded
+      if (job.budgetKey && job.usage && this.commandClient) {
+        const tokens = job.usage.totalTokens ?? 0;
+        const cost = job.usage.costUsd ?? 0;
+        if (tokens > 0 || cost > 0) {
+          const budgetResult = await recordUsageAndCheckBudget(
+            this.commandClient,
+            job.budgetKey,
+            tokens,
+            cost,
+          );
+          if (budgetResult === 'exceeded') {
+            this.emit('budget-exceeded', job, currentJobId);
+          }
+        }
+      }
+
+      // Post-completion TPM tracking: increment counter for token rate limiting.
+      // Use whichever is larger: usage.totalTokens or explicit tpmTokens.
+      if (this.opts.tokenLimiter) {
+        const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
+        if (tpmTokens > 0) {
+          await this.incrementTpmCounter(tpmTokens);
+        }
+      }
+
       if (job.schedulerName) {
         await this.updateSchedulerAfterComplete(job.schedulerName, now);
       }
@@ -1399,14 +1485,16 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     return false;
   }
 
-  protected startHeartbeat(jobId: string): void {
+  protected startHeartbeat(jobId: string, jobLockDuration?: number): void {
     if (!this.commandClient) return;
+    // Use per-job lockDuration when specified, otherwise fall back to worker-level.
+    const effectiveLock = jobLockDuration ?? this.lockDuration;
     // Only start periodic heartbeat for long lockDurations where stall detection matters.
     // moveToActive already writes the initial lastActive - protects against immediate stall reclaim.
     // For the default 30s lockDuration with 30s stalledInterval, the heartbeat fires at 15s.
     // Skip entirely if lockDuration >= stalledInterval (initial write is sufficient for one cycle).
-    if (this.lockDuration >= this.stalledInterval) return;
-    const interval = this.lockDuration / 2;
+    if (effectiveLock >= this.stalledInterval) return;
+    const interval = effectiveLock / 2;
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
     const timer = setInterval(() => {
@@ -1485,6 +1573,90 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
   }
 
+  /**
+   * Check the TPM (token-per-minute) rate limit and wait if either the local or
+   * per-queue counter exceeds the configured maxTokens for the current window.
+   */
+  protected async waitForTokenLimit(): Promise<void> {
+    const tl = this.opts.tokenLimiter;
+    if (!tl) return;
+
+    const scope = tl.scope ?? 'both';
+
+    while (true) {
+      const now = Date.now();
+
+      // Reset local counter if the window has expired
+      if (now >= this.tpmWindowStart + tl.duration) {
+        this.tpmLocalCounter = 0;
+        this.tpmWindowStart = now - (now % tl.duration);
+      }
+
+      // Local check
+      if (scope === 'worker' || scope === 'both') {
+        if (this.tpmLocalCounter >= tl.maxTokens) {
+          const sleepMs = this.tpmWindowStart + tl.duration - now;
+          if (sleepMs > 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+            continue;
+          }
+        }
+      }
+
+      // Queue-wide (Valkey) check
+      if ((scope === 'queue' || scope === 'both') && this.commandClient) {
+        const windowId = Math.floor(now / tl.duration);
+        const tpmKey = `${this.queueKeys.tpm}:${windowId}`;
+        // INCRBY 0 reads the current value without modifying it
+        const current = await this.commandClient.incrBy(tpmKey, 0);
+        if (current >= tl.maxTokens) {
+          const windowEndMs = (windowId + 1) * tl.duration;
+          const sleepMs = windowEndMs - now;
+          if (sleepMs > 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+            continue;
+          }
+        }
+      }
+
+      break;
+    }
+  }
+
+  /**
+   * Increment the TPM counter after a job completes (or reports tokens).
+   * Called from the completion path when tokenLimiter is configured.
+   */
+  protected async incrementTpmCounter(tokens: number): Promise<void> {
+    if (tokens <= 0) return;
+    const tl = this.opts.tokenLimiter;
+    if (!tl) return;
+
+    const scope = tl.scope ?? 'both';
+    const now = Date.now();
+
+    // Local counter
+    if (scope === 'worker' || scope === 'both') {
+      if (now >= this.tpmWindowStart + tl.duration) {
+        this.tpmLocalCounter = 0;
+        this.tpmWindowStart = now - (now % tl.duration);
+      }
+      this.tpmLocalCounter += tokens;
+    }
+
+    // Valkey counter
+    if ((scope === 'queue' || scope === 'both') && this.commandClient) {
+      const windowId = Math.floor(now / tl.duration);
+      const tpmKey = `${this.queueKeys.tpm}:${windowId}`;
+      const newVal = await this.commandClient.incrBy(tpmKey, tokens);
+      // Set expiry on first increment so the key auto-cleans.
+      // If newVal === tokens, this is likely the first write in this window.
+      if (newVal === tokens) {
+        await this.commandClient.pexpire(tpmKey, tl.duration);
+      }
+    }
+  }
+
   /** Refresh cached meta flags from Valkey. Called on init and each scheduler tick. */
   private async refreshMetaFlags(): Promise<void> {
     if (!this.commandClient) return;
@@ -1504,6 +1676,20 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.cachedRateLimitDuration = Number(rlDur) || 0;
     } catch {
       // Transient error - next tick will retry
+    }
+  }
+
+  /**
+   * Read the onExceeded policy from a budget hash.
+   * Returns 'fail' (default) or 'pause'.
+   */
+  private async getBudgetOnExceeded(budgetKey: string): Promise<string> {
+    if (!this.commandClient) return 'fail';
+    try {
+      const val = await this.commandClient.hget(budgetKey, 'onExceeded');
+      return val ? String(val) : 'fail';
+    } catch {
+      return 'fail';
     }
   }
 

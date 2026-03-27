@@ -51,9 +51,17 @@ export type {
   ReadStreamOptions,
   SuspendOptions,
   SignalEntry,
+  BudgetOptions,
+  IndexCreateOptions,
+  SearchQueryOptions,
+  JobIndexOptions,
+  VectorSearchOptions,
+  VectorSearchResult,
 } from './types';
 
 export { JSON_SERIALIZER } from './types';
+
+export type { Field } from '@glidemq/speedkey';
 
 export {
   GlideMQError,

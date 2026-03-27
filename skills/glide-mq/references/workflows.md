@@ -191,6 +191,60 @@ const worker = new Worker('orchestrator', async (job) => {
 }, { connection });
 ```
 
+## Budget on Flows
+
+Cap total token usage and/or USD cost across all jobs in a flow tree.
+
+```typescript
+const flow = new FlowProducer({ connection });
+
+await flow.add(
+  {
+    name: 'research',
+    queueName: 'ai',
+    data: { topic: 'quantum computing' },
+    children: [
+      { name: 'search', queueName: 'ai', data: {} },
+      { name: 'summarize', queueName: 'ai', data: {} },
+    ],
+  },
+  {
+    budget: {
+      maxTotalTokens: 50_000,
+      maxCostUsd: 0.50,
+      onExceeded: 'fail',      // 'fail' (default) or 'pause'
+    },
+  },
+);
+
+// Check budget state
+const budget = await queue.getFlowBudget(parentJobId);
+// { maxTotalTokens, maxCostUsd, usedTokens, usedCost, exceeded, onExceeded }
+```
+
+Budget is propagated to every job in the flow via a `budgetKey` field.
+
+## Suspend / Resume as Workflow Primitive
+
+Suspend a job in a flow to await human approval, then resume and continue the pipeline.
+
+```typescript
+const worker = new Worker('ai', async (job) => {
+  if (job.name === 'review') {
+    if (job.signals.length > 0) {
+      return { approved: job.signals.some(s => s.name === 'approve') };
+    }
+    await job.suspend({ reason: 'Human review required', timeout: 86_400_000 });
+  }
+  // other job types...
+}, { connection });
+
+// Resume externally
+await queue.signal(jobId, 'approve', { reviewer: 'alice' });
+```
+
+When a suspended job resumes, it re-enters the stream and the processor is invoked again with `job.signals` populated. The parent flow continues once all children (including the resumed one) complete.
+
 ## Gotchas
 
 - `chain()` array is **reverse execution order** - last element is leaf (runs first).

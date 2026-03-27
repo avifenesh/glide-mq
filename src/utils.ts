@@ -120,6 +120,8 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     worker: (id: string) => `${p}:w:${id}`,
     suspended: `${p}:suspended`,
     signals: (id: string) => `${p}:signals:${id}`,
+    budget: (flowId: string) => `${p}:budget:${flowId}`,
+    tpm: `${p}:tpm`,
   };
 }
 
@@ -229,6 +231,7 @@ export const JOB_METADATA_FIELDS: readonly string[] = Object.freeze([
   'suspendedAt',
   'suspendTimeout',
   'signals',
+  'tpmTokens',
 ]);
 
 /**
@@ -258,9 +261,7 @@ export function hmgetArrayToRecord(
  */
 export function extractJobIdsFromStreamEntries(entries: Record<string, [unknown, unknown][]>): string[] {
   const jobIds: string[] = [];
-  for (const entryId in entries) {
-    if (!Object.prototype.hasOwnProperty.call(entries, entryId)) continue;
-    const fieldPairs = entries[entryId];
+  for (const [_entryId, fieldPairs] of Object.entries(entries)) {
     for (let i = 0; i < fieldPairs.length; i++) {
       const field = fieldPairs[i][0];
       const value = fieldPairs[i][1];

@@ -9,6 +9,11 @@ import type { GroupRateLimitOptions } from './errors';
 import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
+/** Try to parse a string as JSON; return the original string if parsing fails. */
+function tryParseJson(s: string): any {
+  try { return JSON.parse(s); } catch { return s; }
+}
+
 export class Job<D = any, R = any> {
   readonly id: string;
   readonly name: string;
@@ -34,8 +39,17 @@ export class Job<D = any, R = any> {
   expireAt?: number;
   schedulerName?: string;
 
+  /** Budget key for flow-level budget enforcement. Set when the job belongs to a budgeted flow. */
+  budgetKey?: string;
+
+  /** Current position in the fallback chain. 0 = original request, 1+ = fallback entries. */
+  fallbackIndex: number = 0;
+
   /** AI-specific usage metadata reported via reportUsage(). */
   usage?: JobUsage;
+
+  /** Tokens reported via reportTokens() for TPM rate limiting. */
+  tpmTokens?: number;
 
   /**
    * AbortSignal that fires when this job is revoked during processing.
@@ -103,6 +117,16 @@ export class Job<D = any, R = any> {
     this.attemptsMade = 0;
     this.progress = 0;
     this.timestamp = Date.now();
+  }
+
+  /**
+   * The current fallback entry, or undefined when running the original request.
+   * fallbackIndex=0 means original (no fallback). On first failure, fallbackIndex
+   * becomes 1 and currentFallback returns fallbacks[0], etc.
+   */
+  get currentFallback(): { model: string; provider?: string; metadata?: Record<string, unknown> } | undefined {
+    if (!this.opts.fallbacks || this.fallbackIndex === 0) return undefined;
+    return this.opts.fallbacks[this.fallbackIndex - 1];
   }
 
   /**
@@ -206,6 +230,20 @@ export class Job<D = any, R = any> {
     }
 
     this.usage = resolved;
+  }
+
+  /**
+   * Report tokens consumed by this job for TPM (tokens-per-minute) tracking.
+   * The count is stored in the job hash field `tpmTokens`.
+   * After job completion, the Worker reads this value and increments the TPM counter
+   * if a tokenLimiter is configured.
+   *
+   * Calling multiple times overwrites the previous value.
+   */
+  async reportTokens(count: number): Promise<void> {
+    if (count < 0) throw new Error('Token count must not be negative');
+    await this.client.hset(this.queueKeys.job(this.id), { tpmTokens: count.toString() });
+    this.tpmTokens = count;
   }
 
   /**
@@ -705,6 +743,9 @@ export class Job<D = any, R = any> {
     job.cost = hash.cost ? parseInt(hash.cost, 10) : undefined;
     job.expireAt = hash.expireAt ? parseInt(hash.expireAt, 10) : undefined;
     job.schedulerName = hash.schedulerName || undefined;
+    job.budgetKey = hash.budgetKey || undefined;
+    job.fallbackIndex = hash.fallbackIndex ? parseInt(hash.fallbackIndex, 10) : 0;
+    job.tpmTokens = hash.tpmTokens ? parseInt(hash.tpmTokens, 10) : undefined;
     if (hash.parentIds) {
       try {
         job.parentIds = JSON.parse(hash.parentIds);
@@ -740,12 +781,28 @@ export class Job<D = any, R = any> {
     }
     if (hash.signals) {
       try {
-        job.signals = JSON.parse(hash.signals) as SignalEntry[];
+        const raw = JSON.parse(hash.signals) as any[];
+        job.signals = raw.map(s => ({
+          ...s,
+          data: typeof s.data === 'string' ? tryParseJson(s.data) : s.data,
+        }));
       } catch {
         job.signals = [];
       }
     }
     return job;
+  }
+
+  /**
+   * Store a vector embedding in this job's hash field.
+   * The vector is stored as a raw Float32Array buffer suitable for Valkey Search vector indexing.
+   * @param field - Hash field name where the vector is stored (must match the index schema).
+   * @param embedding - The vector as a number[] or Float32Array.
+   */
+  async storeVector(field: string, embedding: number[] | Float32Array): Promise<void> {
+    const arr = embedding instanceof Float32Array ? embedding : new Float32Array(embedding);
+    const buf = Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength);
+    await this.client.hset(this.queueKeys.job(this.id), { [field]: buf });
   }
 
   private serializeData(data: D): string {

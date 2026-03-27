@@ -127,11 +127,11 @@ export async function withSpan<T>(
 
   try {
     const result = await fn(span);
-    span.setStatus({ code: otelApi?.SpanStatusCode.OK ?? 0 });
+    span.setStatus({ code: otelApi?.SpanStatusCode.OK ?? 1 });
     return result;
   } catch (err) {
     span.setStatus({
-      code: otelApi?.SpanStatusCode.ERROR ?? 1,
+      code: otelApi?.SpanStatusCode.ERROR ?? 2,
       message: err instanceof Error ? err.message : String(err),
     });
     span.recordException(err instanceof Error ? err : new Error(String(err)));
