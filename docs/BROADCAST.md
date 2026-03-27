@@ -11,17 +11,25 @@ const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 
 const broadcast = new Broadcast('events', {
   connection,
-  maxMessages: 1000,  // retain at most 1000 messages in the stream
+  maxMessages: 1000, // retain at most 1000 messages in the stream
 });
 
 // Each subscriber is identified by a unique subscription name (becomes a consumer group)
-const inventoryWorker = new BroadcastWorker('events', async (job) => {
-  console.log('Inventory update:', job.data);
-}, { connection, subscription: 'inventory-service' });
+const inventoryWorker = new BroadcastWorker(
+  'events',
+  async (job) => {
+    console.log('Inventory update:', job.data);
+  },
+  { connection, subscription: 'inventory-service' },
+);
 
-const emailWorker = new BroadcastWorker('events', async (job) => {
-  console.log('Send notification:', job.data);
-}, { connection, subscription: 'email-service' });
+const emailWorker = new BroadcastWorker(
+  'events',
+  async (job) => {
+    console.log('Send notification:', job.data);
+  },
+  { connection, subscription: 'email-service' },
+);
 
 // Publish - every subscriber receives this message
 await broadcast.publish('order.placed', { event: 'order.placed', orderId: 42 });
@@ -29,14 +37,14 @@ await broadcast.publish('order.placed', { event: 'order.placed', orderId: 42 });
 
 ## Queue vs Broadcast
 
-| | Queue | Broadcast |
-|---|---|---|
-| Delivery | Point-to-point (one consumer) | Fan-out (all subscribers) |
-| Use case | Task processing, job queues | Event distribution, notifications |
-| Add / Publish | `queue.add(name, data, opts)` | `broadcast.publish(subject, data, opts?)` |
-| Consumer | `Worker` | `BroadcastWorker` |
-| Retry / backoff | Per job | Per subscriber, per message |
-| Stream trimming | Auto (completion/removal) | `maxMessages` option |
+|                 | Queue                         | Broadcast                                 |
+| --------------- | ----------------------------- | ----------------------------------------- |
+| Delivery        | Point-to-point (one consumer) | Fan-out (all subscribers)                 |
+| Use case        | Task processing, job queues   | Event distribution, notifications         |
+| Add / Publish   | `queue.add(name, data, opts)` | `broadcast.publish(subject, data, opts?)` |
+| Consumer        | `Worker`                      | `BroadcastWorker`                         |
+| Retry / backoff | Per job                       | Per subscriber, per message               |
+| Stream trimming | Auto (completion/removal)     | `maxMessages` option                      |
 
 ## BroadcastWorker options
 
@@ -52,7 +60,7 @@ Each `BroadcastWorker` supports the same options as `Worker` (concurrency, limit
 const replayWorker = new BroadcastWorker('events', processor, {
   connection,
   subscription: 'analytics',
-  startFrom: '0-0',     // backfill all existing messages
+  startFrom: '0-0', // backfill all existing messages
   concurrency: 5,
 });
 ```
@@ -71,43 +79,55 @@ Subject patterns use `.` as a token separator:
 
 ### Examples
 
-| Pattern | Matches | Does not match |
-|---------|---------|----------------|
-| `orders.created` | `orders.created` | `orders.updated`, `orders.created.us` |
-| `orders.*` | `orders.created`, `orders.updated` | `orders.created.us`, `inventory.created` |
-| `orders.>` | `orders.created`, `orders.created.us`, `orders.a.b.c` | `inventory.created` |
-| `*.created` | `orders.created`, `inventory.created` | `orders.updated`, `orders.created.us` |
+| Pattern          | Matches                                               | Does not match                           |
+| ---------------- | ----------------------------------------------------- | ---------------------------------------- |
+| `orders.created` | `orders.created`                                      | `orders.updated`, `orders.created.us`    |
+| `orders.*`       | `orders.created`, `orders.updated`                    | `orders.created.us`, `inventory.created` |
+| `orders.>`       | `orders.created`, `orders.created.us`, `orders.a.b.c` | `inventory.created`                      |
+| `*.created`      | `orders.created`, `inventory.created`                 | `orders.updated`, `orders.created.us`    |
 
 ### Usage
 
 ```typescript
 // Only process order events
-const orderWorker = new BroadcastWorker('events', async (job) => {
-  console.log('Order event:', job.name, job.data);
-}, {
-  connection,
-  subscription: 'order-handler',
-  subjects: ['orders.*'],
-  concurrency: 5,
-});
+const orderWorker = new BroadcastWorker(
+  'events',
+  async (job) => {
+    console.log('Order event:', job.name, job.data);
+  },
+  {
+    connection,
+    subscription: 'order-handler',
+    subjects: ['orders.*'],
+    concurrency: 5,
+  },
+);
 
 // Process all events under a namespace
-const allOrderWorker = new BroadcastWorker('events', async (job) => {
-  console.log('Deep order event:', job.name, job.data);
-}, {
-  connection,
-  subscription: 'order-deep-handler',
-  subjects: ['orders.>'],
-});
+const allOrderWorker = new BroadcastWorker(
+  'events',
+  async (job) => {
+    console.log('Deep order event:', job.name, job.data);
+  },
+  {
+    connection,
+    subscription: 'order-deep-handler',
+    subjects: ['orders.>'],
+  },
+);
 
 // Multiple patterns
-const mixedWorker = new BroadcastWorker('events', async (job) => {
-  console.log('Relevant event:', job.name, job.data);
-}, {
-  connection,
-  subscription: 'mixed-handler',
-  subjects: ['orders.*', 'inventory.low', 'shipping.>'],
-});
+const mixedWorker = new BroadcastWorker(
+  'events',
+  async (job) => {
+    console.log('Relevant event:', job.name, job.data);
+  },
+  {
+    connection,
+    subscription: 'mixed-handler',
+    subjects: ['orders.*', 'inventory.low', 'shipping.>'],
+  },
+);
 ```
 
 ### How it works
@@ -134,13 +154,13 @@ await broadcast.publish('inventory.low', { sku: 'ABC', qty: 0 });
 ```typescript
 import { matchSubject, compileSubjectMatcher } from 'glide-mq';
 
-matchSubject('orders.*', 'orders.created');  // true
-matchSubject('orders.*', 'orders.a.b');      // false
+matchSubject('orders.*', 'orders.created'); // true
+matchSubject('orders.*', 'orders.a.b'); // false
 
 const matcher = compileSubjectMatcher(['orders.*', 'shipping.>']);
-matcher('orders.created');    // true
-matcher('shipping.us.west');  // true
-matcher('inventory.low');     // false
+matcher('orders.created'); // true
+matcher('shipping.us.west'); // true
+matcher('inventory.low'); // false
 ```
 
 ## Closing

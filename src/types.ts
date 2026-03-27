@@ -292,12 +292,24 @@ export interface BatchOptions {
 
 export type BatchProcessor<D = any, R = any> = (jobs: import('./job').Job<D, R>[]) => Promise<R[]>;
 
-/** Budget constraints for a flow. Caps total token usage and/or USD cost across all jobs. */
+/** Budget constraints for a flow. Caps token usage and/or cost across all jobs. */
 export interface BudgetOptions {
-  /** Hard cap on total tokens across all jobs in this flow. */
+  /** Hard cap on weighted total tokens across all jobs in this flow. */
   maxTotalTokens?: number;
-  /** Hard cap on total USD cost across all jobs in this flow. */
-  maxCostUsd?: number;
+  /** Per-category token caps (e.g. { input: 50000, reasoning: 5000 }). Each independently enforced. */
+  maxTokens?: Record<string, number>;
+  /**
+   * Weight multipliers for token categories when computing weighted total for maxTotalTokens.
+   * Unlisted categories default to weight 1.
+   * Example: { reasoning: 4, cachedInput: 0.25 }
+   */
+  tokenWeights?: Record<string, number>;
+  /** Hard cap on total cost across all jobs in this flow. */
+  maxTotalCost?: number;
+  /** Per-category cost caps. Each independently enforced. */
+  maxCosts?: Record<string, number>;
+  /** Unit for cost values (informational, e.g. 'usd', 'credits', 'ils'). */
+  costUnit?: string;
   /** What happens when budget is exceeded. Default: 'fail'. */
   onExceeded?: 'pause' | 'fail';
 }
@@ -561,18 +573,26 @@ export interface ReadStreamOptions {
 
 /** AI-specific usage metadata reported by a job processor. */
 export interface JobUsage {
-  /** Model identifier (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). */
+  /** Model identifier (e.g. 'gpt-5.4', 'claude-sonnet-4-20250514'). */
   model?: string;
   /** Provider identifier (e.g. 'openai', 'anthropic'). */
   provider?: string;
-  /** Number of input/prompt tokens consumed. */
-  inputTokens?: number;
-  /** Number of output/completion tokens generated. */
-  outputTokens?: number;
-  /** Total tokens (auto-computed as inputTokens + outputTokens if not provided). */
+  /**
+   * Token counts by category. Any string key is accepted.
+   * Well-known keys: input, output, reasoning, cachedInput, cachedOutput.
+   */
+  tokens?: Record<string, number>;
+  /** Total tokens (auto-computed as sum of all values in `tokens` if not provided). */
   totalTokens?: number;
-  /** Actual cost in USD. */
-  costUsd?: number;
+  /**
+   * Cost breakdown by category. Values are in whatever unit `costUnit` specifies.
+   * Any string key is accepted.
+   */
+  costs?: Record<string, number>;
+  /** Total cost (auto-computed as sum of all values in `costs` if not provided). */
+  totalCost?: number;
+  /** Unit for cost values (e.g. 'usd', 'credits', 'ils'). Informational only. */
+  costUnit?: string;
   /** Inference latency in milliseconds (not including queue wait time). */
   latencyMs?: number;
   /** Whether the response came from a cache hit. */

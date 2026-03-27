@@ -30,7 +30,7 @@ async function main() {
         { role: 'user', content: job.data.content },
       ], 10);
 
-      await job.reportUsage({ model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens });
+      await job.reportUsage({ model: result.model, tokens: { input: result.inputTokens, output: result.outputTokens } });
 
       const classification = result.content.trim().toLowerCase();
       console.log(`[classify] Result: ${classification}`);
@@ -96,7 +96,7 @@ async function main() {
       }
       console.log('\n');
 
-      await job.reportUsage({ model, inputTokens: inTok, outputTokens: outTok });
+      await job.reportUsage({ model, tokens: { input: inTok, output: outTok } });
       return { polished: full, tokens: inTok + outTok };
     }
 

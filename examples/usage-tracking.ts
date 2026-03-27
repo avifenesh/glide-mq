@@ -34,8 +34,7 @@ async function main() {
     await job.reportUsage({
       model: result.model,
       provider: 'openrouter',
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
+      tokens: { input: result.inputTokens, output: result.outputTokens },
       latencyMs: latency,
     });
 
@@ -76,7 +75,7 @@ async function main() {
   for (const child of node.children!) {
     const job = await queue.getJob(child.job.id);
     if (job?.usage) {
-      console.log(`  ${job.name}: model=${job.usage.model}, in=${job.usage.inputTokens}, out=${job.usage.outputTokens}, latency=${job.usage.latencyMs}ms`);
+      console.log(`  ${job.name}: model=${job.usage.model}, in=${job.usage.tokens?.input ?? 0}, out=${job.usage.tokens?.output ?? 0}, latency=${job.usage.latencyMs}ms`);
     }
   }
 
@@ -84,9 +83,9 @@ async function main() {
   const flowUsage = await queue.getFlowUsage(node.job.id);
   console.log('\n--- Flow Usage (aggregated) ---');
   console.log(`  Jobs with usage: ${flowUsage.jobCount}`);
-  console.log(`  Total input tokens: ${flowUsage.totalInputTokens}`);
-  console.log(`  Total output tokens: ${flowUsage.totalOutputTokens}`);
-  console.log(`  Total tokens: ${flowUsage.totalInputTokens + flowUsage.totalOutputTokens}`);
+  console.log(`  Input tokens: ${flowUsage.tokens?.input ?? 0}`);
+  console.log(`  Output tokens: ${flowUsage.tokens?.output ?? 0}`);
+  console.log(`  Total tokens: ${flowUsage.totalTokens}`);
   console.log(`  Model distribution:`, flowUsage.models);
 
   await cleanup(worker, queue, flow);

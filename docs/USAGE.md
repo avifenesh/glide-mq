@@ -410,14 +410,14 @@ const replayWorker = new BroadcastWorker('events', processor, {
 
 ### Queue vs Broadcast
 
-|                 | Queue                         | Broadcast                         |
-| --------------- | ----------------------------- | --------------------------------- |
-| Delivery        | Point-to-point (one consumer) | Fan-out (all subscribers)         |
-| Use case        | Task processing, job queues   | Event distribution, notifications |
+|                 | Queue                         | Broadcast                                 |
+| --------------- | ----------------------------- | ----------------------------------------- |
+| Delivery        | Point-to-point (one consumer) | Fan-out (all subscribers)                 |
+| Use case        | Task processing, job queues   | Event distribution, notifications         |
 | Add / Publish   | `queue.add(name, data, opts)` | `broadcast.publish(subject, data, opts?)` |
-| Consumer        | `Worker`                      | `BroadcastWorker`                 |
-| Retry / backoff | Per job                       | Per subscriber, per message       |
-| Stream trimming | Auto (completion/removal)     | `maxMessages` option              |
+| Consumer        | `Worker`                      | `BroadcastWorker`                         |
+| Retry / backoff | Per job                       | Per subscriber, per message               |
+| Stream trimming | Auto (completion/removal)     | `maxMessages` option                      |
 
 ---
 
@@ -628,24 +628,27 @@ Track token usage, cost, and latency per job for cost attribution and observabil
 ```typescript
 import { Worker, Queue } from 'glide-mq';
 
-const worker = new Worker('llm-tasks', async (job) => {
-  const result = await callLLM(job.data.prompt);
+const worker = new Worker(
+  'llm-tasks',
+  async (job) => {
+    const result = await callLLM(job.data.prompt);
 
-  await job.reportUsage({
-    model: 'gpt-5.4',
-    provider: 'openai',
-    inputTokens: result.usage.prompt_tokens,
-    outputTokens: result.usage.completion_tokens,
-    costUsd: result.usage.total_cost,
-    latencyMs: result.latencyMs,
-  });
+    await job.reportUsage({
+      model: 'gpt-5.4',
+      provider: 'openai',
+      tokens: { input: result.usage.prompt_tokens, output: result.usage.completion_tokens },
+      costs: { total: result.usage.total_cost },
+      latencyMs: result.latencyMs,
+    });
 
-  return result.text;
-}, { connection });
+    return result.text;
+  },
+  { connection },
+);
 
 // Aggregate usage for a job flow (parent + all children)
 const usage = await queue.getFlowUsage(parentJobId);
-console.log(usage.totalInputTokens + usage.totalOutputTokens, usage.totalCostUsd);
+console.log(usage.totalTokens, usage.totalCost);
 ```
 
 `reportUsage()` persists usage to the job hash in Valkey. `job.usage` is populated when the job is fetched via `getJob()`. `getFlowUsage()` walks the job tree downward from the parent and sums all fields.
@@ -658,12 +661,16 @@ Stream incremental output from a processor - useful for LLM token-by-token outpu
 import { Worker, Queue } from 'glide-mq';
 
 // Producer side: emit chunks from inside the processor
-const worker = new Worker('llm-stream', async (job) => {
-  for await (const chunk of callLLMStreaming(job.data.prompt)) {
-    await job.stream({ token: chunk.text });
-  }
-  return 'done';
-}, { connection });
+const worker = new Worker(
+  'llm-stream',
+  async (job) => {
+    for await (const chunk of callLLMStreaming(job.data.prompt)) {
+      await job.stream({ token: chunk.text });
+    }
+    return 'done';
+  },
+  { connection },
+);
 
 // Consumer side: read back all chunks after completion
 const entries = await queue.readStream(jobId);
@@ -686,28 +693,32 @@ Suspend a job mid-processor and resume it later via an external signal. Designed
 ```typescript
 import { Worker, Queue, SuspendError } from 'glide-mq';
 
-const worker = new Worker('approvals', async (job) => {
-  if (job.data.step === 'process') {
-    // Start work...
-    const draft = await generateDraft(job.data);
+const worker = new Worker(
+  'approvals',
+  async (job) => {
+    if (job.data.step === 'process') {
+      // Start work...
+      const draft = await generateDraft(job.data);
 
-    // Suspend and wait for human approval
-    await job.suspend({
-      reason: 'awaiting-approval',
-      timeout: 86_400_000, // fail after 24 h if no signal arrives
-      onResume: async (signals) => {
-        // Called on the same worker instance when the job is re-queued (best-effort)
-        const approval = signals[0];
-        if (approval.name === 'approve') {
-          return await publishDraft(draft, approval.data);
-        }
-        throw new Error('Draft rejected');
-      },
-    });
-  }
-  // Fallback path if onResume is not used (job re-enters processor normally)
-  return await publishDraft(job.data);
-}, { connection });
+      // Suspend and wait for human approval
+      await job.suspend({
+        reason: 'awaiting-approval',
+        timeout: 86_400_000, // fail after 24 h if no signal arrives
+        onResume: async (signals) => {
+          // Called on the same worker instance when the job is re-queued (best-effort)
+          const approval = signals[0];
+          if (approval.name === 'approve') {
+            return await publishDraft(draft, approval.data);
+          }
+          throw new Error('Draft rejected');
+        },
+      });
+    }
+    // Fallback path if onResume is not used (job re-enters processor normally)
+    return await publishDraft(job.data);
+  },
+  { connection },
+);
 
 // From outside (e.g., a webhook handler) - send the signal:
 const resumed = await queue.signal(jobId, 'approve', { reviewer: 'alice' });
@@ -725,8 +736,8 @@ const resumed = await queue.signal(jobId, 'approve', { reviewer: 'alice' });
 
 ```typescript
 interface SuspendOptions {
-  reason?: string;    // Human-readable label stored on the job hash
-  timeout?: number;   // Milliseconds until auto-fail (0 = infinite, default)
+  reason?: string; // Human-readable label stored on the job hash
+  timeout?: number; // Milliseconds until auto-fail (0 = infinite, default)
 }
 ```
 
@@ -767,7 +778,6 @@ const worker = new TestWorker(queue, async (job) => {
 const resumed = await queue.signal(jobId, 'approve');
 ```
 
-
 ### Fallback Chains
 
 Ordered list of model/provider alternatives tried on retryable failure. The worker auto-advances through the chain on each retry.
@@ -778,7 +788,7 @@ See [ADVANCED.md](./ADVANCED.md#fallback-chains) for details on how the chain ad
 
 ### Budget Middleware (Flow-level Token/Cost Caps)
 
-Enforce hard caps on total tokens and/or USD cost across all jobs in a flow. Pass a budget option to FlowProducer.add() with maxTotalTokens, maxCostUsd, and onExceeded (fail or pause). When a job calls reportUsage() inside a budgeted flow, the worker calls glidemq_recordUsageAndCheckBudget to atomically increment counters and check limits.
+Enforce hard caps on total tokens and/or cost across all jobs in a flow. Pass a budget option to FlowProducer.add() with maxTotalTokens, maxTotalCost, and onExceeded (fail or pause). Per-category limits are also supported via maxTokens (e.g. `{ input: 5000 }`), tokenWeights (e.g. `{ output: 4 }`), maxCosts, and costUnit. When a job calls reportUsage() inside a budgeted flow, the worker calls glidemq_recordUsageAndCheckBudget to atomically increment counters and check limits.
 
 Query budget state via queue.getFlowBudget(flowId). Budget state is stored in glide:{queueName}:budget:{flowId}.
 
@@ -808,8 +818,7 @@ See [ADVANCED.md](./ADVANCED.md#vector-search-index-management) for index manage
 
 The proxy (glide-mq/proxy) exposes two AI-specific endpoints:
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /queues/:name/jobs/:id/stream | SSE stream of job output chunks. Supports Last-Event-ID header and ?lastId query param. |
-| POST | /queues/:name/jobs/:id/signal | Send a signal to a suspended job. Body: { "name": "...", "data": ... }. Returns { "resumed": true/false }. |
-
+| Method | Path                          | Description                                                                                                |
+| ------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| GET    | /queues/:name/jobs/:id/stream | SSE stream of job output chunks. Supports Last-Event-ID header and ?lastId query param.                    |
+| POST   | /queues/:name/jobs/:id/signal | Send a signal to a suspended job. Body: { "name": "...", "data": ... }. Returns { "resumed": true/false }. |

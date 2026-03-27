@@ -70,7 +70,9 @@ describeEachMode('Stress: Concurrent Workers', (CONNECTION) => {
     for (const q of queuesToFlush) {
       try {
         await flushQueue(cleanupClient, q);
-      } catch { /* best effort */ }
+      } catch {
+        /* best effort */
+      }
     }
     cleanupClient.close();
   });
@@ -138,10 +140,7 @@ describeEachMode('Stress: Concurrent Workers', (CONNECTION) => {
     }
 
     // Wait for completion
-    await Promise.race([
-      Promise.all(workerPromises),
-      sleep(55000),
-    ]);
+    await Promise.race([Promise.all(workerPromises), sleep(55000)]);
 
     // Close all workers
     await Promise.all(workers.map((w) => w.close(true)));
@@ -206,10 +205,14 @@ describeEachMode('Stress: Concurrent Workers', (CONNECTION) => {
 
     // Jobs with retries so that stalled -> failed -> retry -> complete
     for (let i = 0; i < TOTAL_JOBS; i++) {
-      await queue.add('stall-job', { i }, {
-        attempts: 5,
-        backoff: { type: 'fixed', delay: 200 },
-      });
+      await queue.add(
+        'stall-job',
+        { i },
+        {
+          attempts: 5,
+          backoff: { type: 'fixed', delay: 200 },
+        },
+      );
     }
 
     // Single worker handles everything. First 3 invocations "hang"
@@ -249,9 +252,13 @@ describeEachMode('Stress: Concurrent Workers', (CONNECTION) => {
     // Wait for all jobs to reach a terminal state.
     // Some may complete, some may fail after max stalled count.
     // The key assertion is that ALL jobs eventually resolve (no stuck jobs).
-    await waitFor(async () => {
-      return completedIds.size + failedIds.size >= TOTAL_JOBS;
-    }, 45000, 300);
+    await waitFor(
+      async () => {
+        return completedIds.size + failedIds.size >= TOTAL_JOBS;
+      },
+      45000,
+      300,
+    );
 
     await worker.close(true);
     await queue.close();
@@ -288,9 +295,8 @@ describeEachMode('Stress: Concurrent Workers', (CONNECTION) => {
           const idx = job.data.index;
           await job.reportUsage({
             model: `model-${w}`,
-            inputTokens: idx * 10,
-            outputTokens: idx * 5,
-            costUsd: idx * 0.001,
+            tokens: { input: idx * 10, output: idx * 5 },
+            costs: { total: idx * 0.001 },
           });
           return { workerNum: w };
         },
@@ -314,8 +320,8 @@ describeEachMode('Stress: Concurrent Workers', (CONNECTION) => {
       if (job && job.usage) {
         usageCount++;
         expect(job.usage.model).toBeDefined();
-        expect(job.usage.inputTokens).toBeDefined();
-        expect(job.usage.outputTokens).toBeDefined();
+        expect(job.usage.tokens?.input).toBeDefined();
+        expect(job.usage.tokens?.output).toBeDefined();
       }
     }
 
@@ -341,7 +347,9 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
     for (const q of queuesToFlush) {
       try {
         await flushQueue(cleanupClient, q);
-      } catch { /* best effort */ }
+      } catch {
+        /* best effort */
+      }
     }
     cleanupClient.close();
   });
@@ -390,10 +398,14 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
       const k = buildKeys(qName);
 
       // Wait for the root (last to complete) to finish
-      await waitFor(async () => {
-        const state = await cleanupClient.hget(k.job(rootId), 'state');
-        return String(state) === 'completed';
-      }, 45000, 500);
+      await waitFor(
+        async () => {
+          const state = await cleanupClient.hget(k.job(rootId), 'state');
+          return String(state) === 'completed';
+        },
+        45000,
+        500,
+      );
 
       // Verify all completed
       const rootState = await cleanupClient.hget(k.job(rootId), 'state');
@@ -480,8 +492,7 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
         const tokens = job.data.tokens || 50;
         await job.reportUsage({
           model: 'gpt-4',
-          inputTokens: tokens,
-          outputTokens: 0,
+          tokens: { input: tokens, output: 0 },
         });
         processedJobNames.push(job.name);
         return { tokens };
@@ -510,11 +521,15 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
       const rootId = result.job.id;
 
       // Wait for flow to settle (either complete or budget exceeded)
-      await waitFor(async () => {
-        const counts = await queue.getJobCounts();
-        // All jobs either completed or failed
-        return counts.waiting === 0 && counts.active === 0;
-      }, 30000, 500);
+      await waitFor(
+        async () => {
+          const counts = await queue.getJobCounts();
+          // All jobs either completed or failed
+          return counts.waiting === 0 && counts.active === 0;
+        },
+        30000,
+        500,
+      );
 
       // Check budget state
       const budgetState = await queue.getFlowBudget(rootId);
@@ -547,7 +562,9 @@ describeEachMode('Stress: Streaming Under Load', (CONNECTION) => {
     for (const q of queuesToFlush) {
       try {
         await flushQueueAll(cleanupClient, q);
-      } catch { /* best effort */ }
+      } catch {
+        /* best effort */
+      }
     }
     cleanupClient.close();
   });
@@ -672,7 +689,9 @@ describeEachMode('Stress: Suspend/Resume Race Conditions', (CONNECTION) => {
     for (const q of queuesToFlush) {
       try {
         await flushQueue(cleanupClient, q);
-      } catch { /* best effort */ }
+      } catch {
+        /* best effort */
+      }
     }
     cleanupClient.close();
   });
@@ -849,7 +868,9 @@ describeEachMode('Stress: Rate Limiting Accuracy', (CONNECTION) => {
     for (const q of queuesToFlush) {
       try {
         await flushQueue(cleanupClient, q);
-      } catch { /* best effort */ }
+      } catch {
+        /* best effort */
+      }
     }
     cleanupClient.close();
   });
@@ -910,8 +931,16 @@ describeEachMode('Stress: Rate Limiting Accuracy', (CONNECTION) => {
       // With 3s windows and 15 jobs needing 3 windows, expect >= 1 full window
       expect(totalTime).toBeGreaterThanOrEqual(WINDOW_MS * 1.0);
     } finally {
-      try { await worker.close(); } catch { /* may already be closed */ }
-      try { await queue.close(); } catch { /* may already be closed */ }
+      try {
+        await worker.close();
+      } catch {
+        /* may already be closed */
+      }
+      try {
+        await queue.close();
+      } catch {
+        /* may already be closed */
+      }
     }
   }, 40000);
 
@@ -967,8 +996,16 @@ describeEachMode('Stress: Rate Limiting Accuracy', (CONNECTION) => {
       // Should take at least 3 windows (generous)
       expect(totalTime).toBeGreaterThanOrEqual(WINDOW_MS * 2.5);
     } finally {
-      try { await worker.close(); } catch { /* may already be closed */ }
-      try { await queue.close(); } catch { /* may already be closed */ }
+      try {
+        await worker.close();
+      } catch {
+        /* may already be closed */
+      }
+      try {
+        await queue.close();
+      } catch {
+        /* may already be closed */
+      }
     }
   }, 50000);
 });
@@ -989,7 +1026,9 @@ describeEachMode('Stress: Data Integrity', (CONNECTION) => {
     for (const q of queuesToFlush) {
       try {
         await flushQueue(cleanupClient, q);
-      } catch { /* best effort */ }
+      } catch {
+        /* best effort */
+      }
     }
     cleanupClient.close();
   });
@@ -1071,9 +1110,8 @@ describeEachMode('Stress: Data Integrity', (CONNECTION) => {
         const model = attemptCounter === 1 ? 'gpt-3.5' : attemptCounter === 2 ? 'gpt-4' : 'claude-sonnet';
         await job.reportUsage({
           model,
-          inputTokens: attemptCounter * 100,
-          outputTokens: attemptCounter * 50,
-          costUsd: attemptCounter * 0.01,
+          tokens: { input: attemptCounter * 100, output: attemptCounter * 50 },
+          costs: { total: attemptCounter * 0.01 },
         });
 
         if (attemptCounter < 3) {
@@ -1086,10 +1124,14 @@ describeEachMode('Stress: Data Integrity', (CONNECTION) => {
     );
 
     try {
-      const added = await queue.add('retry-usage', {}, {
-        attempts: 3,
-        backoff: { type: 'fixed', delay: 500 },
-      });
+      const added = await queue.add(
+        'retry-usage',
+        {},
+        {
+          attempts: 3,
+          backoff: { type: 'fixed', delay: 500 },
+        },
+      );
 
       const k = buildKeys(qName);
       await waitFor(async () => {
@@ -1101,9 +1143,9 @@ describeEachMode('Stress: Data Integrity', (CONNECTION) => {
       const completedJob = await queue.getJob(added!.id);
       expect(completedJob!.usage).toBeDefined();
       expect(completedJob!.usage!.model).toBe('claude-sonnet');
-      expect(completedJob!.usage!.inputTokens).toBe(300);
-      expect(completedJob!.usage!.outputTokens).toBe(150);
-      expect(completedJob!.usage!.costUsd).toBeCloseTo(0.03, 5);
+      expect(completedJob!.usage!.tokens?.input).toBe(300);
+      expect(completedJob!.usage!.tokens?.output).toBe(150);
+      expect(completedJob!.usage!.totalCost).toBeCloseTo(0.03, 5);
     } finally {
       await worker.close();
       await queue.close();
@@ -1130,9 +1172,8 @@ describeEachMode('Stress: Data Integrity', (CONNECTION) => {
         if (job.data.inputTokens) {
           await job.reportUsage({
             model: 'gpt-4',
-            inputTokens: job.data.inputTokens,
-            outputTokens: job.data.outputTokens,
-            costUsd: (job.data.inputTokens + job.data.outputTokens) * 0.00001,
+            tokens: { input: job.data.inputTokens, output: job.data.outputTokens },
+            costs: { total: (job.data.inputTokens + job.data.outputTokens) * 0.00001 },
           });
         }
         return { processed: true };
@@ -1171,9 +1212,9 @@ describeEachMode('Stress: Data Integrity', (CONNECTION) => {
 
       const flowUsage = await queue.getFlowUsage(parentId);
 
-      expect(flowUsage.totalInputTokens).toBe(expectedInput);
-      expect(flowUsage.totalOutputTokens).toBe(expectedOutput);
-      expect(Math.abs(flowUsage.totalCostUsd - expectedCost)).toBeLessThan(0.001);
+      expect(flowUsage.tokens.input).toBe(expectedInput);
+      expect(flowUsage.tokens.output).toBe(expectedOutput);
+      expect(Math.abs(flowUsage.totalCost - expectedCost)).toBeLessThan(0.001);
       expect(flowUsage.jobCount).toBe(CHILD_COUNT);
       expect(flowUsage.models['gpt-4']).toBe(CHILD_COUNT);
     } finally {
@@ -1208,7 +1249,9 @@ describeEachMode('Stress: Search Under Concurrency', (CONNECTION) => {
     for (const q of queuesToFlush) {
       try {
         await flushQueue(cleanupClient, q);
-      } catch { /* best effort */ }
+      } catch {
+        /* best effort */
+      }
     }
     cleanupClient.close();
   });
@@ -1226,7 +1269,11 @@ describeEachMode('Stress: Search Under Concurrency', (CONNECTION) => {
 
     try {
       // Drop any leftover index from a previous run
-      try { await GlideFt.dropindex(cleanupClient, indexName); } catch { /* ok */ }
+      try {
+        await GlideFt.dropindex(cleanupClient, indexName);
+      } catch {
+        /* ok */
+      }
       await sleep(300);
 
       // Create index with vector field
@@ -1295,7 +1342,11 @@ describeEachMode('Stress: Search Under Concurrency', (CONNECTION) => {
         expect(typeof r.score).toBe('number');
       }
 
-      try { await queue.dropJobIndex(); } catch { /* ok */ }
+      try {
+        await queue.dropJobIndex();
+      } catch {
+        /* ok */
+      }
     } finally {
       await queue.close();
     }
@@ -1370,7 +1421,11 @@ describeEachMode('Stress: Search Under Concurrency', (CONNECTION) => {
       const topResult = results[0];
       expect(topResult.score).toBeLessThan(0.1); // Very close (cosine distance near 0)
 
-      try { await queue.dropJobIndex(); } catch { /* ok */ }
+      try {
+        await queue.dropJobIndex();
+      } catch {
+        /* ok */
+      }
     } catch (err: any) {
       // If any search operation times out, skip rather than fail
       const msg = err?.message || err?.constructor?.name || String(err);
@@ -1380,7 +1435,11 @@ describeEachMode('Stress: Search Under Concurrency', (CONNECTION) => {
       }
       throw err;
     } finally {
-      try { await queue.close(); } catch { /* ok */ }
+      try {
+        await queue.close();
+      } catch {
+        /* ok */
+      }
     }
   }, 40000);
 });

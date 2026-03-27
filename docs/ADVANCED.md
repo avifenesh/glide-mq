@@ -33,10 +33,10 @@ By default, each glide-mq component creates its own GLIDE client (one TCP connec
 ```typescript
 const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 
-const queue  = new Queue('jobs', { connection });        // 1 connection
-const flow   = new FlowProducer({ connection });          // 1 connection
-const worker = new Worker('jobs', handler, { connection });// 2 connections (command + blocking)
-const events = new QueueEvents('jobs', { connection });   // 1 connection
+const queue = new Queue('jobs', { connection }); // 1 connection
+const flow = new FlowProducer({ connection }); // 1 connection
+const worker = new Worker('jobs', handler, { connection }); // 2 connections (command + blocking)
+const events = new QueueEvents('jobs', { connection }); // 1 connection
 // Total: 5 TCP connections
 ```
 
@@ -48,8 +48,8 @@ import { GlideClient } from '@glidemq/speedkey';
 const client = await GlideClient.createClient({ addresses: [{ host: 'localhost' }] });
 const connection = { addresses: [{ host: 'localhost' }] };
 
-const queue  = new Queue('jobs', { client });
-const flow   = new FlowProducer({ client });
+const queue = new Queue('jobs', { client });
+const flow = new FlowProducer({ client });
 const worker = new Worker('jobs', handler, { connection, commandClient: client });
 const events = new QueueEvents('jobs', { connection });
 // Total: 2 TCP connections (shared + Worker's blocking client)
@@ -72,16 +72,16 @@ new QueueEvents('jobs', { connection, client } as any);
 
 ### Tradeoffs
 
-| | Dedicated (default) | Shared |
-|---|---|---|
-| **Connections** | N+2 per setup (1 per Queue/FlowProducer + 2 per Worker + 1 per QueueEvents) | 2 (shared + blocking) |
-| **Throughput** | Baseline | Same or slightly better (fewer NAPI wake callbacks) |
-| **Latency** | Baseline | Same (p50/p95/p99 identical in benchmarks) |
-| **Isolation** | Each component has its own connection - failures are independent | All components sharing a client are affected by a disconnect |
-| **Reconnection** | Each component reconnects independently | Worker emits error if shared client is unreachable - you manage reconnection |
-| **Lifecycle** | Component creates and closes its own client | You create the client, you close it. `close()` on a component does not destroy the shared client. |
-| **Simplicity** | Pass `connection` - done | Must create client upfront, pass it around, close in correct order |
-| **Memory** | Slightly higher (N client objects + Rust state machines) | Lower (1 client object shared) |
+|                  | Dedicated (default)                                                         | Shared                                                                                            |
+| ---------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| **Connections**  | N+2 per setup (1 per Queue/FlowProducer + 2 per Worker + 1 per QueueEvents) | 2 (shared + blocking)                                                                             |
+| **Throughput**   | Baseline                                                                    | Same or slightly better (fewer NAPI wake callbacks)                                               |
+| **Latency**      | Baseline                                                                    | Same (p50/p95/p99 identical in benchmarks)                                                        |
+| **Isolation**    | Each component has its own connection - failures are independent            | All components sharing a client are affected by a disconnect                                      |
+| **Reconnection** | Each component reconnects independently                                     | Worker emits error if shared client is unreachable - you manage reconnection                      |
+| **Lifecycle**    | Component creates and closes its own client                                 | You create the client, you close it. `close()` on a component does not destroy the shared client. |
+| **Simplicity**   | Pass `connection` - done                                                    | Must create client upfront, pass it around, close in correct order                                |
+| **Memory**       | Slightly higher (N client objects + Rust state machines)                    | Lower (1 client object shared)                                                                    |
 
 ### When to use shared
 
@@ -106,10 +106,10 @@ new QueueEvents('jobs', { connection, client } as any);
 
 ```typescript
 // Correct: close components first, then shared client
-await queue.close();    // detaches from shared client (does not close it)
-await worker.close();   // closes only the auto-created blocking client
-await flow.close();     // detaches from shared client
-client.close();         // now safe - no components using it
+await queue.close(); // detaches from shared client (does not close it)
+await worker.close(); // closes only the auto-created blocking client
+await flow.close(); // detaches from shared client
+client.close(); // now safe - no components using it
 ```
 
 ### Producer with an external client
@@ -180,7 +180,7 @@ await queue.upsertJobScheduler(
 // Interval: run "cleanup" every 5 minutes
 await queue.upsertJobScheduler(
   'cleanup',
-  { every: 5 * 60 * 1_000 },  // ms
+  { every: 5 * 60 * 1_000 }, // ms
   { name: 'cleanup-old-records', data: {} },
 );
 
@@ -197,9 +197,13 @@ await queue.removeJobScheduler('cleanup');
 
 ```typescript
 // Poll a sensor every 5 seconds after the previous poll finishes
-await queue.upsertJobScheduler('sensor-poll', {
-  repeatAfterComplete: 5000, // 5s after previous job completes
-}, { name: 'poll', data: { sensor: 'temp-1' } });
+await queue.upsertJobScheduler(
+  'sensor-poll',
+  {
+    repeatAfterComplete: 5000, // 5s after previous job completes
+  },
+  { name: 'poll', data: { sensor: 'temp-1' } },
+);
 ```
 
 This mode is useful for:
@@ -214,11 +218,11 @@ This mode is useful for:
 
 All three scheduler modes (`pattern`, `every`, `repeatAfterComplete`) support bounding via `startDate`, `endDate`, and `limit`:
 
-| Option | Type | Effect |
-|--------|------|--------|
-| `startDate` | `Date \| number` | Defer the first eligible run until this time. |
-| `endDate` | `Date \| number` | Auto-remove the scheduler when the next scheduled time would exceed this date. |
-| `limit` | `number` | Auto-remove the scheduler after creating this many jobs. |
+| Option      | Type             | Effect                                                                         |
+| ----------- | ---------------- | ------------------------------------------------------------------------------ |
+| `startDate` | `Date \| number` | Defer the first eligible run until this time.                                  |
+| `endDate`   | `Date \| number` | Auto-remove the scheduler when the next scheduled time would exceed this date. |
+| `limit`     | `number`         | Auto-remove the scheduler after creating this many jobs.                       |
 
 ```typescript
 // Run a cron job during a specific campaign window, max 36 runs
@@ -238,9 +242,9 @@ await queue.upsertJobScheduler(
   'warmup-cache',
   {
     every: 30_000,
-    startDate: Date.now() + 60_000,  // first run delayed 1 minute
+    startDate: Date.now() + 60_000, // first run delayed 1 minute
     endDate: new Date('2026-12-31'), // stop scheduling after this date
-    limit: 100,                       // auto-remove after 100 runs
+    limit: 100, // auto-remove after 100 runs
   },
   { name: 'warmup', data: { region: 'us-east' } },
 );
@@ -287,15 +291,23 @@ Set `ttl` in `JobOptions` to auto-expire jobs that are not processed within a ti
 
 ```typescript
 // Expire if not processed within 30 seconds
-await queue.add('time-sensitive', { alert: 'server-down' }, {
-  ttl: 30_000,
-});
+await queue.add(
+  'time-sensitive',
+  { alert: 'server-down' },
+  {
+    ttl: 30_000,
+  },
+);
 
 // TTL works with delayed jobs — the clock starts at creation time
-await queue.add('offer', { code: 'FLASH50' }, {
-  delay: 5_000,
-  ttl: 60_000, // must be processed within 60s of creation, not of becoming active
-});
+await queue.add(
+  'offer',
+  { code: 'FLASH50' },
+  {
+    delay: 5_000,
+    ttl: 60_000, // must be processed within 60s of creation, not of becoming active
+  },
+);
 
 // TTL works with priority jobs
 await queue.add('urgent', data, {
@@ -370,9 +382,7 @@ The built-in JSON serializer is exported for use in conditional logic or testing
 ```typescript
 import { JSON_SERIALIZER } from 'glide-mq';
 
-const serializer = process.env.USE_MSGPACK === '1'
-  ? msgpackSerializer
-  : JSON_SERIALIZER;
+const serializer = process.env.USE_MSGPACK === '1' ? msgpackSerializer : JSON_SERIALIZER;
 
 const queue = new Queue('tasks', { connection, serializer });
 ```
@@ -389,12 +399,20 @@ Add `ordering.key` to a job to guarantee that all jobs with the same key are pro
 
 ```typescript
 // All jobs with ordering.key = 'user:42' are processed sequentially
-await queue.add('process-payment', { userId: 42, amount: 100 }, {
-  ordering: { key: 'user:42' },
-});
-await queue.add('send-receipt', { userId: 42 }, {
-  ordering: { key: 'user:42' },
-});
+await queue.add(
+  'process-payment',
+  { userId: 42, amount: 100 },
+  {
+    ordering: { key: 'user:42' },
+  },
+);
+await queue.add(
+  'send-receipt',
+  { userId: 42 },
+  {
+    ordering: { key: 'user:42' },
+  },
+);
 ```
 
 ### Group concurrency (concurrency > 1)
@@ -434,7 +452,7 @@ await queue.add('sync', data, {
 });
 ```
 
-When both `concurrency` and `rateLimit` are set, both gates apply - a job must have a free concurrency slot *and* remaining rate capacity to start. Jobs that hit the rate limit are parked in a scheduler-managed promotion queue and released when the window resets.
+When both `concurrency` and `rateLimit` are set, both gates apply - a job must have a free concurrency slot _and_ remaining rate capacity to start. Jobs that hit the rate limit are parked in a scheduler-managed promotion queue and released when the window resets.
 
 - **Promotion latency**: rate-limited jobs are promoted by the scheduler loop. Worst-case latency is one `promotionInterval` (default 5 s). Lower `promotionInterval` on the worker if tighter latency is needed.
 - **Retried jobs consume rate slots** - a retried job counts against the rate window like any new job.
@@ -472,13 +490,13 @@ await queue.add('bulk-export', data, {
 
 **Differences from sliding window** (`rateLimit`):
 
-| | Sliding window (`rateLimit`) | Token bucket (`tokenBucket`) |
-|---|---|---|
-| Unit | Job count | Weighted cost per job |
-| Config | `{ max, duration }` | `{ capacity, refillRate }` |
-| Default cost | 1 job | `cost: 1` token |
-| Refill | Window resets after `duration` ms | Continuous refill at `refillRate`/s |
-| Use case | "Max N jobs per window" | "Max N units of work per second" |
+|              | Sliding window (`rateLimit`)      | Token bucket (`tokenBucket`)        |
+| ------------ | --------------------------------- | ----------------------------------- |
+| Unit         | Job count                         | Weighted cost per job               |
+| Config       | `{ max, duration }`               | `{ capacity, refillRate }`          |
+| Default cost | 1 job                             | `cost: 1` token                     |
+| Refill       | Window resets after `duration` ms | Continuous refill at `refillRate`/s |
+| Use case     | "Max N jobs per window"           | "Max N units of work per second"    |
 
 - **Promotion latency**: same as sliding window - worst-case one `promotionInterval` (default 5 s).
 - **Composition**: token bucket composes with concurrency, sliding window, and global rate limits. All gates are enforced.
@@ -501,9 +519,13 @@ By default glide-mq assigns a monotonically increasing integer ID to each job. Y
 
 ```typescript
 // Deterministic job: safe to call multiple times
-const job = await queue.add('send-email', { to: 'user@example.com' }, {
-  jobId: 'email-user-42',
-});
+const job = await queue.add(
+  'send-email',
+  { to: 'user@example.com' },
+  {
+    jobId: 'email-user-42',
+  },
+);
 // job is null if a job with this ID already exists (silent skip)
 ```
 
@@ -515,12 +537,12 @@ const job = await queue.add('send-email', { to: 'user@example.com' }, {
 
 **Duplicate behaviour by surface**
 
-| Surface | Behaviour on duplicate ID |
-|---------|--------------------------|
-| `Queue.add` | Returns `null` (silent skip) |
-| `Queue.addBulk` | Silently omits the duplicate from the returned array |
-| `FlowProducer.add` | Throws - flows cannot be partially created |
-| `TestQueue.add` | Returns `null` (mirrors production) |
+| Surface            | Behaviour on duplicate ID                            |
+| ------------------ | ---------------------------------------------------- |
+| `Queue.add`        | Returns `null` (silent skip)                         |
+| `Queue.addBulk`    | Silently omits the duplicate from the returned array |
+| `FlowProducer.add` | Throws - flows cannot be partially created           |
+| `TestQueue.add`    | Returns `null` (mirrors production)                  |
 
 **Interaction with deduplication**
 
@@ -532,27 +554,39 @@ const job = await queue.add('send-email', { to: 'user@example.com' }, {
 
 Prevent duplicate jobs from entering the queue using `deduplication.id`. Three modes are supported:
 
-| Mode | Behaviour |
-|------|-----------|
-| `simple` | Skip the new job if any job with the same ID already exists (any state). |
-| `throttle` | Accept only the first job in a TTL window; later arrivals are dropped. |
+| Mode       | Behaviour                                                                 |
+| ---------- | ------------------------------------------------------------------------- |
+| `simple`   | Skip the new job if any job with the same ID already exists (any state).  |
+| `throttle` | Accept only the first job in a TTL window; later arrivals are dropped.    |
 | `debounce` | Accept only the last job in a TTL window; earlier arrivals are cancelled. |
 
 ```typescript
 // Simple: skip if a job with this ID is already queued / active / completed
-await queue.add('send-welcome', { userId: 99 }, {
-  deduplication: { id: 'welcome-99', mode: 'simple' },
-});
+await queue.add(
+  'send-welcome',
+  { userId: 99 },
+  {
+    deduplication: { id: 'welcome-99', mode: 'simple' },
+  },
+);
 
 // Throttle: at most one "sync" job per 10 s
-await queue.add('sync', { region: 'eu' }, {
-  deduplication: { id: 'sync-eu', mode: 'throttle', ttl: 10_000 },
-});
+await queue.add(
+  'sync',
+  { region: 'eu' },
+  {
+    deduplication: { id: 'sync-eu', mode: 'throttle', ttl: 10_000 },
+  },
+);
 
 // Debounce: only the last "search" job within 500 ms is actually queued
-await queue.add('search', { query: 'hello' }, {
-  deduplication: { id: 'search-user-1', mode: 'debounce', ttl: 500 },
-});
+await queue.add(
+  'search',
+  { query: 'hello' },
+  {
+    deduplication: { id: 'search-user-1', mode: 'debounce', ttl: 500 },
+  },
+);
 ```
 
 `queue.add()` returns `null` when a job is skipped by deduplication.
@@ -617,15 +651,19 @@ const result = await queue.revoke(job.id);
 In your processor, use `job.abortSignal` to react to revocation:
 
 ```typescript
-const worker = new Worker('tasks', async (job) => {
-  for (const chunk of largeDataset) {
-    if (job.abortSignal?.aborted) {
-      throw new Error('Job revoked');
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    for (const chunk of largeDataset) {
+      if (job.abortSignal?.aborted) {
+        throw new Error('Job revoked');
+      }
+      await processChunk(chunk);
     }
-    await processChunk(chunk);
-  }
-  return { done: true };
-}, { connection });
+    return { done: true };
+  },
+  { connection },
+);
 ```
 
 `job.abortSignal` is an [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal). You can pass it directly to `fetch`, `axios`, or any `AbortSignal`-aware API.
@@ -647,7 +685,7 @@ await queue.add('process-large', { report: '... 15 KB of data ...' });
 // Stored size: ~300 bytes (98% savings on repetitive data)
 ```
 
-**Payload size limit:** job data must be ≤ 1 MB *after* serialisation but *before* compression. Larger payloads throw immediately:
+**Payload size limit:** job data must be ≤ 1 MB _after_ serialisation but _before_ compression. Larger payloads throw immediately:
 
 ```
 Error: Job data exceeds maximum size (1234567 bytes > 1MB).
@@ -723,7 +761,6 @@ const dlqJobs = await queue.getDeadLetterJobs(0, 49);
 
 Jobs in the DLQ are ordinary jobs — you can inspect, retry, or remove them like any other job.
 
-
 ---
 
 ## Fallback Chains
@@ -747,11 +784,11 @@ Jobs report tokens via job.reportTokens(count) or via job.reportUsage() (which a
 
 ### Scope options
 
-| Scope | Where tracked | When to use |
-|-------|--------------|-------------|
-| queue | glide:{queueName}:tpm hash | Multi-worker, strict global limit |
-| worker | In-memory counter | Single worker, zero-latency checks |
-| both (default) | Local first, then Valkey | Fast local check avoids Valkey when under limit |
+| Scope          | Where tracked              | When to use                                     |
+| -------------- | -------------------------- | ----------------------------------------------- |
+| queue          | glide:{queueName}:tpm hash | Multi-worker, strict global limit               |
+| worker         | In-memory counter          | Single worker, zero-latency checks              |
+| both (default) | Local first, then Valkey   | Fast local check avoids Valkey when under limit |
 
 See [USAGE.md](./USAGE.md#dual-axis-rate-limiting-rpm--tpm) for configuration examples.
 
@@ -775,10 +812,10 @@ Base fields (name, state, timestamp, priority) are always included. Users add cu
 
 ### Distance metrics
 
-| Metric | Score interpretation | Use case |
-|--------|---------------------|----------|
-| COSINE | 0 = identical, 2 = opposite (lower = better) | Text embeddings, semantic similarity |
-| L2 | 0 = identical (lower = better) | Image features, spatial data |
-| IP | Higher = more similar | Normalized embeddings, recommendation |
+| Metric | Score interpretation                         | Use case                              |
+| ------ | -------------------------------------------- | ------------------------------------- |
+| COSINE | 0 = identical, 2 = opposite (lower = better) | Text embeddings, semantic similarity  |
+| L2     | 0 = identical (lower = better)               | Image features, spatial data          |
+| IP     | Higher = more similar                        | Normalized embeddings, recommendation |
 
 See [USAGE.md](./USAGE.md#vector-search-createjobindex--storevector--vectorsearch) for full API and examples.

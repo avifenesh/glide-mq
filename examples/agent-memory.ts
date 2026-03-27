@@ -58,8 +58,7 @@ async function main() {
 
     await job.reportUsage({
       model: result.model,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
+      tokens: { input: result.inputTokens, output: result.outputTokens },
     });
 
     return { reply: result.content, tokens: result.totalTokens };

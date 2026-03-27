@@ -24,7 +24,7 @@ Import from `glide-mq/testing`:
 ```typescript
 import { TestQueue, TestWorker } from 'glide-mq/testing';
 
-const queue  = new TestQueue('tasks');
+const queue = new TestQueue('tasks');
 const worker = new TestWorker(queue, async (job) => {
   // same processor signature as the real Worker
   return { processed: job.data };
@@ -51,9 +51,13 @@ await queue.close();
 Batch processing is also supported in test mode:
 
 ```typescript
-const batchWorker = new TestWorker(queue, async (jobs) => {
-  return jobs.map(j => ({ processed: j.data }));
-}, { batch: { size: 10 } });
+const batchWorker = new TestWorker(
+  queue,
+  async (jobs) => {
+    return jobs.map((j) => ({ processed: j.data }));
+  },
+  { batch: { size: 10 } },
+);
 ```
 
 ### Using with a test framework (Vitest / Jest)
@@ -67,7 +71,7 @@ describe('email processor', () => {
   let worker: TestWorker;
 
   beforeEach(() => {
-    queue  = new TestQueue('email');
+    queue = new TestQueue('email');
     worker = new TestWorker(queue, async (job) => {
       if (!job.data.to) throw new Error('missing recipient');
       return { sent: true };
@@ -101,36 +105,36 @@ describe('email processor', () => {
 
 ### TestQueue
 
-| Method | Description |
-|--------|-------------|
-| `add(name, data, opts?)` | Enqueue a job; triggers processing immediately |
-| `addBulk(jobs)` | Enqueue multiple jobs |
-| `getJob(id)` | Retrieve a job by ID |
-| `getJobs(state, start?, end?)` | List jobs by state |
-| `getJobCounts()` | Returns `{ waiting, active, delayed, completed, failed }` |
-| `searchJobs(opts)` | Filter jobs by state, name, and/or data fields |
-| `drain(delayed?)` | Remove waiting jobs; pass `true` to also remove delayed jobs |
-| `pause()` / `resume()` | Pause / resume the queue |
-| `isPaused()` | Check pause state (synchronous, returns `boolean` - note: real `Queue.isPaused()` is async) |
-| `close()` | Close the queue |
+| Method                         | Description                                                                                 |
+| ------------------------------ | ------------------------------------------------------------------------------------------- |
+| `add(name, data, opts?)`       | Enqueue a job; triggers processing immediately                                              |
+| `addBulk(jobs)`                | Enqueue multiple jobs                                                                       |
+| `getJob(id)`                   | Retrieve a job by ID                                                                        |
+| `getJobs(state, start?, end?)` | List jobs by state                                                                          |
+| `getJobCounts()`               | Returns `{ waiting, active, delayed, completed, failed }`                                   |
+| `searchJobs(opts)`             | Filter jobs by state, name, and/or data fields                                              |
+| `drain(delayed?)`              | Remove waiting jobs; pass `true` to also remove delayed jobs                                |
+| `pause()` / `resume()`         | Pause / resume the queue                                                                    |
+| `isPaused()`                   | Check pause state (synchronous, returns `boolean` - note: real `Queue.isPaused()` is async) |
+| `close()`                      | Close the queue                                                                             |
 
 ### TestJob
 
-| Method | Description |
-|--------|-------------|
-| `changePriority(newPriority)` | Re-prioritize a job in the in-memory queue; mirrors `Job.changePriority()` |
-| `changeDelay(newDelay)` | Change the delay of a job in the in-memory queue; mirrors `Job.changeDelay()` |
-| `promote()` | Move delayed job to waiting immediately; mirrors `Job.promote()` |
+| Method                        | Description                                                                   |
+| ----------------------------- | ----------------------------------------------------------------------------- |
+| `changePriority(newPriority)` | Re-prioritize a job in the in-memory queue; mirrors `Job.changePriority()`    |
+| `changeDelay(newDelay)`       | Change the delay of a job in the in-memory queue; mirrors `Job.changeDelay()` |
+| `promote()`                   | Move delayed job to waiting immediately; mirrors `Job.promote()`              |
 
 ### TestWorker
 
-| Method / Event | Description |
-|----------------|-------------|
-| `on('active', fn)` | Fired when a job starts processing — args: `(job, jobId)` |
-| `on('completed', fn)` | Fired when a job finishes successfully |
-| `on('failed', fn)` | Fired when a job throws |
-| `on('drained', fn)` | Fired when the queue transitions from non-empty to empty |
-| `close()` | Stop the worker |
+| Method / Event        | Description                                               |
+| --------------------- | --------------------------------------------------------- |
+| `on('active', fn)`    | Fired when a job starts processing — args: `(job, jobId)` |
+| `on('completed', fn)` | Fired when a job finishes successfully                    |
+| `on('failed', fn)`    | Fired when a job throws                                   |
+| `on('drained', fn)`   | Fired when the queue transitions from non-empty to empty  |
+| `close()`             | Stop the worker                                           |
 
 ---
 
@@ -153,7 +157,6 @@ const userFailed = await queue.searchJobs({
 
 // Search across all states (scans all job hashes)
 const byName = await queue.searchJobs({ name: 'send-email' });
-
 ```
 
 `searchJobs` is also available on the real `Queue` class (with an additional `limit` option, default 100).
@@ -183,7 +186,7 @@ expect(done[0]?.attemptsMade).toBe(2);
 `TestQueue.add()` honours the `jobId` option and enforces uniqueness, just like the real `Queue`. If you add a job with a `jobId` that already exists, the call returns `null` instead of creating a duplicate:
 
 ```typescript
-const first  = await queue.add('task', { v: 1 }, { jobId: 'unique-1' });
+const first = await queue.add('task', { v: 1 }, { jobId: 'unique-1' });
 const second = await queue.add('task', { v: 2 }, { jobId: 'unique-1' });
 
 expect(first).not.toBeNull();
@@ -199,9 +202,13 @@ This makes it straightforward to test idempotent-add patterns without a running 
 `TestWorker` supports the `batch` option with `size` and optional `timeout`, matching the real `Worker` interface. When batch mode is enabled, the processor receives an array of jobs:
 
 ```typescript
-const worker = new TestWorker(queue, async (jobs) => {
-  return jobs.map(j => ({ doubled: j.data.n * 2 }));
-}, { batch: { size: 5, timeout: 100 } });
+const worker = new TestWorker(
+  queue,
+  async (jobs) => {
+    return jobs.map((j) => ({ doubled: j.data.n * 2 }));
+  },
+  { batch: { size: 5, timeout: 100 } },
+);
 
 await queue.addBulk([
   { name: 'calc', data: { n: 1 } },
@@ -218,23 +225,27 @@ To test `BatchError` handling (partial failures), throw a `BatchError` from the 
 ```typescript
 import { BatchError } from 'glide-mq';
 
-const worker = new TestWorker(queue, async (jobs) => {
-  const results = [];
-  const failedIndexes = new Map<number, Error>();
+const worker = new TestWorker(
+  queue,
+  async (jobs) => {
+    const results = [];
+    const failedIndexes = new Map<number, Error>();
 
-  for (let i = 0; i < jobs.length; i++) {
-    if (jobs[i].data.bad) {
-      failedIndexes.set(i, new Error('bad input'));
-    } else {
-      results[i] = { ok: true };
+    for (let i = 0; i < jobs.length; i++) {
+      if (jobs[i].data.bad) {
+        failedIndexes.set(i, new Error('bad input'));
+      } else {
+        results[i] = { ok: true };
+      }
     }
-  }
 
-  if (failedIndexes.size > 0) {
-    throw new BatchError(results, failedIndexes);
-  }
-  return results;
-}, { batch: { size: 10 } });
+    if (failedIndexes.size > 0) {
+      throw new BatchError(results, failedIndexes);
+    }
+    return results;
+  },
+  { batch: { size: 10 } },
+);
 
 await queue.add('item', { bad: false });
 await queue.add('item', { bad: true });
@@ -252,28 +263,44 @@ expect(failed[0]?.failedReason).toMatch('bad input');
 
 ```typescript
 // Simple mode: second add with the same dedup id is rejected
-const a = await queue.add('task', { v: 1 }, {
-  deduplication: { id: 'dedup-1', mode: 'simple' },
-});
-const b = await queue.add('task', { v: 2 }, {
-  deduplication: { id: 'dedup-1', mode: 'simple' },
-});
+const a = await queue.add(
+  'task',
+  { v: 1 },
+  {
+    deduplication: { id: 'dedup-1', mode: 'simple' },
+  },
+);
+const b = await queue.add(
+  'task',
+  { v: 2 },
+  {
+    deduplication: { id: 'dedup-1', mode: 'simple' },
+  },
+);
 
 expect(a).not.toBeNull();
 expect(b).toBeNull(); // deduplicated
 
 // Throttle mode with TTL: after the TTL window expires the same id is accepted again
-const c = await queue.add('task', { v: 3 }, {
-  deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 },
-});
+const c = await queue.add(
+  'task',
+  { v: 3 },
+  {
+    deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 },
+  },
+);
 expect(c).not.toBeNull();
 
 // Wait for TTL to expire
-await new Promise(r => setTimeout(r, 60));
+await new Promise((r) => setTimeout(r, 60));
 
-const d = await queue.add('task', { v: 4 }, {
-  deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 },
-});
+const d = await queue.add(
+  'task',
+  { v: 4 },
+  {
+    deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 },
+  },
+);
 expect(d).not.toBeNull(); // accepted — window expired
 ```
 
@@ -289,21 +316,24 @@ If your processor relies on `moveToDelayed` for step-job orchestration, use inte
 // Integration test (requires Valkey)
 import { Queue, Worker, DelayedError } from 'glide-mq';
 
-const queue  = new Queue('steps', { connection });
-const worker = new Worker('steps', async (job) => {
-  const step = job.data.step ?? 'start';
-  if (step === 'start') {
-    await job.updateData({ ...job.data, step: 'finish' });
-    await job.moveToDelayed(Date.now() + 1000, 'finish');
-  }
-  return { done: true };
-}, { connection });
+const queue = new Queue('steps', { connection });
+const worker = new Worker(
+  'steps',
+  async (job) => {
+    const step = job.data.step ?? 'start';
+    if (step === 'start') {
+      await job.updateData({ ...job.data, step: 'finish' });
+      await job.moveToDelayed(Date.now() + 1000, 'finish');
+    }
+    return { done: true };
+  },
+  { connection },
+);
 ```
 
-For unit-testing the logic *around* steps (data transformations, branching decisions), you can still use `TestQueue` and `TestWorker` — just skip the `moveToDelayed` call in test mode or guard it behind an environment check.
+For unit-testing the logic _around_ steps (data transformations, branching decisions), you can still use `TestQueue` and `TestWorker` — just skip the `moveToDelayed` call in test mode or guard it behind an environment check.
 
 ---
-
 
 ---
 
@@ -313,24 +343,24 @@ All AI-native primitives have full testing mode parity - no Valkey needed.
 
 ### TestJob methods
 
-| Method | Description |
-|--------|-------------|
-| `reportUsage(usage)` | Store AI usage metadata (model, tokens, cost, latency). Validates non-negative token counts. |
-| `stream(chunk)` | Append a chunk to the in-memory streaming channel. Returns a synthetic stream entry ID. |
-| `storeVector(field, embedding)` | Store a vector embedding for later similarity search. Accepts number[] or Float32Array. |
-| `suspend(opts?)` | Move the job to suspended state. Throws SuspendError to halt the processor. |
+| Method                          | Description                                                                                  |
+| ------------------------------- | -------------------------------------------------------------------------------------------- |
+| `reportUsage(usage)`            | Store AI usage metadata (model, tokens, cost, latency). Validates non-negative token counts. |
+| `stream(chunk)`                 | Append a chunk to the in-memory streaming channel. Returns a synthetic stream entry ID.      |
+| `storeVector(field, embedding)` | Store a vector embedding for later similarity search. Accepts number[] or Float32Array.      |
+| `suspend(opts?)`                | Move the job to suspended state. Throws SuspendError to halt the processor.                  |
 
 ### TestQueue methods
 
-| Method | Description |
-|--------|-------------|
-| `readStream(jobId, opts?)` | Read chunks from a streaming channel. Supports lastId, count, and block. |
-| `signal(jobId, name, data?)` | Send a signal to a suspended job. Returns true if the job was suspended. |
-| `getSuspendInfo(jobId)` | Get suspension state or null. |
-| `getFlowUsage(parentJobId)` | Aggregate usage across parent and children. |
-| `getFlowBudget(flowId)` | Get budget state for a flow or null. |
-| `createJobIndex(opts?)` | Store index configuration in memory. |
-| `vectorSearch(embedding, opts?)` | Run cosine-similarity KNN search over stored vectors. |
+| Method                           | Description                                                              |
+| -------------------------------- | ------------------------------------------------------------------------ |
+| `readStream(jobId, opts?)`       | Read chunks from a streaming channel. Supports lastId, count, and block. |
+| `signal(jobId, name, data?)`     | Send a signal to a suspended job. Returns true if the job was suspended. |
+| `getSuspendInfo(jobId)`          | Get suspension state or null.                                            |
+| `getFlowUsage(parentJobId)`      | Aggregate usage across parent and children.                              |
+| `getFlowBudget(flowId)`          | Get budget state for a flow or null.                                     |
+| `createJobIndex(opts?)`          | Store index configuration in memory.                                     |
+| `vectorSearch(embedding, opts?)` | Run cosine-similarity KNN search over stored vectors.                    |
 
 ### Example: testing an AI workflow
 
@@ -338,16 +368,16 @@ The TestJob and TestQueue classes mirror the real API:
 
 ```ts
 const queue = new TestQueue('test');
-const worker = new TestWorker('test', async (job) => {
-  await job.reportUsage({ model: 'gpt-5.4', inputTokens: 100, outputTokens: 50 });
+const worker = new TestWorker(queue, async (job) => {
+  await job.reportUsage({ model: 'gpt-5.4', tokens: { input: 100, output: 50 } });
   await job.stream({ type: 'token', content: 'hello' });
   return 'done';
 });
-worker.start();
 const job = await queue.add('ai-task', { prompt: 'test' });
 // After processing: job.usage.model === 'gpt-5.4'
 // queue.readStream(job.id) returns streamed chunks
 ```
+
 . Call stream(), reportUsage(), storeVector() inside the processor, then verify with readStream(), getFlowUsage(), and vectorSearch() on the queue.
 
 ### Example: testing suspend/resume
@@ -365,10 +395,10 @@ Call job.suspend() inside the processor, then queue.signal() from outside. Use g
 
 ```typescript
 // Production
-const queue  = new Queue('tasks', { connection });
+const queue = new Queue('tasks', { connection });
 const worker = new Worker('tasks', myProcessor, { connection });
 
 // Tests
-const queue  = new TestQueue('tasks');
+const queue = new TestQueue('tasks');
 const worker = new TestWorker(queue, myProcessor);
 ```

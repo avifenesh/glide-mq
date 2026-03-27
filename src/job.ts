@@ -11,7 +11,11 @@ import { isClusterClient } from './connection';
 
 /** Try to parse a string as JSON; return the original string if parsing fails. */
 function tryParseJson(s: string): any {
-  try { return JSON.parse(s); } catch { return s; }
+  try {
+    return JSON.parse(s);
+  } catch {
+    return s;
+  }
 }
 
 export class Job<D = any, R = any> {
@@ -186,30 +190,47 @@ export class Job<D = any, R = any> {
    * and emits a 'usage' event on the events stream.
    *
    * Callable from any context (inside a processor, externally via getJob(), etc.).
-   * If `totalTokens` is not provided, it is auto-computed as inputTokens + outputTokens.
+   * If `totalTokens` is not provided, it is auto-computed as the sum of all values in `tokens`.
    * Calling multiple times overwrites the previous usage data.
    */
   async reportUsage(usage: JobUsage): Promise<void> {
-    if (
-      (usage.inputTokens !== undefined && usage.inputTokens < 0) ||
-      (usage.outputTokens !== undefined && usage.outputTokens < 0) ||
-      (usage.totalTokens !== undefined && usage.totalTokens < 0)
-    ) {
-      throw new Error('Token counts must not be negative');
+    if (usage.tokens) {
+      for (const [key, val] of Object.entries(usage.tokens)) {
+        if (!Number.isFinite(val) || val < 0) {
+          throw new Error(`Token count for '${key}' must be a finite non-negative number`);
+        }
+      }
+    }
+    if (usage.totalTokens !== undefined && (!Number.isFinite(usage.totalTokens) || usage.totalTokens < 0)) {
+      throw new Error('totalTokens must be a finite non-negative number');
+    }
+    if (usage.costs) {
+      for (const [key, val] of Object.entries(usage.costs)) {
+        if (!Number.isFinite(val) || val < 0) {
+          throw new Error(`Cost for '${key}' must be a finite non-negative number`);
+        }
+      }
+    }
+    if (usage.totalCost !== undefined && (!Number.isFinite(usage.totalCost) || usage.totalCost < 0)) {
+      throw new Error('totalCost must be a finite non-negative number');
     }
 
     const resolved: JobUsage = { ...usage };
-    if (resolved.totalTokens === undefined && (resolved.inputTokens !== undefined || resolved.outputTokens !== undefined)) {
-      resolved.totalTokens = (resolved.inputTokens ?? 0) + (resolved.outputTokens ?? 0);
+    if (resolved.totalTokens === undefined && resolved.tokens && Object.keys(resolved.tokens).length > 0) {
+      resolved.totalTokens = Object.values(resolved.tokens).reduce((sum, v) => sum + v, 0);
+    }
+    if (resolved.totalCost === undefined && resolved.costs && Object.keys(resolved.costs).length > 0) {
+      resolved.totalCost = Object.values(resolved.costs).reduce((sum, v) => sum + v, 0);
     }
 
     const fields: Record<string, string> = {};
     if (resolved.model !== undefined) fields['usage:model'] = resolved.model;
     if (resolved.provider !== undefined) fields['usage:provider'] = resolved.provider;
-    if (resolved.inputTokens !== undefined) fields['usage:inputTokens'] = resolved.inputTokens.toString();
-    if (resolved.outputTokens !== undefined) fields['usage:outputTokens'] = resolved.outputTokens.toString();
+    if (resolved.tokens !== undefined) fields['usage:tokens'] = JSON.stringify(resolved.tokens);
     if (resolved.totalTokens !== undefined) fields['usage:totalTokens'] = resolved.totalTokens.toString();
-    if (resolved.costUsd !== undefined) fields['usage:costUsd'] = resolved.costUsd.toString();
+    if (resolved.costs !== undefined) fields['usage:costs'] = JSON.stringify(resolved.costs);
+    if (resolved.totalCost !== undefined) fields['usage:totalCost'] = resolved.totalCost.toString();
+    if (resolved.costUnit !== undefined) fields['usage:costUnit'] = resolved.costUnit;
     if (resolved.latencyMs !== undefined) fields['usage:latencyMs'] = resolved.latencyMs.toString();
     if (resolved.cached !== undefined) fields['usage:cached'] = resolved.cached ? '1' : '0';
 
@@ -268,6 +289,21 @@ export class Job<D = any, R = any> {
     }
     const entryId = await this.client.xadd(this.queueKeys.jstream(this.id), entries);
     return String(entryId);
+  }
+
+  /**
+   * Convenience method for streaming typed LLM chunks.
+   * Wraps `stream()` with `{ type, content }` fields.
+   *
+   * @example
+   *   await job.streamChunk('reasoning', 'Let me think about this...');
+   *   await job.streamChunk('content', 'The answer is 42.');
+   *   await job.streamChunk('done');
+   */
+  async streamChunk(type: string, content?: string): Promise<string> {
+    const chunk: Record<string, string> = { type };
+    if (content !== undefined) chunk.content = content;
+    return this.stream(chunk);
   }
 
   /**
@@ -347,7 +383,9 @@ export class Job<D = any, R = any> {
   }
 
   /** @internal */
-  consumeSuspendRequest(): { reason?: string; timeout?: number; onResume?: (signals: SignalEntry[]) => Promise<any> } | undefined {
+  consumeSuspendRequest():
+    | { reason?: string; timeout?: number; onResume?: (signals: SignalEntry[]) => Promise<any> }
+    | undefined {
     const req = this.suspendRequest;
     this.suspendRequest = undefined;
     return req;
@@ -767,14 +805,41 @@ export class Job<D = any, R = any> {
         job.progress = parseInt(hash.progress, 10) || 0;
       }
     }
-    if (hash['usage:model'] || hash['usage:inputTokens'] || hash['usage:provider'] || hash['usage:costUsd']) {
+    if (
+      hash['usage:model'] ||
+      hash['usage:tokens'] ||
+      hash['usage:provider'] ||
+      hash['usage:costs'] ||
+      hash['usage:totalTokens'] ||
+      hash['usage:totalCost'] ||
+      hash['usage:costUnit']
+    ) {
+      let tokens: Record<string, number> | undefined;
+      let costs: Record<string, number> | undefined;
+      if (hash['usage:tokens']) {
+        try {
+          const p = JSON.parse(hash['usage:tokens']);
+          if (p && typeof p === 'object') tokens = p;
+        } catch {
+          /* ignore */
+        }
+      }
+      if (hash['usage:costs']) {
+        try {
+          const p = JSON.parse(hash['usage:costs']);
+          if (p && typeof p === 'object') costs = p;
+        } catch {
+          /* ignore */
+        }
+      }
       job.usage = {
         model: hash['usage:model'] || undefined,
         provider: hash['usage:provider'] || undefined,
-        inputTokens: hash['usage:inputTokens'] ? parseInt(hash['usage:inputTokens'], 10) : undefined,
-        outputTokens: hash['usage:outputTokens'] ? parseInt(hash['usage:outputTokens'], 10) : undefined,
+        tokens,
         totalTokens: hash['usage:totalTokens'] ? parseInt(hash['usage:totalTokens'], 10) : undefined,
-        costUsd: hash['usage:costUsd'] ? parseFloat(hash['usage:costUsd']) : undefined,
+        costs,
+        totalCost: hash['usage:totalCost'] ? parseFloat(hash['usage:totalCost']) : undefined,
+        costUnit: hash['usage:costUnit'] || undefined,
         latencyMs: hash['usage:latencyMs'] ? parseInt(hash['usage:latencyMs'], 10) : undefined,
         cached: hash['usage:cached'] === '1' ? true : hash['usage:cached'] === '0' ? false : undefined,
       };
@@ -782,7 +847,7 @@ export class Job<D = any, R = any> {
     if (hash.signals) {
       try {
         const raw = JSON.parse(hash.signals) as any[];
-        job.signals = raw.map(s => ({
+        job.signals = raw.map((s) => ({
           ...s,
           data: typeof s.data === 'string' ? tryParseJson(s.data) : s.data,
         }));

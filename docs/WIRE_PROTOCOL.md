@@ -29,29 +29,29 @@ Returns the library version as a string (e.g. `"40"`). The dummy key `{glidemq}:
 
 All keys share a hash tag `{queueName}` to ensure cluster slot co-location. Default prefix is `glide`.
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `glide:{queueName}:id` | String | Auto-increment job ID counter |
-| `glide:{queueName}:stream` | Stream | Ready jobs (primary queue) |
-| `glide:{queueName}:scheduled` | Sorted Set | Delayed + prioritized staging area |
-| `glide:{queueName}:completed` | Sorted Set | Completed jobs (score = timestamp) |
-| `glide:{queueName}:failed` | Sorted Set | Failed jobs (score = timestamp) |
-| `glide:{queueName}:events` | Stream | Lifecycle events (capped ~1000) |
-| `glide:{queueName}:meta` | Hash | Queue metadata (paused flag, concurrency, rate limit) |
-| `glide:{queueName}:dedup` | Hash | Deduplication entries (field=dedup_id, value=jobId:timestamp) |
-| `glide:{queueName}:job:{id}` | Hash | Individual job data |
-| `glide:{queueName}:log:{id}` | List | Per-job log entries |
-| `glide:{queueName}:deps:{id}` | Set | Child job IDs for parent (flows) |
-| `glide:{queueName}:ordering` | Hash | Per-key sequence counters |
-| `glide:{queueName}:group:{key}` | Hash | Group state (concurrency, rate limit, token bucket) |
-| `glide:{queueName}:groupq:{key}` | List | FIFO wait list for group-limited jobs |
-| `glide:{queueName}:ratelimited` | Sorted Set | Rate-limited group promotion queue |
-| `glide:{queueName}:schedulers` | Hash | Job scheduler configs |
-| `glide:{queueName}:jstream:{id}` | Stream | Per-job streaming channel |
-| `glide:{queueName}:signals:{id}` | List | Signals delivered to a suspended job |
-| `glide:{queueName}:suspended` | Sorted Set | Suspended jobs (score = timeout deadline) |
-| `glide:{queueName}:budget:{flowId}` | Hash | Flow-level budget state |
-| `glide:{queueName}:tpm` | Hash | Token-per-minute rate limiter state |
+| Key                                 | Type       | Description                                                   |
+| ----------------------------------- | ---------- | ------------------------------------------------------------- |
+| `glide:{queueName}:id`              | String     | Auto-increment job ID counter                                 |
+| `glide:{queueName}:stream`          | Stream     | Ready jobs (primary queue)                                    |
+| `glide:{queueName}:scheduled`       | Sorted Set | Delayed + prioritized staging area                            |
+| `glide:{queueName}:completed`       | Sorted Set | Completed jobs (score = timestamp)                            |
+| `glide:{queueName}:failed`          | Sorted Set | Failed jobs (score = timestamp)                               |
+| `glide:{queueName}:events`          | Stream     | Lifecycle events (capped ~1000)                               |
+| `glide:{queueName}:meta`            | Hash       | Queue metadata (paused flag, concurrency, rate limit)         |
+| `glide:{queueName}:dedup`           | Hash       | Deduplication entries (field=dedup_id, value=jobId:timestamp) |
+| `glide:{queueName}:job:{id}`        | Hash       | Individual job data                                           |
+| `glide:{queueName}:log:{id}`        | List       | Per-job log entries                                           |
+| `glide:{queueName}:deps:{id}`       | Set        | Child job IDs for parent (flows)                              |
+| `glide:{queueName}:ordering`        | Hash       | Per-key sequence counters                                     |
+| `glide:{queueName}:group:{key}`     | Hash       | Group state (concurrency, rate limit, token bucket)           |
+| `glide:{queueName}:groupq:{key}`    | List       | FIFO wait list for group-limited jobs                         |
+| `glide:{queueName}:ratelimited`     | Sorted Set | Rate-limited group promotion queue                            |
+| `glide:{queueName}:schedulers`      | Hash       | Job scheduler configs                                         |
+| `glide:{queueName}:jstream:{id}`    | Stream     | Per-job streaming channel                                     |
+| `glide:{queueName}:signals:{id}`    | List       | Signals delivered to a suspended job                          |
+| `glide:{queueName}:suspended`       | Sorted Set | Suspended jobs (score = timeout deadline)                     |
+| `glide:{queueName}:budget:{flowId}` | Hash       | Flow-level budget state                                       |
+| `glide:{queueName}:tpm`             | Hash       | Token-per-minute rate limiter state                           |
 
 ---
 
@@ -59,45 +59,46 @@ All keys share a hash tag `{queueName}` to ensure cluster slot co-location. Defa
 
 Each job is stored as a hash at `glide:{queueName}:job:{id}` with these fields:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | string | Job ID |
-| `name` | string | Job name |
-| `data` | string | JSON-serialized (or compressed) payload |
-| `opts` | string | JSON-serialized JobOptions |
-| `timestamp` | string (int) | Enqueue timestamp in ms |
-| `attemptsMade` | string (int) | Number of attempts made |
-| `delay` | string (int) | Delay in ms |
-| `priority` | string (int) | Priority (0 = highest) |
-| `maxAttempts` | string (int) | Maximum retry attempts |
-| `state` | string | `waiting`, `active`, `delayed`, `prioritized`, `completed`, `failed`, `waiting-children`, `group-waiting` |
-| `returnvalue` | string | JSON-serialized return value (set on completion) |
-| `failedReason` | string | Error message (set on failure) |
-| `finishedOn` | string (int) | Completion/failure timestamp |
-| `processedOn` | string (int) | Start-of-processing timestamp |
-| `progress` | string | Progress (number or JSON object) |
-| `parentId` | string | Parent job ID (flows) |
-| `parentQueue` | string | Parent queue prefix (flows) |
-| `orderingKey` | string | Ordering key (sequential mode) |
-| `orderingSeq` | string (int) | Ordering sequence number |
-| `groupKey` | string | Group key (group concurrency mode) |
-| `cost` | string (int) | Token cost in millitokens |
-| `expireAt` | string (int) | TTL deadline (timestamp + ttl) |
-| `revoked` | string | `"1"` if revoked |
-| `usage:model` | string | AI model identifier |
-| `usage:inputTokens` | string (int) | Input token count |
-| `usage:outputTokens` | string (int) | Output token count |
-| `usage:totalTokens` | string (int) | Total tokens |
-| `usage:costUsd` | string (float) | Cost in USD |
-| `usage:latencyMs` | string (int) | Inference latency ms |
-| `usage:cached` | string | true if cached |
-| `tpmTokens` | string (int) | Tokens for TPM rate limiting |
-| `suspendReason` | string | Reason for suspension |
-| `suspendedAt` | string (int) | Suspension timestamp |
-| `suspendTimeout` | string (int) | Suspend timeout in ms |
-| `signals` | string (JSON) | Array of signal entries |
-| `fallbackIndex` | string (int) | Current fallback chain position |
-| `budgetKey` | string | Budget hash key for flow budget |
+| Field               | Type           | Description                                                                                               |
+| ------------------- | -------------- | --------------------------------------------------------------------------------------------------------- |
+| `id`                | string         | Job ID                                                                                                    |
+| `name`              | string         | Job name                                                                                                  |
+| `data`              | string         | JSON-serialized (or compressed) payload                                                                   |
+| `opts`              | string         | JSON-serialized JobOptions                                                                                |
+| `timestamp`         | string (int)   | Enqueue timestamp in ms                                                                                   |
+| `attemptsMade`      | string (int)   | Number of attempts made                                                                                   |
+| `delay`             | string (int)   | Delay in ms                                                                                               |
+| `priority`          | string (int)   | Priority (0 = highest)                                                                                    |
+| `maxAttempts`       | string (int)   | Maximum retry attempts                                                                                    |
+| `state`             | string         | `waiting`, `active`, `delayed`, `prioritized`, `completed`, `failed`, `waiting-children`, `group-waiting` |
+| `returnvalue`       | string         | JSON-serialized return value (set on completion)                                                          |
+| `failedReason`      | string         | Error message (set on failure)                                                                            |
+| `finishedOn`        | string (int)   | Completion/failure timestamp                                                                              |
+| `processedOn`       | string (int)   | Start-of-processing timestamp                                                                             |
+| `progress`          | string         | Progress (number or JSON object)                                                                          |
+| `parentId`          | string         | Parent job ID (flows)                                                                                     |
+| `parentQueue`       | string         | Parent queue prefix (flows)                                                                               |
+| `orderingKey`       | string         | Ordering key (sequential mode)                                                                            |
+| `orderingSeq`       | string (int)   | Ordering sequence number                                                                                  |
+| `groupKey`          | string         | Group key (group concurrency mode)                                                                        |
+| `cost`              | string (int)   | Token cost in millitokens                                                                                 |
+| `expireAt`          | string (int)   | TTL deadline (timestamp + ttl)                                                                            |
+| `revoked`           | string         | `"1"` if revoked                                                                                          |
+| `usage:model`       | string         | AI model identifier                                                                                       |
+| `usage:tokens`      | string (JSON)  | Token breakdown by category (e.g. `{"input":100,"output":50}`)                                            |
+| `usage:totalTokens` | string (int)   | Total tokens                                                                                              |
+| `usage:costs`       | string (JSON)  | Cost breakdown (e.g. `{"total":0.003}`)                                                                   |
+| `usage:totalCost`   | string (float) | Total cost                                                                                                |
+| `usage:costUnit`    | string         | Cost unit (e.g. `"usd"`)                                                                                  |
+| `usage:latencyMs`   | string (int)   | Inference latency ms                                                                                      |
+| `usage:cached`      | string         | true if cached                                                                                            |
+| `tpmTokens`         | string (int)   | Tokens for TPM rate limiting                                                                              |
+| `suspendReason`     | string         | Reason for suspension                                                                                     |
+| `suspendedAt`       | string (int)   | Suspension timestamp                                                                                      |
+| `suspendTimeout`    | string (int)   | Suspend timeout in ms                                                                                     |
+| `signals`           | string (JSON)  | Array of signal entries                                                                                   |
+| `fallbackIndex`     | string (int)   | Current fallback chain position                                                                           |
+| `budgetKey`         | string         | Budget hash key for flow budget                                                                           |
 
 ---
 
@@ -107,47 +108,47 @@ Atomically creates a job hash and enqueues it to the stream (or scheduled ZSet i
 
 ### Keys (4)
 
-| Position | Key |
-|----------|-----|
-| 1 | `glide:{queueName}:id` |
-| 2 | `glide:{queueName}:stream` |
-| 3 | `glide:{queueName}:scheduled` |
-| 4 | `glide:{queueName}:events` |
+| Position | Key                           |
+| -------- | ----------------------------- |
+| 1        | `glide:{queueName}:id`        |
+| 2        | `glide:{queueName}:stream`    |
+| 3        | `glide:{queueName}:scheduled` |
+| 4        | `glide:{queueName}:events`    |
 
 ### Args (21)
 
-| Position | Name | Type | Description |
-|----------|------|------|-------------|
-| 1 | jobName | string | Job name |
-| 2 | jobData | string | JSON-serialized job data (or `gz:` + base64(gzip(data)) if compressed) |
-| 3 | jobOpts | string | JSON-serialized options object |
-| 4 | timestamp | string (int) | Current time in ms (e.g. `Date.now()`) |
-| 5 | delay | string (int) | Delay in ms, `"0"` for immediate |
-| 6 | priority | string (int) | Priority, `"0"` for default (highest) |
-| 7 | parentId | string | Parent job ID, `""` if none |
-| 8 | maxAttempts | string (int) | Max retry attempts, `"0"` for no retries |
-| 9 | orderingKey | string | Ordering key, `""` if none |
-| 10 | groupConcurrency | string (int) | Group concurrency, `"0"` if none |
-| 11 | groupRateMax | string (int) | Group rate limit max, `"0"` if none |
-| 12 | groupRateDuration | string (int) | Group rate limit duration in ms, `"0"` if none |
-| 13 | tbCapacity | string (int) | Token bucket capacity in millitokens, `"0"` if none |
-| 14 | tbRefillRate | string (int) | Token bucket refill rate in millitokens/s, `"0"` if none |
-| 15 | jobCost | string (int) | Job cost in millitokens, `"0"` for default (1000 = 1 token) |
-| 16 | ttl | string (int) | Time-to-live in ms, `"0"` for no expiry |
-| 17 | customJobId | string | Custom job ID, `""` for auto-generated |
-| 18 | lifo | string (int) | `"1"` for LIFO mode, `"0"` for FIFO |
-| 19 | parentQueue | string | Parent queue prefix (for flows) |
-| 20 | schedulerName | string | Scheduler name (for repeatable jobs) |
-| 21 | skipEvents | string | `"1"` to skip event emission |
+| Position | Name              | Type         | Description                                                            |
+| -------- | ----------------- | ------------ | ---------------------------------------------------------------------- |
+| 1        | jobName           | string       | Job name                                                               |
+| 2        | jobData           | string       | JSON-serialized job data (or `gz:` + base64(gzip(data)) if compressed) |
+| 3        | jobOpts           | string       | JSON-serialized options object                                         |
+| 4        | timestamp         | string (int) | Current time in ms (e.g. `Date.now()`)                                 |
+| 5        | delay             | string (int) | Delay in ms, `"0"` for immediate                                       |
+| 6        | priority          | string (int) | Priority, `"0"` for default (highest)                                  |
+| 7        | parentId          | string       | Parent job ID, `""` if none                                            |
+| 8        | maxAttempts       | string (int) | Max retry attempts, `"0"` for no retries                               |
+| 9        | orderingKey       | string       | Ordering key, `""` if none                                             |
+| 10       | groupConcurrency  | string (int) | Group concurrency, `"0"` if none                                       |
+| 11       | groupRateMax      | string (int) | Group rate limit max, `"0"` if none                                    |
+| 12       | groupRateDuration | string (int) | Group rate limit duration in ms, `"0"` if none                         |
+| 13       | tbCapacity        | string (int) | Token bucket capacity in millitokens, `"0"` if none                    |
+| 14       | tbRefillRate      | string (int) | Token bucket refill rate in millitokens/s, `"0"` if none               |
+| 15       | jobCost           | string (int) | Job cost in millitokens, `"0"` for default (1000 = 1 token)            |
+| 16       | ttl               | string (int) | Time-to-live in ms, `"0"` for no expiry                                |
+| 17       | customJobId       | string       | Custom job ID, `""` for auto-generated                                 |
+| 18       | lifo              | string (int) | `"1"` for LIFO mode, `"0"` for FIFO                                    |
+| 19       | parentQueue       | string       | Parent queue prefix (for flows)                                        |
+| 20       | schedulerName     | string       | Scheduler name (for repeatable jobs)                                   |
+| 21       | skipEvents        | string       | `"1"` to skip event emission                                           |
 
 ### Return Values
 
-| Value | Meaning |
-|-------|---------|
-| `"{jobId}"` | Numeric or custom job ID string |
-| `"duplicate"` | Custom job ID already exists (silent skip) |
-| `"ERR:COST_EXCEEDS_CAPACITY"` | Job cost exceeds token bucket capacity |
-| `"ERR:ID_EXHAUSTED"` | Too many ID collisions |
+| Value                         | Meaning                                    |
+| ----------------------------- | ------------------------------------------ |
+| `"{jobId}"`                   | Numeric or custom job ID string            |
+| `"duplicate"`                 | Custom job ID already exists (silent skip) |
+| `"ERR:COST_EXCEEDS_CAPACITY"` | Job cost exceeds token bucket capacity     |
+| `"ERR:ID_EXHAUSTED"`          | Too many ID collisions                     |
 
 ### Behavior
 
@@ -191,29 +192,29 @@ Adds a job with deduplication. Checks the dedup hash first and either skips or c
 
 ### Keys (5)
 
-| Position | Key |
-|----------|-----|
-| 1 | `glide:{queueName}:dedup` |
-| 2 | `glide:{queueName}:id` |
-| 3 | `glide:{queueName}:stream` |
-| 4 | `glide:{queueName}:scheduled` |
-| 5 | `glide:{queueName}:events` |
+| Position | Key                           |
+| -------- | ----------------------------- |
+| 1        | `glide:{queueName}:dedup`     |
+| 2        | `glide:{queueName}:id`        |
+| 3        | `glide:{queueName}:stream`    |
+| 4        | `glide:{queueName}:scheduled` |
+| 5        | `glide:{queueName}:events`    |
 
 ### Args (20)
 
-| Position | Name | Type | Description |
-|----------|------|------|-------------|
-| 1 | dedupId | string | Deduplication identifier |
-| 2 | ttlMs | string (int) | TTL for throttle mode in ms, `"0"` if not used |
-| 3 | mode | string | `"simple"`, `"throttle"`, or `"debounce"` |
-| 4-20 | (same as addJob args 1-17) | | Same 17 args as glidemq_addJob |
+| Position | Name                       | Type         | Description                                    |
+| -------- | -------------------------- | ------------ | ---------------------------------------------- |
+| 1        | dedupId                    | string       | Deduplication identifier                       |
+| 2        | ttlMs                      | string (int) | TTL for throttle mode in ms, `"0"` if not used |
+| 3        | mode                       | string       | `"simple"`, `"throttle"`, or `"debounce"`      |
+| 4-20     | (same as addJob args 1-17) |              | Same 17 args as glidemq_addJob                 |
 
 ### Return Values
 
 Same as `glidemq_addJob`, plus:
 
-| Value | Meaning |
-|-------|---------|
+| Value       | Meaning                            |
+| ----------- | ---------------------------------- |
 | `"skipped"` | Deduplicated - job was not created |
 
 ### Deduplication Modes
@@ -230,55 +231,55 @@ Atomically creates a parent job and all child jobs. The parent starts in `waitin
 
 ### Keys (4 + 4 per child)
 
-| Position | Key |
-|----------|-----|
-| 1 | `glide:{parentQueue}:id` |
-| 2 | `glide:{parentQueue}:stream` |
-| 3 | `glide:{parentQueue}:scheduled` |
-| 4 | `glide:{parentQueue}:events` |
-| 4+(i-1)*4+1 | `glide:{childQueue_i}:id` |
-| 4+(i-1)*4+2 | `glide:{childQueue_i}:stream` |
-| 4+(i-1)*4+3 | `glide:{childQueue_i}:scheduled` |
-| 4+(i-1)*4+4 | `glide:{childQueue_i}:events` |
+| Position     | Key                              |
+| ------------ | -------------------------------- |
+| 1            | `glide:{parentQueue}:id`         |
+| 2            | `glide:{parentQueue}:stream`     |
+| 3            | `glide:{parentQueue}:scheduled`  |
+| 4            | `glide:{parentQueue}:events`     |
+| 4+(i-1)\*4+1 | `glide:{childQueue_i}:id`        |
+| 4+(i-1)\*4+2 | `glide:{childQueue_i}:stream`    |
+| 4+(i-1)\*4+3 | `glide:{childQueue_i}:scheduled` |
+| 4+(i-1)\*4+4 | `glide:{childQueue_i}:events`    |
 
 ### Args (9 parent + 9 per child + extra deps)
 
 **Parent args (positions 1-9):**
 
-| Position | Name | Type |
-|----------|------|------|
-| 1 | parentName | string |
-| 2 | parentData | string (JSON) |
-| 3 | parentOpts | string (JSON) |
-| 4 | timestamp | string (int) |
-| 5 | parentDelay | string (int) |
-| 6 | parentPriority | string (int) |
-| 7 | parentMaxAttempts | string (int) |
-| 8 | numChildren | string (int) |
-| 9 | parentCustomId | string |
+| Position | Name              | Type          |
+| -------- | ----------------- | ------------- |
+| 1        | parentName        | string        |
+| 2        | parentData        | string (JSON) |
+| 3        | parentOpts        | string (JSON) |
+| 4        | timestamp         | string (int)  |
+| 5        | parentDelay       | string (int)  |
+| 6        | parentPriority    | string (int)  |
+| 7        | parentMaxAttempts | string (int)  |
+| 8        | numChildren       | string (int)  |
+| 9        | parentCustomId    | string        |
 
 **Child args (9 per child, starting at position 10):**
 
 For child `i` (1-based), base = `9 + (i-1) * 9`:
 
-| Offset | Name | Type |
-|--------|------|------|
-| base+1 | childName | string |
-| base+2 | childData | string (JSON) |
-| base+3 | childOpts | string (JSON) |
-| base+4 | childDelay | string (int) |
-| base+5 | childPriority | string (int) |
-| base+6 | childMaxAttempts | string (int) |
-| base+7 | childQueuePrefix | string |
-| base+8 | childParentQueue | string |
-| base+9 | childCustomId | string |
+| Offset | Name             | Type          |
+| ------ | ---------------- | ------------- |
+| base+1 | childName        | string        |
+| base+2 | childData        | string (JSON) |
+| base+3 | childOpts        | string (JSON) |
+| base+4 | childDelay       | string (int)  |
+| base+5 | childPriority    | string (int)  |
+| base+6 | childMaxAttempts | string (int)  |
+| base+7 | childQueuePrefix | string        |
+| base+8 | childParentQueue | string        |
+| base+9 | childCustomId    | string        |
 
 **Extra deps (after all children):**
 
-| Offset | Name |
-|--------|------|
-| 9 + numChildren*9 + 1 | numExtraDeps (string int) |
-| 9 + numChildren*9 + 2..N | extraDepsMember (string) |
+| Offset                    | Name                      |
+| ------------------------- | ------------------------- |
+| 9 + numChildren\*9 + 1    | numExtraDeps (string int) |
+| 9 + numChildren\*9 + 2..N | extraDepsMember (string)  |
 
 ### Return Value
 
@@ -292,10 +293,10 @@ Returns `["duplicate"]` if any custom job ID already exists, or `"ERR:COST_EXCEE
 
 ### Keys (2)
 
-| Position | Key |
-|----------|-----|
-| 1 | `glide:{queueName}:meta` |
-| 2 | `glide:{queueName}:events` |
+| Position | Key                        |
+| -------- | -------------------------- |
+| 1        | `glide:{queueName}:meta`   |
+| 2        | `glide:{queueName}:events` |
 
 ### Args
 
@@ -334,6 +335,7 @@ glide-mq supports transparent gzip compression of job data.
 **Format**: `gz:` + base64(gzip(data))
 
 The `data` field in the job hash is stored as:
+
 - Plain JSON string when compression is off
 - `gz:AAAB3...` prefixed base64 when compression is on
 
@@ -348,6 +350,7 @@ Any language reading job data must check for the `gz:` prefix and decompress if 
 Custom job IDs allow deterministic identity for idempotent producers.
 
 **Validation rules:**
+
 - Maximum 256 characters
 - Must not contain control characters (0x00-0x1F, 0x7F)
 - Must not contain curly braces (`{`, `}`)
@@ -410,6 +413,7 @@ XREADGROUP GROUP workers worker-{uuid} COUNT {prefetch} BLOCK {timeout} STREAMS 
 Token bucket values are stored in **millitokens** (1 token = 1000 millitokens) for integer precision.
 
 When setting `tbCapacity` and `tbRefillRate` in FCALL args:
+
 - Multiply the user-facing value by 1000: `capacity=5` becomes `"5000"`, `refillRate=2.5` becomes `"2500"`
 - Job cost follows the same convention: `cost=1` becomes `"1000"`, default cost is `1000` (1 token)
 
@@ -548,8 +552,6 @@ func main() {
 
 ---
 
-
-
 ---
 
 ## FCALL glidemq_suspend
@@ -558,24 +560,24 @@ Moves an active job to the suspended state.
 
 ### Keys (4)
 
-| Position | Key |
-|----------|-----|
-| 1 | glide:{queueName}:job:{id} |
-| 2 | glide:{queueName}:stream |
-| 3 | glide:{queueName}:events |
-| 4 | glide:{queueName}:suspended |
+| Position | Key                         |
+| -------- | --------------------------- |
+| 1        | glide:{queueName}:job:{id}  |
+| 2        | glide:{queueName}:stream    |
+| 3        | glide:{queueName}:events    |
+| 4        | glide:{queueName}:suspended |
 
 ### Args (7)
 
-| Position | Name | Type | Description |
-|----------|------|------|-------------|
-| 1 | jobId | string | Job ID |
-| 2 | entryId | string | Stream entry ID (for XACK) |
-| 3 | group | string | Consumer group name |
-| 4 | now | string (int) | Current timestamp in ms |
-| 5 | reason | string | Suspension reason |
-| 6 | timeout | string (int) | Timeout in ms (0 for infinite) |
-| 7 | broadcastMode | string | 1 for broadcast, 0 for normal |
+| Position | Name          | Type         | Description                    |
+| -------- | ------------- | ------------ | ------------------------------ |
+| 1        | jobId         | string       | Job ID                         |
+| 2        | entryId       | string       | Stream entry ID (for XACK)     |
+| 3        | group         | string       | Consumer group name            |
+| 4        | now           | string (int) | Current timestamp in ms        |
+| 5        | reason        | string       | Suspension reason              |
+| 6        | timeout       | string (int) | Timeout in ms (0 for infinite) |
+| 7        | broadcastMode | string       | 1 for broadcast, 0 for normal  |
 
 Returns "ok", "error:not_found", or "error:not_active".
 
@@ -587,22 +589,22 @@ Sends a signal to a suspended job and re-queues it.
 
 ### Keys (5)
 
-| Position | Key |
-|----------|-----|
-| 1 | glide:{queueName}:job:{id} |
-| 2 | glide:{queueName}:stream |
-| 3 | glide:{queueName}:events |
-| 4 | glide:{queueName}:suspended |
-| 5 | glide:{queueName}:signals:{id} |
+| Position | Key                            |
+| -------- | ------------------------------ |
+| 1        | glide:{queueName}:job:{id}     |
+| 2        | glide:{queueName}:stream       |
+| 3        | glide:{queueName}:events       |
+| 4        | glide:{queueName}:suspended    |
+| 5        | glide:{queueName}:signals:{id} |
 
 ### Args (4)
 
-| Position | Name | Type | Description |
-|----------|------|------|-------------|
-| 1 | jobId | string | Job ID |
-| 2 | signalName | string | Signal name |
-| 3 | signalData | string | JSON-serialized payload |
-| 4 | now | string (int) | Current timestamp in ms |
+| Position | Name       | Type         | Description             |
+| -------- | ---------- | ------------ | ----------------------- |
+| 1        | jobId      | string       | Job ID                  |
+| 2        | signalName | string       | Signal name             |
+| 3        | signalData | string       | JSON-serialized payload |
+| 4        | now        | string (int) | Current timestamp in ms |
 
 Returns "ok" or "not_suspended".
 

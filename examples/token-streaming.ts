@@ -1,9 +1,9 @@
 /**
- * Token Streaming - job.stream / queue.readStream
+ * Token Streaming - job.streamChunk / queue.readStream
  *
  * Real scenario: Stream a blog post generation to the terminal in real-time.
  * The worker generates a response using streamChat, publishing each token
- * chunk via job.stream(). A consumer polls readStream() and prints tokens
+ * chunk via job.streamChunk(). A consumer polls readStream() and prints tokens
  * as they arrive. Demonstrates resume from a known lastId.
  *
  * Run: npx tsx examples/token-streaming.ts
@@ -24,12 +24,12 @@ async function main() {
 
     for await (const chunk of streamChat(model, [{ role: 'user', content: prompt }], 200)) {
       if (chunk.type === 'token') {
-        await job.stream({ t: chunk.content });
+        await job.streamChunk('content', chunk.content);
         full += chunk.content;
       } else {
         totalIn = chunk.inputTokens ?? 0;
         totalOut = chunk.outputTokens ?? 0;
-        await job.stream({ t: '', done: '1' });
+        await job.streamChunk('done');
       }
     }
 
@@ -59,11 +59,11 @@ async function main() {
 
     for (const entry of entries) {
       lastId = entry.id;
-      if (entry.fields.done === '1') {
+      if (entry.fields.type === 'done') {
         done = true;
         break;
       }
-      process.stdout.write(entry.fields.t);
+      process.stdout.write(entry.fields.content ?? '');
       tokenCount++;
     }
 

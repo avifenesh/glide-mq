@@ -45,10 +45,7 @@ describe('Job.reportTokens (unit)', () => {
     const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
     await job.reportTokens(500);
 
-    expect(mockClient.hset).toHaveBeenCalledWith(
-      keys.job('1'),
-      { tpmTokens: '500' },
-    );
+    expect(mockClient.hset).toHaveBeenCalledWith(keys.job('1'), { tpmTokens: '500' });
     expect(job.tpmTokens).toBe(500);
   });
 
@@ -64,20 +61,14 @@ describe('Job.reportTokens (unit)', () => {
 
     expect(job.tpmTokens).toBe(200);
     expect(mockClient.hset).toHaveBeenCalledTimes(2);
-    expect(mockClient.hset).toHaveBeenLastCalledWith(
-      keys.job('1'),
-      { tpmTokens: '200' },
-    );
+    expect(mockClient.hset).toHaveBeenLastCalledWith(keys.job('1'), { tpmTokens: '200' });
   });
 
   it('allows zero tokens', async () => {
     const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
     await job.reportTokens(0);
 
-    expect(mockClient.hset).toHaveBeenCalledWith(
-      keys.job('1'),
-      { tpmTokens: '0' },
-    );
+    expect(mockClient.hset).toHaveBeenCalledWith(keys.job('1'), { tpmTokens: '0' });
     expect(job.tpmTokens).toBe(0);
   });
 });
@@ -144,13 +135,17 @@ describe('TestWorker TPM enforcement', () => {
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
 
-    const worker = new TestWorker(queue, async (job: any) => {
-      await job.reportTokens(600);
-      completionTimes.push(Date.now());
-      return 'done';
-    }, {
-      tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS },
-    });
+    const worker = new TestWorker(
+      queue,
+      async (job: any) => {
+        await job.reportTokens(600);
+        completionTimes.push(Date.now());
+        return 'done';
+      },
+      {
+        tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS },
+      },
+    );
 
     // Add 3 jobs - first two consume 1200 tokens total (exceeds 1000 limit).
     // Third job should be delayed until the window resets.
@@ -159,7 +154,9 @@ describe('TestWorker TPM enforcement', () => {
     await queue.add('job3', {});
 
     let completedCount = 0;
-    worker.on('completed', () => { completedCount++; });
+    worker.on('completed', () => {
+      completedCount++;
+    });
 
     const start = Date.now();
     while (completedCount < 3 && Date.now() - start < 8000) {
@@ -183,20 +180,26 @@ describe('TestWorker TPM enforcement', () => {
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
 
-    const worker = new TestWorker(queue, async (job: any) => {
-      await job.reportUsage({ inputTokens: 400, outputTokens: 200 });
-      completionTimes.push(Date.now());
-      return 'done';
-    }, {
-      tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS },
-    });
+    const worker = new TestWorker(
+      queue,
+      async (job: any) => {
+        await job.reportUsage({ tokens: { input: 400, output: 200 } });
+        completionTimes.push(Date.now());
+        return 'done';
+      },
+      {
+        tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS },
+      },
+    );
 
     await queue.add('job1', {});
     await queue.add('job2', {});
     await queue.add('job3', {});
 
     let completedCount = 0;
-    worker.on('completed', () => { completedCount++; });
+    worker.on('completed', () => {
+      completedCount++;
+    });
 
     const start = Date.now();
     while (completedCount < 3 && Date.now() - start < 8000) {
@@ -216,13 +219,17 @@ describe('TestWorker TPM enforcement', () => {
     const queue = new TestQueue('test-tpm-under');
     const completionTimes: number[] = [];
 
-    const worker = new TestWorker(queue, async (job: any) => {
-      await job.reportTokens(100);
-      completionTimes.push(Date.now());
-      return 'done';
-    }, {
-      tokenLimiter: { maxTokens: 10000, duration: 5000 },
-    });
+    const worker = new TestWorker(
+      queue,
+      async (job: any) => {
+        await job.reportTokens(100);
+        completionTimes.push(Date.now());
+        return 'done';
+      },
+      {
+        tokenLimiter: { maxTokens: 10000, duration: 5000 },
+      },
+    );
 
     // 5 jobs x 100 tokens = 500 tokens - well under 10000 limit
     for (let i = 0; i < 5; i++) {
@@ -230,7 +237,9 @@ describe('TestWorker TPM enforcement', () => {
     }
 
     let completedCount = 0;
-    worker.on('completed', () => { completedCount++; });
+    worker.on('completed', () => {
+      completedCount++;
+    });
 
     const start = Date.now();
     while (completedCount < 5 && Date.now() - start < 3000) {
@@ -251,23 +260,29 @@ describe('TestWorker TPM enforcement', () => {
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
 
-    const worker = new TestWorker(queue, async (job: any) => {
-      // reportUsage gives 200 totalTokens, reportTokens gives 600
-      // Worker should use max(200, 600) = 600 for TPM tracking
-      await job.reportUsage({ inputTokens: 100, outputTokens: 100 });
-      await job.reportTokens(600);
-      completionTimes.push(Date.now());
-      return 'done';
-    }, {
-      tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS },
-    });
+    const worker = new TestWorker(
+      queue,
+      async (job: any) => {
+        // reportUsage gives 200 totalTokens, reportTokens gives 600
+        // Worker should use max(200, 600) = 600 for TPM tracking
+        await job.reportUsage({ tokens: { input: 100, output: 100 } });
+        await job.reportTokens(600);
+        completionTimes.push(Date.now());
+        return 'done';
+      },
+      {
+        tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS },
+      },
+    );
 
     await queue.add('job1', {});
     await queue.add('job2', {});
     await queue.add('job3', {});
 
     let completedCount = 0;
-    worker.on('completed', () => { completedCount++; });
+    worker.on('completed', () => {
+      completedCount++;
+    });
 
     const start = Date.now();
     while (completedCount < 3 && Date.now() - start < 8000) {
@@ -335,17 +350,23 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
           if (found.length > 0) await cleanupClient.del(found);
         } while (cursor !== '0');
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   it('reportTokens persists tpmTokens in the job hash', async () => {
     const Q = `tpm-persist-${Date.now()}`;
     const queue = new QueueImpl(Q, { connection: CONNECTION });
 
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.reportTokens(1500);
-      return 'done';
-    }, { connection: CONNECTION });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.reportTokens(1500);
+        return 'done';
+      },
+      { connection: CONNECTION },
+    );
 
     const added = await queue.add('test-report-tokens', { prompt: 'test' });
     await waitFor(async () => {
@@ -368,14 +389,18 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     // Use a 2s window for reliability
     const WINDOW_MS = 2000;
 
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.reportTokens(600);
-      completionTimes.push(Date.now());
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS, scope: 'worker' },
-    });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.reportTokens(600);
+        completionTimes.push(Date.now());
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS, scope: 'worker' },
+      },
+    );
 
     await queue.add('tpm-w1', {});
     await queue.add('tpm-w2', {});
@@ -402,14 +427,18 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
 
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.reportTokens(600);
-      completionTimes.push(Date.now());
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS, scope: 'queue' },
-    });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.reportTokens(600);
+        completionTimes.push(Date.now());
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS, scope: 'queue' },
+      },
+    );
 
     await queue.add('tpm-q1', {});
     await queue.add('tpm-q2', {});
@@ -433,14 +462,18 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
 
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.reportTokens(600);
-      completionTimes.push(Date.now());
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS, scope: 'both' },
-    });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.reportTokens(600);
+        completionTimes.push(Date.now());
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS, scope: 'both' },
+      },
+    );
 
     await queue.add('tpm-b1', {});
     await queue.add('tpm-b2', {});
@@ -464,14 +497,18 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
 
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.reportTokens(1100);
-      completionTimes.push(Date.now());
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS, scope: 'worker' },
-    });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.reportTokens(1100);
+        completionTimes.push(Date.now());
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS, scope: 'worker' },
+      },
+    );
 
     await queue.add('tpm-resume-1', {});
     await queue.add('tpm-resume-2', {});
@@ -494,16 +531,20 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const queue = new QueueImpl(Q, { connection: CONNECTION });
     const completedNames: string[] = [];
 
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      // Report minimal tokens - TPM should not block
-      await job.reportTokens(10);
-      completedNames.push(job.name);
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      limiter: { max: 100, duration: 5000 },
-      tokenLimiter: { maxTokens: 100000, duration: 5000, scope: 'worker' },
-    });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        // Report minimal tokens - TPM should not block
+        await job.reportTokens(10);
+        completedNames.push(job.name);
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        limiter: { max: 100, duration: 5000 },
+        tokenLimiter: { maxTokens: 100000, duration: 5000, scope: 'worker' },
+      },
+    );
 
     await queue.add('rpm-tpm-1', {});
     await queue.add('rpm-tpm-2', {});
@@ -525,14 +566,18 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
 
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.reportTokens(5000);
-      completionTimes.push(Date.now());
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      tokenLimiter: { maxTokens: 5000, duration: WINDOW_MS, scope: 'worker' },
-    });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.reportTokens(5000);
+        completionTimes.push(Date.now());
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        tokenLimiter: { maxTokens: 5000, duration: WINDOW_MS, scope: 'worker' },
+      },
+    );
 
     await queue.add('big-token-1', {});
     await queue.add('big-token-2', {});
@@ -556,14 +601,18 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
 
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.reportUsage({ inputTokens: 400, outputTokens: 200 });
-      completionTimes.push(Date.now());
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS, scope: 'worker' },
-    });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.reportUsage({ tokens: { input: 400, output: 200 } });
+        completionTimes.push(Date.now());
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS, scope: 'worker' },
+      },
+    );
 
     await queue.add('auto-tpm-1', {});
     await queue.add('auto-tpm-2', {});
@@ -592,13 +641,17 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const k = buildK(Q);
     const WINDOW_MS = 5000;
 
-    const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.reportTokens(500);
-      return 'done';
-    }, {
-      connection: CONNECTION,
-      tokenLimiter: { maxTokens: 10000, duration: WINDOW_MS, scope: 'queue' },
-    });
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.reportTokens(500);
+        return 'done';
+      },
+      {
+        connection: CONNECTION,
+        tokenLimiter: { maxTokens: 10000, duration: WINDOW_MS, scope: 'queue' },
+      },
+    );
 
     // Add 3 jobs - each reports 500 tokens
     await queue.add('shared-1', {});
