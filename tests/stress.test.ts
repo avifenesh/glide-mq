@@ -404,7 +404,6 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
       const childValues = await rootJob!.getChildrenValues();
       expect(Object.keys(childValues).length).toBeGreaterThanOrEqual(10);
 
-      await (rootJob as any).constructor.prototype.constructor.prototype === undefined; // no-op
       const tempQ = new Queue(qName, { connection: CONNECTION });
       await tempQ.close();
     } finally {
