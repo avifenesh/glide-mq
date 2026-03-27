@@ -290,6 +290,7 @@ describe('Valkey Search integration', () => {
 
   let cleanupClient: InstanceType<typeof GlideClient>;
   let searchAvailable = false;
+  let searchVersion = 0; // e.g. 10000 = 1.0.0, 66048 = 1.2.0
 
   /** Drop ALL FT indexes to prevent cascading timeout issues from stale indexes. */
   async function dropAllIndexes() {
@@ -312,6 +313,17 @@ describe('Valkey Search integration', () => {
       });
       await GlideFt.list(cleanupClient);
       searchAvailable = true;
+      // Detect search module version via MODULE LIST
+      try {
+        const modules = (await cleanupClient.customCommand(['MODULE', 'LIST'])) as any[];
+        for (let i = 0; i < modules.length; i += 2) {
+          const mod = modules[i] as any[];
+          if (mod && String(mod[1]) === 'search') {
+            searchVersion = Number(mod[3]) || 0;
+            break;
+          }
+        }
+      } catch {}
       // Clean up any stale indexes from previous runs
       await dropAllIndexes();
     } catch {
@@ -334,9 +346,14 @@ describe('Valkey Search integration', () => {
   });
 
   function requireSearch() {
-    if (!searchAvailable) {
-      return false;
-    }
+    if (!searchAvailable) return false;
+    return true;
+  }
+
+  /** Require search 1.1+ (version >= 65536). Skip test on older servers. */
+  function requireSearch11() {
+    if (!searchAvailable) return false;
+    if (searchVersion < 65536) return false; // 65536 = 1.1.0
     return true;
   }
 
@@ -654,7 +671,7 @@ describe('Valkey Search integration', () => {
   // -- Search 1.1+ create options (requires valkey-search >= 1.1)
 
   it('createJobIndex with skipInitialScan option', async () => {
-    if (!requireSearch()) return;
+    if (!requireSearch11()) return;
 
     const qName = 'search-skipscan-' + Date.now();
     const idxName = `${qName}-idx`;
@@ -689,7 +706,7 @@ describe('Valkey Search integration', () => {
   }, 30000);
 
   it('createJobIndex with noStopWords option', async () => {
-    if (!requireSearch()) return;
+    if (!requireSearch11()) return;
 
     const qName = 'search-nostop-' + Date.now();
     const idxName = `${qName}-idx`;
@@ -711,7 +728,7 @@ describe('Valkey Search integration', () => {
   }, 15000);
 
   it('createJobIndex with custom stopWords', async () => {
-    if (!requireSearch()) return;
+    if (!requireSearch11()) return;
 
     const qName = 'search-cstop-' + Date.now();
     const idxName = `${qName}-idx`;
@@ -735,7 +752,7 @@ describe('Valkey Search integration', () => {
   // -- Non-vector index (search 1.1+ allows indexes without vector fields)
 
   it('createJobIndex without vectorField on search 1.1+', async () => {
-    if (!requireSearch()) return;
+    if (!requireSearch11()) return;
 
     const qName = 'search-novec-' + Date.now();
     const idxName = `${qName}-idx`;
