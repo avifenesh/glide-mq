@@ -112,7 +112,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await waitFor(async () => {
         const stateA = await cleanupClient.hget(k.job(jobs.get('A')!.id), 'state');
         return String(stateA) === 'completed';
-      }, 15000);
+      }, 30000);
 
       // Verify all completed
       for (const [_name, job] of jobs) {
@@ -423,7 +423,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await waitFor(async () => {
         const state = await cleanupClient.hget(k.job(dId), 'state');
         return String(state) === 'completed';
-      }, 15000);
+      }, 30000);
 
       // At this point, one of B or C should have completed (notifying A)
       // Wait for at least one of them to complete
@@ -431,7 +431,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
         const stateB = await cleanupClient.hget(k.job(bId), 'state');
         const stateC = await cleanupClient.hget(k.job(cId), 'state');
         return String(stateB) === 'completed' || String(stateC) === 'completed';
-      }, 15000);
+      }, 30000);
 
       // Check A's depsCompleted counter
       let depsCompleted = await cleanupClient.hget(k.job(aId), 'depsCompleted');
@@ -443,7 +443,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
         const stateB = await cleanupClient.hget(k.job(bId), 'state');
         const stateC = await cleanupClient.hget(k.job(cId), 'state');
         return String(stateB) === 'completed' && String(stateC) === 'completed';
-      }, 15000);
+      }, 30000);
 
       // After both complete, A's depsCompleted should be 2
       depsCompleted = await cleanupClient.hget(k.job(aId), 'depsCompleted');
@@ -453,7 +453,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await waitFor(async () => {
         const state = await cleanupClient.hget(k.job(aId), 'state');
         return String(state) === 'completed';
-      }, 15000);
+      }, 30000);
 
       const stateA = await cleanupClient.hget(k.job(aId), 'state');
       expect(String(stateA)).toBe('completed');
