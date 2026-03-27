@@ -19,7 +19,7 @@ const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 const queue = new Queue('ai', { connection });
 
 await queue.add('inference', { prompt: 'Explain message queues' }, {
-  fallbacks: [{ model: 'gpt-4o-mini', provider: 'openai' }],
+  fallbacks: [{ model: 'gpt-4.1-nano', provider: 'openai' }],
   lockDuration: 120000,
 });
 
