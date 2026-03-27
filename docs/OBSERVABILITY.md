@@ -165,22 +165,23 @@ When job.reportUsage() is called inside a processor, the usage metadata is persi
 |------------|------|-------------|
 | usage:model | string | Model identifier (e.g. gpt-5.4) |
 | usage:provider | string | Provider identifier (e.g. openai) |
-| usage:inputTokens | string (int) | Input/prompt token count |
-| usage:outputTokens | string (int) | Output/completion token count |
+| usage:tokens | string (JSON) | Token breakdown by category (e.g. `{"input":100,"output":50}`) |
 | usage:totalTokens | string (int) | Total tokens (auto-computed if not set) |
-| usage:costUsd | string (float) | Cost in USD |
+| usage:costs | string (JSON) | Cost breakdown (e.g. `{"total":0.003}`) |
+| usage:totalCost | string (float) | Total cost |
+| usage:costUnit | string | Cost unit (e.g. `"usd"`) |
 | usage:latencyMs | string (int) | Inference latency in ms |
 | usage:cached | string | true if response was cached |
 
 ### Flow-level usage aggregation
 
-queue.getFlowUsage(parentJobId) traverses the job tree and returns totals for inputTokens, outputTokens, costUsd, plus a models map (model name to job count) and jobCount.
+queue.getFlowUsage(parentJobId) traverses the job tree and returns aggregated tokens and costs maps, totalTokens, totalCost, plus a models map (model name to job count), costUnit, and jobCount.
 
 ### Budget exceeded events
 
 When a flow budget is exceeded (via glidemq_recordUsageAndCheckBudget), the budget hash exceeded field is set to 1. Subsequent jobs in the flow are either failed or paused depending on the onExceeded setting.
 
-Budget state can be queried via queue.getFlowBudget(flowId) which returns { maxTotalTokens, maxCostUsd, usedTokens, usedCost, exceeded, onExceeded }.
+Budget state can be queried via queue.getFlowBudget(flowId) which returns { maxTotalTokens, maxTokens, tokenWeights, maxTotalCost, maxCosts, costUnit, usedTokens, usedCost, exceeded, onExceeded }.
 
 ### Token-per-minute (TPM) metrics
 

@@ -634,9 +634,8 @@ const worker = new Worker('llm-tasks', async (job) => {
   await job.reportUsage({
     model: 'gpt-5.4',
     provider: 'openai',
-    inputTokens: result.usage.prompt_tokens,
-    outputTokens: result.usage.completion_tokens,
-    costUsd: result.usage.total_cost,
+    tokens: { input: result.usage.prompt_tokens, output: result.usage.completion_tokens },
+    costs: { total: result.usage.total_cost },
     latencyMs: result.latencyMs,
   });
 
@@ -645,7 +644,7 @@ const worker = new Worker('llm-tasks', async (job) => {
 
 // Aggregate usage for a job flow (parent + all children)
 const usage = await queue.getFlowUsage(parentJobId);
-console.log(usage.totalInputTokens + usage.totalOutputTokens, usage.totalCostUsd);
+console.log(usage.totalTokens, usage.totalCost);
 ```
 
 `reportUsage()` persists usage to the job hash in Valkey. `job.usage` is populated when the job is fetched via `getJob()`. `getFlowUsage()` walks the job tree downward from the parent and sums all fields.
@@ -778,7 +777,7 @@ See [ADVANCED.md](./ADVANCED.md#fallback-chains) for details on how the chain ad
 
 ### Budget Middleware (Flow-level Token/Cost Caps)
 
-Enforce hard caps on total tokens and/or USD cost across all jobs in a flow. Pass a budget option to FlowProducer.add() with maxTotalTokens, maxCostUsd, and onExceeded (fail or pause). When a job calls reportUsage() inside a budgeted flow, the worker calls glidemq_recordUsageAndCheckBudget to atomically increment counters and check limits.
+Enforce hard caps on total tokens and/or cost across all jobs in a flow. Pass a budget option to FlowProducer.add() with maxTotalTokens, maxTotalCost, and onExceeded (fail or pause). Per-category limits are also supported via maxTokens (e.g. `{ input: 5000 }`), tokenWeights (e.g. `{ output: 4 }`), maxCosts, and costUnit. When a job calls reportUsage() inside a budgeted flow, the worker calls glidemq_recordUsageAndCheckBudget to atomically increment counters and check limits.
 
 Query budget state via queue.getFlowBudget(flowId). Budget state is stored in glide:{queueName}:budget:{flowId}.
 

@@ -339,11 +339,10 @@ The TestJob and TestQueue classes mirror the real API:
 ```ts
 const queue = new TestQueue('test');
 const worker = new TestWorker('test', async (job) => {
-  await job.reportUsage({ model: 'gpt-5.4', inputTokens: 100, outputTokens: 50 });
+  await job.reportUsage({ model: 'gpt-5.4', tokens: { input: 100, output: 50 } });
   await job.stream({ type: 'token', content: 'hello' });
   return 'done';
 });
-worker.start();
 const job = await queue.add('ai-task', { prompt: 'test' });
 // After processing: job.usage.model === 'gpt-5.4'
 // queue.readStream(job.id) returns streamed chunks

@@ -85,10 +85,11 @@ Each job is stored as a hash at `glide:{queueName}:job:{id}` with these fields:
 | `expireAt` | string (int) | TTL deadline (timestamp + ttl) |
 | `revoked` | string | `"1"` if revoked |
 | `usage:model` | string | AI model identifier |
-| `usage:inputTokens` | string (int) | Input token count |
-| `usage:outputTokens` | string (int) | Output token count |
+| `usage:tokens` | string (JSON) | Token breakdown by category (e.g. `{"input":100,"output":50}`) |
 | `usage:totalTokens` | string (int) | Total tokens |
-| `usage:costUsd` | string (float) | Cost in USD |
+| `usage:costs` | string (JSON) | Cost breakdown (e.g. `{"total":0.003}`) |
+| `usage:totalCost` | string (float) | Total cost |
+| `usage:costUnit` | string | Cost unit (e.g. `"usd"`) |
 | `usage:latencyMs` | string (int) | Inference latency ms |
 | `usage:cached` | string | true if cached |
 | `tpmTokens` | string (int) | Tokens for TPM rate limiting |
