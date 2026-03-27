@@ -204,7 +204,7 @@ Resume externally via `queue.signal(jobId, 'approve', { ... })`.
 const worker = new Worker('inference', async (job) => {
   const fallback = job.currentFallback;
   // undefined on first attempt, then fallbacks[0], fallbacks[1], etc.
-  const model = fallback?.model ?? 'gpt-4.1-nano';
+  const model = fallback?.model ?? 'gpt-5.4-nano';
   return await callLLM(model, job.data.prompt);
 }, { connection });
 ```
