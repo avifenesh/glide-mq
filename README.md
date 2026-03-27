@@ -126,7 +126,7 @@ Reproduce with `npm run bench` or `npx tsx benchmarks/elasticache-head-to-head.t
 ## When NOT to use glide-mq
 
 - **You need a streaming platform.** glide-mq is a job/task queue, not a replacement for Kafka or NATS JetStream.
-- **You need browser or Deno support.** The Rust NAPI client requires Node.js 20+.
+- **You need browser support.** The Rust NAPI client requires a server-side runtime (Node.js 20+, Bun, or Deno with NAPI support).
 - **You need exactly-once delivery.** glide-mq provides at-least-once semantics. Jobs may be processed more than once after crashes or stalled recovery.
 - **You do not run Valkey or Redis.** There is no embedded mode - a Valkey 7.0+ or Redis 7.0+ instance is required.
 - **Vector search without valkey-bundle.** KNN queries require the Valkey Search module.
