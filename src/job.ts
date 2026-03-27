@@ -11,7 +11,11 @@ import { isClusterClient } from './connection';
 
 /** Try to parse a string as JSON; return the original string if parsing fails. */
 function tryParseJson(s: string): any {
-  try { return JSON.parse(s); } catch { return s; }
+  try {
+    return JSON.parse(s);
+  } catch {
+    return s;
+  }
 }
 
 export class Job<D = any, R = any> {
@@ -367,7 +371,9 @@ export class Job<D = any, R = any> {
   }
 
   /** @internal */
-  consumeSuspendRequest(): { reason?: string; timeout?: number; onResume?: (signals: SignalEntry[]) => Promise<any> } | undefined {
+  consumeSuspendRequest():
+    | { reason?: string; timeout?: number; onResume?: (signals: SignalEntry[]) => Promise<any> }
+    | undefined {
     const req = this.suspendRequest;
     this.suspendRequest = undefined;
     return req;
@@ -787,14 +793,30 @@ export class Job<D = any, R = any> {
         job.progress = parseInt(hash.progress, 10) || 0;
       }
     }
-    if (hash['usage:model'] || hash['usage:tokens'] || hash['usage:provider'] || hash['usage:costs'] || hash['usage:totalTokens']) {
+    if (
+      hash['usage:model'] ||
+      hash['usage:tokens'] ||
+      hash['usage:provider'] ||
+      hash['usage:costs'] ||
+      hash['usage:totalTokens']
+    ) {
       let tokens: Record<string, number> | undefined;
       let costs: Record<string, number> | undefined;
       if (hash['usage:tokens']) {
-        try { tokens = JSON.parse(hash['usage:tokens']); } catch { /* ignore */ }
+        try {
+          const p = JSON.parse(hash['usage:tokens']);
+          if (p && typeof p === 'object') tokens = p;
+        } catch {
+          /* ignore */
+        }
       }
       if (hash['usage:costs']) {
-        try { costs = JSON.parse(hash['usage:costs']); } catch { /* ignore */ }
+        try {
+          const p = JSON.parse(hash['usage:costs']);
+          if (p && typeof p === 'object') costs = p;
+        } catch {
+          /* ignore */
+        }
       }
       job.usage = {
         model: hash['usage:model'] || undefined,
@@ -811,7 +833,7 @@ export class Job<D = any, R = any> {
     if (hash.signals) {
       try {
         const raw = JSON.parse(hash.signals) as any[];
-        job.signals = raw.map(s => ({
+        job.signals = raw.map((s) => ({
           ...s,
           data: typeof s.data === 'string' ? tryParseJson(s.data) : s.data,
         }));

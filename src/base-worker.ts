@@ -2,7 +2,15 @@ import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
 import { TimeUnit } from '@glidemq/speedkey';
-import type { WorkerOptions, Processor, BatchProcessor, Client, Serializer, SchedulerEntry, SignalEntry } from './types';
+import type {
+  WorkerOptions,
+  Processor,
+  BatchProcessor,
+  Client,
+  Serializer,
+  SchedulerEntry,
+  SignalEntry,
+} from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import {
@@ -50,7 +58,16 @@ import {
 import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
 
-export type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained' | 'budget-exceeded';
+export type WorkerEvent =
+  | 'completed'
+  | 'failed'
+  | 'error'
+  | 'stalled'
+  | 'closing'
+  | 'closed'
+  | 'active'
+  | 'drained'
+  | 'budget-exceeded';
 
 /**
  * Configuration that differs between Worker and BroadcastWorker.
@@ -1211,12 +1228,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
               await this.handleJobFailure(job, currentJobId, currentEntryId, e);
             }
           } else {
-            await this.handleJobFailure(
-              job,
-              currentJobId,
-              currentEntryId,
-              new Error('Budget exceeded'),
-            );
+            await this.handleJobFailure(job, currentJobId, currentEntryId, new Error('Budget exceeded'));
           }
           return;
         }
@@ -1409,21 +1421,39 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         const rawTotal = job.usage.totalTokens ?? 0;
         const totalCost = job.usage.totalCost ?? 0;
 
-        if (rawTotal > 0 || totalCost > 0 || Object.keys(usageTokens).length > 0 || Object.keys(usageCosts).length > 0) {
+        if (
+          rawTotal > 0 ||
+          totalCost > 0 ||
+          Object.keys(usageTokens).length > 0 ||
+          Object.keys(usageCosts).length > 0
+        ) {
           // Read budget config for weights and per-category limits
-          const budgetData = await this.commandClient.hmget(job.budgetKey, [
-            'tokenWeights', 'maxTokens', 'maxCosts',
-          ]);
+          const budgetData = await this.commandClient.hmget(job.budgetKey, ['tokenWeights', 'maxTokens', 'maxCosts']);
           const weightsRaw = budgetData?.[0] ? String(budgetData[0]) : '{}';
           const maxTokensRaw = budgetData?.[1] ? String(budgetData[1]) : '{}';
           const maxCostsRaw = budgetData?.[2] ? String(budgetData[2]) : '{}';
 
           let weights: Record<string, number> = {};
-          try { weights = JSON.parse(weightsRaw); } catch { /* ignore */ }
+          try {
+            const p = JSON.parse(weightsRaw);
+            if (p && typeof p === 'object') weights = p;
+          } catch {
+            /* ignore */
+          }
           let maxTokens: Record<string, number> = {};
-          try { maxTokens = JSON.parse(maxTokensRaw); } catch { /* ignore */ }
+          try {
+            const p = JSON.parse(maxTokensRaw);
+            if (p && typeof p === 'object') maxTokens = p;
+          } catch {
+            /* ignore */
+          }
           let maxCosts: Record<string, number> = {};
-          try { maxCosts = JSON.parse(maxCostsRaw); } catch { /* ignore */ }
+          try {
+            const p = JSON.parse(maxCostsRaw);
+            if (p && typeof p === 'object') maxCosts = p;
+          } catch {
+            /* ignore */
+          }
 
           // Compute weighted total: sum of tokens[cat] * (weights[cat] ?? 1)
           let weightedTotal = 0;

@@ -1726,7 +1726,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
     models: Record<string, number>;
   }> {
     const client = await this.getClient();
-    const usageFields = ['usage:model', 'usage:tokens', 'usage:costs', 'usage:totalTokens', 'usage:totalCost', 'usage:costUnit'];
+    const usageFields = [
+      'usage:model',
+      'usage:tokens',
+      'usage:costs',
+      'usage:totalTokens',
+      'usage:totalCost',
+      'usage:costUnit',
+    ];
     const agg = {
       tokens: {} as Record<string, number>,
       totalTokens: 0,
@@ -1755,19 +1762,27 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
       if (tokensStr) {
         try {
-          const tokens = JSON.parse(tokensStr) as Record<string, number>;
-          for (const [k, v] of Object.entries(tokens)) {
-            agg.tokens[k] = (agg.tokens[k] || 0) + v;
+          const p = JSON.parse(tokensStr);
+          if (p && typeof p === 'object') {
+            for (const [k, v] of Object.entries(p as Record<string, number>)) {
+              agg.tokens[k] = (agg.tokens[k] || 0) + v;
+            }
           }
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
       if (costsStr) {
         try {
-          const costs = JSON.parse(costsStr) as Record<string, number>;
-          for (const [k, v] of Object.entries(costs)) {
-            agg.costs[k] = (agg.costs[k] || 0) + v;
+          const p = JSON.parse(costsStr);
+          if (p && typeof p === 'object') {
+            for (const [k, v] of Object.entries(p as Record<string, number>)) {
+              agg.costs[k] = (agg.costs[k] || 0) + v;
+            }
           }
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
     };
 
@@ -1829,9 +1844,30 @@ export class Queue<D = any, R = any> extends EventEmitter {
     let maxTokens: Record<string, number> | undefined;
     let tokenWeights: Record<string, number> | undefined;
     let maxCosts: Record<string, number> | undefined;
-    if (fields.maxTokens) { try { maxTokens = JSON.parse(fields.maxTokens); } catch { /* ignore */ } }
-    if (fields.tokenWeights) { try { tokenWeights = JSON.parse(fields.tokenWeights); } catch { /* ignore */ } }
-    if (fields.maxCosts) { try { maxCosts = JSON.parse(fields.maxCosts); } catch { /* ignore */ } }
+    if (fields.maxTokens) {
+      try {
+        const p = JSON.parse(fields.maxTokens);
+        if (p && typeof p === 'object') maxTokens = p;
+      } catch {
+        /* ignore */
+      }
+    }
+    if (fields.tokenWeights) {
+      try {
+        const p = JSON.parse(fields.tokenWeights);
+        if (p && typeof p === 'object') tokenWeights = p;
+      } catch {
+        /* ignore */
+      }
+    }
+    if (fields.maxCosts) {
+      try {
+        const p = JSON.parse(fields.maxCosts);
+        if (p && typeof p === 'object') maxCosts = p;
+      } catch {
+        /* ignore */
+      }
+    }
 
     return {
       maxTotalTokens: fields.maxTotalTokens ? parseFloat(fields.maxTotalTokens) : undefined,
@@ -1853,10 +1889,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * When `block` is set and > 0, uses XREAD with BLOCK for long-polling.
    * Pass lastId to resume from a known position.
    */
-  async readStream(
-    jobId: string,
-    opts?: ReadStreamOptions,
-  ): Promise<{ id: string; fields: Record<string, string> }[]> {
+  async readStream(jobId: string, opts?: ReadStreamOptions): Promise<{ id: string; fields: Record<string, string> }[]> {
     const client = await this.getClient();
     const lastId = opts?.lastId;
     const count = opts?.count ?? 100;
@@ -1865,10 +1898,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (blockMs !== undefined && blockMs > 0) {
       // Use XREAD with BLOCK for long-polling
       const streamId = lastId ?? '0-0';
-      const xreadResult = await client.xread(
-        { [this.keys.jstream(jobId)]: streamId },
-        { block: blockMs, count },
-      );
+      const xreadResult = await client.xread({ [this.keys.jstream(jobId)]: streamId }, { block: blockMs, count });
       if (!xreadResult) return [];
       const result: { id: string; fields: Record<string, string> }[] = [];
       for (const streamEntry of xreadResult) {
@@ -1888,15 +1918,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
     }
 
     // Non-blocking: use XRANGE
-    const start = lastId
-      ? ({ value: lastId, isInclusive: false } as const)
-      : InfBoundary.NegativeInfinity;
-    const entries = await client.xrange(
-      this.keys.jstream(jobId),
-      start,
-      InfBoundary.PositiveInfinity,
-      { count },
-    );
+    const start = lastId ? ({ value: lastId, isInclusive: false } as const) : InfBoundary.NegativeInfinity;
+    const entries = await client.xrange(this.keys.jstream(jobId), start, InfBoundary.PositiveInfinity, { count });
     if (!entries) return [];
     const result: { id: string; fields: Record<string, string> }[] = [];
     for (const entryId of Object.keys(entries)) {
@@ -2006,9 +2029,18 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (values[4]) {
       try {
         const raw = JSON.parse(String(values[4])) as any[];
-        signals = raw.map(s => ({
+        signals = raw.map((s) => ({
           ...s,
-          data: typeof s.data === 'string' ? (() => { try { return JSON.parse(s.data); } catch { return s.data; } })() : s.data,
+          data:
+            typeof s.data === 'string'
+              ? (() => {
+                  try {
+                    return JSON.parse(s.data);
+                  } catch {
+                    return s.data;
+                  }
+                })()
+              : s.data,
         }));
       } catch {
         // ignore parse errors
@@ -2180,9 +2212,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     // Fetch job data using HMGET to avoid reading binary vector fields
     // (HGETALL would include vector buffers that fail UTF-8 string decoding).
-    const JOB_TEXT_FIELDS = [
-      'data', 'returnvalue', ...JOB_METADATA_FIELDS,
-    ] as string[];
+    const JOB_TEXT_FIELDS = ['data', 'returnvalue', ...JOB_METADATA_FIELDS] as string[];
     const batch = this.newBatch();
     const scoreMap = new Map<string, number>();
     const jobIds: string[] = [];
