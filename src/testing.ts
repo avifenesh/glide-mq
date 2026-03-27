@@ -79,6 +79,8 @@ export interface TestJobRecord<D = any, R = any> {
   suspendTimeout?: number;
   /** @internal Budget key for flow-level budget enforcement. */
   budgetKey?: string;
+  /** @internal Usage metadata reported by the processor. */
+  usage?: JobUsage;
   /** @internal Stored vectors for vector search testing. */
   vectors?: Map<string, number[]>;
 }
@@ -124,6 +126,7 @@ export class TestJob<D = any, R = any> {
     this.fallbackIndex = record.fallbackIndex;
     this.signals = record.signals ?? [];
     this.budgetKey = record.budgetKey;
+    this.usage = record.usage;
   }
 
   get currentFallback(): { model: string; provider?: string; metadata?: Record<string, unknown> } | undefined {
@@ -196,6 +199,7 @@ export class TestJob<D = any, R = any> {
       resolved.totalCost = Object.values(resolved.costs).reduce((sum, v) => sum + v, 0);
     }
     this.usage = resolved;
+    this._record.usage = resolved;
   }
 
   async reportTokens(count: number): Promise<void> {
@@ -789,12 +793,12 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     };
 
     // Include parent
-    mergeUsage((parentJob as any).usage as JobUsage | undefined);
+    mergeUsage(parentJob.usage);
 
     // Walk all jobs looking for children (testing mode has no deps set, scan by parentId)
     for (const [, record] of this.jobs) {
-      if ((record as any).opts?.parent?.id === parentJobId) {
-        mergeUsage((record as any).usage as JobUsage | undefined);
+      if (record.opts?.parent?.id === parentJobId) {
+        mergeUsage(record.usage);
       }
     }
 
