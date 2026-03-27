@@ -811,7 +811,8 @@ export class Job<D = any, R = any> {
       hash['usage:provider'] ||
       hash['usage:costs'] ||
       hash['usage:totalTokens'] ||
-      hash['usage:totalCost']
+      hash['usage:totalCost'] ||
+      hash['usage:costUnit']
     ) {
       let tokens: Record<string, number> | undefined;
       let costs: Record<string, number> | undefined;

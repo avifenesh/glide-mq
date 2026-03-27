@@ -135,12 +135,12 @@ glide-mq does **not** guarantee:
 
 ## Comparison at a Glance
 
-| System | Typical durability model | Delivery semantics | Main trade-off |
-|--------|---------------------------|--------------------|----------------|
-| glide-mq + Valkey AOF (`everysec`) | AOF-backed queue state with a small crash window | At-least-once | Lower write cost than `always`, in exchange for a small possible loss window on hard crash |
-| glide-mq + Valkey AOF (`always`) | Strongest Valkey persistence mode | At-least-once | Smallest persistence window, in exchange for higher write cost |
-| pg-boss / PostgreSQL | Backed by PostgreSQL WAL / transaction durability | At-least-once | Strong database durability, in exchange for PostgreSQL operational and latency tradeoffs |
-| RabbitMQ with durable queues + persistent messages | Broker durability when queues/messages are durable and producers use publisher confirms appropriately | At-least-once | Mature broker durability model, in exchange for more broker-specific configuration surface |
+| System                                             | Typical durability model                                                                              | Delivery semantics | Main trade-off                                                                             |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------ |
+| glide-mq + Valkey AOF (`everysec`)                 | AOF-backed queue state with a small crash window                                                      | At-least-once      | Lower write cost than `always`, in exchange for a small possible loss window on hard crash |
+| glide-mq + Valkey AOF (`always`)                   | Strongest Valkey persistence mode                                                                     | At-least-once      | Smallest persistence window, in exchange for higher write cost                             |
+| pg-boss / PostgreSQL                               | Backed by PostgreSQL WAL / transaction durability                                                     | At-least-once      | Strong database durability, in exchange for PostgreSQL operational and latency tradeoffs   |
+| RabbitMQ with durable queues + persistent messages | Broker durability when queues/messages are durable and producers use publisher confirms appropriately | At-least-once      | Mature broker durability model, in exchange for more broker-specific configuration surface |
 
 Compared with BullMQ-style Redis queues, glide-mq still depends on the same underlying Valkey durability settings, but its in-flight recovery model is built on Streams consumer groups, the PEL, and `XAUTOCLAIM` rather than a separate lock-renew / stall-detection cycle.
 

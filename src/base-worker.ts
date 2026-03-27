@@ -1459,7 +1459,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           // When no per-category tokens are reported, fall back to rawTotal (weight 1).
           let weightedTotal = 0;
           for (const [cat, val] of Object.entries(usageTokens)) {
-            weightedTotal += val * (weights[cat] ?? 1);
+            const w = weights[cat] ?? 1;
+            weightedTotal += val * (Number.isFinite(w) && w >= 0 ? w : 1);
           }
           if (weightedTotal === 0 && rawTotal > 0) {
             weightedTotal = rawTotal;

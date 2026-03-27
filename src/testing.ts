@@ -846,8 +846,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       costUnit: budget.costUnit,
       usedTokens: 0,
       usedCost: 0,
-      usedTokensByCategory: {},
-      usedCostsByCategory: {},
+      usedTokensByCategory: Object.create(null) as Record<string, number>,
+      usedCostsByCategory: Object.create(null) as Record<string, number>,
       exceeded: false,
       onExceeded: budget.onExceeded ?? 'fail',
     });
@@ -1428,7 +1428,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
             const weights = budgetState?.tokenWeights ?? {};
             let weightedTotal = 0;
             for (const [cat, val] of Object.entries(usageTokens)) {
-              weightedTotal += val * (weights[cat] ?? 1);
+              const w = weights[cat] ?? 1;
+              weightedTotal += val * (Number.isFinite(w) && w >= 0 ? w : 1);
             }
             if (weightedTotal === 0 && rawTotal > 0) {
               weightedTotal = rawTotal;

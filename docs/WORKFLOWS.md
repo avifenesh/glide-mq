@@ -30,8 +30,8 @@ const { job: parent } = await flow.add({
   queueName: 'reports',
   data: { month: '2025-01' },
   children: [
-    { name: 'fetch-sales',    queueName: 'data', data: { region: 'eu' } },
-    { name: 'fetch-returns',  queueName: 'data', data: { region: 'eu' } },
+    { name: 'fetch-sales', queueName: 'data', data: { region: 'eu' } },
+    { name: 'fetch-returns', queueName: 'data', data: { region: 'eu' } },
     {
       name: 'fetch-inventory',
       queueName: 'data',
@@ -55,11 +55,15 @@ await flow.close();
 ```typescript
 const nodes = await flow.addBulk([
   {
-    name: 'report-jan', queueName: 'reports', data: {},
+    name: 'report-jan',
+    queueName: 'reports',
+    data: {},
     children: [{ name: 'data-jan', queueName: 'data', data: {} }],
   },
   {
-    name: 'report-feb', queueName: 'reports', data: {},
+    name: 'report-feb',
+    queueName: 'reports',
+    data: {},
     children: [{ name: 'data-feb', queueName: 'data', data: {} }],
   },
 ]);
@@ -72,16 +76,20 @@ const nodes = await flow.addBulk([
 In the parent processor, call `job.getChildrenValues()` to retrieve the return values of all direct children. The keys are internal dependency identifiers (implementation detail — prefer `Object.values()` when you only need the results).
 
 ```typescript
-const worker = new Worker('reports', async (job) => {
-  // Runs only after all children have completed
-  const childValues = await job.getChildrenValues();
-  // Keys are opaque internal identifiers; use Object.values() for the results:
-  const results = Object.values(childValues);
-  // [ { sales: 42000 }, { returns: 300 } ]
+const worker = new Worker(
+  'reports',
+  async (job) => {
+    // Runs only after all children have completed
+    const childValues = await job.getChildrenValues();
+    // Keys are opaque internal identifiers; use Object.values() for the results:
+    const results = Object.values(childValues);
+    // [ { sales: 42000 }, { returns: 300 } ]
 
-  const totalSales = results.reduce((s, v) => s + (v.sales ?? 0), 0);
-  return { totalSales };
-}, { connection });
+    const totalSales = results.reduce((s, v) => s + (v.sales ?? 0), 0);
+    return { totalSales };
+  },
+  { connection },
+);
 ```
 
 ---
@@ -104,12 +112,16 @@ import { FlowProducer, dag } from 'glide-mq';
 const flow = new FlowProducer({ connection });
 
 // Submit a DAG using the helper function
-const jobs = await dag('queueName', [
-  { name: 'A', data: { step: 1 } },
-  { name: 'B', data: { step: 2 }, deps: ['A'] },
-  { name: 'C', data: { step: 3 }, deps: ['A'] },
-  { name: 'D', data: { step: 4 }, deps: ['B', 'C'] },
-], connection);
+const jobs = await dag(
+  'queueName',
+  [
+    { name: 'A', data: { step: 1 } },
+    { name: 'B', data: { step: 2 }, deps: ['A'] },
+    { name: 'C', data: { step: 3 }, deps: ['A'] },
+    { name: 'D', data: { step: 4 }, deps: ['B', 'C'] },
+  ],
+  connection,
+);
 
 // Or use FlowProducer.addDAG() directly
 const jobs = await flow.addDAG({
@@ -124,6 +136,7 @@ const jobs = await flow.addDAG({
 ```
 
 Each **DAGNode** has:
+
 - `name` — unique identifier within this DAG (used in `deps` arrays)
 - `queueName` — queue to submit this job to
 - `data` — job payload
@@ -136,16 +149,20 @@ Each **DAGNode** has:
 import { dag } from 'glide-mq';
 
 // Three parallel data fetches, then one merge job
-const jobs = await dag('data', [
-  { name: 'fetch-sales', data: { source: 'sales-db' } },
-  { name: 'fetch-inventory', data: { source: 'warehouse-db' } },
-  { name: 'fetch-returns', data: { source: 'returns-db' } },
-  {
-    name: 'merge-reports',
-    data: { reportId: 'Q1-2025' },
-    deps: ['fetch-sales', 'fetch-inventory', 'fetch-returns'],
-  },
-], connection);
+const jobs = await dag(
+  'data',
+  [
+    { name: 'fetch-sales', data: { source: 'sales-db' } },
+    { name: 'fetch-inventory', data: { source: 'warehouse-db' } },
+    { name: 'fetch-returns', data: { source: 'returns-db' } },
+    {
+      name: 'merge-reports',
+      data: { reportId: 'Q1-2025' },
+      deps: ['fetch-sales', 'fetch-inventory', 'fetch-returns'],
+    },
+  ],
+  connection,
+);
 
 // All three fetches run in parallel.
 // 'merge-reports' runs only after all three complete.
@@ -163,17 +180,22 @@ import { dag } from 'glide-mq';
 //      \ /
 //       D
 
-const jobs = await dag('tasks', [
-  { name: 'A', data: { step: 'root' } },
-  { name: 'B', data: { step: 'left' }, deps: ['A'] },
-  { name: 'C', data: { step: 'right' }, deps: ['A'] },
-  { name: 'D', data: { step: 'converge' }, deps: ['B', 'C'] },
-], connection);
+const jobs = await dag(
+  'tasks',
+  [
+    { name: 'A', data: { step: 'root' } },
+    { name: 'B', data: { step: 'left' }, deps: ['A'] },
+    { name: 'C', data: { step: 'right' }, deps: ['A'] },
+    { name: 'D', data: { step: 'converge' }, deps: ['B', 'C'] },
+  ],
+  connection,
+);
 
 // A runs first, then B and C in parallel, then D after both complete.
 ```
 
 **Implementation notes:**
+
 - DAG validation runs automatically - cycles are detected and rejected with `CycleError`.
 - Jobs are submitted in topological order (leaves first, roots last).
 - If any parent fails or is dead-lettered, dependent jobs remain blocked indefinitely (manual cleanup required).
@@ -184,14 +206,18 @@ const jobs = await dag('tasks', [
 Use `job.getParents()` to fetch all parent jobs and their results:
 
 ```typescript
-const worker = new Worker('tasks', async (job) => {
-  if (job.name === 'D') {
-    const parents = await job.getParents();
-    // parents is an array of Job instances
-    const results = parents.map(p => p.returnvalue);
-    return { merged: results };
-  }
-}, { connection });
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    if (job.name === 'D') {
+      const parents = await job.getParents();
+      // parents is an array of Job instances
+      const results = parents.map((p) => p.returnvalue);
+      return { merged: results };
+    }
+  },
+  { connection },
+);
 ```
 
 Alternatively, manually fetch specific parents if you know their IDs:
@@ -228,29 +254,37 @@ import { Queue, Worker, FlowProducer } from 'glide-mq';
 const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 const queue = new Queue('processing', { connection });
 
-const worker = new Worker('processing', async (job) => {
-  // Check if children have already completed (re-entry after waiting)
-  const existing = await job.getChildrenValues();
-  if (Object.keys(existing).length > 0) {
-    // All children done — aggregate and return
-    const results = Object.values(existing);
-    return { total: results.reduce((sum, r) => sum + r.count, 0) };
-  }
+const worker = new Worker(
+  'processing',
+  async (job) => {
+    // Check if children have already completed (re-entry after waiting)
+    const existing = await job.getChildrenValues();
+    if (Object.keys(existing).length > 0) {
+      // All children done — aggregate and return
+      const results = Object.values(existing);
+      return { total: results.reduce((sum, r) => sum + r.count, 0) };
+    }
 
-  // First execution: inspect data and spawn children dynamically
-  const { urls } = job.data;
+    // First execution: inspect data and spawn children dynamically
+    const { urls } = job.data;
 
-  const flow = new FlowProducer({ connection });
-  for (const url of urls) {
-    await queue.add('fetch-url', { url }, {
-      parent: { id: job.id!, queue: job.queueQualifiedName },
-    });
-  }
-  await flow.close();
+    const flow = new FlowProducer({ connection });
+    for (const url of urls) {
+      await queue.add(
+        'fetch-url',
+        { url },
+        {
+          parent: { id: job.id!, queue: job.queueQualifiedName },
+        },
+      );
+    }
+    await flow.close();
 
-  // Pause until all children complete — throws WaitingChildrenError
-  await job.moveToWaitingChildren();
-}, { connection });
+    // Pause until all children complete — throws WaitingChildrenError
+    await job.moveToWaitingChildren();
+  },
+  { connection },
+);
 ```
 
 ### Key points
@@ -270,12 +304,16 @@ Execute a list of jobs **sequentially**, specified in **reverse execution order*
 import { chain } from 'glide-mq';
 
 // Execution order: download → parse → transform → upload
-await chain('pipeline', [
-  { name: 'upload',    data: { bucket: 'my-bucket' } },   // runs last  (root)
-  { name: 'transform', data: {} },
-  { name: 'parse',     data: {} },
-  { name: 'download',  data: { url: 'https://example.com/file.csv' } }, // runs first (leaf)
-], connection);
+await chain(
+  'pipeline',
+  [
+    { name: 'upload', data: { bucket: 'my-bucket' } }, // runs last  (root)
+    { name: 'transform', data: {} },
+    { name: 'parse', data: {} },
+    { name: 'download', data: { url: 'https://example.com/file.csv' } }, // runs first (leaf)
+  ],
+  connection,
+);
 ```
 
 - The **last** element in the array is the leaf — it runs first.
@@ -283,14 +321,18 @@ await chain('pipeline', [
 - Each step's processor can access the prior step's return value via `Object.values(job.getChildrenValues())[0]`.
 
 ```typescript
-const worker = new Worker('pipeline', async (job) => {
-  if (job.name === 'parse') {
-    const prev = await job.getChildrenValues();
-    const raw = Object.values(prev)[0]; // result from 'download'
-    return parse(raw);
-  }
-  // ...
-}, { connection });
+const worker = new Worker(
+  'pipeline',
+  async (job) => {
+    if (job.name === 'parse') {
+      const prev = await job.getChildrenValues();
+      const raw = Object.values(prev)[0]; // result from 'download'
+      return parse(raw);
+    }
+    // ...
+  },
+  { connection },
+);
 ```
 
 ---
@@ -302,11 +344,15 @@ Execute a list of jobs **in parallel**. A synthetic `__group__` parent waits for
 ```typescript
 import { group } from 'glide-mq';
 
-await group('tasks', [
-  { name: 'resize-thumb',  data: { imageId: 1, size: 'sm' } },
-  { name: 'resize-medium', data: { imageId: 1, size: 'md' } },
-  { name: 'resize-large',  data: { imageId: 1, size: 'lg' } },
-], connection);
+await group(
+  'tasks',
+  [
+    { name: 'resize-thumb', data: { imageId: 1, size: 'sm' } },
+    { name: 'resize-medium', data: { imageId: 1, size: 'md' } },
+    { name: 'resize-large', data: { imageId: 1, size: 'lg' } },
+  ],
+  connection,
+);
 ```
 
 The `__group__` parent processor (if you define one) can collect results from all children via `getChildrenValues()`.
@@ -337,19 +383,22 @@ await chord(
 In the callback processor:
 
 ```typescript
-const worker = new Worker('tasks', async (job) => {
-  if (job.name === 'select-best-model') {
-    const scores = await job.getChildrenValues();
-    // Keys are opaque — use Object.entries() if you need them, or Object.values():
-    const best = Object.entries(scores).sort((a, b) => b[1].score - a[1].score)[0];
-    return { score: best[1].score };
-  }
-  // ... other processors
-}, { connection });
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    if (job.name === 'select-best-model') {
+      const scores = await job.getChildrenValues();
+      // Keys are opaque — use Object.entries() if you need them, or Object.values():
+      const best = Object.entries(scores).sort((a, b) => b[1].score - a[1].score)[0];
+      return { score: best[1].score };
+    }
+    // ... other processors
+  },
+  { connection },
+);
 ```
 
 ---
-
 
 ---
 

@@ -152,7 +152,6 @@ console.log('Tracing active:', isTracingEnabled());
 
 ---
 
-
 ---
 
 ## AI Usage Telemetry
@@ -161,17 +160,17 @@ console.log('Tracing active:', isTracingEnabled());
 
 When job.reportUsage() is called inside a processor, the usage metadata is persisted to the job hash. Usage data is stored as hash fields on the job key:
 
-| Hash field | Type | Description |
-|------------|------|-------------|
-| usage:model | string | Model identifier (e.g. gpt-5.4) |
-| usage:provider | string | Provider identifier (e.g. openai) |
-| usage:tokens | string (JSON) | Token breakdown by category (e.g. `{"input":100,"output":50}`) |
-| usage:totalTokens | string (int) | Total tokens (auto-computed if not set) |
-| usage:costs | string (JSON) | Cost breakdown (e.g. `{"total":0.003}`) |
-| usage:totalCost | string (float) | Total cost |
-| usage:costUnit | string | Cost unit (e.g. `"usd"`) |
-| usage:latencyMs | string (int) | Inference latency in ms |
-| usage:cached | string | true if response was cached |
+| Hash field        | Type           | Description                                                    |
+| ----------------- | -------------- | -------------------------------------------------------------- |
+| usage:model       | string         | Model identifier (e.g. gpt-5.4)                                |
+| usage:provider    | string         | Provider identifier (e.g. openai)                              |
+| usage:tokens      | string (JSON)  | Token breakdown by category (e.g. `{"input":100,"output":50}`) |
+| usage:totalTokens | string (int)   | Total tokens (auto-computed if not set)                        |
+| usage:costs       | string (JSON)  | Cost breakdown (e.g. `{"total":0.003}`)                        |
+| usage:totalCost   | string (float) | Total cost                                                     |
+| usage:costUnit    | string         | Cost unit (e.g. `"usd"`)                                       |
+| usage:latencyMs   | string (int)   | Inference latency in ms                                        |
+| usage:cached      | string         | true if response was cached                                    |
 
 ### Flow-level usage aggregation
 

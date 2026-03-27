@@ -48,18 +48,26 @@ BullMQ Pro groups jobs by `group.id` so jobs for the same client do not run in p
 
 ```ts
 // BullMQ Pro
-await queue.add('process', { clientId, payload }, {
-  group: { id: `client-${clientId}` },
-});
+await queue.add(
+  'process',
+  { clientId, payload },
+  {
+    group: { id: `client-${clientId}` },
+  },
+);
 ```
 
 glide-mq provides `opts.ordering.key` for the same isolation guarantee - jobs sharing a key run sequentially, one at a time, regardless of worker concurrency:
 
 ```ts
 // glide-mq
-await queue.add('process', { clientId, payload }, {
-  ordering: { key: `client-${clientId}` },
-});
+await queue.add(
+  'process',
+  { clientId, payload },
+  {
+    ordering: { key: `client-${clientId}` },
+  },
+);
 ```
 
 **What you get**: jobs for `client-123` always run one at a time, in enqueue order. Jobs for different clients run in parallel. No changes needed to the worker.
@@ -70,18 +78,26 @@ BullMQ Pro lets you cap concurrent jobs per group:
 
 ```ts
 // BullMQ Pro - max 2 concurrent jobs per client
-await queue.add('process', { clientId, payload }, {
-  group: { id: `client-${clientId}`, limit: { max: 2, duration: 0 } },
-});
+await queue.add(
+  'process',
+  { clientId, payload },
+  {
+    group: { id: `client-${clientId}`, limit: { max: 2, duration: 0 } },
+  },
+);
 ```
 
 glide-mq supports this natively via `ordering.concurrency`:
 
 ```ts
 // glide-mq - max 2 concurrent jobs per client (open source, no Pro license)
-await queue.add('process', { clientId, payload }, {
-  ordering: { key: `client-${clientId}`, concurrency: 2 },
-});
+await queue.add(
+  'process',
+  { clientId, payload },
+  {
+    ordering: { key: `client-${clientId}`, concurrency: 2 },
+  },
+);
 ```
 
 Jobs exceeding the limit are automatically parked in a per-group wait list and released when a slot opens. No thundering herd - exactly one waiting job is promoted per slot freed.
@@ -90,9 +106,13 @@ For strict serialization (1 at a time), omit `concurrency` or set it to 1:
 
 ```ts
 // glide-mq - one job at a time per client
-await queue.add('process', { clientId, payload }, {
-  ordering: { key: `client-${clientId}` },
-});
+await queue.add(
+  'process',
+  { clientId, payload },
+  {
+    ordering: { key: `client-${clientId}` },
+  },
+);
 ```
 
 ### Exponential backoff
@@ -101,18 +121,26 @@ Identical API - no changes needed:
 
 ```ts
 // BullMQ
-await queue.add('process', { clientId, payload }, {
-  attempts: 5,
-  backoff: { type: 'exponential', delay: 1000 },
-});
+await queue.add(
+  'process',
+  { clientId, payload },
+  {
+    attempts: 5,
+    backoff: { type: 'exponential', delay: 1000 },
+  },
+);
 ```
 
 ```ts
 // glide-mq - identical
-await queue.add('process', { clientId, payload }, {
-  attempts: 5,
-  backoff: { type: 'exponential', delay: 1000 },
-});
+await queue.add(
+  'process',
+  { clientId, payload },
+  {
+    attempts: 5,
+    backoff: { type: 'exponential', delay: 1000 },
+  },
+);
 ```
 
 `job.attemptsMade` is also identical - same property name, same semantics.
@@ -141,20 +169,24 @@ const worker = new Worker('process', async (job) => {
 
 ```ts
 // glide-mq - identical, no changes
-const worker = new Worker('process', async (job) => {
-  const results = job.data.partialResults ?? [];
+const worker = new Worker(
+  'process',
+  async (job) => {
+    const results = job.data.partialResults ?? [];
 
-  const chunk = await processNextChunk(job.data.clientId, job.attemptsMade);
-  results.push(chunk);
+    const chunk = await processNextChunk(job.data.clientId, job.attemptsMade);
+    results.push(chunk);
 
-  await job.updateData({ ...job.data, partialResults: results });
+    await job.updateData({ ...job.data, partialResults: results });
 
-  if (results.length < job.data.totalChunks) {
-    throw new Error('more chunks needed');
-  }
+    if (results.length < job.data.totalChunks) {
+      throw new Error('more chunks needed');
+    }
 
-  return results;
-}, { connection });
+    return results;
+  },
+  { connection },
+);
 ```
 
 For custom attempt tracking in job data:
@@ -193,14 +225,18 @@ Dynamic rate limiting from inside the processor also works the same way:
 
 ```ts
 // Both BullMQ and glide-mq
-const worker = new Worker('process', async (job) => {
-  const retryAfter = await checkUpstreamRateLimit(job.data.clientId);
-  if (retryAfter > 0) {
-    await worker.rateLimit(retryAfter);
-    throw new Worker.RateLimitError(); // re-queues the job, not counted as failure
-  }
-  return process(job.data);
-}, { connection, limiter: { max: 100, duration: 1000 } });
+const worker = new Worker(
+  'process',
+  async (job) => {
+    const retryAfter = await checkUpstreamRateLimit(job.data.clientId);
+    if (retryAfter > 0) {
+      await worker.rateLimit(retryAfter);
+      throw new Worker.RateLimitError(); // re-queues the job, not counted as failure
+    }
+    return process(job.data);
+  },
+  { connection, limiter: { max: 100, duration: 1000 } },
+);
 ```
 
 ### Full before/after for the described setup
@@ -213,22 +249,30 @@ const connection = { host: 'localhost', port: 6379 };
 const queue = new Queue('jobs', { connection });
 
 // Enqueue with per-client isolation, max 2 concurrent
-await queue.add('task', { clientId: 'acme', payload: {} }, {
-  group: { id: 'acme', limit: { max: 2, duration: 0 } },
-  attempts: 5,
-  backoff: { type: 'exponential', delay: 1000 },
-});
+await queue.add(
+  'task',
+  { clientId: 'acme', payload: {} },
+  {
+    group: { id: 'acme', limit: { max: 2, duration: 0 } },
+    attempts: 5,
+    backoff: { type: 'exponential', delay: 1000 },
+  },
+);
 
-const worker = new Worker('jobs', async (job) => {
-  const results = job.data.partialResults ?? [];
-  results.push(await doWork(job.data));
-  await job.updateData({ ...job.data, partialResults: results });
-  return results;
-}, {
-  connection,
-  concurrency: 20,
-  limiter: { max: 2, duration: 100 },
-});
+const worker = new Worker(
+  'jobs',
+  async (job) => {
+    const results = job.data.partialResults ?? [];
+    results.push(await doWork(job.data));
+    await job.updateData({ ...job.data, partialResults: results });
+    return results;
+  },
+  {
+    connection,
+    concurrency: 20,
+    limiter: { max: 2, duration: 100 },
+  },
+);
 ```
 
 ```ts
@@ -239,41 +283,47 @@ const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 const queue = new Queue('jobs', { connection });
 
 // ordering.key + concurrency: 2 gives exact BullMQ Pro group behavior
-await queue.add('task', { clientId: 'acme', payload: {} }, {
-  ordering: { key: 'acme', concurrency: 2 },
-  attempts: 5,
-  backoff: { type: 'exponential', delay: 1000 },
-});
+await queue.add(
+  'task',
+  { clientId: 'acme', payload: {} },
+  {
+    ordering: { key: 'acme', concurrency: 2 },
+    attempts: 5,
+    backoff: { type: 'exponential', delay: 1000 },
+  },
+);
 
-const worker = new Worker('jobs', async (job) => {
-  const results = job.data.partialResults ?? [];
-  results.push(await doWork(job.data));
-  await job.updateData({ ...job.data, partialResults: results });
-  return results;
-}, {
-  connection,
-  concurrency: 20,
-  limiter: { max: 2, duration: 100 },
-});
+const worker = new Worker(
+  'jobs',
+  async (job) => {
+    const results = job.data.partialResults ?? [];
+    results.push(await doWork(job.data));
+    await job.updateData({ ...job.data, partialResults: results });
+    return results;
+  },
+  {
+    connection,
+    concurrency: 20,
+    limiter: { max: 2, duration: 100 },
+  },
+);
 ```
 
 This is a direct equivalent. No behavioral differences.
 
 ---
 
-
-
-| | BullMQ | glide-mq |
-|---|---|---|
-| Redis client | ioredis (JS) | valkey-glide (Rust NAPI) |
-| RTT per job | 2-3 (fetch + ack + complete) | 1 (`completeAndFetchNext` FCALL) |
-| Server-side logic | 53 EVAL Lua scripts | 1 FUNCTION LOAD library |
-| Cluster support | Works, not hash-tagged by default | Built-in, all keys `glide:{name}:*` |
-| AZ-affinity routing | No | Yes - pin reads to your AZ |
-| IAM auth (ElastiCache/MemoryDB) | No | Yes |
-| Compression | No | gzip transparent compression |
-| Per-key ordering + group rate limit | No (BullMQ Pro groups only) | Yes, `opts.ordering.key` with concurrency, rateLimit, and tokenBucket |
-| In-memory test mode | No | Yes, `TestQueue` / `TestWorker` |
+|                                     | BullMQ                            | glide-mq                                                              |
+| ----------------------------------- | --------------------------------- | --------------------------------------------------------------------- |
+| Redis client                        | ioredis (JS)                      | valkey-glide (Rust NAPI)                                              |
+| RTT per job                         | 2-3 (fetch + ack + complete)      | 1 (`completeAndFetchNext` FCALL)                                      |
+| Server-side logic                   | 53 EVAL Lua scripts               | 1 FUNCTION LOAD library                                               |
+| Cluster support                     | Works, not hash-tagged by default | Built-in, all keys `glide:{name}:*`                                   |
+| AZ-affinity routing                 | No                                | Yes - pin reads to your AZ                                            |
+| IAM auth (ElastiCache/MemoryDB)     | No                                | Yes                                                                   |
+| Compression                         | No                                | gzip transparent compression                                          |
+| Per-key ordering + group rate limit | No (BullMQ Pro groups only)       | Yes, `opts.ordering.key` with concurrency, rateLimit, and tokenBucket |
+| In-memory test mode                 | No                                | Yes, `TestQueue` / `TestWorker`                                       |
 
 glide-mq is a strict superset of BullMQ's core job queue semantics. At-least-once delivery, consumer groups, stall detection, retries, DLQ, flows, and schedulers all work the same way. The differences are in API shape and some missing conveniences listed in [Gaps and workarounds](#gaps-and-workarounds).
 
@@ -342,7 +392,7 @@ const connection = {
   addresses: [{ host: 'my-cluster.cache.amazonaws.com', port: 6379 }],
   useTLS: true,
   credentials: { password: 'secret' },
-  clusterMode: true,           // set to true for Redis Cluster / ElastiCache cluster
+  clusterMode: true, // set to true for Redis Cluster / ElastiCache cluster
 };
 ```
 
@@ -377,9 +427,13 @@ const connection = { host: 'localhost', port: 6379 };
 const queue = new Queue('tasks', { connection });
 await queue.add('send-email', { to: 'user@example.com' });
 
-const worker = new Worker('tasks', async (job) => {
-  await sendEmail(job.data.to);
-}, { connection, concurrency: 10 });
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    await sendEmail(job.data.to);
+  },
+  { connection, concurrency: 10 },
+);
 
 worker.on('completed', (job) => console.log(job.id, 'done'));
 worker.on('failed', (job, err) => console.error(job.id, err.message));
@@ -394,9 +448,13 @@ const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 const queue = new Queue('tasks', { connection });
 await queue.add('send-email', { to: 'user@example.com' });
 
-const worker = new Worker('tasks', async (job) => {
-  await sendEmail(job.data.to);
-}, { connection, concurrency: 10 });
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    await sendEmail(job.data.to);
+  },
+  { connection, concurrency: 10 },
+);
 
 worker.on('completed', (job) => console.log(job.id, 'done'));
 worker.on('failed', (job, err) => console.error(job.id, err.message));
@@ -412,129 +470,129 @@ The processor function signature is identical. The only change is the connection
 
 ### Queue methods
 
-| BullMQ | glide-mq | Status |
-|--------|----------|--------|
-| `new Queue(name, { connection, prefix, defaultJobOptions })` | `new Queue(name, { connection, prefix, deadLetterQueue, compression })` | Changed |
-| `queue.add(name, data, opts)` | `queue.add(name, data, opts)` | Full |
-| `queue.addBulk(jobs)` | `queue.addBulk(jobs)` | Full |
-| `queue.pause()` | `queue.pause()` | Full |
-| `queue.resume()` | `queue.resume()` | Full |
-| `queue.isPaused()` | `queue.isPaused()` | Full |
-| `queue.obliterate({ force })` | `queue.obliterate({ force })` | Full |
-| `queue.getJob(id)` | `queue.getJob(id)` | Full |
-| `queue.getJobs(types, start, end, asc)` | `queue.getJobs(type, start, end)` | Changed |
-| `queue.getJobCounts(...types)` | `queue.getJobCounts()` | Changed |
-| `queue.getJobCountByTypes(...types)` | `queue.getJobCountByTypes()` | Full |
-| `queue.count()` | `queue.count()` | Full |
-| `queue.getMetrics(type, start, end)` | `queue.getMetrics(type)` | Changed |
-| `queue.getJobLogs(id, start, end)` | `queue.getJobLogs(id, start, end)` | Full |
-| `queue.setGlobalConcurrency(n)` | `queue.setGlobalConcurrency(n)` | Full |
-| `queue.upsertJobScheduler(id, opts, template)` | `queue.upsertJobScheduler(name, scheduleOpts, template)` | Full |
-| `queue.getJobScheduler(id)` | `queue.getJobScheduler(name)` | Full |
-| `queue.getJobSchedulers()` | `queue.getRepeatableJobs()` | Changed |
-| `queue.removeJobScheduler(id)` | `queue.removeJobScheduler(name)` | Full |
-| `queue.getWorkers()` | `queue.getWorkers()` | Full |
-| `queue.drain(delayed?)` | `queue.drain(delayed?)` | Full |
-| `queue.clean(grace, limit, type)` | `queue.clean(grace, limit, type)` | Full |
-| `queue.retryJobs(opts)` | `queue.retryJobs(opts?)` | Full |
-| `queue.close()` | `queue.close()` | Full |
-| BullMQ request-reply pattern | `queue.addAndWait(name, data, { waitTimeout })` | glide-mq extension |
-| - | `queue.revoke(jobId)` | glide-mq only |
-| - | `queue.getDeadLetterJobs(start, end)` | glide-mq only |
-| - | `queue.searchJobs(opts)` | glide-mq only |
-| - | `queue.setGlobalRateLimit({ max, duration })` | glide-mq only |
-| - | `queue.getGlobalRateLimit()` | glide-mq only |
-| - | `queue.removeGlobalRateLimit()` | glide-mq only |
+| BullMQ                                                       | glide-mq                                                                | Status             |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------ |
+| `new Queue(name, { connection, prefix, defaultJobOptions })` | `new Queue(name, { connection, prefix, deadLetterQueue, compression })` | Changed            |
+| `queue.add(name, data, opts)`                                | `queue.add(name, data, opts)`                                           | Full               |
+| `queue.addBulk(jobs)`                                        | `queue.addBulk(jobs)`                                                   | Full               |
+| `queue.pause()`                                              | `queue.pause()`                                                         | Full               |
+| `queue.resume()`                                             | `queue.resume()`                                                        | Full               |
+| `queue.isPaused()`                                           | `queue.isPaused()`                                                      | Full               |
+| `queue.obliterate({ force })`                                | `queue.obliterate({ force })`                                           | Full               |
+| `queue.getJob(id)`                                           | `queue.getJob(id)`                                                      | Full               |
+| `queue.getJobs(types, start, end, asc)`                      | `queue.getJobs(type, start, end)`                                       | Changed            |
+| `queue.getJobCounts(...types)`                               | `queue.getJobCounts()`                                                  | Changed            |
+| `queue.getJobCountByTypes(...types)`                         | `queue.getJobCountByTypes()`                                            | Full               |
+| `queue.count()`                                              | `queue.count()`                                                         | Full               |
+| `queue.getMetrics(type, start, end)`                         | `queue.getMetrics(type)`                                                | Changed            |
+| `queue.getJobLogs(id, start, end)`                           | `queue.getJobLogs(id, start, end)`                                      | Full               |
+| `queue.setGlobalConcurrency(n)`                              | `queue.setGlobalConcurrency(n)`                                         | Full               |
+| `queue.upsertJobScheduler(id, opts, template)`               | `queue.upsertJobScheduler(name, scheduleOpts, template)`                | Full               |
+| `queue.getJobScheduler(id)`                                  | `queue.getJobScheduler(name)`                                           | Full               |
+| `queue.getJobSchedulers()`                                   | `queue.getRepeatableJobs()`                                             | Changed            |
+| `queue.removeJobScheduler(id)`                               | `queue.removeJobScheduler(name)`                                        | Full               |
+| `queue.getWorkers()`                                         | `queue.getWorkers()`                                                    | Full               |
+| `queue.drain(delayed?)`                                      | `queue.drain(delayed?)`                                                 | Full               |
+| `queue.clean(grace, limit, type)`                            | `queue.clean(grace, limit, type)`                                       | Full               |
+| `queue.retryJobs(opts)`                                      | `queue.retryJobs(opts?)`                                                | Full               |
+| `queue.close()`                                              | `queue.close()`                                                         | Full               |
+| BullMQ request-reply pattern                                 | `queue.addAndWait(name, data, { waitTimeout })`                         | glide-mq extension |
+| -                                                            | `queue.revoke(jobId)`                                                   | glide-mq only      |
+| -                                                            | `queue.getDeadLetterJobs(start, end)`                                   | glide-mq only      |
+| -                                                            | `queue.searchJobs(opts)`                                                | glide-mq only      |
+| -                                                            | `queue.setGlobalRateLimit({ max, duration })`                           | glide-mq only      |
+| -                                                            | `queue.getGlobalRateLimit()`                                            | glide-mq only      |
+| -                                                            | `queue.removeGlobalRateLimit()`                                         | glide-mq only      |
 
 ### Worker methods and options
 
-| BullMQ | glide-mq | Status |
-|--------|----------|--------|
+| BullMQ                                                                                                                        | glide-mq                                                                                                                                                  | Status  |
+| ----------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `new Worker(name, processor, { connection, concurrency, limiter, stalledInterval, maxStalledCount, lockDuration, settings })` | `new Worker(name, processor, { connection, concurrency, globalConcurrency, limiter, stalledInterval, maxStalledCount, lockDuration, backoffStrategies })` | Changed |
-| `worker.pause(doNotWaitActive?)` | `worker.pause(force?)` | Full |
-| `worker.resume()` | `worker.resume()` | Full |
-| `worker.close(force?)` | `worker.close(force?)` | Full |
-| `worker.drain()` | `worker.drain()` | Full |
-| `worker.rateLimit(ms)` | `worker.rateLimit(ms)` | Full |
-| `worker.on('completed', (job, result))` | `worker.on('completed', (job, result))` | Full |
-| `worker.on('failed', (job, err))` | `worker.on('failed', (job, err))` | Full |
-| `worker.on('error', (err))` | `worker.on('error', (err))` | Full |
-| `worker.on('stalled', (jobId))` | `worker.on('stalled', (jobId))` | Full |
-| `worker.on('closing')` | `worker.on('closing')` | Full |
-| `worker.on('closed')` | `worker.on('closed')` | Full |
-| `worker.on('active', (job, prev))` | `worker.on('active', (job, jobId))` | Changed |
-| `worker.on('drained')` | `worker.on('drained')` | Full |
-| `Worker.RateLimitError` | `Worker.RateLimitError` | Full |
-| Sandboxed processor (file path string) | `new Worker('q', './processor.js', { connection, sandbox: {} })` | Full |
+| `worker.pause(doNotWaitActive?)`                                                                                              | `worker.pause(force?)`                                                                                                                                    | Full    |
+| `worker.resume()`                                                                                                             | `worker.resume()`                                                                                                                                         | Full    |
+| `worker.close(force?)`                                                                                                        | `worker.close(force?)`                                                                                                                                    | Full    |
+| `worker.drain()`                                                                                                              | `worker.drain()`                                                                                                                                          | Full    |
+| `worker.rateLimit(ms)`                                                                                                        | `worker.rateLimit(ms)`                                                                                                                                    | Full    |
+| `worker.on('completed', (job, result))`                                                                                       | `worker.on('completed', (job, result))`                                                                                                                   | Full    |
+| `worker.on('failed', (job, err))`                                                                                             | `worker.on('failed', (job, err))`                                                                                                                         | Full    |
+| `worker.on('error', (err))`                                                                                                   | `worker.on('error', (err))`                                                                                                                               | Full    |
+| `worker.on('stalled', (jobId))`                                                                                               | `worker.on('stalled', (jobId))`                                                                                                                           | Full    |
+| `worker.on('closing')`                                                                                                        | `worker.on('closing')`                                                                                                                                    | Full    |
+| `worker.on('closed')`                                                                                                         | `worker.on('closed')`                                                                                                                                     | Full    |
+| `worker.on('active', (job, prev))`                                                                                            | `worker.on('active', (job, jobId))`                                                                                                                       | Changed |
+| `worker.on('drained')`                                                                                                        | `worker.on('drained')`                                                                                                                                    | Full    |
+| `Worker.RateLimitError`                                                                                                       | `Worker.RateLimitError`                                                                                                                                   | Full    |
+| Sandboxed processor (file path string)                                                                                        | `new Worker('q', './processor.js', { connection, sandbox: {} })`                                                                                          | Full    |
 
 ### Job methods
 
-| BullMQ | glide-mq | Status |
-|--------|----------|--------|
-| `job.id`, `job.name`, `job.data`, `job.opts` | Same | Full |
-| `job.attemptsMade`, `job.timestamp`, `job.processedOn`, `job.finishedOn` | Same | Full |
-| `job.returnvalue`, `job.failedReason`, `job.progress` | Same | Full |
-| `job.updateData(data)` | `job.updateData(data)` | Full |
-| `job.updateProgress(progress)` | `job.updateProgress(progress)` | Full |
-| `job.log(message)` | `job.log(message)` | Full |
-| `job.getState()` | `job.getState()` | Full |
-| `job.isCompleted()`, `job.isFailed()`, `job.isActive()`, `job.isWaiting()`, `job.isDelayed()` | Same | Full |
-| `job.waitUntilFinished(queueEvents, ttl)` | `job.waitUntilFinished(pollIntervalMs, timeoutMs)` | Changed |
-| `job.retry(state?)` | `job.retry()` | Changed |
-| `job.remove(opts?)` | `job.remove()` | Full |
-| `job.getChildrenValues()` | `job.getChildrenValues()` | Full |
-| `job.promote()` | `job.promote()` | Full [#11](https://github.com/avifenesh/glide-mq/issues/11) |
-| `job.changeDelay(delay)` | `job.changeDelay(newDelay)` | Full [#12](https://github.com/avifenesh/glide-mq/issues/12) |
-| `job.changePriority(opts)` | `job.changePriority(newPriority)` | Full [#13](https://github.com/avifenesh/glide-mq/issues/13) |
-| `job.discard()` | `job.discard()` | Full [#14](https://github.com/avifenesh/glide-mq/issues/14) |
-| BullMQ process-step pattern | `job.moveToDelayed(timestampMs, nextStep?)` | glide-mq extension |
-| `job.toJSON()` | - | Use `job.data`, `job.opts`, etc. directly |
-| - | `job.abortSignal` | glide-mq only |
-| - | `job.isRevoked()` | glide-mq only |
+| BullMQ                                                                                        | glide-mq                                           | Status                                                      |
+| --------------------------------------------------------------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------- |
+| `job.id`, `job.name`, `job.data`, `job.opts`                                                  | Same                                               | Full                                                        |
+| `job.attemptsMade`, `job.timestamp`, `job.processedOn`, `job.finishedOn`                      | Same                                               | Full                                                        |
+| `job.returnvalue`, `job.failedReason`, `job.progress`                                         | Same                                               | Full                                                        |
+| `job.updateData(data)`                                                                        | `job.updateData(data)`                             | Full                                                        |
+| `job.updateProgress(progress)`                                                                | `job.updateProgress(progress)`                     | Full                                                        |
+| `job.log(message)`                                                                            | `job.log(message)`                                 | Full                                                        |
+| `job.getState()`                                                                              | `job.getState()`                                   | Full                                                        |
+| `job.isCompleted()`, `job.isFailed()`, `job.isActive()`, `job.isWaiting()`, `job.isDelayed()` | Same                                               | Full                                                        |
+| `job.waitUntilFinished(queueEvents, ttl)`                                                     | `job.waitUntilFinished(pollIntervalMs, timeoutMs)` | Changed                                                     |
+| `job.retry(state?)`                                                                           | `job.retry()`                                      | Changed                                                     |
+| `job.remove(opts?)`                                                                           | `job.remove()`                                     | Full                                                        |
+| `job.getChildrenValues()`                                                                     | `job.getChildrenValues()`                          | Full                                                        |
+| `job.promote()`                                                                               | `job.promote()`                                    | Full [#11](https://github.com/avifenesh/glide-mq/issues/11) |
+| `job.changeDelay(delay)`                                                                      | `job.changeDelay(newDelay)`                        | Full [#12](https://github.com/avifenesh/glide-mq/issues/12) |
+| `job.changePriority(opts)`                                                                    | `job.changePriority(newPriority)`                  | Full [#13](https://github.com/avifenesh/glide-mq/issues/13) |
+| `job.discard()`                                                                               | `job.discard()`                                    | Full [#14](https://github.com/avifenesh/glide-mq/issues/14) |
+| BullMQ process-step pattern                                                                   | `job.moveToDelayed(timestampMs, nextStep?)`        | glide-mq extension                                          |
+| `job.toJSON()`                                                                                | -                                                  | Use `job.data`, `job.opts`, etc. directly                   |
+| -                                                                                             | `job.abortSignal`                                  | glide-mq only                                               |
+| -                                                                                             | `job.isRevoked()`                                  | glide-mq only                                               |
 
 ### JobOptions
 
-| BullMQ field | glide-mq field | Status |
-|---|---|---|
-| `delay` | `delay` | Full |
-| `priority` | `priority` | Full |
-| `attempts` | `attempts` | Full |
-| `backoff` | `backoff` | Full |
-| `timeout` | `timeout` | Full |
-| `removeOnComplete` | `removeOnComplete` | Full |
-| `removeOnFail` | `removeOnFail` | Full |
-| `deduplication` | `deduplication` | Changed (see [Deduplication](#deduplication)) |
-| `parent` | `parent` | Full |
-| `jobId` (custom ID) | `jobId` | Full |
-| `lifo` | `lifo` | Same |
-| `repeat` | - | Gap - use `queue.upsertJobScheduler()` |
-| `sizeLimit` | - | 1 MB hard limit enforced internally (JSON string character length) |
-| - | `ordering.key` | glide-mq only |
-| - | `ordering.concurrency` | glide-mq only |
-| - | `ordering.rateLimit` | glide-mq only |
-| - | `ordering.tokenBucket` | glide-mq only |
-| - | `cost` | glide-mq only |
+| BullMQ field        | glide-mq field         | Status                                                             |
+| ------------------- | ---------------------- | ------------------------------------------------------------------ |
+| `delay`             | `delay`                | Full                                                               |
+| `priority`          | `priority`             | Full                                                               |
+| `attempts`          | `attempts`             | Full                                                               |
+| `backoff`           | `backoff`              | Full                                                               |
+| `timeout`           | `timeout`              | Full                                                               |
+| `removeOnComplete`  | `removeOnComplete`     | Full                                                               |
+| `removeOnFail`      | `removeOnFail`         | Full                                                               |
+| `deduplication`     | `deduplication`        | Changed (see [Deduplication](#deduplication))                      |
+| `parent`            | `parent`               | Full                                                               |
+| `jobId` (custom ID) | `jobId`                | Full                                                               |
+| `lifo`              | `lifo`                 | Same                                                               |
+| `repeat`            | -                      | Gap - use `queue.upsertJobScheduler()`                             |
+| `sizeLimit`         | -                      | 1 MB hard limit enforced internally (JSON string character length) |
+| -                   | `ordering.key`         | glide-mq only                                                      |
+| -                   | `ordering.concurrency` | glide-mq only                                                      |
+| -                   | `ordering.rateLimit`   | glide-mq only                                                      |
+| -                   | `ordering.tokenBucket` | glide-mq only                                                      |
+| -                   | `cost`                 | glide-mq only                                                      |
 
 ### QueueEvents events
 
-| BullMQ event | glide-mq event | Status |
-|---|---|---|
-| `'added'` | `'added'` | Full |
-| `'completed'` | `'completed'` | Full |
-| `'failed'` | `'failed'` | Full |
-| `'stalled'` | `'stalled'` | Full |
-| `'progress'` | `'progress'` | Full |
-| `'paused'` | `'paused'` | Full |
-| `'resumed'` | `'resumed'` | Full |
-| `'removed'` | `'removed'` | Full |
-| `'retries-exhausted'` | `'failed'` | Changed - check `job.attemptsMade >= job.opts.attempts` |
-| `'waiting'` | - | Gap |
-| `'active'` | - | Gap |
-| `'delayed'` | - | Gap |
-| `'drained'` | - | Gap |
-| `'cleaned'` | - | Gap |
-| `'deduplicated'` | - | Gap |
-| `'waiting-children'` | - | Gap |
+| BullMQ event          | glide-mq event | Status                                                  |
+| --------------------- | -------------- | ------------------------------------------------------- |
+| `'added'`             | `'added'`      | Full                                                    |
+| `'completed'`         | `'completed'`  | Full                                                    |
+| `'failed'`            | `'failed'`     | Full                                                    |
+| `'stalled'`           | `'stalled'`    | Full                                                    |
+| `'progress'`          | `'progress'`   | Full                                                    |
+| `'paused'`            | `'paused'`     | Full                                                    |
+| `'resumed'`           | `'resumed'`    | Full                                                    |
+| `'removed'`           | `'removed'`    | Full                                                    |
+| `'retries-exhausted'` | `'failed'`     | Changed - check `job.attemptsMade >= job.opts.attempts` |
+| `'waiting'`           | -              | Gap                                                     |
+| `'active'`            | -              | Gap                                                     |
+| `'delayed'`           | -              | Gap                                                     |
+| `'drained'`           | -              | Gap                                                     |
+| `'cleaned'`           | -              | Gap                                                     |
+| `'deduplicated'`      | -              | Gap                                                     |
+| `'waiting-children'`  | -              | Gap                                                     |
 
 ---
 
@@ -555,8 +613,7 @@ const queue = new Queue('tasks', {
 ```ts
 // glide-mq - wrap add() with your defaults
 const DEFAULTS = { attempts: 3, backoff: { type: 'exponential', delay: 1000 } } as const;
-const add = (name: string, data: unknown, opts?: JobOptions) =>
-  queue.add(name, data, { ...DEFAULTS, ...opts });
+const add = (name: string, data: unknown, opts?: JobOptions) => queue.add(name, data, { ...DEFAULTS, ...opts });
 ```
 
 **`queue.getJobs()` takes a single type** - BullMQ accepts an array of types; glide-mq takes one type at a time:
@@ -568,10 +625,7 @@ const jobs = await queue.getJobs(['waiting', 'active'], 0, 99);
 
 ```ts
 // glide-mq
-const [waiting, active] = await Promise.all([
-  queue.getJobs('waiting', 0, 99),
-  queue.getJobs('active', 0, 99),
-]);
+const [waiting, active] = await Promise.all([queue.getJobs('waiting', 0, 99), queue.getJobs('active', 0, 99)]);
 const jobs = [...waiting, ...active];
 ```
 
@@ -612,7 +666,7 @@ const worker = new Worker('q', processor, {
   connection,
   backoffStrategies: {
     jitter: (attemptsMade, err) => 1000 + Math.random() * 1000,
-    linear:  (attemptsMade, err) => 1000 * attemptsMade,
+    linear: (attemptsMade, err) => 1000 * attemptsMade,
   },
 });
 
@@ -626,8 +680,8 @@ await queue.add('job', data, { backoff: { type: 'jitter', delay: 1000 } });
 // glide-mq
 const worker = new Worker('q', processor, {
   connection,
-  concurrency: 10,          // per-worker concurrency
-  globalConcurrency: 50,   // queue-wide cap across all workers (set once, stored in Valkey)
+  concurrency: 10, // per-worker concurrency
+  globalConcurrency: 50, // queue-wide cap across all workers (set once, stored in Valkey)
 });
 
 // Or set it on the queue separately:
@@ -682,10 +736,12 @@ const job = await queue.add('job', data, { jobId: 'my-deterministic-id' });
 **LIFO support** - Last-in-first-out ordering is supported via `lifo: true` option. Jobs are processed in reverse-chronological order (newest first). Priority and delayed jobs take precedence over LIFO. Cannot be combined with ordering keys (per-key sequencing).
 
 > **LIFO + `globalConcurrency` — crash limitation:** When `globalConcurrency` is set on a queue, LIFO and priority-list jobs are tracked via a `{queue}:list-active` counter in Valkey. If a worker process is killed hard (SIGKILL, OOM) while processing a list-backed job, the counter is not decremented. This permanently reduces effective global concurrency by one slot until it is manually reset:
+>
 > ```
 > # Reset stuck list-active counter
 > valkey-cli DEL glide:{queueName}:list-active
 > ```
+>
 > Stream-backed (FIFO) jobs are self-healing via stream PEL and `glidemq_reclaimStalled`. LIFO/priority jobs lack this self-healing because they have no PEL entry. A future enhancement will integrate `list-active` with stall detection.
 
 **`job.promote()` is now implemented** - call `job.promote()` to move a delayed job to waiting immediately. Throws if the job is not in the delayed state (#11).
@@ -749,7 +805,7 @@ interface FlowJob {
 interface FlowJob {
   name: string;
   queueName: string;
-  data: any;            // required in glide-mq (not optional)
+  data: any; // required in glide-mq (not optional)
   opts?: JobOptions;
   children?: FlowJob[]; // same type for parent and children
 }
@@ -790,9 +846,9 @@ await queue.add('daily-report', data, {
 ```ts
 // glide-mq (and BullMQ v5+) - upsertJobScheduler
 await queue.upsertJobScheduler(
-  'daily-report',                             // scheduler name
+  'daily-report', // scheduler name
   { pattern: '0 9 * * *', tz: 'America/New_York' }, // direct replacement for repeat
-  { name: 'daily-report', data: { v: 1 } },  // job template
+  { name: 'daily-report', data: { v: 1 } }, // job template
 );
 ```
 
@@ -856,14 +912,18 @@ Custom backoff strategies moved from `settings.backoffStrategy` to `backoffStrat
 **`timeout` option exists but behavior note** - Both BullMQ and glide-mq accept `opts.timeout`. In BullMQ this is also not fully implemented in all versions. In glide-mq the timeout is respected but acts as a heartbeat-based stall detection rather than a hard kill. Use `job.abortSignal` for cooperative cancellation within the processor:
 
 ```ts
-const worker = new Worker('q', async (job) => {
-  if (job.abortSignal?.aborted) return;
+const worker = new Worker(
+  'q',
+  async (job) => {
+    if (job.abortSignal?.aborted) return;
 
-  const result = await someOperation();
+    const result = await someOperation();
 
-  if (job.abortSignal?.aborted) return; // check periodically in long tasks
-  return result;
-}, { connection });
+    if (job.abortSignal?.aborted) return; // check periodically in long tasks
+    return result;
+  },
+  { connection },
+);
 ```
 
 ---
@@ -902,28 +962,36 @@ Both libraries support the `limiter` option and `Worker.RateLimitError`. The usa
 
 ```ts
 // Both BullMQ and glide-mq
-const worker = new Worker('q', async (job) => {
-  if (shouldThrottle()) {
-    throw new Worker.RateLimitError();  // re-queues job, does not count as failure
-  }
-  return process(job);
-}, {
-  connection,
-  limiter: { max: 100, duration: 1000 },  // 100 jobs per second
-});
+const worker = new Worker(
+  'q',
+  async (job) => {
+    if (shouldThrottle()) {
+      throw new Worker.RateLimitError(); // re-queues job, does not count as failure
+    }
+    return process(job);
+  },
+  {
+    connection,
+    limiter: { max: 100, duration: 1000 }, // 100 jobs per second
+  },
+);
 ```
 
 `worker.rateLimit(ms)` is also available in both:
 
 ```ts
-const worker = new Worker('q', async (job) => {
-  const retryAfterMs = await checkExternalRateLimit();
-  if (retryAfterMs > 0) {
-    await worker.rateLimit(retryAfterMs);
-    throw new Worker.RateLimitError();
-  }
-  return process(job);
-}, { connection });
+const worker = new Worker(
+  'q',
+  async (job) => {
+    const retryAfterMs = await checkExternalRateLimit();
+    if (retryAfterMs > 0) {
+      await worker.rateLimit(retryAfterMs);
+      throw new Worker.RateLimitError();
+    }
+    return process(job);
+  },
+  { connection },
+);
 ```
 
 **Global rate limiting** - glide-mq supports a queue-wide rate limit stored in Valkey, dynamically picked up by all workers:
@@ -977,8 +1045,8 @@ await queue.add('background', data, { priority: 100 });
 
 ```ts
 // Re-prioritize a waiting job after enqueue
-await job.changePriority(5);   // move to priority queue with priority 5
-await job.changePriority(0);   // move back to normal stream (no priority)
+await job.changePriority(5); // move to priority queue with priority 5
+await job.changePriority(0); // move back to normal stream (no priority)
 ```
 
 Throws if the job is active, completed, or failed.
@@ -992,14 +1060,14 @@ BullMQ Pro offers group-level concurrency (max N parallel jobs per group key). g
 ```ts
 // BullMQ Pro only
 await queue.add('job', data, {
-  group: { id: 'tenant-123', limit: 1 },  // requires BullMQ Pro license
+  group: { id: 'tenant-123', limit: 1 }, // requires BullMQ Pro license
 });
 ```
 
 ```ts
 // glide-mq (open source)
 await queue.add('job', data, {
-  ordering: { key: 'tenant-123' },  // jobs for this key run one at a time, in order
+  ordering: { key: 'tenant-123' }, // jobs for this key run one at a time, in order
 });
 ```
 
@@ -1027,14 +1095,14 @@ BullMQ does not have a native DLQ - failed jobs stay in the failed state. glide-
 const queue = new Queue('tasks', {
   connection,
   deadLetterQueue: {
-    name: 'tasks-dlq',   // separate queue for permanently failed jobs
-    maxRetries: 3,       // override job's own attempts setting
+    name: 'tasks-dlq', // separate queue for permanently failed jobs
+    maxRetries: 3, // override job's own attempts setting
   },
 });
 
 // Retrieve DLQ jobs:
 const dlqQueue = new Queue('tasks-dlq', { connection });
-const dlqJobs  = await dlqQueue.getDeadLetterJobs();
+const dlqJobs = await dlqQueue.getDeadLetterJobs();
 ```
 
 If you were managing a DLQ manually in BullMQ (e.g., moving jobs in the `failed` handler), switch to the native option above.
@@ -1047,18 +1115,22 @@ BullMQ has no equivalent. glide-mq supports revoking a job from outside the work
 
 ```ts
 // glide-mq only
-await queue.revoke(jobId);  // signals abort to the processor via job.abortSignal
+await queue.revoke(jobId); // signals abort to the processor via job.abortSignal
 ```
 
 The processor must cooperate:
 
 ```ts
-const worker = new Worker('q', async (job) => {
-  for (const chunk of data) {
-    if (job.abortSignal?.aborted) return;  // exits cleanly on revocation
-    await processChunk(chunk);
-  }
-}, { connection });
+const worker = new Worker(
+  'q',
+  async (job) => {
+    for (const chunk of data) {
+      if (job.abortSignal?.aborted) return; // exits cleanly on revocation
+      await processChunk(chunk);
+    }
+  },
+  { connection },
+);
 ```
 
 ---
@@ -1093,7 +1165,7 @@ BullMQ has no built-in compression. glide-mq supports transparent gzip compressi
 // glide-mq only
 const queue = new Queue('tasks', {
   connection,
-  compression: 'gzip',  // compress all job payloads on write, decompress on read
+  compression: 'gzip', // compress all job payloads on write, decompress on read
 });
 // No change needed in worker or job code - transparent.
 ```
@@ -1106,29 +1178,29 @@ Useful when job payloads are large (15 KB JSON → 331 bytes with gzip, 98% redu
 
 These BullMQ features have been implemented in glide-mq.
 
-| Feature | glide-mq API | Issue |
-|---|---|---|
-| `job.promote()` | `job.promote()` - move delayed job to waiting | [#11](https://github.com/avifenesh/glide-mq/issues/11) |
-| `job.changeDelay(delay)` | `job.changeDelay(newDelay)` | [#12](https://github.com/avifenesh/glide-mq/issues/12) |
-| `job.changePriority(opts)` | `job.changePriority(newPriority)` | [#13](https://github.com/avifenesh/glide-mq/issues/13) |
-| `job.discard()` | `job.discard()` or throw `UnrecoverableError` | [#14](https://github.com/avifenesh/glide-mq/issues/14) |
-| `queue.drain(delayed?)` | `queue.drain()` or `queue.drain(true)` | [#15](https://github.com/avifenesh/glide-mq/issues/15) |
-| `queue.clean(grace, limit, type)` | Same signature | [#16](https://github.com/avifenesh/glide-mq/issues/16) |
-| `queue.retryJobs(opts)` | `queue.retryJobs({ count: 100 })` | [#17](https://github.com/avifenesh/glide-mq/issues/17) |
-| `queue.getWorkers()` | Same signature | [#18](https://github.com/avifenesh/glide-mq/issues/18) |
-| `queue.getJobScheduler(name)` | Same signature | [#19](https://github.com/avifenesh/glide-mq/issues/19) |
-| `worker.on('active')` | Emits `(job, jobId)` - note: BullMQ passes `(job, prev)` | [#20](https://github.com/avifenesh/glide-mq/issues/20) |
-| `worker.on('drained')` | Same signature | [#20](https://github.com/avifenesh/glide-mq/issues/20) |
-| Sandboxed processor | `new Worker('q', './processor.js', { connection, sandbox: {} })` | - |
+| Feature                           | glide-mq API                                                     | Issue                                                  |
+| --------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------ |
+| `job.promote()`                   | `job.promote()` - move delayed job to waiting                    | [#11](https://github.com/avifenesh/glide-mq/issues/11) |
+| `job.changeDelay(delay)`          | `job.changeDelay(newDelay)`                                      | [#12](https://github.com/avifenesh/glide-mq/issues/12) |
+| `job.changePriority(opts)`        | `job.changePriority(newPriority)`                                | [#13](https://github.com/avifenesh/glide-mq/issues/13) |
+| `job.discard()`                   | `job.discard()` or throw `UnrecoverableError`                    | [#14](https://github.com/avifenesh/glide-mq/issues/14) |
+| `queue.drain(delayed?)`           | `queue.drain()` or `queue.drain(true)`                           | [#15](https://github.com/avifenesh/glide-mq/issues/15) |
+| `queue.clean(grace, limit, type)` | Same signature                                                   | [#16](https://github.com/avifenesh/glide-mq/issues/16) |
+| `queue.retryJobs(opts)`           | `queue.retryJobs({ count: 100 })`                                | [#17](https://github.com/avifenesh/glide-mq/issues/17) |
+| `queue.getWorkers()`              | Same signature                                                   | [#18](https://github.com/avifenesh/glide-mq/issues/18) |
+| `queue.getJobScheduler(name)`     | Same signature                                                   | [#19](https://github.com/avifenesh/glide-mq/issues/19) |
+| `worker.on('active')`             | Emits `(job, jobId)` - note: BullMQ passes `(job, prev)`         | [#20](https://github.com/avifenesh/glide-mq/issues/20) |
+| `worker.on('drained')`            | Same signature                                                   | [#20](https://github.com/avifenesh/glide-mq/issues/20) |
+| Sandboxed processor               | `new Worker('q', './processor.js', { connection, sandbox: {} })` | -                                                      |
 
 ## Current gaps
 
 These BullMQ features are not yet implemented.
 
-| Missing feature | Workaround |
-|---|---|
-| QueueEvents `'waiting'`, `'active'`, `'delayed'`, `'drained'`, `'deduplicated'` events | Use worker-level events or poll `getJobCounts()` |
-| `failParentOnFailure` in FlowJob | Implement manually in the worker's `failed` handler |
+| Missing feature                                                                        | Workaround                                          |
+| -------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| QueueEvents `'waiting'`, `'active'`, `'delayed'`, `'drained'`, `'deduplicated'` events | Use worker-level events or poll `getJobCounts()`    |
+| `failParentOnFailure` in FlowJob                                                       | Implement manually in the worker's `failed` handler |
 
 ---
 
@@ -1202,7 +1274,7 @@ const worker = new TestWorker(queue, async (job) => {
 
 await queue.add('send-email', { email: 'user@example.com' });
 // TestWorker processes jobs automatically when added to the queue
-await new Promise(r => setTimeout(r, 10)); // let microtask run
+await new Promise((r) => setTimeout(r, 10)); // let microtask run
 
 const jobs = await queue.getJobs('completed');
 // [{ data: { email: 'user@example.com' }, returnvalue: { sent: true } }]
@@ -1222,23 +1294,36 @@ import { chain, group, chord } from 'glide-mq';
 const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 
 // chain: sequential pipeline - each job is a child of the next
-await chain('tasks', [
-  { name: 'step-1', data: {} },
-  { name: 'step-2', data: {} },
-  { name: 'step-3', data: {} },
-], connection);
+await chain(
+  'tasks',
+  [
+    { name: 'step-1', data: {} },
+    { name: 'step-2', data: {} },
+    { name: 'step-3', data: {} },
+  ],
+  connection,
+);
 
 // group: parallel fan-out - all jobs run concurrently, synthetic parent waits
-await group('tasks', [
-  { name: 'shard-1', data: {} },
-  { name: 'shard-2', data: {} },
-], connection);
+await group(
+  'tasks',
+  [
+    { name: 'shard-1', data: {} },
+    { name: 'shard-2', data: {} },
+  ],
+  connection,
+);
 
 // chord: group then callback - callback fires after all group jobs complete
-await chord('tasks', [
-  { name: 'task-1', data: {} },
-  { name: 'task-2', data: {} },
-], { name: 'aggregate', data: {} }, connection);
+await chord(
+  'tasks',
+  [
+    { name: 'task-1', data: {} },
+    { name: 'task-2', data: {} },
+  ],
+  { name: 'aggregate', data: {} },
+  connection,
+);
 ```
 
 ---
@@ -1258,9 +1343,13 @@ const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 @Injectable()
 export class TaskQueue implements OnModuleInit, OnModuleDestroy {
   private queue = new Queue('tasks', { connection });
-  private worker = new Worker('tasks', async (job) => {
-    // process job
-  }, { connection, concurrency: 10 });
+  private worker = new Worker(
+    'tasks',
+    async (job) => {
+      // process job
+    },
+    { connection, concurrency: 10 },
+  );
 
   async add(data: unknown) {
     return this.queue.add('task', data);
