@@ -59,6 +59,8 @@ describe('createClient', () => {
       credentials: undefined,
       readFrom: undefined,
       clientAz: undefined,
+      inflightRequestsLimit: undefined,
+      requestTimeout: 500,
     });
     expect(GlideClusterClient.createClient).not.toHaveBeenCalled();
     expect(client).toBe(mockClient);
@@ -76,6 +78,8 @@ describe('createClient', () => {
       credentials: undefined,
       readFrom: undefined,
       clientAz: undefined,
+      inflightRequestsLimit: undefined,
+      requestTimeout: 500,
     });
     expect(GlideClient.createClient).not.toHaveBeenCalled();
     expect(client).toBe(mockClient);
@@ -99,6 +103,8 @@ describe('createClient', () => {
       credentials: { username: 'admin', password: 'secret' },
       readFrom: undefined,
       clientAz: undefined,
+      inflightRequestsLimit: undefined,
+      requestTimeout: 500,
     });
   });
 
