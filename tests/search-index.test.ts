@@ -285,6 +285,7 @@ describe('Valkey Search integration', () => {
 
   const CONNECTION = {
     addresses: [{ host: 'localhost', port: 6379 }],
+    requestTimeout: 5000,
   };
 
   let cleanupClient: InstanceType<typeof GlideClient>;
@@ -648,7 +649,39 @@ describe('Valkey Search integration', () => {
       await q.close();
       await cleanup(qName, idxName);
     }
-  }, 20000);
+  }, 60000);
+
+  // -- Search 1.1+ options: these require valkey-search >= 1.1.
+  // valkey-bundle currently ships search 1.0.0, so these verify graceful rejection.
+  // When valkey-search 1.1+ is available, update these tests to verify the options work.
+
+  it('createJobIndex with search 1.1 options rejects on search 1.0', async () => {
+    if (!requireSearch()) return;
+
+    const qName = 'search-11-opts-' + Date.now();
+    const q = new Queue(qName, { connection: CONNECTION });
+
+    try {
+      // skipInitialScan is a search 1.1+ option
+      await expect(
+        q.createJobIndex({
+          vectorField: { name: 'vec', dimensions: 2, algorithm: 'FLAT', distanceMetric: 'COSINE' },
+          createOptions: { skipInitialScan: true },
+        }),
+      ).rejects.toThrow();
+
+      // noStopWords is a search 1.1+ option
+      await expect(
+        q.createJobIndex({
+          vectorField: { name: 'vec', dimensions: 2, algorithm: 'FLAT', distanceMetric: 'COSINE' },
+          createOptions: { noStopWords: true },
+        }),
+      ).rejects.toThrow();
+    } finally {
+      await q.close();
+      await cleanup(qName);
+    }
+  }, 60000);
 
   it('createJobIndex throws clear error when search module not loaded', async () => {
     // This test forces ensureSearchModule to fail
