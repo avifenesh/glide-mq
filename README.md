@@ -125,11 +125,10 @@ Reproduce with `npm run bench` or `npx tsx benchmarks/elasticache-head-to-head.t
 
 ## When NOT to use glide-mq
 
-- **You need a streaming platform.** glide-mq is a job/task queue, not a replacement for Kafka or NATS JetStream.
+- **You need log-based event streaming at scale.** glide-mq is a job/task queue with pub/sub (Broadcast), not a partitioned event log like Kafka or NATS JetStream. For fan-out, pub/sub, and task-level streaming it works well - but not for replaying millions of events across consumer groups.
 - **You need browser support.** The Rust NAPI client requires a server-side runtime (Node.js 20+, Bun, or Deno with NAPI support).
-- **You need exactly-once delivery.** glide-mq provides at-least-once semantics. Jobs may be processed more than once after crashes or stalled recovery.
-- **You do not run Valkey or Redis.** There is no embedded mode - a Valkey 7.0+ or Redis 7.0+ instance is required.
-- **Vector search without valkey-bundle.** KNN queries require the Valkey Search module.
+- **You need exactly-once semantics.** glide-mq provides at-least-once delivery. Duplicate processing is rare (only on hard crashes during the completion path) but possible - design processors to be idempotent.
+- **You need to run without Valkey or Redis.** Production use requires a Valkey 7.0+ or Redis 7.0+ instance. For development and testing, `TestQueue`/`TestWorker` run fully in-memory with no external dependencies.
 
 ## Documentation
 
