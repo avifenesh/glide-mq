@@ -1,11 +1,11 @@
 services:
   valkey:
-    image: valkey/valkey-bundle:latest
+    image: valkey/valkey-bundle:9.1.0-rc1
     ports:
-      - "6379:6379"
+      - '6379:6379'
     command: valkey-server --save "" --appendonly no --maxmemory-policy noeviction
     healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
+      test: ['CMD', 'valkey-cli', 'ping']
       interval: 2s
       timeout: 3s
       retries: 5
@@ -13,9 +13,9 @@ services:
   valkey-cluster:
     image: valkey/valkey:8.0
     ports:
-      - "7000-7005:7000-7005"
-      - "17000-17005:17000-17005"
-    entrypoint: ["/bin/sh", "-c"]
+      - '7000-7005:7000-7005'
+      - '17000-17005:17000-17005'
+    entrypoint: ['/bin/sh', '-c']
     command:
       - |
         ANNOUNCE_IP=$${CLUSTER_ANNOUNCE_IP:-127.0.0.1}
@@ -51,7 +51,7 @@ services:
         echo "Cluster state: $$state"
         tail -f /dev/null
     healthcheck:
-      test: ["CMD-SHELL", "valkey-cli -p 7000 cluster info | grep -q cluster_state:ok"]
+      test: ['CMD-SHELL', 'valkey-cli -p 7000 cluster info | grep -q cluster_state:ok']
       interval: 3s
       timeout: 5s
       retries: 15

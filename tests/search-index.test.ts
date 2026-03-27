@@ -651,37 +651,168 @@ describe('Valkey Search integration', () => {
     }
   }, 60000);
 
-  // -- Search 1.1+ options: these require valkey-search >= 1.1.
-  // valkey-bundle currently ships search 1.0.0, so these verify graceful rejection.
-  // When valkey-search 1.1+ is available, update these tests to verify the options work.
+  // -- Search 1.1+ create options (requires valkey-search >= 1.1)
 
-  it('createJobIndex with search 1.1 options rejects on search 1.0', async () => {
+  it('createJobIndex with skipInitialScan option', async () => {
     if (!requireSearch()) return;
 
-    const qName = 'search-11-opts-' + Date.now();
+    const qName = 'search-skipscan-' + Date.now();
+    const idxName = `${qName}-idx`;
     const q = new Queue(qName, { connection: CONNECTION });
 
     try {
-      // skipInitialScan is a search 1.1+ option
-      await expect(
-        q.createJobIndex({
-          vectorField: { name: 'vec', dimensions: 2, algorithm: 'FLAT', distanceMetric: 'COSINE' },
-          createOptions: { skipInitialScan: true },
-        }),
-      ).rejects.toThrow();
+      // Add a job BEFORE creating the index
+      const job = await q.add('pre-existing', { text: 'before index' });
+      await storeVecDirect(qName, job!.id, 'vec', [1.0, 0.0]);
 
-      // noStopWords is a search 1.1+ option
-      await expect(
-        q.createJobIndex({
-          vectorField: { name: 'vec', dimensions: 2, algorithm: 'FLAT', distanceMetric: 'COSINE' },
-          createOptions: { noStopWords: true },
-        }),
-      ).rejects.toThrow();
+      // skipInitialScan: index won't backfill pre-existing keys
+      await q.createJobIndex({
+        vectorField: { name: 'vec', dimensions: 2, algorithm: 'FLAT', distanceMetric: 'COSINE' },
+        createOptions: { skipInitialScan: true },
+      });
+
+      await new Promise((r) => setTimeout(r, 500));
+      const results = await q.vectorSearch([1.0, 0.0], { k: 10 });
+      expect(results).toHaveLength(0);
+
+      // New job added AFTER index creation IS indexed
+      const job2 = await q.add('post-index', {});
+      await storeVecDirect(qName, job2!.id, 'vec', [0.0, 1.0]);
+      await new Promise((r) => setTimeout(r, 500));
+
+      const results2 = await q.vectorSearch([0.0, 1.0], { k: 10 });
+      expect(results2.length).toBeGreaterThanOrEqual(1);
     } finally {
       await q.close();
-      await cleanup(qName);
+      await cleanup(qName, idxName);
     }
-  }, 60000);
+  }, 30000);
+
+  it('createJobIndex with noStopWords option', async () => {
+    if (!requireSearch()) return;
+
+    const qName = 'search-nostop-' + Date.now();
+    const idxName = `${qName}-idx`;
+    const q = new Queue(qName, { connection: CONNECTION });
+
+    try {
+      await q.createJobIndex({
+        fields: [{ type: 'TEXT', name: 'title' }],
+        vectorField: { name: 'vec', dimensions: 2, algorithm: 'FLAT', distanceMetric: 'COSINE' },
+        createOptions: { noStopWords: true },
+      });
+
+      const info = await GlideFt.info(cleanupClient, idxName);
+      expect(info).toBeDefined();
+    } finally {
+      await q.close();
+      await cleanup(qName, idxName);
+    }
+  }, 15000);
+
+  it('createJobIndex with custom stopWords', async () => {
+    if (!requireSearch()) return;
+
+    const qName = 'search-cstop-' + Date.now();
+    const idxName = `${qName}-idx`;
+    const q = new Queue(qName, { connection: CONNECTION });
+
+    try {
+      await q.createJobIndex({
+        fields: [{ type: 'TEXT', name: 'title' }],
+        vectorField: { name: 'vec', dimensions: 2, algorithm: 'FLAT', distanceMetric: 'COSINE' },
+        createOptions: { stopWords: ['the', 'a', 'is'] },
+      });
+
+      const info = await GlideFt.info(cleanupClient, idxName);
+      expect(info).toBeDefined();
+    } finally {
+      await q.close();
+      await cleanup(qName, idxName);
+    }
+  }, 15000);
+
+  // -- Non-vector index (search 1.1+ allows indexes without vector fields)
+
+  it('createJobIndex without vectorField on search 1.1+', async () => {
+    if (!requireSearch()) return;
+
+    const qName = 'search-novec-' + Date.now();
+    const idxName = `${qName}-idx`;
+    const q = new Queue(qName, { connection: CONNECTION });
+
+    try {
+      // No vectorField - on search 1.0 this adds a dummy vector, on 1.1+ it should work natively
+      await q.createJobIndex({
+        fields: [{ type: 'TAG', name: 'category' }],
+      });
+
+      const info = await GlideFt.info(cleanupClient, idxName);
+      expect(info).toBeDefined();
+    } finally {
+      await q.close();
+      await cleanup(qName, idxName);
+    }
+  }, 15000);
+
+  // -- Distance metrics
+
+  it('vectorSearch with L2 distance metric', async () => {
+    if (!requireSearch()) return;
+
+    const qName = 'search-l2-' + Date.now();
+    const idxName = `${qName}-idx`;
+    const q = new Queue(qName, { connection: CONNECTION });
+
+    try {
+      await q.createJobIndex({
+        vectorField: { name: 'vec', dimensions: 2, algorithm: 'FLAT', distanceMetric: 'L2' },
+      });
+
+      const j1 = await q.add('near', {});
+      await storeVecDirect(qName, j1!.id, 'vec', [1.0, 0.0]);
+      const j2 = await q.add('far', {});
+      await storeVecDirect(qName, j2!.id, 'vec', [0.0, 1.0]);
+
+      await new Promise((r) => setTimeout(r, 500));
+
+      const results = await q.vectorSearch([1.0, 0.0], { k: 2 });
+      expect(results).toHaveLength(2);
+      // L2: lower = more similar
+      expect(results[0].job.id).toBe(j1!.id);
+      expect(results[0].score).toBeLessThan(results[1].score);
+    } finally {
+      await q.close();
+      await cleanup(qName, idxName);
+    }
+  }, 15000);
+
+  it('vectorSearch with inner product distance metric', async () => {
+    if (!requireSearch()) return;
+
+    const qName = 'search-ip-' + Date.now();
+    const idxName = `${qName}-idx`;
+    const q = new Queue(qName, { connection: CONNECTION });
+
+    try {
+      await q.createJobIndex({
+        vectorField: { name: 'vec', dimensions: 2, algorithm: 'FLAT', distanceMetric: 'IP' },
+      });
+
+      const j1 = await q.add('aligned', {});
+      await storeVecDirect(qName, j1!.id, 'vec', [1.0, 0.0]);
+      const j2 = await q.add('partial', {});
+      await storeVecDirect(qName, j2!.id, 'vec', [0.5, 0.5]);
+
+      await new Promise((r) => setTimeout(r, 500));
+
+      const results = await q.vectorSearch([1.0, 0.0], { k: 2 });
+      expect(results).toHaveLength(2);
+    } finally {
+      await q.close();
+      await cleanup(qName, idxName);
+    }
+  }, 15000);
 
   it('createJobIndex throws clear error when search module not loaded', async () => {
     // This test forces ensureSearchModule to fail
