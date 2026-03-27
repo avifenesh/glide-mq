@@ -51,7 +51,7 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "@glidemq/speedkey": "^0.3.0-rc1"
+    "@glidemq/speedkey": "^0.3.0"
   },
   "devDependencies": {
     "@ai-sdk/openai": "^3.0.48",
