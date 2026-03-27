@@ -1717,31 +1717,63 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * Walks the deps set of the parent job and sums token counts, cost, and model usage.
    */
   async getFlowUsage(parentJobId: string): Promise<{
-    totalInputTokens: number;
-    totalOutputTokens: number;
-    totalCostUsd: number;
+    tokens: Record<string, number>;
+    totalTokens: number;
+    costs: Record<string, number>;
+    totalCost: number;
+    costUnit?: string;
     jobCount: number;
     models: Record<string, number>;
   }> {
     const client = await this.getClient();
-    const usageFields = ['usage:model', 'usage:inputTokens', 'usage:outputTokens', 'usage:costUsd'];
-    const agg = { totalInputTokens: 0, totalOutputTokens: 0, totalCostUsd: 0, jobCount: 0, models: {} as Record<string, number> };
+    const usageFields = ['usage:model', 'usage:tokens', 'usage:costs', 'usage:totalTokens', 'usage:totalCost', 'usage:costUnit'];
+    const agg = {
+      tokens: {} as Record<string, number>,
+      totalTokens: 0,
+      costs: {} as Record<string, number>,
+      totalCost: 0,
+      costUnit: undefined as string | undefined,
+      jobCount: 0,
+      models: {} as Record<string, number>,
+    };
+
+    const mergeJob = (values: (unknown | null)[]) => {
+      const model = values[0] ? String(values[0]) : undefined;
+      const tokensStr = values[1] ? String(values[1]) : undefined;
+      const costsStr = values[2] ? String(values[2]) : undefined;
+      const totalTokens = values[3] ? parseFloat(String(values[3])) : 0;
+      const totalCost = values[4] ? parseFloat(String(values[4])) : 0;
+      const costUnit = values[5] ? String(values[5]) : undefined;
+
+      if (!model && !tokensStr && !costsStr && !totalTokens && !totalCost) return;
+
+      agg.totalTokens += totalTokens;
+      agg.totalCost += totalCost;
+      agg.jobCount++;
+      if (costUnit && !agg.costUnit) agg.costUnit = costUnit;
+      if (model) agg.models[model] = (agg.models[model] || 0) + 1;
+
+      if (tokensStr) {
+        try {
+          const tokens = JSON.parse(tokensStr) as Record<string, number>;
+          for (const [k, v] of Object.entries(tokens)) {
+            agg.tokens[k] = (agg.tokens[k] || 0) + v;
+          }
+        } catch { /* ignore */ }
+      }
+      if (costsStr) {
+        try {
+          const costs = JSON.parse(costsStr) as Record<string, number>;
+          for (const [k, v] of Object.entries(costs)) {
+            agg.costs[k] = (agg.costs[k] || 0) + v;
+          }
+        } catch { /* ignore */ }
+      }
+    };
 
     // Include the parent job itself
     const parentValues = await client.hmget(this.keys.job(parentJobId), usageFields);
-    if (parentValues) {
-      const pModel = parentValues[0] ? String(parentValues[0]) : undefined;
-      const pIn = parentValues[1] ? parseInt(String(parentValues[1]), 10) : 0;
-      const pOut = parentValues[2] ? parseInt(String(parentValues[2]), 10) : 0;
-      const pCost = parentValues[3] ? parseFloat(String(parentValues[3])) : 0;
-      if (pModel || pIn || pOut || pCost) {
-        agg.totalInputTokens += pIn;
-        agg.totalOutputTokens += pOut;
-        agg.totalCostUsd += pCost;
-        agg.jobCount++;
-        if (pModel) agg.models[pModel] = (agg.models[pModel] || 0) + 1;
-      }
-    }
+    if (parentValues) mergeJob(parentValues);
 
     // Walk children via deps set
     const members = await client.smembers(this.keys.deps(parentJobId));
@@ -1766,18 +1798,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     for (let i = 0; i < memberList.length; i++) {
       const values = batchResults[i] as any[] | null;
-      if (!values) continue;
-      const model = values[0] ? String(values[0]) : undefined;
-      const inTokens = values[1] ? parseInt(String(values[1]), 10) : 0;
-      const outTokens = values[2] ? parseInt(String(values[2]), 10) : 0;
-      const cost = values[3] ? parseFloat(String(values[3])) : 0;
-      if (model || inTokens || outTokens || cost) {
-        agg.totalInputTokens += inTokens;
-        agg.totalOutputTokens += outTokens;
-        agg.totalCostUsd += cost;
-        agg.jobCount++;
-        if (model) agg.models[model] = (agg.models[model] || 0) + 1;
-      }
+      if (values) mergeJob(values);
     }
 
     return agg;
@@ -1788,7 +1809,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
    */
   async getFlowBudget(flowId: string): Promise<{
     maxTotalTokens?: number;
-    maxCostUsd?: number;
+    maxTokens?: Record<string, number>;
+    tokenWeights?: Record<string, number>;
+    maxTotalCost?: number;
+    maxCosts?: Record<string, number>;
+    costUnit?: string;
     usedTokens: number;
     usedCost: number;
     exceeded: boolean;
@@ -1800,9 +1825,21 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (!raw || (Array.isArray(raw) && raw.length === 0)) return null;
     const fields = hashDataToRecord(raw as any);
     if (!fields) return null;
+
+    let maxTokens: Record<string, number> | undefined;
+    let tokenWeights: Record<string, number> | undefined;
+    let maxCosts: Record<string, number> | undefined;
+    if (fields.maxTokens) { try { maxTokens = JSON.parse(fields.maxTokens); } catch { /* ignore */ } }
+    if (fields.tokenWeights) { try { tokenWeights = JSON.parse(fields.tokenWeights); } catch { /* ignore */ } }
+    if (fields.maxCosts) { try { maxCosts = JSON.parse(fields.maxCosts); } catch { /* ignore */ } }
+
     return {
       maxTotalTokens: fields.maxTotalTokens ? parseFloat(fields.maxTotalTokens) : undefined,
-      maxCostUsd: fields.maxCostUsd ? parseFloat(fields.maxCostUsd) : undefined,
+      maxTokens,
+      tokenWeights,
+      maxTotalCost: fields.maxTotalCost ? parseFloat(fields.maxTotalCost) : undefined,
+      maxCosts,
+      costUnit: fields.costUnit || undefined,
       usedTokens: parseFloat(fields.usedTokens || '0'),
       usedCost: parseFloat(fields.usedCost || '0'),
       exceeded: fields.exceeded === '1',

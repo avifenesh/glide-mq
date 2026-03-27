@@ -96,8 +96,20 @@ export class FlowProducer {
           if (flowOpts.budget.maxTotalTokens != null) {
             budgetFields.maxTotalTokens = flowOpts.budget.maxTotalTokens.toString();
           }
-          if (flowOpts.budget.maxCostUsd != null) {
-            budgetFields.maxCostUsd = flowOpts.budget.maxCostUsd.toString();
+          if (flowOpts.budget.maxTokens != null) {
+            budgetFields.maxTokens = JSON.stringify(flowOpts.budget.maxTokens);
+          }
+          if (flowOpts.budget.tokenWeights != null) {
+            budgetFields.tokenWeights = JSON.stringify(flowOpts.budget.tokenWeights);
+          }
+          if (flowOpts.budget.maxTotalCost != null) {
+            budgetFields.maxTotalCost = flowOpts.budget.maxTotalCost.toString();
+          }
+          if (flowOpts.budget.maxCosts != null) {
+            budgetFields.maxCosts = JSON.stringify(flowOpts.budget.maxCosts);
+          }
+          if (flowOpts.budget.costUnit != null) {
+            budgetFields.costUnit = flowOpts.budget.costUnit;
           }
           await client.hset(budgetKey, budgetFields);
 

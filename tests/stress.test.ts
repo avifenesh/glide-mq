@@ -288,9 +288,8 @@ describeEachMode('Stress: Concurrent Workers', (CONNECTION) => {
           const idx = job.data.index;
           await job.reportUsage({
             model: `model-${w}`,
-            inputTokens: idx * 10,
-            outputTokens: idx * 5,
-            costUsd: idx * 0.001,
+            tokens: { input: idx * 10, output: idx * 5 },
+            costs: { total: idx * 0.001 },
           });
           return { workerNum: w };
         },
@@ -314,8 +313,8 @@ describeEachMode('Stress: Concurrent Workers', (CONNECTION) => {
       if (job && job.usage) {
         usageCount++;
         expect(job.usage.model).toBeDefined();
-        expect(job.usage.inputTokens).toBeDefined();
-        expect(job.usage.outputTokens).toBeDefined();
+        expect(job.usage.tokens?.input).toBeDefined();
+        expect(job.usage.tokens?.output).toBeDefined();
       }
     }
 
@@ -480,8 +479,7 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
         const tokens = job.data.tokens || 50;
         await job.reportUsage({
           model: 'gpt-4',
-          inputTokens: tokens,
-          outputTokens: 0,
+          tokens: { input: tokens, output: 0 },
         });
         processedJobNames.push(job.name);
         return { tokens };
@@ -1071,9 +1069,8 @@ describeEachMode('Stress: Data Integrity', (CONNECTION) => {
         const model = attemptCounter === 1 ? 'gpt-3.5' : attemptCounter === 2 ? 'gpt-4' : 'claude-sonnet';
         await job.reportUsage({
           model,
-          inputTokens: attemptCounter * 100,
-          outputTokens: attemptCounter * 50,
-          costUsd: attemptCounter * 0.01,
+          tokens: { input: attemptCounter * 100, output: attemptCounter * 50 },
+          costs: { total: attemptCounter * 0.01 },
         });
 
         if (attemptCounter < 3) {
@@ -1101,9 +1098,9 @@ describeEachMode('Stress: Data Integrity', (CONNECTION) => {
       const completedJob = await queue.getJob(added!.id);
       expect(completedJob!.usage).toBeDefined();
       expect(completedJob!.usage!.model).toBe('claude-sonnet');
-      expect(completedJob!.usage!.inputTokens).toBe(300);
-      expect(completedJob!.usage!.outputTokens).toBe(150);
-      expect(completedJob!.usage!.costUsd).toBeCloseTo(0.03, 5);
+      expect(completedJob!.usage!.tokens?.input).toBe(300);
+      expect(completedJob!.usage!.tokens?.output).toBe(150);
+      expect(completedJob!.usage!.totalCost).toBeCloseTo(0.03, 5);
     } finally {
       await worker.close();
       await queue.close();
@@ -1130,9 +1127,8 @@ describeEachMode('Stress: Data Integrity', (CONNECTION) => {
         if (job.data.inputTokens) {
           await job.reportUsage({
             model: 'gpt-4',
-            inputTokens: job.data.inputTokens,
-            outputTokens: job.data.outputTokens,
-            costUsd: (job.data.inputTokens + job.data.outputTokens) * 0.00001,
+            tokens: { input: job.data.inputTokens, output: job.data.outputTokens },
+            costs: { total: (job.data.inputTokens + job.data.outputTokens) * 0.00001 },
           });
         }
         return { processed: true };
@@ -1171,9 +1167,9 @@ describeEachMode('Stress: Data Integrity', (CONNECTION) => {
 
       const flowUsage = await queue.getFlowUsage(parentId);
 
-      expect(flowUsage.totalInputTokens).toBe(expectedInput);
-      expect(flowUsage.totalOutputTokens).toBe(expectedOutput);
-      expect(Math.abs(flowUsage.totalCostUsd - expectedCost)).toBeLessThan(0.001);
+      expect(flowUsage.tokens.input).toBe(expectedInput);
+      expect(flowUsage.tokens.output).toBe(expectedOutput);
+      expect(Math.abs(flowUsage.totalCost - expectedCost)).toBeLessThan(0.001);
       expect(flowUsage.jobCount).toBe(CHILD_COUNT);
       expect(flowUsage.models['gpt-4']).toBe(CHILD_COUNT);
     } finally {

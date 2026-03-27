@@ -27,7 +27,7 @@ async function main() {
       const result = await chat(MODELS.fast, [
         { role: 'user', content: `Represent this for retrieval: "${job.data.query}"` },
       ], 30);
-      await job.reportUsage({ model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens });
+      await job.reportUsage({ model: result.model, tokens: { input: result.inputTokens, output: result.outputTokens } });
       console.log(`[embed] Done (${result.totalTokens} tokens)`);
       return { embedding: '[0.12, -0.45, 0.78, ...]', tokens: result.totalTokens };
     }
@@ -69,9 +69,9 @@ async function main() {
       }
       console.log('\n');
 
-      await job.reportUsage({ model: MODELS.fast, inputTokens: inTok, outputTokens: outTok });
+      await job.reportUsage({ model: MODELS.fast, tokens: { input: inTok, output: outTok } });
       console.log(`[generate] Done (in=${inTok}, out=${outTok})`);
-      return { content: full, inputTokens: inTok, outputTokens: outTok };
+      return { content: full, tokens: { input: inTok, output: outTok } };
     }
 
     if (step === 'aggregate') {

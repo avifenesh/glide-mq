@@ -79,8 +79,7 @@ async function main() {
         await job.reportUsage({
           model: 'arcee-ai/trinity-large-preview:free',
           provider: 'openrouter',
-          inputTokens: r.usage.promptTokens ?? 0,
-          outputTokens: r.usage.completionTokens ?? 0,
+          tokens: { input: r.usage.promptTokens ?? 0, output: r.usage.completionTokens ?? 0 },
         });
       }
     } else if (step === 'summarize') {
@@ -90,8 +89,7 @@ async function main() {
         await job.reportUsage({
           model: 'arcee-ai/trinity-large-preview:free',
           provider: 'openrouter',
-          inputTokens: r.usage.promptTokens ?? 0,
-          outputTokens: r.usage.completionTokens ?? 0,
+          tokens: { input: r.usage.promptTokens ?? 0, output: r.usage.completionTokens ?? 0 },
         });
       }
     } else {
@@ -101,8 +99,7 @@ async function main() {
         await job.reportUsage({
           model: 'arcee-ai/trinity-large-preview:free',
           provider: 'openrouter',
-          inputTokens: r.usage.promptTokens ?? 0,
-          outputTokens: r.usage.completionTokens ?? 0,
+          tokens: { input: r.usage.promptTokens ?? 0, output: r.usage.completionTokens ?? 0 },
         });
       }
     }
@@ -157,7 +154,7 @@ async function main() {
     if (!id) continue;
     const j = await queue.getJob(id);
     if (j?.usage) {
-      console.log(`  ${j.name}: in=${j.usage.inputTokens}, out=${j.usage.outputTokens}`);
+      console.log(`  ${j.name}: in=${j.usage.tokens?.input ?? 0}, out=${j.usage.tokens?.output ?? 0}`);
     }
   }
 

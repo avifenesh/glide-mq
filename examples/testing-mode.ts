@@ -33,8 +33,7 @@ async function testReportUsage() {
     await job.reportUsage({
       model: 'gpt-4',
       provider: 'openai',
-      inputTokens: 100,
-      outputTokens: 50,
+      tokens: { input: 100, output: 50 },
       latencyMs: 200,
     });
     capturedUsage = job.usage;
@@ -53,8 +52,8 @@ async function testReportUsage() {
 
   // Usage is captured during processing (on the processor's job instance)
   assert(capturedUsage?.model === 'gpt-4', 'Usage model is gpt-4');
-  assert(capturedUsage?.inputTokens === 100, 'Input tokens = 100');
-  assert(capturedUsage?.outputTokens === 50, 'Output tokens = 50');
+  assert(capturedUsage?.tokens?.input === 100, 'Input tokens = 100');
+  assert(capturedUsage?.tokens?.output === 50, 'Output tokens = 50');
   assert(capturedUsage?.latencyMs === 200, 'Latency = 200ms');
 
   await worker.close();

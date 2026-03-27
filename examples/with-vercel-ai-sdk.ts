@@ -47,8 +47,7 @@ async function main() {
       await job.reportUsage({
         model,
         provider: 'openrouter',
-        inputTokens: usage.inputTokens ?? 0,
-        outputTokens: usage.outputTokens ?? 0,
+        tokens: { input: usage.inputTokens ?? 0, output: usage.outputTokens ?? 0 },
       });
 
       const text = await result.text;
@@ -65,8 +64,7 @@ async function main() {
     await job.reportUsage({
       model,
       provider: 'openrouter',
-      inputTokens: result.usage.inputTokens ?? 0,
-      outputTokens: result.usage.outputTokens ?? 0,
+      tokens: { input: result.usage.inputTokens ?? 0, output: result.usage.outputTokens ?? 0 },
     });
 
     return {
@@ -146,7 +144,7 @@ async function main() {
   // Check usage on completed job
   const finishedJob = await queue.getJob(streamJob.id);
   if (finishedJob?.usage) {
-    console.log(`Stream job usage: model=${finishedJob.usage.model}, in=${finishedJob.usage.inputTokens}, out=${finishedJob.usage.outputTokens}`);
+    console.log(`Stream job usage: model=${finishedJob.usage.model}, in=${finishedJob.usage.tokens?.input ?? 0}, out=${finishedJob.usage.tokens?.output ?? 0}`);
   }
 
   await cleanup(genWorker, queue);

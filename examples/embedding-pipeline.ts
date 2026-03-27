@@ -49,8 +49,7 @@ async function main() {
     await job.reportUsage({
       model: result.model,
       provider: 'openrouter',
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
+      tokens: { input: result.inputTokens, output: result.outputTokens },
       latencyMs: elapsed,
     });
 

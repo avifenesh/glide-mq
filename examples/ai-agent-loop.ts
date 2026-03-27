@@ -42,7 +42,7 @@ async function main() {
         ...history,
         { role: 'user', content: 'Summarize what you accomplished in one sentence.' },
       ], 60);
-      await job.reportUsage({ model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens });
+      await job.reportUsage({ model: result.model, tokens: { input: result.inputTokens, output: result.outputTokens } });
       return { status: 'done', summary: result.content, iterations: iteration };
     }
 
@@ -55,7 +55,7 @@ async function main() {
     ];
 
     const plan = await chat(MODELS.fast, planMessages, 50);
-    await job.reportUsage({ model: plan.model, inputTokens: plan.inputTokens, outputTokens: plan.outputTokens });
+    await job.reportUsage({ model: plan.model, tokens: { input: plan.inputTokens, output: plan.outputTokens } });
     console.log(`[Agent] Plan: ${plan.content.trim()}`);
 
     const action = plan.content.trim();

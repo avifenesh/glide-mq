@@ -184,7 +184,7 @@ describe('TestWorker TPM enforcement', () => {
     const WINDOW_MS = 2000;
 
     const worker = new TestWorker(queue, async (job: any) => {
-      await job.reportUsage({ inputTokens: 400, outputTokens: 200 });
+      await job.reportUsage({ tokens: { input: 400, output: 200 } });
       completionTimes.push(Date.now());
       return 'done';
     }, {
@@ -254,7 +254,7 @@ describe('TestWorker TPM enforcement', () => {
     const worker = new TestWorker(queue, async (job: any) => {
       // reportUsage gives 200 totalTokens, reportTokens gives 600
       // Worker should use max(200, 600) = 600 for TPM tracking
-      await job.reportUsage({ inputTokens: 100, outputTokens: 100 });
+      await job.reportUsage({ tokens: { input: 100, output: 100 } });
       await job.reportTokens(600);
       completionTimes.push(Date.now());
       return 'done';
@@ -557,7 +557,7 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const WINDOW_MS = 2000;
 
     const worker = new WorkerImpl(Q, async (job: any) => {
-      await job.reportUsage({ inputTokens: 400, outputTokens: 200 });
+      await job.reportUsage({ tokens: { input: 400, output: 200 } });
       completionTimes.push(Date.now());
       return 'done';
     }, {

@@ -63,13 +63,13 @@ describeEachMode('Budget middleware', (CONNECTION) => {
           { name: 'child-2', queueName, data: { step: 'generate' } },
         ],
       },
-      { budget: { maxTotalTokens: 5000, maxCostUsd: 1.0 } },
+      { budget: { maxTotalTokens: 5000, maxTotalCost: 1.0 } },
     );
 
     const budget = await queue.getFlowBudget(node.job.id);
     expect(budget).not.toBeNull();
     expect(budget!.maxTotalTokens).toBe(5000);
-    expect(budget!.maxCostUsd).toBe(1.0);
+    expect(budget!.maxTotalCost).toBe(1.0);
     expect(budget!.usedTokens).toBe(0);
     expect(budget!.usedCost).toBe(0);
     expect(budget!.exceeded).toBe(false);
@@ -86,7 +86,7 @@ describeEachMode('Budget middleware', (CONNECTION) => {
     }
   });
 
-  it('flow with maxCostUsd stops after exceeding', async () => {
+  it('flow with maxTotalCost stops after exceeding', async () => {
     queueName = uid();
     flow = new FlowProducer({ connection: CONNECTION });
     queue = new Queue(queueName, { connection: CONNECTION });
@@ -102,7 +102,7 @@ describeEachMode('Budget middleware', (CONNECTION) => {
           { name: 'child-3', queueName, data: { step: 3 } },
         ],
       },
-      { budget: { maxCostUsd: 0.05 } },
+      { budget: { maxTotalCost: 0.05 } },
     );
 
     const processed: string[] = [];
@@ -114,7 +114,7 @@ describeEachMode('Budget middleware', (CONNECTION) => {
         processed.push(job.name);
         // Each child reports $0.03 - second child should trigger exceeded
         if (job.name.startsWith('child')) {
-          await job.reportUsage({ model: 'gpt-4o', inputTokens: 100, costUsd: 0.03 });
+          await job.reportUsage({ model: 'gpt-4o', tokens: { input: 100 }, costs: { total: 0.03 } });
         }
         return 'done';
       },
@@ -166,9 +166,9 @@ describeEachMode('Budget middleware', (CONNECTION) => {
       queueName,
       async (job: any) => {
         if (job.name === 'child-1') {
-          await job.reportUsage({ inputTokens: 300, outputTokens: 100 });
+          await job.reportUsage({ tokens: { input: 300, output: 100 } });
         } else if (job.name === 'child-2') {
-          await job.reportUsage({ inputTokens: 200, outputTokens: 50 });
+          await job.reportUsage({ tokens: { input: 200, output: 50 } });
         }
         return 'ok';
       },
@@ -200,7 +200,7 @@ describeEachMode('Budget middleware', (CONNECTION) => {
           { name: 'child-2', queueName, data: {} },
         ],
       },
-      { budget: { maxCostUsd: 0.01 } },
+      { budget: { maxTotalCost: 0.01 } },
     );
 
     // Manually set budget to exceeded before any worker runs
@@ -249,7 +249,7 @@ describeEachMode('Budget middleware', (CONNECTION) => {
           { name: 'child-3', queueName, data: {} },
         ],
       },
-      { budget: { maxCostUsd: 0.01, onExceeded: 'fail' } },
+      { budget: { maxTotalCost: 0.01, onExceeded: 'fail' } },
     );
 
     let childOneDone = false;
@@ -260,7 +260,7 @@ describeEachMode('Budget middleware', (CONNECTION) => {
       async (job: any) => {
         if (job.name === 'child-1') {
           // First child exceeds the budget
-          await job.reportUsage({ costUsd: 0.02 });
+          await job.reportUsage({ costs: { total: 0.02 } });
           childOneDone = true;
         }
         return 'ok';
@@ -293,13 +293,13 @@ describeEachMode('Budget middleware', (CONNECTION) => {
         data: {},
         children: [{ name: 'child-1', queueName, data: {} }],
       },
-      { budget: { maxTotalTokens: 10000, maxCostUsd: 5.0, onExceeded: 'pause' } },
+      { budget: { maxTotalTokens: 10000, maxTotalCost: 5.0, onExceeded: 'pause' } },
     );
 
     const budget = await queue.getFlowBudget(node.job.id);
     expect(budget).not.toBeNull();
     expect(budget!.maxTotalTokens).toBe(10000);
-    expect(budget!.maxCostUsd).toBe(5.0);
+    expect(budget!.maxTotalCost).toBe(5.0);
     expect(budget!.usedTokens).toBe(0);
     expect(budget!.usedCost).toBe(0);
     expect(budget!.exceeded).toBe(false);
@@ -325,7 +325,7 @@ describeEachMode('Budget middleware', (CONNECTION) => {
         data: {},
         children: [{ name: 'child-1', queueName, data: {} }],
       },
-      { budget: { maxCostUsd: 0.001 } },
+      { budget: { maxTotalCost: 0.001 } },
     );
 
     let budgetExceededEmitted = false;
@@ -334,7 +334,7 @@ describeEachMode('Budget middleware', (CONNECTION) => {
       queueName,
       async (job: any) => {
         if (job.name === 'child-1') {
-          await job.reportUsage({ costUsd: 0.01 });
+          await job.reportUsage({ costs: { total: 0.01 } });
         }
         return 'ok';
       },
@@ -379,7 +379,7 @@ describe('Budget middleware (testing mode)', () => {
     const budgetFlowId = 'flow-1';
 
     queue.setBudget(budgetFlowId, {
-      maxCostUsd: 0.05,
+      maxTotalCost: 0.05,
     });
 
     // Add jobs with budgetKey
@@ -404,7 +404,7 @@ describe('Budget middleware (testing mode)', () => {
       async (job: any) => {
         processed.push(job.name);
         // Each child costs $0.03
-        await job.reportUsage({ costUsd: 0.03 });
+        await job.reportUsage({ costs: { total: 0.03 } });
         return 'ok';
       },
       { concurrency: 1 },
@@ -447,7 +447,7 @@ describe('Budget middleware (testing mode)', () => {
     const budgetFlowId = 'flow-pause';
 
     queue.setBudget(budgetFlowId, {
-      maxCostUsd: 0.01,
+      maxTotalCost: 0.01,
       onExceeded: 'pause',
     });
 
@@ -497,7 +497,7 @@ describe('Budget middleware (testing mode)', () => {
     const worker = new TestWorker(
       queue,
       async (job: any) => {
-        await job.reportUsage({ inputTokens: 300, outputTokens: 300 });
+        await job.reportUsage({ tokens: { input: 300, output: 300 } });
         return 'ok';
       },
       { concurrency: 1 },
@@ -511,6 +511,151 @@ describe('Budget middleware (testing mode)', () => {
     const budget = await queue.getFlowBudget(budgetFlowId);
     expect(budget!.exceeded).toBe(true);
     expect(budget!.usedTokens).toBe(600);
+    expect(budgetExceeded).toBe(true);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('per-category token limit triggers exceeded', async () => {
+    const queue = new TestQueue('test-budget-cat-tokens');
+    const budgetFlowId = 'flow-cat-tokens';
+
+    queue.setBudget(budgetFlowId, {
+      maxTokens: { reasoning: 5000 },
+    });
+
+    const job1 = await queue.add('child-1', {}, {});
+    const r1 = queue.jobs.get(job1!.id)!;
+    r1.budgetKey = budgetFlowId;
+
+    const worker = new TestWorker(
+      queue,
+      async (job: any) => {
+        // Report reasoning tokens over the 5000 cap
+        await job.reportUsage({ tokens: { reasoning: 6000 } });
+        return 'ok';
+      },
+      { concurrency: 1 },
+    );
+
+    let budgetExceeded = false;
+    worker.on('budget-exceeded', () => { budgetExceeded = true; });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    const budget = await queue.getFlowBudget(budgetFlowId);
+    expect(budget!.exceeded).toBe(true);
+    expect(budgetExceeded).toBe(true);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('token weights multiply toward maxTotalTokens', async () => {
+    const queue = new TestQueue('test-budget-weights');
+    const budgetFlowId = 'flow-weights';
+
+    queue.setBudget(budgetFlowId, {
+      tokenWeights: { reasoning: 4 },
+      maxTotalTokens: 1000,
+    });
+
+    const job1 = await queue.add('child-1', {}, {});
+    const r1 = queue.jobs.get(job1!.id)!;
+    r1.budgetKey = budgetFlowId;
+
+    const worker = new TestWorker(
+      queue,
+      async (job: any) => {
+        // 300 reasoning tokens * weight 4 = 1200 weighted, exceeds 1000
+        await job.reportUsage({ tokens: { reasoning: 300 } });
+        return 'ok';
+      },
+      { concurrency: 1 },
+    );
+
+    let budgetExceeded = false;
+    worker.on('budget-exceeded', () => { budgetExceeded = true; });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    const budget = await queue.getFlowBudget(budgetFlowId);
+    expect(budget!.exceeded).toBe(true);
+    expect(budgetExceeded).toBe(true);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('per-category cost limit triggers exceeded', async () => {
+    const queue = new TestQueue('test-budget-cat-cost');
+    const budgetFlowId = 'flow-cat-cost';
+
+    queue.setBudget(budgetFlowId, {
+      maxCosts: { reasoning: 0.5 },
+    });
+
+    const job1 = await queue.add('child-1', {}, {});
+    const r1 = queue.jobs.get(job1!.id)!;
+    r1.budgetKey = budgetFlowId;
+
+    const worker = new TestWorker(
+      queue,
+      async (job: any) => {
+        // Reasoning cost over 0.5 triggers exceeded
+        await job.reportUsage({ costs: { reasoning: 0.75 } });
+        return 'ok';
+      },
+      { concurrency: 1 },
+    );
+
+    let budgetExceeded = false;
+    worker.on('budget-exceeded', () => { budgetExceeded = true; });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    const budget = await queue.getFlowBudget(budgetFlowId);
+    expect(budget!.exceeded).toBe(true);
+    expect(budgetExceeded).toBe(true);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('mixed limits: per-category triggers before total', async () => {
+    const queue = new TestQueue('test-budget-mixed');
+    const budgetFlowId = 'flow-mixed';
+
+    queue.setBudget(budgetFlowId, {
+      maxTotalTokens: 100000,
+      maxTokens: { reasoning: 500 },
+    });
+
+    const job1 = await queue.add('child-1', {}, {});
+    const r1 = queue.jobs.get(job1!.id)!;
+    r1.budgetKey = budgetFlowId;
+
+    const worker = new TestWorker(
+      queue,
+      async (job: any) => {
+        // Total tokens (800) is well under maxTotalTokens (100000),
+        // but reasoning (800) exceeds per-category cap (500)
+        await job.reportUsage({ tokens: { input: 100, reasoning: 800 } });
+        return 'ok';
+      },
+      { concurrency: 1 },
+    );
+
+    let budgetExceeded = false;
+    worker.on('budget-exceeded', () => { budgetExceeded = true; });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    const budget = await queue.getFlowBudget(budgetFlowId);
+    expect(budget!.exceeded).toBe(true);
+    // Total tokens should be well under the total cap
+    expect(budget!.usedTokens).toBeLessThan(100000);
     expect(budgetExceeded).toBe(true);
 
     await worker.close();

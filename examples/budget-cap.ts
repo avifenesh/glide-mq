@@ -32,8 +32,7 @@ async function main() {
 
     await job.reportUsage({
       model: result.model,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
+      tokens: { input: result.inputTokens, output: result.outputTokens },
     });
 
     // Use parentId to check flow-level budget state

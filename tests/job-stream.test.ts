@@ -93,6 +93,38 @@ describe('Job.stream (unit)', () => {
     const id = await job.stream({ token: 'test' });
     expect(id).toBe('1-0');
   });
+
+  it('streamChunk reasoning calls xadd with type+content fields', async () => {
+    const job = new Job(mockClient as any, keys, '42', 'llm-stream', {}, {});
+    const entryId = await job.streamChunk('reasoning', 'thinking...');
+
+    expect(mockClient.xadd).toHaveBeenCalledWith(
+      keys.jstream('42'),
+      [['type', 'reasoning'], ['content', 'thinking...']],
+    );
+    expect(entryId).toBe('1-0');
+  });
+
+  it('streamChunk done calls xadd with type only (no content field)', async () => {
+    const job = new Job(mockClient as any, keys, '42', 'llm-stream', {}, {});
+    const entryId = await job.streamChunk('done');
+
+    expect(mockClient.xadd).toHaveBeenCalledWith(
+      keys.jstream('42'),
+      [['type', 'done']],
+    );
+    expect(entryId).toBe('1-0');
+  });
+
+  it('streamChunk content produces correct fields', async () => {
+    const job = new Job(mockClient as any, keys, '42', 'llm-stream', {}, {});
+    await job.streamChunk('content', 'answer');
+
+    expect(mockClient.xadd).toHaveBeenCalledWith(
+      keys.jstream('42'),
+      [['type', 'content'], ['content', 'answer']],
+    );
+  });
 });
 
 // ---- Testing mode tests ----
@@ -167,6 +199,28 @@ describe('TestJob.stream + TestQueue.readStream', () => {
     const job = await queue.add('llm-call', {});
     const huge = 'x'.repeat(MAX_JOB_DATA_SIZE + 1);
     await expect(job!.stream({ data: huge })).rejects.toThrow('exceeds maximum size');
+  });
+
+  it('streamChunk round-trip: reasoning + content + done read back correctly', async () => {
+    queue = new TestQueue('test-streamchunk-rt');
+    const job = await queue.add('llm-call', { prompt: 'hello' });
+    expect(job).not.toBeNull();
+
+    await job!.streamChunk('reasoning', 'Let me think...');
+    await job!.streamChunk('content', 'The answer is 42.');
+    await job!.streamChunk('done');
+
+    const entries = await queue.readStream(job!.id);
+    expect(entries).toHaveLength(3);
+
+    expect(entries[0].fields.type).toBe('reasoning');
+    expect(entries[0].fields.content).toBe('Let me think...');
+
+    expect(entries[1].fields.type).toBe('content');
+    expect(entries[1].fields.content).toBe('The answer is 42.');
+
+    expect(entries[2].fields.type).toBe('done');
+    expect(entries[2].fields.content).toBeUndefined();
   });
 });
 

@@ -168,16 +168,20 @@ export class TestJob<D = any, R = any> {
   }
 
   async reportUsage(usage: JobUsage): Promise<void> {
-    if (
-      (usage.inputTokens !== undefined && usage.inputTokens < 0) ||
-      (usage.outputTokens !== undefined && usage.outputTokens < 0) ||
-      (usage.totalTokens !== undefined && usage.totalTokens < 0)
-    ) {
-      throw new Error('Token counts must not be negative');
+    if (usage.tokens) {
+      for (const [key, val] of Object.entries(usage.tokens)) {
+        if (val < 0) throw new Error(`Token count for '${key}' must not be negative`);
+      }
+    }
+    if (usage.totalTokens !== undefined && usage.totalTokens < 0) {
+      throw new Error('totalTokens must not be negative');
     }
     const resolved = { ...usage };
-    if (resolved.totalTokens === undefined && (resolved.inputTokens !== undefined || resolved.outputTokens !== undefined)) {
-      resolved.totalTokens = (resolved.inputTokens ?? 0) + (resolved.outputTokens ?? 0);
+    if (resolved.totalTokens === undefined && resolved.tokens && Object.keys(resolved.tokens).length > 0) {
+      resolved.totalTokens = Object.values(resolved.tokens).reduce((sum, v) => sum + v, 0);
+    }
+    if (resolved.totalCost === undefined && resolved.costs && Object.keys(resolved.costs).length > 0) {
+      resolved.totalCost = Object.values(resolved.costs).reduce((sum, v) => sum + v, 0);
     }
     this.usage = resolved;
   }
@@ -203,6 +207,16 @@ export class TestJob<D = any, R = any> {
     const id = `test-${++this._record.streamCounter}`;
     this._record.streamChunks.push({ id, fields: { ...chunk } });
     return id;
+  }
+
+  /**
+   * Convenience method for streaming typed LLM chunks.
+   * Wraps `stream()` with `{ type, content }` fields.
+   */
+  async streamChunk(type: string, content?: string): Promise<string> {
+    const chunk: Record<string, string> = { type };
+    if (content !== undefined) chunk.content = content;
+    return this.stream(chunk);
   }
 
   /**
@@ -283,9 +297,15 @@ export interface TestQueueOptions {
 /** Budget state stored in-memory for testing mode. */
 interface TestBudgetState {
   maxTotalTokens?: number;
-  maxCostUsd?: number;
+  maxTokens?: Record<string, number>;
+  tokenWeights?: Record<string, number>;
+  maxTotalCost?: number;
+  maxCosts?: Record<string, number>;
+  costUnit?: string;
   usedTokens: number;
   usedCost: number;
+  usedTokensByCategory: Record<string, number>;
+  usedCostsByCategory: Record<string, number>;
   exceeded: boolean;
   onExceeded: 'pause' | 'fail';
 }
@@ -711,37 +731,52 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   /** Close the queue. */
   async getFlowUsage(parentJobId: string): Promise<{
-    totalInputTokens: number;
-    totalOutputTokens: number;
-    totalCostUsd: number;
+    tokens: Record<string, number>;
+    totalTokens: number;
+    costs: Record<string, number>;
+    totalCost: number;
+    costUnit?: string;
     jobCount: number;
     models: Record<string, number>;
   }> {
-    const agg = { totalInputTokens: 0, totalOutputTokens: 0, totalCostUsd: 0, jobCount: 0, models: {} as Record<string, number> };
+    const agg = {
+      tokens: {} as Record<string, number>,
+      totalTokens: 0,
+      costs: {} as Record<string, number>,
+      totalCost: 0,
+      costUnit: undefined as string | undefined,
+      jobCount: 0,
+      models: {} as Record<string, number>,
+    };
     const parentJob = this.jobs.get(parentJobId);
     if (!parentJob) return agg;
 
-    // Include parent
-    const pUsage = (parentJob as any).usage as JobUsage | undefined;
-    if (pUsage) {
-      agg.totalInputTokens += pUsage.inputTokens ?? 0;
-      agg.totalOutputTokens += pUsage.outputTokens ?? 0;
-      agg.totalCostUsd += pUsage.costUsd ?? 0;
+    const mergeUsage = (usage: JobUsage | undefined) => {
+      if (!usage) return;
+      agg.totalTokens += usage.totalTokens ?? 0;
+      agg.totalCost += usage.totalCost ?? 0;
       agg.jobCount++;
-      if (pUsage.model) agg.models[pUsage.model] = (agg.models[pUsage.model] || 0) + 1;
-    }
+      if (usage.costUnit && !agg.costUnit) agg.costUnit = usage.costUnit;
+      if (usage.model) agg.models[usage.model] = (agg.models[usage.model] || 0) + 1;
+      if (usage.tokens) {
+        for (const [k, v] of Object.entries(usage.tokens)) {
+          agg.tokens[k] = (agg.tokens[k] || 0) + v;
+        }
+      }
+      if (usage.costs) {
+        for (const [k, v] of Object.entries(usage.costs)) {
+          agg.costs[k] = (agg.costs[k] || 0) + v;
+        }
+      }
+    };
+
+    // Include parent
+    mergeUsage((parentJob as any).usage as JobUsage | undefined);
 
     // Walk all jobs looking for children (testing mode has no deps set, scan by parentId)
     for (const [, record] of this.jobs) {
       if ((record as any).opts?.parent?.id === parentJobId) {
-        const childUsage = (record as any).usage as JobUsage | undefined;
-        if (childUsage) {
-          agg.totalInputTokens += childUsage.inputTokens ?? 0;
-          agg.totalOutputTokens += childUsage.outputTokens ?? 0;
-          agg.totalCostUsd += childUsage.costUsd ?? 0;
-          agg.jobCount++;
-          if (childUsage.model) agg.models[childUsage.model] = (agg.models[childUsage.model] || 0) + 1;
-        }
+        mergeUsage((record as any).usage as JobUsage | undefined);
       }
     }
 
@@ -753,7 +788,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
    */
   async getFlowBudget(flowId: string): Promise<{
     maxTotalTokens?: number;
-    maxCostUsd?: number;
+    maxTokens?: Record<string, number>;
+    tokenWeights?: Record<string, number>;
+    maxTotalCost?: number;
+    maxCosts?: Record<string, number>;
+    costUnit?: string;
     usedTokens: number;
     usedCost: number;
     exceeded: boolean;
@@ -761,7 +800,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   } | null> {
     const budget = this.budgets.get(flowId);
     if (!budget) return null;
-    return { ...budget };
+    const { usedTokensByCategory: _t, usedCostsByCategory: _c, ...rest } = budget;
+    return { ...rest };
   }
 
   /**
@@ -769,14 +809,24 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
    */
   setBudget(flowId: string, budget: {
     maxTotalTokens?: number;
-    maxCostUsd?: number;
+    maxTokens?: Record<string, number>;
+    tokenWeights?: Record<string, number>;
+    maxTotalCost?: number;
+    maxCosts?: Record<string, number>;
+    costUnit?: string;
     onExceeded?: 'pause' | 'fail';
   }): void {
     this.budgets.set(flowId, {
       maxTotalTokens: budget.maxTotalTokens,
-      maxCostUsd: budget.maxCostUsd,
+      maxTokens: budget.maxTokens,
+      tokenWeights: budget.tokenWeights,
+      maxTotalCost: budget.maxTotalCost,
+      maxCosts: budget.maxCosts,
+      costUnit: budget.costUnit,
       usedTokens: 0,
       usedCost: 0,
+      usedTokensByCategory: {},
+      usedCostsByCategory: {},
       exceeded: false,
       onExceeded: budget.onExceeded ?? 'fail',
     });
@@ -784,22 +834,62 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   /**
    * @internal Record usage against a budget and check if exceeded.
+   * Supports per-category tracking, weighted totals, and per-category limits.
    * Returns 'ok', 'exceeded', or 'no_budget'.
    */
-  recordBudgetUsage(budgetKey: string, tokens: number, costUsd: number): string {
+  recordBudgetUsage(
+    budgetKey: string,
+    tokens: Record<string, number>,
+    costs: Record<string, number>,
+    weightedTotal: number,
+    totalCost: number,
+  ): string {
     const budget = this.budgets.get(budgetKey);
     if (!budget) return 'no_budget';
 
-    budget.usedTokens += tokens;
-    budget.usedCost += costUsd;
+    budget.usedTokens += weightedTotal;
+    budget.usedCost += totalCost;
 
-    const tokenExceeded = (budget.maxTotalTokens ?? 0) > 0 && budget.usedTokens > budget.maxTotalTokens!;
-    const costExceeded = (budget.maxCostUsd ?? 0) > 0 && budget.usedCost > budget.maxCostUsd!;
+    // Increment per-category counters
+    for (const [cat, val] of Object.entries(tokens)) {
+      budget.usedTokensByCategory[cat] = (budget.usedTokensByCategory[cat] || 0) + val;
+    }
+    for (const [cat, val] of Object.entries(costs)) {
+      budget.usedCostsByCategory[cat] = (budget.usedCostsByCategory[cat] || 0) + val;
+    }
 
-    if (tokenExceeded || costExceeded) {
+    // Check weighted total tokens cap
+    if ((budget.maxTotalTokens ?? 0) > 0 && budget.usedTokens > budget.maxTotalTokens!) {
       budget.exceeded = true;
       return 'exceeded';
     }
+
+    // Check total cost cap
+    if ((budget.maxTotalCost ?? 0) > 0 && budget.usedCost > budget.maxTotalCost!) {
+      budget.exceeded = true;
+      return 'exceeded';
+    }
+
+    // Check per-category token limits
+    if (budget.maxTokens) {
+      for (const [cat, limit] of Object.entries(budget.maxTokens)) {
+        if (limit > 0 && (budget.usedTokensByCategory[cat] ?? 0) > limit) {
+          budget.exceeded = true;
+          return 'exceeded';
+        }
+      }
+    }
+
+    // Check per-category cost limits
+    if (budget.maxCosts) {
+      for (const [cat, limit] of Object.entries(budget.maxCosts)) {
+        if (limit > 0 && (budget.usedCostsByCategory[cat] ?? 0) > limit) {
+          budget.exceeded = true;
+          return 'exceeded';
+        }
+      }
+    }
+
     return 'ok';
   }
 
@@ -1300,10 +1390,22 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
         // Post-completion budget check
         if (record.budgetKey && job.usage) {
-          const tokens = job.usage.totalTokens ?? 0;
-          const cost = job.usage.costUsd ?? 0;
-          if (tokens > 0 || cost > 0) {
-            const budgetResult = this.queue.recordBudgetUsage(record.budgetKey, tokens, cost);
+          const usageTokens = job.usage.tokens ?? {};
+          const usageCosts = job.usage.costs ?? {};
+          const totalCost = job.usage.totalCost ?? 0;
+
+          if (Object.keys(usageTokens).length > 0 || Object.keys(usageCosts).length > 0 || totalCost > 0) {
+            // Compute weighted total using budget weights
+            const budgetState = this.queue.budgets.get(record.budgetKey);
+            const weights = budgetState?.tokenWeights ?? {};
+            let weightedTotal = 0;
+            for (const [cat, val] of Object.entries(usageTokens)) {
+              weightedTotal += val * (weights[cat] ?? 1);
+            }
+
+            const budgetResult = this.queue.recordBudgetUsage(
+              record.budgetKey, usageTokens, usageCosts, weightedTotal, totalCost,
+            );
             if (budgetResult === 'exceeded') {
               this.emit('budget-exceeded', job, record.id);
             }

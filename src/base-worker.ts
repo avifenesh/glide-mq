@@ -1404,14 +1404,42 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       // Post-completion budget check: record usage and detect exceeded
       if (job.budgetKey && job.usage && this.commandClient) {
-        const tokens = job.usage.totalTokens ?? 0;
-        const cost = job.usage.costUsd ?? 0;
-        if (tokens > 0 || cost > 0) {
+        const usageTokens = job.usage.tokens ?? {};
+        const usageCosts = job.usage.costs ?? {};
+        const rawTotal = job.usage.totalTokens ?? 0;
+        const totalCost = job.usage.totalCost ?? 0;
+
+        if (rawTotal > 0 || totalCost > 0 || Object.keys(usageTokens).length > 0 || Object.keys(usageCosts).length > 0) {
+          // Read budget config for weights and per-category limits
+          const budgetData = await this.commandClient.hmget(job.budgetKey, [
+            'tokenWeights', 'maxTokens', 'maxCosts',
+          ]);
+          const weightsRaw = budgetData?.[0] ? String(budgetData[0]) : '{}';
+          const maxTokensRaw = budgetData?.[1] ? String(budgetData[1]) : '{}';
+          const maxCostsRaw = budgetData?.[2] ? String(budgetData[2]) : '{}';
+
+          let weights: Record<string, number> = {};
+          try { weights = JSON.parse(weightsRaw); } catch { /* ignore */ }
+          let maxTokens: Record<string, number> = {};
+          try { maxTokens = JSON.parse(maxTokensRaw); } catch { /* ignore */ }
+          let maxCosts: Record<string, number> = {};
+          try { maxCosts = JSON.parse(maxCostsRaw); } catch { /* ignore */ }
+
+          // Compute weighted total: sum of tokens[cat] * (weights[cat] ?? 1)
+          let weightedTotal = 0;
+          for (const [cat, val] of Object.entries(usageTokens)) {
+            weightedTotal += val * (weights[cat] ?? 1);
+          }
+
           const budgetResult = await recordUsageAndCheckBudget(
             this.commandClient,
             job.budgetKey,
-            tokens,
-            cost,
+            usageTokens,
+            usageCosts,
+            weightedTotal,
+            totalCost,
+            maxTokens,
+            maxCosts,
           );
           if (budgetResult === 'exceeded') {
             this.emit('budget-exceeded', job, currentJobId);
