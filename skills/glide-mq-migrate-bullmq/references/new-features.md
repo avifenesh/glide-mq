@@ -456,9 +456,9 @@ const worker = new Worker('inference', async (job) => {
   await job.reportUsage({
     model: 'gpt-5.4',
     provider: 'openai',
-    inputTokens: result.promptTokens,
-    outputTokens: result.completionTokens,
-    costUsd: 0.003,
+    tokens: { input: result.promptTokens, output: result.completionTokens },
+    costs: { total: 0.003 },
+    costUnit: 'usd',
     latencyMs: 800,
   });
   return result.content;
@@ -498,11 +498,11 @@ await queue.signal(jobId, 'approve', { reviewer: 'alice' });
 
 ### Budget Middleware (Flow-Level Caps)
 
-Cap total tokens and/or USD cost across all jobs in a flow.
+Cap total tokens and/or cost across all jobs in a flow.
 
 ```ts
 await flow.add(flowTree, {
-  budget: { maxTotalTokens: 50_000, maxCostUsd: 0.50, onExceeded: 'fail' },
+  budget: { maxTotalTokens: 50_000, maxTotalCost: 0.50, costUnit: 'usd', onExceeded: 'fail' },
 });
 
 const budget = await queue.getFlowBudget(parentJobId);
@@ -546,7 +546,7 @@ Aggregate AI usage across all jobs in a flow.
 
 ```ts
 const usage = await queue.getFlowUsage(parentJobId);
-// { totalInputTokens, totalOutputTokens, totalCostUsd, jobCount, models }
+// { tokens, totalTokens, costs, totalCost, costUnit, jobCount, models }
 ```
 
 ### Vector Search (Valkey Search)

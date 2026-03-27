@@ -6,11 +6,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.14.0] - 2026-03-28
+
+### Breaking Changes
+
+- **JobUsage redesigned**: `inputTokens`/`outputTokens` replaced with `tokens: Record<string, number>` for extensible category tracking (input, output, reasoning, cachedInput, etc.)
+- **Cost tracking redesigned**: `costUsd` replaced with `costs: Record<string, number>` + `costUnit` for currency-agnostic per-category cost tracking
+- **BudgetOptions expanded**: `maxCostUsd` replaced with `maxTotalCost`. Added `maxTokens` (per-category caps), `tokenWeights` (weighted totals), `maxCosts` (per-category cost caps), `costUnit`
+- **getFlowUsage return type changed**: `totalInputTokens`/`totalOutputTokens`/`totalCostUsd` replaced with `tokens`/`costs` maps + `totalTokens`/`totalCost`
+
+### Added
+
+- `job.streamChunk(type, content?)` - typed streaming convenience for reasoning vs content chunks
+- Per-category budget enforcement with independent limits per token/cost category
+- Weighted token budgets - reasoning tokens can count 4x toward budget
+- `ConnectionOptions.requestTimeout` - configurable command timeout (was hardcoded 500ms)
+- 9 new examples: thinking-model, cost-breakdown, budget-weighted, reasoning-stream, agent-budget-loop, multi-model-cost, fallback-usage, streaming-sse, batch-embed-tpm
+- Upgraded to valkey-search 1.2 in test infrastructure (compose.yaml)
+- Bumped speedkey to 0.3.0-rc1
+
+### Fixed
+
+- Budget bypass when only `totalTokens` reported without `tokens` breakdown
+- `JSON.parse` null safety in budget and usage parsing
+- Prototype pollution prevention with `Object.create(null)` in aggregation maps
+- DAG cluster test flaky timeouts (15s -> 30s)
+- `TestJobRecord` missing `usage` field causing empty `getFlowUsage()` in testing mode
+
+---
+
 ## [0.13.0] - 2026-03-27
 
 ### Added
 
-- **Structured AI metadata** (#168): `job.reportUsage({ model, promptTokens, completionTokens, cost })` records LLM usage on any job. `queue.getFlowUsage(flowId)` aggregates token counts and cost across an entire flow.
+- **Structured AI metadata** (#168): `job.reportUsage({ model, tokens: { input, output }, costs: { total } })` records LLM usage on any job. `queue.getFlowUsage(flowId)` aggregates token counts and cost across an entire flow.
 - **Per-job streaming channel** (#169): `job.stream(chunk)` publishes incremental data (LLM tokens, progress events) to a dedicated channel. `queue.readStream(jobId, opts?)` consumes chunks in real time. Blocking reads via XREAD BLOCK.
 - **Suspend/resume with signals** (#170): `job.suspend(opts?)` pauses a job mid-processor; `queue.signal(jobId, name, data?)` resumes it with an external event. Enables human-in-the-loop approval gates, webhook callbacks, and any pattern requiring external input before a job can continue.
   - `SuspendOptions`: `reason` (label), `timeout` (auto-fail after N ms)

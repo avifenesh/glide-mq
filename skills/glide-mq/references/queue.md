@@ -152,11 +152,13 @@ const live = await queue.readStream(jobId, {
 ```typescript
 const usage = await queue.getFlowUsage(parentJobId);
 // {
-//   totalInputTokens: number,
-//   totalOutputTokens: number,
-//   totalCostUsd: number,
+//   tokens: Record<string, number>,    // aggregated per-category (e.g. { input, output })
+//   totalTokens: number,
+//   costs: Record<string, number>,     // aggregated per-category costs
+//   totalCost: number,
+//   costUnit?: string,
 //   jobCount: number,
-//   models: Record<string, number>  // model -> call count
+//   models: Record<string, number>     // model -> call count
 // }
 ```
 
@@ -167,7 +169,11 @@ const budget = await queue.getFlowBudget(flowId);
 // null if no budget set, otherwise:
 // {
 //   maxTotalTokens?: number,
-//   maxCostUsd?: number,
+//   maxTokens?: Record<string, number>,
+//   tokenWeights?: Record<string, number>,
+//   maxTotalCost?: number,
+//   maxCosts?: Record<string, number>,
+//   costUnit?: string,
 //   usedTokens: number,
 //   usedCost: number,
 //   exceeded: boolean,

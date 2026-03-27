@@ -125,9 +125,9 @@ const result = await queue.addAndWait('inference', data, { waitTimeout: 30_000 }
 await job.reportUsage({
   model: 'gpt-5.4',
   provider: 'openai',
-  inputTokens: 500,
-  outputTokens: 200,
-  costUsd: 0.003,
+  tokens: { input: 500, output: 200 },
+  costs: { total: 0.003 },
+  costUnit: 'usd',
   latencyMs: 800,
   cached: false,
 });
@@ -141,7 +141,7 @@ events.on('usage', ({ jobId, data }) => {
 // Read usage from a completed job
 const job = await queue.getJob(jobId);
 console.log(job.usage);
-// { model, provider, inputTokens, outputTokens, totalTokens, costUsd, latencyMs, cached }
+// { model, provider, tokens, totalTokens, costs, totalCost, costUnit, latencyMs, cached }
 ```
 
 ### Flow-Level Aggregation
@@ -149,9 +149,11 @@ console.log(job.usage);
 ```typescript
 const usage = await queue.getFlowUsage(parentJobId);
 // {
-//   totalInputTokens: 2500,
-//   totalOutputTokens: 1200,
-//   totalCostUsd: 0.015,
+//   tokens: { input: 2500, output: 1200 },
+//   totalTokens: 3700,
+//   costs: { total: 0.015 },
+//   totalCost: 0.015,
+//   costUnit: 'usd',
 //   jobCount: 4,
 //   models: { 'gpt-5.4': 3, 'claude-sonnet-4-20250514': 1 }
 // }

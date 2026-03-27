@@ -193,7 +193,7 @@ const worker = new Worker('orchestrator', async (job) => {
 
 ## Budget on Flows
 
-Cap total token usage and/or USD cost across all jobs in a flow tree.
+Cap total token usage and/or cost across all jobs in a flow tree. Supports per-category limits and weighted totals.
 
 ```typescript
 const flow = new FlowProducer({ connection });
@@ -211,7 +211,9 @@ await flow.add(
   {
     budget: {
       maxTotalTokens: 50_000,
-      maxCostUsd: 0.50,
+      maxTotalCost: 0.50,
+      costUnit: 'usd',
+      tokenWeights: { reasoning: 4, cachedInput: 0.25 },
       onExceeded: 'fail',      // 'fail' (default) or 'pause'
     },
   },
@@ -219,7 +221,8 @@ await flow.add(
 
 // Check budget state
 const budget = await queue.getFlowBudget(parentJobId);
-// { maxTotalTokens, maxCostUsd, usedTokens, usedCost, exceeded, onExceeded }
+// { maxTotalTokens, maxTokens, tokenWeights, maxTotalCost, maxCosts, costUnit,
+//   usedTokens, usedCost, exceeded, onExceeded }
 ```
 
 Budget is propagated to every job in the flow via a `budgetKey` field.
