@@ -9,6 +9,11 @@ import type { GroupRateLimitOptions } from './errors';
 import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
+/** Try to parse a string as JSON; return the original string if parsing fails. */
+function tryParseJson(s: string): any {
+  try { return JSON.parse(s); } catch { return s; }
+}
+
 export class Job<D = any, R = any> {
   readonly id: string;
   readonly name: string;
@@ -119,7 +124,7 @@ export class Job<D = any, R = any> {
    * fallbackIndex=0 means original (no fallback). On first failure, fallbackIndex
    * becomes 1 and currentFallback returns fallbacks[0], etc.
    */
-  get currentFallback(): { model: string; provider?: string; [key: string]: any } | undefined {
+  get currentFallback(): { model: string; provider?: string; metadata?: Record<string, unknown> } | undefined {
     if (!this.opts.fallbacks || this.fallbackIndex === 0) return undefined;
     return this.opts.fallbacks[this.fallbackIndex - 1];
   }
@@ -776,7 +781,11 @@ export class Job<D = any, R = any> {
     }
     if (hash.signals) {
       try {
-        job.signals = JSON.parse(hash.signals) as SignalEntry[];
+        const raw = JSON.parse(hash.signals) as any[];
+        job.signals = raw.map(s => ({
+          ...s,
+          data: typeof s.data === 'string' ? tryParseJson(s.data) : s.data,
+        }));
       } catch {
         job.signals = [];
       }

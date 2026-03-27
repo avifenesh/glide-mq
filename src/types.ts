@@ -228,7 +228,11 @@ export interface JobOptions {
   ttl?: number;
   /** Ordered list of fallback configurations tried on retryable failure.
    *  Each entry provides model/provider info the processor reads via job.currentFallback. */
-  fallbacks?: Array<{ model: string; provider?: string; [key: string]: any }>;
+  fallbacks?: Array<{
+    model: string;
+    provider?: string;
+    metadata?: Record<string, unknown>;
+  }>;
 }
 
 export interface AddAndWaitOptions extends JobOptions {
@@ -298,6 +302,46 @@ export interface BudgetOptions {
   onExceeded?: 'pause' | 'fail';
 }
 
+/** Options passed through to FT.CREATE (glide-mq owned, decoupled from speedkey). */
+export interface IndexCreateOptions {
+  /** Default score for documents. */
+  score?: number;
+  /** Default language for stemming. */
+  language?: string;
+  /** Skip indexing existing documents on creation. */
+  skipInitialScan?: boolean;
+  /** Minimum word length for stemming. */
+  minStemSize?: number;
+  /** Store term offsets. */
+  withOffsets?: boolean;
+  /** Do not store term offsets. */
+  noOffsets?: boolean;
+  /** Disable stop-word filtering. */
+  noStopWords?: boolean;
+  /** Custom stop words. */
+  stopWords?: string[];
+  /** Custom punctuation characters. */
+  punctuation?: string;
+}
+
+/** Options passed through to FT.SEARCH (glide-mq owned, decoupled from speedkey). */
+export interface SearchQueryOptions {
+  /** Return only document IDs, no field content. */
+  nocontent?: boolean;
+  /** Query dialect version. */
+  dialect?: number;
+  /** Disable stemming in query. */
+  verbatim?: boolean;
+  /** Proximity terms must be in order. */
+  inorder?: boolean;
+  /** Slop value for proximity matching. */
+  slop?: number;
+  /** Sort results by field. */
+  sortby?: { field: string; order?: 'ASC' | 'DESC' };
+  /** Scoring function name. */
+  scorer?: string;
+}
+
 /** Options for creating a Valkey Search index over job hashes. */
 export interface JobIndexOptions {
   /** Index name. Defaults to `{queueName}-idx`. */
@@ -315,6 +359,8 @@ export interface JobIndexOptions {
     /** Distance metric. Default: 'COSINE'. */
     distanceMetric?: 'COSINE' | 'L2' | 'IP';
   };
+  /** Pass-through options for FT.CREATE (dataType and prefixes are set automatically). */
+  createOptions?: IndexCreateOptions;
 }
 
 /** Options for vector similarity search over indexed jobs. */
@@ -329,13 +375,21 @@ export interface VectorSearchOptions {
   returnFields?: string[];
   /** Name of the score field in results. Default: `__score`. */
   scoreField?: string;
+  /** Pass-through options for FT.SEARCH (params are set automatically for vector query). */
+  searchOptions?: SearchQueryOptions;
 }
 
 /** A single result from a vector similarity search. */
 export interface VectorSearchResult<D = any, R = any> {
   /** The hydrated Job object. */
   job: import('./job').Job<D, R>;
-  /** Distance/similarity score (lower = more similar for L2/COSINE). */
+  /**
+   * Distance/similarity score from the vector search.
+   * Interpretation depends on the distance metric used in the index:
+   * - COSINE: 0 = identical, 2 = opposite (lower = more similar)
+   * - L2: 0 = identical (lower = more similar)
+   * - IP (inner product): higher = more similar
+   */
   score: number;
 }
 
@@ -500,6 +554,9 @@ export interface DAGFlow {
 export interface ReadStreamOptions {
   lastId?: string;
   count?: number;
+  /** When set and > 0, use XREAD with BLOCK for long-polling (milliseconds).
+   *  A value of 0 means non-blocking (equivalent to omitting). */
+  block?: number;
 }
 
 /** AI-specific usage metadata reported by a job processor. */

@@ -404,13 +404,13 @@ describeEachMode('Fallback chains', (CONNECTION) => {
     expect(indices.length).toBe(2);
   }, 25000);
 
-  it('fallback metadata (arbitrary keys) accessible in processor', async () => {
+  it('fallback metadata accessible in processor', async () => {
     queueName = uid();
     queue = new Queue(queueName, { connection: CONNECTION });
     const k = buildKeys(queueName);
 
     const fallbacks = [
-      { model: 'gpt-4o-mini', provider: 'openai', temperature: 0.7, maxTokens: 100 },
+      { model: 'gpt-4o-mini', provider: 'openai', metadata: { temperature: 0.7, maxTokens: 100 } },
     ];
 
     let capturedFallback: any = null;
@@ -451,8 +451,7 @@ describeEachMode('Fallback chains', (CONNECTION) => {
     expect(capturedFallback).toEqual({
       model: 'gpt-4o-mini',
       provider: 'openai',
-      temperature: 0.7,
-      maxTokens: 100,
+      metadata: { temperature: 0.7, maxTokens: 100 },
     });
   }, 25000);
 });
@@ -553,7 +552,7 @@ describe('Fallback chains [testing mode]', () => {
 
     let capturedFallback: any = null;
     const fallbacks = [
-      { model: 'gpt-4o-mini', provider: 'openai', temperature: 0.5, region: 'us-east' },
+      { model: 'gpt-4o-mini', provider: 'openai', metadata: { temperature: 0.5, region: 'us-east' } },
     ];
 
     const tw = new TestWorker(tq, async (job: any) => {
@@ -574,8 +573,7 @@ describe('Fallback chains [testing mode]', () => {
     expect(capturedFallback).toEqual({
       model: 'gpt-4o-mini',
       provider: 'openai',
-      temperature: 0.5,
-      region: 'us-east',
+      metadata: { temperature: 0.5, region: 'us-east' },
     });
   });
 });

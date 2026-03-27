@@ -126,7 +126,7 @@ export class TestJob<D = any, R = any> {
     this.budgetKey = record.budgetKey;
   }
 
-  get currentFallback(): { model: string; provider?: string; [key: string]: any } | undefined {
+  get currentFallback(): { model: string; provider?: string; metadata?: Record<string, unknown> } | undefined {
     if (!this.opts.fallbacks || this.fallbackIndex === 0) return undefined;
     return this.opts.fallbacks[this.fallbackIndex - 1];
   }
@@ -814,19 +814,37 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   async readStream(
     jobId: string,
-    opts?: { lastId?: string; count?: number },
+    opts?: { lastId?: string; count?: number; block?: number },
   ): Promise<{ id: string; fields: Record<string, string> }[]> {
     const record = this.jobs.get(jobId);
     if (!record) return [];
-    const chunks = record.streamChunks ?? [];
     const lastId = opts?.lastId;
     const count = opts?.count ?? 100;
-    let filtered = chunks;
-    if (lastId) {
-      const idx = chunks.findIndex((c) => c.id === lastId);
-      filtered = idx >= 0 ? chunks.slice(idx + 1) : chunks;
+    const blockMs = opts?.block;
+
+    const readChunks = (): { id: string; fields: Record<string, string> }[] => {
+      const chunks = record.streamChunks ?? [];
+      let filtered = chunks;
+      if (lastId) {
+        const idx = chunks.findIndex((c) => c.id === lastId);
+        filtered = idx >= 0 ? chunks.slice(idx + 1) : chunks;
+      }
+      return filtered.slice(0, count);
+    };
+
+    const immediate = readChunks();
+    if (immediate.length > 0 || !blockMs || blockMs <= 0) {
+      return immediate;
     }
-    return filtered.slice(0, count);
+
+    // Simulate blocking: poll at 50ms intervals until timeout
+    const deadline = Date.now() + blockMs;
+    while (Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, Math.min(50, deadline - Date.now())));
+      const result = readChunks();
+      if (result.length > 0) return result;
+    }
+    return [];
   }
 
   /**
