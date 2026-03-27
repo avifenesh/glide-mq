@@ -1,6 +1,6 @@
 import { gzipSync, gunzipSync } from 'zlib';
 import { randomBytes } from 'crypto';
-import type { ScheduleOpts, SchedulerEntry } from './types';
+import type { JobUsage, ScheduleOpts, SchedulerEntry } from './types';
 
 const DEFAULT_PREFIX = 'glide';
 
@@ -862,4 +862,71 @@ export function compileSubjectMatcher(patterns: string[] | undefined): ((subject
     return (subject) => matchSubject(p, subject);
   }
   return (subject) => patterns.some((p) => matchSubject(p, subject));
+}
+
+/**
+ * Parse a JSON string as a Record<string, number>. Returns undefined on failure
+ * or if the result is not a non-null object.
+ */
+export function parseJsonRecord(raw: string): Record<string, number> | undefined {
+  try {
+    const p = JSON.parse(raw);
+    if (p && typeof p === 'object') return p;
+  } catch {
+    // ignore
+  }
+  return undefined;
+}
+
+/**
+ * Compute weighted total tokens from per-category token counts and weight multipliers.
+ * When no per-category tokens yield a weighted sum, falls back to rawTotal.
+ */
+export function computeWeightedTotal(
+  tokens: Record<string, number>,
+  weights: Record<string, number>,
+  rawTotal: number,
+): number {
+  let weighted = 0;
+  for (const [cat, val] of Object.entries(tokens)) {
+    const w = weights[cat] ?? 1;
+    weighted += val * (Number.isFinite(w) && w >= 0 ? w : 1);
+  }
+  if (weighted === 0 && rawTotal > 0) {
+    weighted = rawTotal;
+  }
+  return weighted;
+}
+
+/** Validate and resolve a JobUsage object: checks numeric constraints and auto-computes totals. */
+export function validateAndResolveUsage(usage: JobUsage): JobUsage {
+  if (usage.tokens) {
+    for (const [key, val] of Object.entries(usage.tokens)) {
+      if (!Number.isFinite(val) || val < 0) {
+        throw new Error(`Token count for '${key}' must be a finite non-negative number`);
+      }
+    }
+  }
+  if (usage.totalTokens !== undefined && (!Number.isFinite(usage.totalTokens) || usage.totalTokens < 0)) {
+    throw new Error('totalTokens must be a finite non-negative number');
+  }
+  if (usage.costs) {
+    for (const [key, val] of Object.entries(usage.costs)) {
+      if (!Number.isFinite(val) || val < 0) {
+        throw new Error(`Cost for '${key}' must be a finite non-negative number`);
+      }
+    }
+  }
+  if (usage.totalCost !== undefined && (!Number.isFinite(usage.totalCost) || usage.totalCost < 0)) {
+    throw new Error('totalCost must be a finite non-negative number');
+  }
+
+  const resolved: JobUsage = { ...usage };
+  if (resolved.totalTokens === undefined && resolved.tokens && Object.keys(resolved.tokens).length > 0) {
+    resolved.totalTokens = Object.values(resolved.tokens).reduce((sum, v) => sum + v, 0);
+  }
+  if (resolved.totalCost === undefined && resolved.costs && Object.keys(resolved.costs).length > 0) {
+    resolved.totalCost = Object.values(resolved.costs).reduce((sum, v) => sum + v, 0);
+  }
+  return resolved;
 }

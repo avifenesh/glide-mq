@@ -17,8 +17,10 @@ import {
   buildKeys,
   calculateBackoff,
   computeFollowingSchedulerNextRun,
+  computeWeightedTotal,
   keyPrefix,
   nextReconnectDelay,
+  parseJsonRecord,
   reconnectWithBackoff,
   MAX_JOB_DATA_SIZE,
 } from './utils';
@@ -1414,7 +1416,6 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       job.finishedOn = now;
       if (this.hasCompletedListeners) this.emit('completed', job, processResult);
 
-      // Post-completion budget check: record usage and detect exceeded
       if (job.budgetKey && job.usage && this.commandClient) {
         const usageTokens = job.usage.tokens ?? {};
         const usageCosts = job.usage.costs ?? {};
@@ -1427,44 +1428,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           Object.keys(usageTokens).length > 0 ||
           Object.keys(usageCosts).length > 0
         ) {
-          // Read budget config for weights and per-category limits
           const budgetData = await this.commandClient.hmget(job.budgetKey, ['tokenWeights', 'maxTokens', 'maxCosts']);
-          const weightsRaw = budgetData?.[0] ? String(budgetData[0]) : '{}';
-          const maxTokensRaw = budgetData?.[1] ? String(budgetData[1]) : '{}';
-          const maxCostsRaw = budgetData?.[2] ? String(budgetData[2]) : '{}';
-
-          let weights: Record<string, number> = {};
-          try {
-            const p = JSON.parse(weightsRaw);
-            if (p && typeof p === 'object') weights = p;
-          } catch {
-            /* ignore */
-          }
-          let maxTokens: Record<string, number> = {};
-          try {
-            const p = JSON.parse(maxTokensRaw);
-            if (p && typeof p === 'object') maxTokens = p;
-          } catch {
-            /* ignore */
-          }
-          let maxCosts: Record<string, number> = {};
-          try {
-            const p = JSON.parse(maxCostsRaw);
-            if (p && typeof p === 'object') maxCosts = p;
-          } catch {
-            /* ignore */
-          }
-
-          // Compute weighted total: sum of tokens[cat] * (weights[cat] ?? 1)
-          // When no per-category tokens are reported, fall back to rawTotal (weight 1).
-          let weightedTotal = 0;
-          for (const [cat, val] of Object.entries(usageTokens)) {
-            const w = weights[cat] ?? 1;
-            weightedTotal += val * (Number.isFinite(w) && w >= 0 ? w : 1);
-          }
-          if (weightedTotal === 0 && rawTotal > 0) {
-            weightedTotal = rawTotal;
-          }
+          const weights = parseJsonRecord(budgetData?.[0] ? String(budgetData[0]) : '{}') ?? {};
+          const maxTokens = parseJsonRecord(budgetData?.[1] ? String(budgetData[1]) : '{}') ?? {};
+          const maxCosts = parseJsonRecord(budgetData?.[2] ? String(budgetData[2]) : '{}') ?? {};
+          const weightedTotal = computeWeightedTotal(usageTokens, weights, rawTotal);
 
           const budgetResult = await recordUsageAndCheckBudget(
             this.commandClient,
