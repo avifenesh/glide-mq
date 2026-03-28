@@ -178,7 +178,7 @@ All examples live in [glidemq-examples](https://github.com/avifenesh/glidemq-exa
 | [@glidemq/fastify](https://github.com/avifenesh/glidemq-fastify)     | Fastify plugin                                |
 | [@glidemq/nestjs](https://github.com/avifenesh/glidemq-nestjs)       | NestJS module                                 |
 | [@glidemq/hapi](https://github.com/avifenesh/glidemq-hapi)           | Hapi plugin                                   |
-| [glide-mq.dev](https://avifenesh.github.io/glide-mq.dev/)            | Full documentation site                       |
+| [glidemq.dev](https://avifenesh.github.io/glidemq.dev/)            | Full documentation site                       |
 
 ## Contributing
 

@@ -389,6 +389,6 @@ Most production deployments run c=5 to c=20, where glide-mq's 1-RTT architecture
 
 ## Full Documentation
 
-- [Migration Guide](https://avifenesh.github.io/glide-mq.dev/migration/from-bullmq)
+- [Migration Guide](https://avifenesh.github.io/glidemq.dev/migration/from-bullmq)
 - [New Features Reference](references/new-features.md)
 - [Connection Mapping Reference](references/connection-mapping.md)

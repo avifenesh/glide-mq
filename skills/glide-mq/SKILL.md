@@ -177,7 +177,7 @@ await worker.run();
 | Connection errors or TLS/IAM setup | [references/connection.md](references/connection.md) |
 | Stalled jobs or lock issues | [references/worker.md](references/worker.md) - Stalled Jobs |
 | Need real-time job events | [references/observability.md](references/observability.md) |
-| Integrating with Fastify/NestJS/Hono | [Framework Integrations](https://avifenesh.github.io/glide-mq.dev/integrations/) |
+| Integrating with Fastify/NestJS/Hono | [Framework Integrations](https://avifenesh.github.io/glidemq.dev/integrations/) |
 | Deploying to Lambda/Vercel Edge | [references/serverless.md](references/serverless.md) |
 | Need deduplication or idempotent jobs | [references/queue.md](references/queue.md) - Dedup |
 | Need rate limiting | [references/queue.md](references/queue.md) - Rate Limit |
@@ -203,4 +203,4 @@ await worker.run();
 
 ## Full Documentation
 
-https://avifenesh.github.io/glide-mq.dev/
+https://avifenesh.github.io/glidemq.dev/
