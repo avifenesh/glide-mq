@@ -133,37 +133,16 @@ Reproduce with `npm run bench` or `npx tsx benchmarks/elasticache-head-to-head.t
 
 ## Examples
 
-27 runnable examples in `examples/`. Run any with `npx tsx examples/<name>.ts`.
+All examples live in [glidemq-examples](https://github.com/avifenesh/glidemq-examples). Pick a directory, `npm install`, `npx tsx <file>.ts`.
 
-| Example                 | What it shows                                   |
-| ----------------------- | ----------------------------------------------- |
-| `usage-tracking.ts`     | Token and cost tracking across multi-step flows |
-| `token-streaming.ts`    | Real-time LLM token streaming to clients        |
-| `human-approval.ts`     | Suspend/resume with editorial review gate       |
-| `model-failover.ts`     | Fallback chains across providers                |
-| `tpm-throttle.ts`       | Dual-axis RPM + TPM rate limiting               |
-| `budget-cap.ts`         | Flow-level token and cost caps                  |
-| `vector-search.ts`      | KNN similarity search with pre-filters          |
-| `with-langchain.ts`     | LangChain integration with token tracking       |
-| `with-vercel-ai-sdk.ts` | Vercel AI SDK integration with streaming        |
-| `rag-pipeline.ts`       | RAG with embedding, indexing, retrieval         |
-| `ai-agent-loop.ts`      | Autonomous agent loop with budget enforcement   |
-| `testing-mode.ts`       | In-memory testing without Valkey                |
-| `agent-budget-loop.ts`  | Agent loop with per-step budget tracking        |
-| `multi-model-cost.ts`   | Cost breakdown across multiple models           |
-| `fallback-usage.ts`     | Usage tracking through fallback chains          |
-| `streaming-sse.ts`      | Server-sent events with token streaming         |
-| `batch-embed-tpm.ts`    | Batch embeddings with TPM rate limiting         |
-| `thinking-model.ts`     | Thinking/reasoning model token tracking         |
-| `cost-breakdown.ts`     | Detailed per-category cost breakdown            |
-| `budget-weighted.ts`    | Weighted budget allocation across flow steps    |
-| `reasoning-stream.ts`   | Streaming reasoning/chain-of-thought tokens     |
-| `adaptive-timeout.ts`   | Adaptive lock duration based on model complexity |
-| `broadcast-events.ts`   | Fan-out event publishing with subject filtering  |
-| `agent-memory.ts`       | Multi-turn agent with persistent memory          |
-| `search-dashboard.ts`   | Job search and monitoring dashboard              |
-| `embedding-pipeline.ts` | Batch document embedding with rate limiting      |
-| `content-pipeline.ts`   | Content moderation with streaming and approval   |
+| AI Orchestration | Core Patterns | Framework Plugins |
+|------------------|---------------|-------------------|
+| [Usage & Costs](https://github.com/avifenesh/glidemq-examples/tree/main/examples/ai-usage-and-costs) | [Basics](https://github.com/avifenesh/glidemq-examples/tree/main/examples/core-basics) | [Hono](https://github.com/avifenesh/glidemq-examples/tree/main/examples/hono-api) |
+| [Budget & TPM](https://github.com/avifenesh/glidemq-examples/tree/main/examples/ai-budget) | [Workflows](https://github.com/avifenesh/glidemq-examples/tree/main/examples/core-workflows) | [Fastify](https://github.com/avifenesh/glidemq-examples/tree/main/examples/fastify-api) |
+| [Streaming](https://github.com/avifenesh/glidemq-examples/tree/main/examples/ai-streaming) | [Advanced](https://github.com/avifenesh/glidemq-examples/tree/main/examples/core-advanced) | [Hapi](https://github.com/avifenesh/glidemq-examples/tree/main/examples/hapi-api) |
+| [Agent Loops](https://github.com/avifenesh/glidemq-examples/tree/main/examples/ai-agents) | [DAG Flows](https://github.com/avifenesh/glidemq-examples/tree/main/examples/dag-workflows) | [NestJS](https://github.com/avifenesh/glidemq-examples/tree/main/examples/nestjs-module) |
+| [Search & Vectors](https://github.com/avifenesh/glidemq-examples/tree/main/examples/ai-search) | [Scheduling](https://github.com/avifenesh/glidemq-examples/tree/main/examples/cron-scheduler) | [Express](https://github.com/avifenesh/glidemq-examples/tree/main/examples/express-dashboard) |
+| [SDK Integrations](https://github.com/avifenesh/glidemq-examples/tree/main/examples/ai-integrations) | [Batch Processing](https://github.com/avifenesh/glidemq-examples/tree/main/examples/batch-processing) | [Next.js](https://github.com/avifenesh/glidemq-examples/tree/main/examples/nextjs-api-routes) |
 
 ## When NOT to use glide-mq
 
