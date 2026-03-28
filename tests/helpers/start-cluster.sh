@@ -42,6 +42,38 @@ sleep 1
 
 rm -rf $CLUSTER_DIR
 
+# Check if modules can be loaded (they may exist but have missing native deps outside Docker)
+LOAD_MODULES=0
+if [ -f /usr/lib/valkey/libsearch.so ]; then
+  tmpdir=$(mktemp -d)
+  cat > $tmpdir/test.conf <<TESTEOF
+port 0
+daemonize no
+loadmodule /usr/lib/valkey/libsearch.so
+TESTEOF
+  if timeout 3 $SERVER $tmpdir/test.conf --test-memory 1 2>/dev/null; then
+    LOAD_MODULES=1
+    echo "Modules are loadable - enabling search/json/bloom"
+  else
+    # Try a quick start-stop to verify
+    cat > $tmpdir/test.conf <<TESTEOF
+port 16399
+daemonize yes
+pidfile $tmpdir/test.pid
+logfile $tmpdir/test.log
+loadmodule /usr/lib/valkey/libsearch.so
+TESTEOF
+    if $SERVER $tmpdir/test.conf 2>/dev/null && sleep 1 && $CLI -p 16399 ping 2>/dev/null | grep -q PONG; then
+      LOAD_MODULES=1
+      echo "Modules are loadable - enabling search/json/bloom"
+      $CLI -p 16399 shutdown nosave 2>/dev/null || true
+    else
+      echo "Modules exist but cannot be loaded natively - skipping"
+    fi
+  fi
+  rm -rf $tmpdir
+fi
+
 # Create and start 6 nodes
 for port in $PORTS; do
   dir=$CLUSTER_DIR/$port
@@ -61,10 +93,13 @@ logfile $dir/valkey.log
 bind 127.0.0.1
 protected-mode no
 EOF
-  # Load search/json/bloom modules if available (valkey-bundle)
-  for mod in /usr/lib/valkey/libsearch.so /usr/lib/valkey/libjson.so /usr/lib/valkey/libvalkey_bloom.so; do
-    [ -f "$mod" ] && echo "loadmodule $mod" >> $dir/valkey.conf
-  done
+  # Load search/json/bloom modules if available and loadable (valkey-bundle)
+  # Modules may exist but fail to load natively outside Docker due to missing shared libs
+  if [ "$LOAD_MODULES" = "1" ]; then
+    for mod in /usr/lib/valkey/libsearch.so /usr/lib/valkey/libjson.so /usr/lib/valkey/libvalkey_bloom.so; do
+      [ -f "$mod" ] && echo "loadmodule $mod" >> $dir/valkey.conf
+    done
+  fi
   $SERVER $dir/valkey.conf
   echo "Started node on port $port"
 done
