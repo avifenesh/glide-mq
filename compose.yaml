@@ -11,7 +11,7 @@ services:
       retries: 5
 
   valkey-cluster:
-    image: valkey/valkey:8.0
+    image: valkey/valkey-bundle:9.1.0-rc1
     ports:
       - '7000-7005:7000-7005'
       - '17000-17005:17000-17005'
@@ -38,6 +38,9 @@ services:
         cluster-announce-ip $$ANNOUNCE_IP
         cluster-announce-port $$port
         cluster-announce-bus-port 1$$port
+        loadmodule /usr/lib/valkey/libsearch.so
+        loadmodule /usr/lib/valkey/libjson.so
+        loadmodule /usr/lib/valkey/libvalkey_bloom.so
         EOF
           valkey-server /data/$$port/valkey.conf
         done

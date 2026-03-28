@@ -61,6 +61,10 @@ logfile $dir/valkey.log
 bind 127.0.0.1
 protected-mode no
 EOF
+  # Load search/json/bloom modules if available (valkey-bundle)
+  for mod in /usr/lib/valkey/libsearch.so /usr/lib/valkey/libjson.so /usr/lib/valkey/libvalkey_bloom.so; do
+    [ -f "$mod" ] && echo "loadmodule $mod" >> $dir/valkey.conf
+  done
   $SERVER $dir/valkey.conf
   echo "Started node on port $port"
 done

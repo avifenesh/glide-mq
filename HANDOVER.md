@@ -2,73 +2,76 @@
 
 ## Current State
 
-- **Branch**: main (uncommitted thinking model changes)
-- **Version**: 0.14.0
-- **CI**: Fix pushed, running. Lint error + 8 moderate vulnerabilities resolved.
-- **speedkey**: 0.3.0-rc1 published to npm. All 6 platform targets built.
-- **Open PRs**: None
-- **Build**: Clean. All tests pass except 1 pre-existing search stress timeout.
+- **Branch**: main
+- **Version**: 0.14.0 - released and published to npm
+- **All packages published**: glide-mq 0.14.0, speedkey 0.3.0, dashboard 0.3.0, fastify 0.2.0, hapi 0.3.0, hono 0.3.0, nestjs 0.2.0
+- **CI**: All green across all repos
+- **Tests**: 2312/2312 pass (94/94 files), all plugin tests pass
+- **Website**: Updated and deployed (dual MQ + AI positioning)
 
-## What Was Done (2026-03-27, session 2)
+## What Was Done (2026-03-28)
 
-### Thinking Model Support - Usage/Budget System Redesign
+### glide-mq 0.14.0 (PR #183 merged, then direct push for JSDoc review)
+- JobUsage redesigned: Record-based tokens/costs replacing flat fields
+- BudgetOptions: per-category caps, weighted totals, currency-agnostic costs
+- job.streamChunk(type, content?) convenience method
+- Extracted shared helpers: parseJsonRecord, computeWeightedTotal, validateAndResolveUsage
+- 9 new examples (agent-budget-loop, multi-model-cost, fallback-usage, streaming-sse, batch-embed-tpm, thinking-model, cost-breakdown, budget-weighted, reasoning-stream)
+- ConnectionOptions.requestTimeout added
+- valkey-search 1.2 in compose.yaml and CI
+- Full JSDoc on all public API (22 interfaces, 8 error classes, 3 main classes)
+- All docs/skills/website updated for dual MQ+AI positioning
+- WIRE_PROTOCOL, ARCHITECTURE, MIGRATION docs corrected
 
-Breaking API change to support reasoning/thinking models and future token categories.
+### speedkey 0.3.0
+- Published stable (was rc1)
+- Bloom Filter, JSON.MSET, search 1.1/1.2 options
+- All 6 platform targets
 
-**JobUsage redesigned:**
-- `inputTokens`/`outputTokens` replaced with `tokens: Record<string, number>` - extensible for any category (input, output, reasoning, cachedInput, etc.)
-- `costUsd` replaced with `costs: Record<string, number>` + `costUnit: string` - currency-agnostic
-- `totalTokens` auto-computed from `sum(Object.values(tokens))`
-- `totalCost` auto-computed from `sum(Object.values(costs))`
+### All 5 plugins updated
+- Dashboard 0.3.0: 3 AI endpoints, AI fields in serialization, 14 new tests
+- Fastify 0.2.0: 3 AI endpoints (24 total), AI types, AI SSE events
+- Hapi 0.3.0: 3 AI endpoints, fixed stream route API pattern
+- Hono 0.3.0: 3 AI endpoints, streamSSE, AI SSE events
+- NestJS 0.2.0: AI usage examples in README
 
-**Budget system expanded:**
-- `maxTokens: Record<string, number>` - per-category token caps
-- `tokenWeights: Record<string, number>` - weighted multipliers (e.g. `{ reasoning: 4 }`)
-- `maxCosts: Record<string, number>` - per-category cost caps
-- `maxTotalCost` replaces `maxCostUsd`
-- Lua function v80: per-category HINCRBYFLOAT tracking + per-category limit checks
+### Website (glide-mq.dev)
+- Dual positioning: "Fast, Reliable, AI-Ready"
+- All integration docs updated: versions, endpoint counts (24), AI endpoint tables
+- All old API refs removed
 
-**Stream convenience:**
-- `job.streamChunk(type, content?)` - typed convenience over raw `stream()`
+## What Was Done (2026-03-28, continued)
 
-**Files changed:**
-- src/types.ts: JobUsage, BudgetOptions interfaces
-- src/job.ts: reportUsage, fromHash, new streamChunk
-- src/queue.ts: getFlowUsage (new return type), getFlowBudget (expanded)
-- src/base-worker.ts: budget check with weights + per-category
-- src/flow-producer.ts: budget hash initialization
-- src/functions/index.ts: Lua v80, expanded recordUsageAndCheckBudget
-- src/testing.ts: full parity (TestJob, TestQueue, TestWorker)
-- All test files updated
-- All example files updated (gate found 9 examples still using old flat-field API; fixed in gate pass)
+### Validation suite (C:\Users\avife\glidemq\glide-mq-validation)
+- All 7 packages installed from npm and validated
+- **In-memory suite** (`npm run validate`): 178 checks across 6 apps
+  - Rich main package app: lifecycle, reportUsage, streamChunk, readStream, flows, budget, suspend/resume, fallbacks, bulk, metrics, serializer
+  - Hono, Fastify, Hapi: createTestApp, HTTP CRUD, AI endpoints (usage, budget, stream SSE)
+  - Dashboard: import validation, Express mount, HTML + API
+  - NestJS: DI injection, @Processor, WorkerHost, testing mode
+- **Live suite** (`npm run validate:live`): 134 checks against real Valkey
+  - Standalone (:6379): core 45/45, search 10/10, plugins 12/12
+  - Cluster (:7000): core 45/45, search 10/10, plugins 12/12
+  - Tests: Queue/Worker, FlowProducer with budget, getFlowUsage/getFlowBudget, createJobIndex, searchJobs, vectorSearch (COSINE), Hono plugin with real connection
 
-**Tests:** 26 budget tests (was 13), 26 ai-metadata tests, 27 stream tests, 32 TPM tests - all pass.
-
-### Previous work (session 1)
-- #168-#177: 7 AI primitives + examples + search integration
-- #179: API fixes, stress tests, comprehensive docs
-- #180: README rewrite (506 -> 170 lines)
-- speedkey 0.3.0-rc1: Bloom Filter, JSON.MSET, search 1.1/1.2
-- 310 new tests, 38 stress tests, full suite 2289+ passing
+### Cluster now uses valkey-bundle with search
+- compose.yaml: cluster image changed from valkey:8.0 to valkey-bundle:9.1.0-rc1
+- Cluster nodes load search/json/bloom modules via loadmodule in config
+- CI: standalone service + cluster binary extraction both use valkey-bundle:9.1.0-rc1
+- start-cluster.sh: auto-loads modules if /usr/lib/valkey/*.so exists
 
 ## Next Steps
 
-- Commit and PR the thinking model changes
-- Test with actual thinking models (StepFun step-3.5-flash on OpenRouter free tier)
-- Version bump to 0.14.0
 - Bun/Deno NAPI compatibility testing
-- speedkey 0.3.0 stable release
-- Fix the 1 flaky search stress test (standalone timeout)
+- Fix the 2 flaky CI tests (broadcast dedup fanout, TPM timing - both timing-sensitive)
+- Consider valkey-bundle stable when 9.1.0 releases (currently on rc1)
 
 ## API Design Decisions (locked)
 
-- Signal data: auto-deserialized on read (tryParseJson)
-- Fallback type: `metadata?: Record<string, unknown>` not index signature
-- Search types: glide-mq owned (IndexCreateOptions/SearchQueryOptions), mapped internally
-- tokenLimiter.maxTokens naming: self-documenting, intentionally different from limiter.max
-- readStream block: supported via XREAD BLOCK
-- VectorSearchResult.score: documented per metric, not normalized
-- JobUsage.tokens: Record<string, number> not flat fields - extensible forever
-- Budget tokenWeights: weighted totals computed in TS, not Lua - keeps Lua simple
-- TPM uses raw (unweighted) totalTokens - provider rate limits count all tokens equally
-- costs/costUnit: currency-agnostic, user's choice
+- JobUsage.tokens: Record<string, number> not flat fields
+- Budget tokenWeights: computed in TS, not Lua
+- TPM uses raw (unweighted) totalTokens
+- costs/costUnit: currency-agnostic
+- streamChunk: thin wrapper over stream(), not new infrastructure
+- Search 1.1+ options: forward-compatible types, graceful skip on older servers
+- Plugins: AI endpoints under /flows/:id/usage, /flows/:id/budget, /jobs/:id/stream

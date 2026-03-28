@@ -82,7 +82,7 @@ jobs:
       fail-fast: false
     services:
       valkey:
-        image: valkey/valkey:8.0
+        image: valkey/valkey-bundle:9.1.0-rc1
         options: >-
           --health-cmd "valkey-cli ping"
           --health-interval 10s
@@ -111,14 +111,17 @@ jobs:
           })().catch(e => { console.error(e.message); process.exit(1); });
           "
 
-      - name: Install Valkey binaries for cluster
+      - name: Install Valkey binaries and modules for cluster
         run: |
-          id=$(docker create valkey/valkey:8.0)
+          id=$(docker create valkey/valkey-bundle:9.1.0-rc1)
           sudo docker cp "$id:/usr/local/bin/valkey-server" /usr/local/bin/valkey-server
           sudo docker cp "$id:/usr/local/bin/valkey-cli" /usr/local/bin/valkey-cli
+          sudo mkdir -p /usr/lib/valkey
+          sudo docker cp "$id:/usr/lib/valkey/." /usr/lib/valkey/
           docker rm "$id"
           sudo chmod +x /usr/local/bin/valkey-server /usr/local/bin/valkey-cli
           valkey-server --version
+          ls -la /usr/lib/valkey/
 
       - name: Start Valkey cluster (7000-7005)
         run: bash tests/helpers/start-cluster.sh
