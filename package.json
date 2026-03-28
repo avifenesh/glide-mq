@@ -1,7 +1,7 @@
 {
   "name": "glide-mq",
-  "version": "0.12.0",
-  "description": "High-performance message queue for Node.js built on Valkey/Redis with native NAPI bindings",
+  "version": "0.14.0",
+  "description": "High-performance message queue for Node.js with AI-native primitives - built on Valkey/Redis with Rust NAPI bindings",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -51,7 +51,7 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "@glidemq/speedkey": "^0.2.0"
+    "@glidemq/speedkey": "^0.3.0"
   },
   "devDependencies": {
     "@ai-sdk/openai": "^3.0.48",
@@ -98,6 +98,13 @@
     "redis",
     "streams",
     "worker",
-    "task"
+    "task",
+    "ai",
+    "llm",
+    "ai-native",
+    "cost-tracking",
+    "token-streaming",
+    "model-failover",
+    "orchestration"
   ]
 }

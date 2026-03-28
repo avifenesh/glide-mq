@@ -30,36 +30,40 @@ async function main() {
   const timings: { chunk: number; tokens: number; ms: number }[] = [];
   const failedJobs: { name: string; reason: string }[] = [];
 
-  const worker = new Worker(QUEUE, async (job) => {
-    if (job.name === 'pipeline-root') {
-      const children = await job.getChildrenValues();
-      return { processed: Object.keys(children).length };
-    }
+  const worker = new Worker(
+    QUEUE,
+    async (job) => {
+      if (job.name === 'pipeline-root') {
+        const children = await job.getChildrenValues();
+        return { processed: Object.keys(children).length };
+      }
 
-    const { text, index } = job.data;
-    const messages: Message[] = [
-      { role: 'system', content: 'Summarize this text in one short sentence.' },
-      { role: 'user', content: text },
-    ];
+      const { text, index } = job.data;
+      const messages: Message[] = [
+        { role: 'system', content: 'Summarize this text in one short sentence.' },
+        { role: 'user', content: text },
+      ];
 
-    const start = Date.now();
-    const result = await chat(MODELS.fast, messages, 50);
-    const elapsed = Date.now() - start;
+      const start = Date.now();
+      const result = await chat(MODELS.fast, messages, 50);
+      const elapsed = Date.now() - start;
 
-    await job.reportUsage({
-      model: result.model,
-      provider: 'openrouter',
-      tokens: { input: result.inputTokens, output: result.outputTokens },
-      latencyMs: elapsed,
-    });
+      await job.reportUsage({
+        model: result.model,
+        provider: 'openrouter',
+        tokens: { input: result.inputTokens, output: result.outputTokens },
+        latencyMs: elapsed,
+      });
 
-    timings.push({ chunk: index, tokens: result.totalTokens, ms: elapsed });
-    return { summary: result.content, tokens: result.totalTokens };
-  }, {
-    connection: CONNECTION,
-    concurrency: 2,
-    tokenLimiter: { maxTokens: 500, duration: 10_000 },
-  });
+      timings.push({ chunk: index, tokens: result.totalTokens, ms: elapsed });
+      return { summary: result.content, tokens: result.totalTokens };
+    },
+    {
+      connection: CONNECTION,
+      concurrency: 2,
+      tokenLimiter: { maxTokens: 500, duration: 10_000 },
+    },
+  );
 
   const completedCount = { n: 0 };
   worker.on('completed', (job) => {
@@ -69,23 +73,26 @@ async function main() {
     failedJobs.push({ name: job.name, reason: err.message });
   });
 
-  const node = await flow.add({
-    name: 'pipeline-root',
-    queueName: QUEUE,
-    data: { task: 'aggregate' },
-    children: CHUNKS.map((text, i) => ({
-      name: `chunk-${i}`,
+  const node = await flow.add(
+    {
+      name: 'pipeline-root',
       queueName: QUEUE,
-      data: { text, index: i },
-    })),
-  }, { budget: { maxTotalTokens: 2000, onExceeded: 'fail' } });
+      data: { task: 'aggregate' },
+      children: CHUNKS.map((text, i) => ({
+        name: `chunk-${i}`,
+        queueName: QUEUE,
+        data: { text, index: i },
+      })),
+    },
+    { budget: { maxTotalTokens: 2000, onExceeded: 'fail' } },
+  );
 
   console.log(`Pipeline created: ${CHUNKS.length} chunks, budget=2000 tokens\n`);
 
   // Wait for processing
   const deadline = Date.now() + 90_000;
   while (completedCount.n + failedJobs.length < CHUNKS.length && Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
   }
 
   // Per-chunk timings
@@ -106,9 +113,9 @@ async function main() {
   const flowUsage = await queue.getFlowUsage(node.job.id);
   console.log('\n--- Flow Usage ---');
   console.log(`  Jobs with usage: ${flowUsage.jobCount}`);
-  console.log(`  Total input tokens: ${flowUsage.totalInputTokens}`);
-  console.log(`  Total output tokens: ${flowUsage.totalOutputTokens}`);
-  console.log(`  Total: ${flowUsage.totalInputTokens + flowUsage.totalOutputTokens}`);
+  console.log(`  Total input tokens: ${flowUsage.tokens.input ?? 0}`);
+  console.log(`  Total output tokens: ${flowUsage.tokens.output ?? 0}`);
+  console.log(`  Total: ${flowUsage.totalTokens}`);
 
   const budget = await queue.getFlowBudget(node.job.id);
   if (budget) {

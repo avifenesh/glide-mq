@@ -6,7 +6,14 @@ import type { QueueKeys } from './functions/index';
 import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
 import { GlideMQError, DelayedError, WaitingChildrenError, GroupRateLimitError, SuspendError } from './errors';
 import type { GroupRateLimitOptions } from './errors';
-import { calculateBackoff, decompress, isPlainStepPayload, MAX_JOB_DATA_SIZE } from './utils';
+import {
+  calculateBackoff,
+  decompress,
+  isPlainStepPayload,
+  parseJsonRecord,
+  validateAndResolveUsage,
+  MAX_JOB_DATA_SIZE,
+} from './utils';
 import { isClusterClient } from './connection';
 
 /** Try to parse a string as JSON; return the original string if parsing fails. */
@@ -194,34 +201,7 @@ export class Job<D = any, R = any> {
    * Calling multiple times overwrites the previous usage data.
    */
   async reportUsage(usage: JobUsage): Promise<void> {
-    if (usage.tokens) {
-      for (const [key, val] of Object.entries(usage.tokens)) {
-        if (!Number.isFinite(val) || val < 0) {
-          throw new Error(`Token count for '${key}' must be a finite non-negative number`);
-        }
-      }
-    }
-    if (usage.totalTokens !== undefined && (!Number.isFinite(usage.totalTokens) || usage.totalTokens < 0)) {
-      throw new Error('totalTokens must be a finite non-negative number');
-    }
-    if (usage.costs) {
-      for (const [key, val] of Object.entries(usage.costs)) {
-        if (!Number.isFinite(val) || val < 0) {
-          throw new Error(`Cost for '${key}' must be a finite non-negative number`);
-        }
-      }
-    }
-    if (usage.totalCost !== undefined && (!Number.isFinite(usage.totalCost) || usage.totalCost < 0)) {
-      throw new Error('totalCost must be a finite non-negative number');
-    }
-
-    const resolved: JobUsage = { ...usage };
-    if (resolved.totalTokens === undefined && resolved.tokens && Object.keys(resolved.tokens).length > 0) {
-      resolved.totalTokens = Object.values(resolved.tokens).reduce((sum, v) => sum + v, 0);
-    }
-    if (resolved.totalCost === undefined && resolved.costs && Object.keys(resolved.costs).length > 0) {
-      resolved.totalCost = Object.values(resolved.costs).reduce((sum, v) => sum + v, 0);
-    }
+    const resolved = validateAndResolveUsage(usage);
 
     const fields: Record<string, string> = {};
     if (resolved.model !== undefined) fields['usage:model'] = resolved.model;
@@ -814,34 +794,20 @@ export class Job<D = any, R = any> {
       hash['usage:totalCost'] ||
       hash['usage:costUnit']
     ) {
-      let tokens: Record<string, number> | undefined;
-      let costs: Record<string, number> | undefined;
-      if (hash['usage:tokens']) {
-        try {
-          const p = JSON.parse(hash['usage:tokens']);
-          if (p && typeof p === 'object') tokens = p;
-        } catch {
-          /* ignore */
-        }
-      }
-      if (hash['usage:costs']) {
-        try {
-          const p = JSON.parse(hash['usage:costs']);
-          if (p && typeof p === 'object') costs = p;
-        } catch {
-          /* ignore */
-        }
-      }
+      let cached: boolean | undefined;
+      if (hash['usage:cached'] === '1') cached = true;
+      else if (hash['usage:cached'] === '0') cached = false;
+
       job.usage = {
         model: hash['usage:model'] || undefined,
         provider: hash['usage:provider'] || undefined,
-        tokens,
+        tokens: hash['usage:tokens'] ? parseJsonRecord(hash['usage:tokens']) : undefined,
         totalTokens: hash['usage:totalTokens'] ? parseInt(hash['usage:totalTokens'], 10) : undefined,
-        costs,
+        costs: hash['usage:costs'] ? parseJsonRecord(hash['usage:costs']) : undefined,
         totalCost: hash['usage:totalCost'] ? parseFloat(hash['usage:totalCost']) : undefined,
         costUnit: hash['usage:costUnit'] || undefined,
         latencyMs: hash['usage:latencyMs'] ? parseInt(hash['usage:latencyMs'], 10) : undefined,
-        cached: hash['usage:cached'] === '1' ? true : hash['usage:cached'] === '0' ? false : undefined,
+        cached,
       };
     }
     if (hash.signals) {

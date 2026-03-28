@@ -20,95 +20,114 @@ async function main() {
   let pipelineDone = false;
   let pipelineResult: any = null;
 
-  const worker = new Worker(QUEUE, async (job) => {
-    const { step } = job.data;
+  const worker = new Worker(
+    QUEUE,
+    async (job) => {
+      const { step } = job.data;
 
-    if (step === 'classify') {
-      console.log('[classify] Analyzing content...');
-      const result = await chat(MODELS.fast, [
-        { role: 'system', content: 'Classify the following content as: safe, borderline, or unsafe. Respond with exactly one word.' },
-        { role: 'user', content: job.data.content },
-      ], 10);
+      if (step === 'classify') {
+        console.log('[classify] Analyzing content...');
+        const result = await chat(
+          MODELS.fast,
+          [
+            {
+              role: 'system',
+              content: 'Classify the following content as: safe, borderline, or unsafe. Respond with exactly one word.',
+            },
+            { role: 'user', content: job.data.content },
+          ],
+          10,
+        );
 
-      await job.reportUsage({ model: result.model, tokens: { input: result.inputTokens, output: result.outputTokens } });
+        await job.reportUsage({
+          model: result.model,
+          tokens: { input: result.inputTokens, output: result.outputTokens },
+        });
 
-      const classification = result.content.trim().toLowerCase();
-      console.log(`[classify] Result: ${classification}`);
-      return { classification, tokens: result.totalTokens };
-    }
-
-    if (step === 'moderate') {
-      // Check classification from sibling job
-      const children = await job.getChildrenValues();
-      const classifyResult = Object.values(children).find((v: any) => v?.classification);
-      const classification = (classifyResult as any)?.classification ?? 'borderline';
-
-      if (classification === 'unsafe') {
-        return { action: 'rejected', reason: 'Content classified as unsafe' };
+        const classification = result.content.trim().toLowerCase();
+        console.log(`[classify] Result: ${classification}`);
+        return { classification, tokens: result.totalTokens };
       }
 
-      if (classification === 'borderline') {
-        // Check if we have a signal from human review
-        if (job.signals.length > 0) {
-          const sig = job.signals[0];
-          const data = typeof sig.data === 'string' ? JSON.parse(sig.data) : sig.data;
-          if (data.action === 'approve') {
-            console.log('[moderate] Human approved. Proceeding to polish.');
-            return { action: 'approved' };
+      if (step === 'moderate') {
+        // Check classification from sibling job
+        const children = await job.getChildrenValues();
+        const classifyResult = Object.values(children).find((v: any) => v?.classification);
+        const classification = (classifyResult as any)?.classification ?? 'borderline';
+
+        if (classification === 'unsafe') {
+          return { action: 'rejected', reason: 'Content classified as unsafe' };
+        }
+
+        if (classification === 'borderline') {
+          // Check if we have a signal from human review
+          if (job.signals.length > 0) {
+            const sig = job.signals[0];
+            const data = typeof sig.data === 'string' ? JSON.parse(sig.data) : sig.data;
+            if (data.action === 'approve') {
+              console.log('[moderate] Human approved. Proceeding to polish.');
+              return { action: 'approved' };
+            }
+            return { action: 'rejected', reason: data.reason || 'Human rejected' };
           }
-          return { action: 'rejected', reason: data.reason || 'Human rejected' };
+
+          console.log('[moderate] Content is borderline. Suspending for human review...');
+          console.log(`\n  Content: "${job.data.content}"\n`);
+          await job.suspend({ reason: 'borderline-content-review' });
+          return; // unreachable
         }
 
-        console.log('[moderate] Content is borderline. Suspending for human review...');
-        console.log(`\n  Content: "${job.data.content}"\n`);
-        await job.suspend({ reason: 'borderline-content-review' });
-        return; // unreachable
+        return { action: 'approved' };
       }
 
-      return { action: 'approved' };
-    }
+      if (step === 'polish') {
+        console.log('[polish] Generating polished version (streaming)...');
 
-    if (step === 'polish') {
-      console.log('[polish] Generating polished version (streaming)...');
+        // Use fallback model from chain if primary fails
+        const fallback = job.currentFallback;
+        const model = fallback ? fallback.model : MODELS.fast;
 
-      // Use fallback model from chain if primary fails
-      const fallback = job.currentFallback;
-      const model = fallback ? fallback.model : MODELS.fast;
+        const messages: Message[] = [
+          {
+            role: 'system',
+            content:
+              'Rewrite the following content to be more professional and engaging. Keep it concise (2-3 sentences).',
+          },
+          { role: 'user', content: job.data.content },
+        ];
 
-      const messages: Message[] = [
-        { role: 'system', content: 'Rewrite the following content to be more professional and engaging. Keep it concise (2-3 sentences).' },
-        { role: 'user', content: job.data.content },
-      ];
-
-      let full = '';
-      let inTok = 0, outTok = 0;
-      process.stdout.write('\n  ');
-      for await (const chunk of streamChat(model, messages, 150)) {
-        if (chunk.type === 'token') {
-          process.stdout.write(chunk.content);
-          await job.stream({ t: chunk.content });
-          full += chunk.content;
-        } else {
-          inTok = chunk.inputTokens ?? 0;
-          outTok = chunk.outputTokens ?? 0;
-          await job.stream({ t: '', done: '1' });
+        let full = '';
+        let inTok = 0,
+          outTok = 0;
+        process.stdout.write('\n  ');
+        for await (const chunk of streamChat(model, messages, 150)) {
+          if (chunk.type === 'token') {
+            process.stdout.write(chunk.content);
+            await job.stream({ t: chunk.content });
+            full += chunk.content;
+          } else {
+            inTok = chunk.inputTokens ?? 0;
+            outTok = chunk.outputTokens ?? 0;
+            await job.stream({ t: '', done: '1' });
+          }
         }
+        console.log('\n');
+
+        await job.reportUsage({ model, tokens: { input: inTok, output: outTok } });
+        return { polished: full, tokens: inTok + outTok };
       }
-      console.log('\n');
 
-      await job.reportUsage({ model, tokens: { input: inTok, output: outTok } });
-      return { polished: full, tokens: inTok + outTok };
-    }
+      if (step === 'aggregate') {
+        const children = await job.getChildrenValues();
+        pipelineDone = true;
+        pipelineResult = children;
+        return children;
+      }
 
-    if (step === 'aggregate') {
-      const children = await job.getChildrenValues();
-      pipelineDone = true;
-      pipelineResult = children;
-      return children;
-    }
-
-    return null;
-  }, { connection: CONNECTION, concurrency: 2 });
+      return null;
+    },
+    { connection: CONNECTION, concurrency: 2 },
+  );
 
   const content = 'Our new product might help people lose weight rapidly with minimal effort, results may vary.';
 
@@ -120,21 +139,18 @@ async function main() {
       children: [
         { name: 'classify', queueName: QUEUE, data: { step: 'classify', content } },
         {
-          name: 'moderate', queueName: QUEUE,
+          name: 'moderate',
+          queueName: QUEUE,
           data: { step: 'moderate', content },
-          children: [
-            { name: 'classify-for-moderate', queueName: QUEUE, data: { step: 'classify', content } },
-          ],
+          children: [{ name: 'classify-for-moderate', queueName: QUEUE, data: { step: 'classify', content } }],
         },
         {
-          name: 'polish', queueName: QUEUE,
+          name: 'polish',
+          queueName: QUEUE,
           data: { step: 'polish', content },
           opts: {
             lockDuration: 60_000,
-            fallbacks: [
-              { model: MODELS.nano },
-              { model: MODELS.fast },
-            ],
+            fallbacks: [{ model: MODELS.nano }, { model: MODELS.fast }],
           },
         },
       ],
@@ -146,9 +162,9 @@ async function main() {
   console.log(`Flow: parent=${node.job.id}, budget=800 tokens\n`);
 
   // Wait a bit, then check if moderation is suspended
-  await new Promise(r => setTimeout(r, 5_000));
+  await new Promise((r) => setTimeout(r, 5_000));
 
-  const moderateJob = node.children!.find(c => c.job.name === 'moderate');
+  const moderateJob = node.children!.find((c) => c.job.name === 'moderate');
   if (moderateJob) {
     const info = await queue.getSuspendInfo(moderateJob.job.id);
     if (info) {
@@ -160,13 +176,13 @@ async function main() {
   // Wait for pipeline completion
   const deadline = Date.now() + 60_000;
   while (!pipelineDone && Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 500));
   }
 
   // Print usage summary
   const usage = await queue.getFlowUsage(node.job.id);
   console.log('--- Pipeline Usage ---');
-  console.log(`  Jobs: ${usage.jobCount}, Tokens: ${usage.totalInputTokens + usage.totalOutputTokens}`);
+  console.log(`  Jobs: ${usage.jobCount}, Tokens: ${usage.totalTokens}`);
 
   const budget = await queue.getFlowBudget(node.job.id);
   if (budget) {

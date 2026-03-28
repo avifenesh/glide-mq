@@ -680,6 +680,14 @@ const entries = await queue.readStream(jobId);
 const more = await queue.readStream(jobId, { lastId: entries[entries.length - 1].id });
 ```
 
+**Typed streaming convenience** - `job.streamChunk(type, content?)` wraps `stream()` with `{ type, content }` fields, matching the common pattern for LLM reasoning and content chunks:
+
+```typescript
+await job.streamChunk('reasoning', 'Let me think about this...');
+await job.streamChunk('content', 'The answer is 42.');
+await job.streamChunk('done');
+```
+
 **SSE endpoint** (proxy): `GET /queues/:name/jobs/:id/stream` streams chunks as Server-Sent Events while the job is active, then drains remaining chunks and closes. Supports the `Last-Event-ID` header and `?lastId` query param for resume.
 
 Stream keys are automatically cleaned up when a job is removed via `job.remove()`, `queue.clean()`, or `queue.drain()`.
@@ -792,7 +800,17 @@ Enforce hard caps on total tokens and/or cost across all jobs in a flow. Pass a 
 
 Query budget state via queue.getFlowBudget(flowId). Budget state is stored in glide:{queueName}:budget:{flowId}.
 
-See [USAGE.md AI-native Primitives section](#budget-middleware-flow-level-tokencost-caps) in the main usage guide for full examples.
+```typescript
+const flow = new FlowProducer({ connection });
+const node = await flow.add(
+  { name: 'parent', queueName: 'ai-tasks', data: {}, children: [...] },
+  { budget: { maxTotalTokens: 10000, maxTotalCost: 0.50, costUnit: 'usd', onExceeded: 'fail' } },
+);
+
+// Check budget state
+const budget = await queue.getFlowBudget(node.job.id);
+// { maxTotalTokens: 10000, maxTotalCost: 0.50, usedTokens: 0, usedCost: 0, exceeded: false, ... }
+```
 
 ### Dual-axis Rate Limiting (RPM + TPM)
 

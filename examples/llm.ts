@@ -18,34 +18,38 @@ export const MODELS = {
   nano: 'nvidia/nemotron-3-nano-30b-a3b:free',
 };
 
-export interface Message { role: 'system' | 'user' | 'assistant'; content: string }
+export interface Message {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
 
 export interface LLMResult {
   content: string;
+  reasoningContent?: string;
   model: string;
   inputTokens: number;
   outputTokens: number;
+  reasoningTokens: number;
   totalTokens: number;
 }
 
-export async function chat(
-  model: string,
-  messages: Message[],
-  maxTokens = 150,
-): Promise<LLMResult> {
+export async function chat(model: string, messages: Message[], maxTokens = 150): Promise<LLMResult> {
   const resp = await fetch(BASE, {
     method: 'POST',
     headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, messages, max_tokens: maxTokens }),
   });
   if (!resp.ok) throw new Error(`LLM ${resp.status}: ${await resp.text()}`);
-  const data = await resp.json() as any;
+  const data = (await resp.json()) as any;
   const msg = data.choices?.[0]?.message;
+  const reasoningTokens = data.usage?.reasoning_tokens ?? 0;
   return {
     content: msg?.content ?? msg?.reasoning ?? '[empty]',
+    reasoningContent: msg?.reasoning,
     model: data.model ?? model,
     inputTokens: data.usage?.prompt_tokens ?? 0,
     outputTokens: data.usage?.completion_tokens ?? 0,
+    reasoningTokens,
     totalTokens: data.usage?.total_tokens ?? 0,
   };
 }
@@ -65,7 +69,8 @@ export async function* streamChat(
   const reader = resp.body!.getReader();
   const decoder = new TextDecoder();
   let full = '';
-  let inTok = 0, outTok = 0;
+  let inTok = 0,
+    outTok = 0;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -77,8 +82,14 @@ export async function* streamChat(
       try {
         const c = JSON.parse(p);
         const delta = c.choices?.[0]?.delta?.content;
-        if (delta) { full += delta; yield { type: 'token', content: delta }; }
-        if (c.usage) { inTok = c.usage.prompt_tokens ?? inTok; outTok = c.usage.completion_tokens ?? outTok; }
+        if (delta) {
+          full += delta;
+          yield { type: 'token', content: delta };
+        }
+        if (c.usage) {
+          inTok = c.usage.prompt_tokens ?? inTok;
+          outTok = c.usage.completion_tokens ?? outTok;
+        }
       } catch {}
     }
   }

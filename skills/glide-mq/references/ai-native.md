@@ -13,10 +13,13 @@ const worker = new Worker('inference', async (job) => {
   await job.reportUsage({
     model: 'gpt-5.4',
     provider: 'openai',
-    inputTokens: response.usage.prompt_tokens,
-    outputTokens: response.usage.completion_tokens,
-    // totalTokens auto-computed as inputTokens + outputTokens if omitted
-    costUsd: 0.0032,
+    tokens: {
+      input: response.usage.prompt_tokens,
+      output: response.usage.completion_tokens,
+    },
+    // totalTokens auto-computed as sum of all token categories if omitted
+    costs: { total: 0.0032 },
+    costUnit: 'usd',
     latencyMs: 1200,
     cached: false,
   });
@@ -31,10 +34,11 @@ const worker = new Worker('inference', async (job) => {
 interface JobUsage {
   model?: string;           // e.g. 'gpt-5.4', 'claude-sonnet-4-20250514'
   provider?: string;        // e.g. 'openai', 'anthropic'
-  inputTokens?: number;     // prompt tokens
-  outputTokens?: number;    // completion tokens
-  totalTokens?: number;     // auto-computed if omitted
-  costUsd?: number;         // actual cost in USD
+  tokens?: Record<string, number>;   // e.g. { input: 500, output: 200, reasoning: 100 }
+  totalTokens?: number;     // auto-computed as sum of tokens values if omitted
+  costs?: Record<string, number>;    // e.g. { total: 0.003 } or { input: 0.001, output: 0.002 }
+  totalCost?: number;       // auto-computed as sum of costs values if omitted
+  costUnit?: string;        // e.g. 'usd', 'credits', 'ils' (informational)
   latencyMs?: number;       // inference latency (not queue wait)
   cached?: boolean;         // cache hit flag
 }
@@ -43,9 +47,9 @@ interface JobUsage {
 - Calling `reportUsage()` multiple times overwrites previous values.
 - Token counts must not be negative (throws).
 - Emits a `'usage'` event on the events stream with the full usage object.
-- Stored in the job hash as `usage:model`, `usage:inputTokens`, etc.
+- Stored in the job hash as `usage:model`, `usage:tokens` (JSON), `usage:costs` (JSON), `usage:totalTokens`, `usage:totalCost`, `usage:costUnit`.
 
-## 2. Token Streaming (job.stream / queue.readStream)
+## 2. Token Streaming (job.stream / job.streamChunk / queue.readStream)
 
 Emit and consume LLM output tokens in real-time via per-job Valkey Streams.
 
@@ -67,6 +71,18 @@ const worker = new Worker('chat', async (job) => {
 ```
 
 `job.stream(chunk)` appends a flat `Record<string, string>` to a per-job Valkey Stream via XADD. Returns the stream entry ID.
+
+### Convenience: job.streamChunk(type, content?)
+
+Typed shorthand for streaming LLM chunks with a `type` field and optional `content`:
+
+```typescript
+await job.streamChunk('reasoning', 'Let me think about this...');
+await job.streamChunk('content', 'The answer is 42.');
+await job.streamChunk('done');
+```
+
+Equivalent to `job.stream({ type, content })` - useful for structured streaming with thinking models.
 
 ### Consumer Side (Queue)
 
@@ -160,7 +176,7 @@ interface SuspendOptions {
 
 ## 4. Budget Middleware (Flow-Level Caps)
 
-Cap total token usage and/or USD cost across all jobs in a flow.
+Cap total token usage and/or cost across all jobs in a flow. Supports per-category limits and weighted totals for thinking model budgets.
 
 ### Setting Budget on a Flow
 
@@ -182,7 +198,9 @@ await flow.add(
   {
     budget: {
       maxTotalTokens: 50_000,
-      maxCostUsd: 0.50,
+      maxTotalCost: 0.50,
+      costUnit: 'usd',
+      tokenWeights: { reasoning: 4, cachedInput: 0.25 },
       onExceeded: 'fail',    // 'fail' (default) or 'pause'
     },
   },
@@ -193,9 +211,13 @@ await flow.add(
 
 ```typescript
 interface BudgetOptions {
-  maxTotalTokens?: number;     // hard cap on total tokens
-  maxCostUsd?: number;         // hard cap on total USD cost
-  onExceeded?: 'pause' | 'fail';  // default: 'fail'
+  maxTotalTokens?: number;                // hard cap on weighted total tokens
+  maxTokens?: Record<string, number>;     // per-category token caps (e.g. { input: 50000, reasoning: 5000 })
+  tokenWeights?: Record<string, number>;  // weight multipliers for maxTotalTokens (unlisted = 1)
+  maxTotalCost?: number;                  // hard cap on total cost
+  maxCosts?: Record<string, number>;      // per-category cost caps
+  costUnit?: string;                      // e.g. 'usd', 'credits', 'ils' (informational)
+  onExceeded?: 'pause' | 'fail';         // default: 'fail'
 }
 ```
 
@@ -206,7 +228,11 @@ const budget = await queue.getFlowBudget(parentJobId);
 // null if no budget was set, otherwise:
 // {
 //   maxTotalTokens?: number,
-//   maxCostUsd?: number,
+//   maxTokens?: Record<string, number>,
+//   tokenWeights?: Record<string, number>,
+//   maxTotalCost?: number,
+//   maxCosts?: Record<string, number>,
+//   costUnit?: string,
 //   usedTokens: number,
 //   usedCost: number,
 //   exceeded: boolean,
@@ -296,8 +322,7 @@ const worker = new Worker('inference', async (job) => {
   // Option 2: reportUsage auto-extracts totalTokens for TPM
   await job.reportUsage({
     model: 'gpt-5.4',
-    inputTokens: result.promptTokens,
-    outputTokens: result.completionTokens,
+    tokens: { input: result.promptTokens, output: result.completionTokens },
   });
 
   return result;
@@ -313,11 +338,13 @@ Aggregate AI usage metadata across all jobs in a flow tree.
 ```typescript
 const usage = await queue.getFlowUsage(parentJobId);
 // {
-//   totalInputTokens: number,
-//   totalOutputTokens: number,
-//   totalCostUsd: number,
+//   tokens: Record<string, number>,    // aggregated per-category tokens (e.g. { input: 2500, output: 1200 })
+//   totalTokens: number,               // sum of all token categories
+//   costs: Record<string, number>,     // aggregated per-category costs
+//   totalCost: number,                 // sum of all cost categories
+//   costUnit?: string,                 // unit from the first job that reported one
 //   jobCount: number,
-//   models: Record<string, number>  // model name -> call count
+//   models: Record<string, number>     // model name -> call count
 // }
 ```
 

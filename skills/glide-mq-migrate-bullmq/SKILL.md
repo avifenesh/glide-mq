@@ -10,7 +10,7 @@ description: >-
 license: Apache-2.0
 metadata:
   author: glide-mq
-  version: "0.13.0"
+  version: "0.14.0"
   tags: glide-mq, bullmq, migration, queue, valkey, redis
   sources: docs/MIGRATION.md
 ---
@@ -308,7 +308,7 @@ await queue.add('job', data, {
 | Job search | `queue.searchJobs(opts)` | Full-text search over job data |
 | excludeData | `queue.getJobs(type, start, end, { excludeData: true })` | Lightweight listings |
 | `globalConcurrency` | On WorkerOptions | Set queue-wide cap at worker startup |
-| **AI usage tracking** | `job.reportUsage({ model, inputTokens, ... })` | Per-job LLM usage metadata |
+| **AI usage tracking** | `job.reportUsage({ model, tokens, costs, ... })` | Per-job LLM usage metadata |
 | **Token streaming** | `job.stream({ token })` / `queue.readStream(jobId)` | Real-time LLM output via per-job streams |
 | **Suspend/resume** | `job.suspend()` / `queue.signal(jobId, name, data)` | Human-in-the-loop approval |
 | **Flow budget** | `flow.add(tree, { budget: { maxTotalTokens } })` | Cap tokens/cost across a flow |

@@ -2,13 +2,13 @@
 
 ## Context
 
-Building a Node.js message queue library to replace BullMQ. Built exclusively on speedkey (valkey-glide with direct NAPI bindings). Streams-first architecture. Cluster-native from day one. Full feature parity with BullMQ plus differentiators. This is the winning horse.
+Building a Node.js message queue library to replace BullMQ. Built exclusively on speedkey (valkey-glide with direct NAPI bindings). Streams-first architecture. Cluster-native from day one. Full feature parity with BullMQ plus differentiators.
 
 ## Key Schema
 
 All keys share a hash tag `{queueName}` where `queueName` is the queue name. This ensures all keys for a given queue hash to the same cluster slot. Default prefix is `glide`.
 
-`glide-mq``
+```
 glide:{queueName}:id            # String - auto-increment job ID counter
 glide:{queueName}:stream        # Stream - ready jobs (primary queue)
 glide:{queueName}:scheduled     # ZSet - delayed + priority staging (score = timestamp | priority-encoded)
@@ -37,11 +37,11 @@ glide:{queueName}:budget:{flowId}        # Hash - flow-level budget state
 glide:{queueName}:tpm                    # Hash - token-per-minute rate limiter state
 glide:{queueName}:ratelimited           # ZSet - scheduler-managed promotion queue for rate-limited jobs
                                 #        (score = earliest eligible timestamp)
-`glide-mq``
+```
 
 ## Job State Machine
 
-`glide-mq``
+```
              scheduled (ZSet)
                |
                v (promotion loop)
@@ -66,11 +66,13 @@ added --> stream (ready) --> PEL (active) --> completed (ZSet)
                        |
                        v (window reset, scheduler promotes)
                      stream (re-queued)
-`glide-mq``glide-mq`moveToActive`may return`GROUP_RATE_LIMITED`when a job's ordering-key sliding window rate limit is exceeded, or`GROUP_TOKEN_LIMITED`when the token bucket has insufficient tokens. In both cases, the job is parked in the`glide:{queueName}:ratelimited`ZSet with a score equal to the earliest eligible timestamp. The scheduler's promotion loop picks it up once capacity is available. If a job's`cost`exceeds the bucket's`tbCapacity`, `moveToActive` moves the job to the DLQ instead.
+```
+
+`moveToActive` may return `GROUP_RATE_LIMITED` when a job's ordering-key sliding window rate limit is exceeded, or `GROUP_TOKEN_LIMITED` when the token bucket has insufficient tokens. In both cases, the job is parked in the `glide:{queueName}:ratelimited` ZSet with a score equal to the earliest eligible timestamp. The scheduler's promotion loop picks it up once capacity is available. If a job's `cost` exceeds the bucket's `tbCapacity`, `moveToActive` moves the job to the DLQ instead.
 
 ### LIFO Mode
 
-Jobs with `lifo: true` are placed onto a dedicated Valkey LIST key `glide:{queueName}:list` via RPUSH, and consumed via RPOP. When the worker's `moveToActive` function checks for the next job, priority jobs in the scheduled ZSet are checked first, then the LIFO list, then the FIFO stream. A `list-active` counter in the queue metadata hash enforces global concurrency across both the LIFO list and the main stream.
+Jobs with `lifo: true` are placed onto a dedicated Valkey LIST key `glide:{queueName}:lifo` via RPUSH, and consumed via RPOP. When the worker's `moveToActive` function checks for the next job, priority jobs in the scheduled ZSet are checked first, then the LIFO list, then the FIFO stream. A `list-active` counter in the queue metadata hash enforces global concurrency across both the LIFO list and the main stream.
 
 States map to Valkey structures:
 
@@ -128,7 +130,7 @@ redis.register_function('glidemq_complete', function(keys, args) ... end)
 
 | Function                          | Keys | Purpose                                                                                 |
 | --------------------------------- | ---- | --------------------------------------------------------------------------------------- |
-| glidemq_version                   | 0    | Return library version                                                                  |
+| glidemq_version                   | 1    | Return library version                                                                  |
 | glidemq_addJob                    | 4    | INCR id, HSET job, XADD stream or ZADD scheduled, XADD event (skippable via skipEvents) |
 | glidemq_promote                   | 3    | ZRANGEBYSCORE scheduled, XADD to stream, ZREM from scheduled                            |
 | glidemq_nextDue                   | 2    | Return next due timestamp from scheduled and rate-limited ZSets                         |
@@ -404,11 +406,11 @@ interface FlowJob {
 
 ## Search Module Integration
 
-When the Valkey Search module is available, uses FT.CREATE to build a secondary index over job hashes. The index prefix is derived from the queue key prefix (e.g. ) and covers all hashes.
+When the Valkey Search module is available, uses FT.CREATE to build a secondary index over job hashes. The index prefix is derived from the queue key prefix (e.g. `glide:{queueName}:`) and covers all job hashes.
 
-Base schema fields ( as TAG, as TAG, as NUMERIC, as NUMERIC) are always included. Users can add custom fields and a vector field for KNN similarity search via .
+Base schema fields (`name` as TAG, `state` as TAG, `timestamp` as NUMERIC, `priority` as NUMERIC) are always included. Users can add custom fields and a vector field for KNN similarity search via `SearchIndex`.
 
-Vector embeddings are stored directly in the job hash via as raw Float32 binary blobs. constructs a KNN query with optional pre-filter expressions.
+Vector embeddings are stored directly in the job hash via `job.storeVector()` as raw Float32 binary blobs. `queue.vectorSearch()` constructs a KNN query with optional pre-filter expressions.
 
 ## Project Structure
 
@@ -503,19 +505,21 @@ Complex workflows with arbitrary dependency graphs are submitted via `FlowProduc
 7. **Simpler reliability model**: Consumer group semantics (XREADGROUP + XACK + XAUTOCLAIM) vs lock-renew-check-stall cycle.
 8. **Server Functions**: Single FUNCTION LOAD, persistent across restarts, no NOSCRIPT cache-miss errors, named calls via FCALL. BullMQ uses ephemeral EVAL/EVALSHA with 53 scripts that must be re-cached on every new connection.
 
-## Implementation Phases
+## Implementation History
 
-### Phase 1: Core (Queue + Worker + Job)
+All phases are complete as of v0.13.0.
+
+### Phase 1: Core (Queue + Worker + Job) - Complete
 
 - Connection factory (blocking vs non-blocking clients)
 - Key builder utilities
-- Lua scripts: addJob, promote, complete, fail, reclaimStalled
+- Server functions: addJob, promote, complete, fail, reclaimStalled
 - Queue: add, addBulk, pause, resume, close
 - Worker: XREADGROUP loop, processor, concurrency, stalled recovery
 - Job: data access, progress, state queries
 - Tests for all above
 
-### Phase 2: Advanced Features
+### Phase 2: Advanced Features - Complete
 
 - Delayed jobs (scheduled ZSet + promotion loop)
 - Priorities (encoded scores)
@@ -525,14 +529,14 @@ Complex workflows with arbitrary dependency graphs are submitted via `FlowProduc
 - Rate limiting
 - Global concurrency
 
-### Phase 3: Flows + Events
+### Phase 3: Flows + Events - Complete
 
 - FlowProducer: parent-child job trees
 - QueueEvents: stream-based event subscription
 - Job schedulers (repeatable/cron jobs)
 - Metrics collection
 
-### Phase 4: Production Hardening
+### Phase 4: Production Hardening - Complete
 
 - Graceful shutdown
 - Connection error recovery
@@ -542,7 +546,7 @@ Complex workflows with arbitrary dependency graphs are submitted via `FlowProduc
 
 ## Verification
 
-- Unit tests for each Lua script in isolation
+- Unit tests for each server function in isolation
 - Integration tests with real Valkey instance (standalone + cluster)
 - Benchmark against BullMQ (jobs/sec, latency p50/p99, memory)
 - Stalled job recovery test (kill worker mid-processing)

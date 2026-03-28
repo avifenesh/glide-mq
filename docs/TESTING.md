@@ -347,6 +347,7 @@ All AI-native primitives have full testing mode parity - no Valkey needed.
 | ------------------------------- | -------------------------------------------------------------------------------------------- |
 | `reportUsage(usage)`            | Store AI usage metadata (model, tokens, cost, latency). Validates non-negative token counts. |
 | `stream(chunk)`                 | Append a chunk to the in-memory streaming channel. Returns a synthetic stream entry ID.      |
+| `streamChunk(type, content?)`   | Convenience wrapper over `stream()` - emits `{ type, content }` fields for typed LLM chunks. |
 | `storeVector(field, embedding)` | Store a vector embedding for later similarity search. Accepts number[] or Float32Array.      |
 | `suspend(opts?)`                | Move the job to suspended state. Throws SuspendError to halt the processor.                  |
 
@@ -378,7 +379,7 @@ const job = await queue.add('ai-task', { prompt: 'test' });
 // queue.readStream(job.id) returns streamed chunks
 ```
 
-. Call stream(), reportUsage(), storeVector() inside the processor, then verify with readStream(), getFlowUsage(), and vectorSearch() on the queue.
+Call stream(), streamChunk(), reportUsage(), storeVector() inside the processor, then verify with readStream(), getFlowUsage(), and vectorSearch() on the queue.
 
 ### Example: testing suspend/resume
 

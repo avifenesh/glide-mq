@@ -51,6 +51,13 @@ export interface ConnectionOptions {
    * Passed through to GLIDE. Default: 1000.
    */
   inflightRequestsLimit?: number;
+  /**
+   * Request timeout in milliseconds. Commands that exceed this timeout
+   * throw a TimeoutError. Default: 500.
+   * Increase for operations that may take longer (e.g. FT.CREATE with many existing keys,
+   * FUNCTION LOAD with large libraries).
+   */
+  requestTimeout?: number;
 }
 
 export interface DeadLetterQueueOptions {

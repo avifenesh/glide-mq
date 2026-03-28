@@ -21,6 +21,7 @@
 - [Dual-axis Rate Limiting (RPM + TPM)](#dual-axis-rate-limiting-rpm--tpm)
 - [Per-job Lock Duration](#per-job-lock-duration)
 - [Vector Search Index Management](#vector-search-index-management)
+- [Request Timeout](#request-timeout)
 
 ---
 
@@ -819,3 +820,20 @@ Base fields (name, state, timestamp, priority) are always included. Users add cu
 | IP     | Higher = more similar                        | Normalized embeddings, recommendation |
 
 See [USAGE.md](./USAGE.md#vector-search-createjobindex--storevector--vectorsearch) for full API and examples.
+
+---
+
+## Request Timeout
+
+Override the default 500ms command timeout for operations that may take longer:
+
+```typescript
+const queue = new Queue('my-queue', {
+  connection: {
+    addresses: [{ host: 'localhost', port: 6379 }],
+    requestTimeout: 5000, // 5 seconds for FT.CREATE, FUNCTION LOAD
+  },
+});
+```
+
+The default (500ms) is sufficient for most operations. Increase for `createJobIndex()` on databases with many existing keys, or `FUNCTION LOAD` with large libraries.

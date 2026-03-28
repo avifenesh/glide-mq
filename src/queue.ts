@@ -34,6 +34,7 @@ import {
   keyPrefix,
   keyPrefixPattern,
   nextReconnectDelay,
+  parseJsonRecord,
   validateTimezone,
   validateSchedulerEvery,
   normalizeScheduleDate,
@@ -1762,32 +1763,20 @@ export class Queue<D = any, R = any> extends EventEmitter {
       if (costUnit && !agg.costUnit) agg.costUnit = costUnit;
       if (model) agg.models[model] = (agg.models[model] || 0) + 1;
 
-      if (tokensStr) {
-        try {
-          const p = JSON.parse(tokensStr);
-          if (p && typeof p === 'object') {
-            for (const [k, v] of Object.entries(p as Record<string, number>)) {
-              if (Number.isFinite(v)) {
-                agg.tokens[k] = (agg.tokens[k] || 0) + (v as number);
-              }
-            }
+      const tokens = tokensStr ? parseJsonRecord(tokensStr) : undefined;
+      if (tokens) {
+        for (const [k, v] of Object.entries(tokens)) {
+          if (Number.isFinite(v)) {
+            agg.tokens[k] = (agg.tokens[k] || 0) + v;
           }
-        } catch {
-          /* ignore */
         }
       }
-      if (costsStr) {
-        try {
-          const p = JSON.parse(costsStr);
-          if (p && typeof p === 'object') {
-            for (const [k, v] of Object.entries(p as Record<string, number>)) {
-              if (Number.isFinite(v)) {
-                agg.costs[k] = (agg.costs[k] || 0) + (v as number);
-              }
-            }
+      const costs = costsStr ? parseJsonRecord(costsStr) : undefined;
+      if (costs) {
+        for (const [k, v] of Object.entries(costs)) {
+          if (Number.isFinite(v)) {
+            agg.costs[k] = (agg.costs[k] || 0) + v;
           }
-        } catch {
-          /* ignore */
         }
       }
     };
@@ -1847,40 +1836,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const fields = hashDataToRecord(raw as any);
     if (!fields) return null;
 
-    let maxTokens: Record<string, number> | undefined;
-    let tokenWeights: Record<string, number> | undefined;
-    let maxCosts: Record<string, number> | undefined;
-    if (fields.maxTokens) {
-      try {
-        const p = JSON.parse(fields.maxTokens);
-        if (p && typeof p === 'object') maxTokens = p;
-      } catch {
-        /* ignore */
-      }
-    }
-    if (fields.tokenWeights) {
-      try {
-        const p = JSON.parse(fields.tokenWeights);
-        if (p && typeof p === 'object') tokenWeights = p;
-      } catch {
-        /* ignore */
-      }
-    }
-    if (fields.maxCosts) {
-      try {
-        const p = JSON.parse(fields.maxCosts);
-        if (p && typeof p === 'object') maxCosts = p;
-      } catch {
-        /* ignore */
-      }
-    }
-
     return {
       maxTotalTokens: fields.maxTotalTokens ? parseFloat(fields.maxTotalTokens) : undefined,
-      maxTokens,
-      tokenWeights,
+      maxTokens: fields.maxTokens ? parseJsonRecord(fields.maxTokens) : undefined,
+      tokenWeights: fields.tokenWeights ? parseJsonRecord(fields.tokenWeights) : undefined,
       maxTotalCost: fields.maxTotalCost ? parseFloat(fields.maxTotalCost) : undefined,
-      maxCosts,
+      maxCosts: fields.maxCosts ? parseJsonRecord(fields.maxCosts) : undefined,
       costUnit: fields.costUnit || undefined,
       usedTokens: parseFloat(fields.usedTokens || '0'),
       usedCost: parseFloat(fields.usedCost || '0'),

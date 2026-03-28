@@ -43,7 +43,7 @@ export async function createClient(opts: ConnectionOptions): Promise<Client> {
     inflightRequestsLimit: opts.inflightRequestsLimit,
     // GLIDE defaults to 250ms which is too short for FUNCTION LOAD, FT.CREATE,
     // and pipelined operations. Use a reasonable default of 500ms.
-    requestTimeout: 500,
+    requestTimeout: opts.requestTimeout ?? 500,
   };
 
   try {

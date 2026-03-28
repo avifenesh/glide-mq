@@ -143,9 +143,9 @@ const worker = new Worker('inference', async (job) => {
   await job.reportUsage({
     model: 'gpt-5.4',
     provider: 'openai',
-    inputTokens: result.promptTokens,
-    outputTokens: result.completionTokens,
-    costUsd: 0.003,
+    tokens: { input: result.promptTokens, output: result.completionTokens },
+    costs: { total: 0.003 },
+    costUnit: 'usd',
     latencyMs: 800,
   });
 

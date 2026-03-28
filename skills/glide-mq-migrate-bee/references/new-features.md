@@ -359,9 +359,9 @@ Track model, tokens, cost, and latency per job.
 await job.reportUsage({
   model: 'gpt-5.4',
   provider: 'openai',
-  inputTokens: 500,
-  outputTokens: 200,
-  costUsd: 0.003,
+  tokens: { input: 500, output: 200 },
+  costs: { total: 0.003 },
+  costUnit: 'usd',
   latencyMs: 800,
 });
 ```
@@ -394,7 +394,7 @@ Cap total tokens/cost across all jobs in a workflow flow.
 
 ```typescript
 await flow.add(flowTree, {
-  budget: { maxTotalTokens: 50_000, maxCostUsd: 0.50 },
+  budget: { maxTotalTokens: 50_000, maxTotalCost: 0.50, costUnit: 'usd' },
 });
 ```
 
@@ -431,7 +431,7 @@ Aggregate AI usage across all jobs in a flow.
 
 ```typescript
 const usage = await queue.getFlowUsage(parentJobId);
-// { totalInputTokens, totalOutputTokens, totalCostUsd, jobCount, models }
+// { tokens, totalTokens, costs, totalCost, costUnit, jobCount, models }
 ```
 
 ### Vector Search
