@@ -120,12 +120,12 @@ See [Usage - AI-native primitives](docs/USAGE.md#ai-native-primitives) for full 
 
 Benchmarked on AWS ElastiCache Valkey 8.2 (r7g.large) with TLS, EC2 client in the same region.
 
-| Concurrency |   glide-mq |     BullMQ | Delta |
-| :---------: | ---------: | ---------: | :---: |
-|     c=5     | 10,754 j/s |  9,866 j/s |  +9%  |
-|    c=10     | 18,218 j/s | 13,541 j/s | +35%  |
-|    c=15     | 19,583 j/s | 14,162 j/s | +38%  |
-|    c=20     | 19,408 j/s | 16,085 j/s | +21%  |
+| Concurrency |   glide-mq | Leading Alternative | Delta |
+| :---------: | ---------: | ------------------: | :---: |
+|     c=5     | 10,754 j/s |          9,866 j/s  |  +9%  |
+|    c=10     | 18,218 j/s |         13,541 j/s  | +35%  |
+|    c=15     | 19,583 j/s |         14,162 j/s  | +38%  |
+|    c=20     | 19,408 j/s |         16,085 j/s  | +21%  |
 
 The advantage comes from completing and fetching the next job in a single FCALL. The savings compound over real network latency - exactly the conditions in every production deployment. At high concurrency both libraries converge toward the Valkey single-thread ceiling.
 
@@ -166,7 +166,7 @@ All examples live in [glidemq-examples](https://github.com/avifenesh/glidemq-exa
 | [Step Jobs](docs/STEP_JOBS.md)         | Step-job workflows with moveToDelayed                       |
 | [Durability](docs/DURABILITY.md)       | Durability guarantees, persistence, delivery semantics      |
 | [Architecture](docs/ARCHITECTURE.md)   | Internal architecture and design reference                  |
-| [Migration](docs/MIGRATION.md)         | Coming from BullMQ - API mapping guide                      |
+| [Migration](docs/MIGRATION.md)         | API mapping guide for migrating from other queues           |
 
 ## Ecosystem
 
