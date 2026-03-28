@@ -191,6 +191,7 @@ const connection = {
 | - | `readFrom: 'AZAffinity'` | glide-mq only |
 | - | `clientAz` | glide-mq only |
 | - | `credentials: { type: 'iam' }` | glide-mq only |
+| - | `requestTimeout` | Command timeout in ms (default: 500). glide-mq only |
 
 ---
 

@@ -52,6 +52,7 @@ const result = await queue.addAndWait(name, data, {
 | `deduplication` | `{ id, mode, ttl? }` | - | Modes: `'simple'`, `'throttle'`, `'debounce'`. Returns `null` when skipped. |
 | `ordering` | `{ key, concurrency?, rateLimit?, tokenBucket? }` | - | Per-key sequential/grouped processing |
 | `cost` | `number` | 1 | Token cost for token bucket rate limiting |
+| `lockDuration` | `number` (ms) | - | Override worker-level lockDuration for this job. Controls heartbeat frequency and stall threshold. |
 | `fallbacks` | `Array<{ model, provider?, metadata? }>` | - | Ordered fallback chain for model/provider failover |
 
 > **Note:** Compression is not a per-job option. Set `compression: 'gzip'` at Queue level in the Queue constructor.

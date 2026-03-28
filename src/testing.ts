@@ -275,17 +275,6 @@ export interface TestQueueOptions {
   serializer?: Serializer;
 }
 
-/**
- * In-memory test double for Queue. Suitable for unit tests without Valkey.
- *
- * Known limitations vs real Queue:
- * - No ordering key / concurrency group support
- * - No global concurrency or rate limiting
- * - No DAG / parent-child flows
- * - No batch processing
- * - repeatAfterComplete behaves like 'every'
- * - No sandbox processor support
- */
 /** Budget state stored in-memory for testing mode. */
 interface TestBudgetState {
   maxTotalTokens?: number;
@@ -302,6 +291,17 @@ interface TestBudgetState {
   onExceeded: 'pause' | 'fail';
 }
 
+/**
+ * In-memory test double for Queue. Suitable for unit tests without Valkey.
+ *
+ * Known limitations vs real Queue:
+ * - No ordering key / concurrency group support
+ * - No global concurrency or rate limiting
+ * - No DAG / parent-child flows
+ * - No batch processing
+ * - repeatAfterComplete behaves like 'every'
+ * - No sandbox processor support
+ */
 export class TestQueue<D = any, R = any> extends EventEmitter {
   readonly name: string;
   /** @internal */ readonly jobs: Map<string, TestJobRecord<D, R>> = new Map();
@@ -633,6 +633,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     return result;
   }
 
+  /** Upsert a job scheduler (repeatable/cron job). */
   async upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void> {
     validateSchedulerEvery(schedule.every);
     if (schedule.repeatAfterComplete != null) {
@@ -703,17 +704,20 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     this.ensureSchedulerLoop();
   }
 
+  /** Remove a job scheduler by name. */
   async removeJobScheduler(name: string): Promise<void> {
     this.schedulers.delete(name);
     this.ensureSchedulerLoop();
   }
 
+  /** Get a single job scheduler entry by name. Returns null if not found. */
   async getJobScheduler(name: string): Promise<SchedulerEntry | null> {
     const entry = this.schedulers.get(name);
     if (!entry) return null;
     return JSON.parse(JSON.stringify(entry));
   }
 
+  /** Get all registered job schedulers. */
   async getRepeatableJobs(): Promise<{ name: string; entry: SchedulerEntry }[]> {
     return [...this.schedulers.entries()].map(([name, entry]) => ({
       name,
@@ -721,7 +725,10 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }));
   }
 
-  /** Close the queue. */
+  /**
+   * Aggregate AI usage metadata across a flow (parent + children).
+   * Walks all jobs whose parent matches parentJobId and sums token counts, cost, and model usage.
+   */
   async getFlowUsage(parentJobId: string): Promise<{
     tokens: Record<string, number>;
     totalTokens: number;
@@ -894,6 +901,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     return budget.exceeded ? 'exceeded' : 'ok';
   }
 
+  /** Read entries from a job's streaming channel. */
   async readStream(
     jobId: string,
     opts?: { lastId?: string; count?: number; block?: number },
@@ -1028,6 +1036,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }));
   }
 
+  /** Close the queue, clear timers, and detach all workers. */
   async close(): Promise<void> {
     this.clearSchedulerTimer();
     this.removeAllListeners();
@@ -1173,6 +1182,7 @@ export interface TestWorkerOptions {
   };
 }
 
+/** In-memory test double for Worker. Processes jobs from a TestQueue without Valkey. */
 export class TestWorker<D = any, R = any> extends EventEmitter {
   private static idCounter = 0;
   readonly id: string;

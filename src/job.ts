@@ -25,6 +25,11 @@ function tryParseJson(s: string): any {
   }
 }
 
+/**
+ * Represents a single job in the queue.
+ * Provides methods for reporting usage, streaming chunks, managing state,
+ * and interacting with the job lifecycle (delay, suspend, retry, etc.).
+ */
 export class Job<D = any, R = any> {
   readonly id: string;
   readonly name: string;

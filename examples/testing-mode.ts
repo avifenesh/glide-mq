@@ -8,7 +8,7 @@
  *
  * Run: npx tsx examples/testing-mode.ts
  */
-import { TestQueue, TestWorker } from 'glide-mq/testing';
+import { TestQueue, TestWorker } from '../dist/testing';
 
 let passed = 0;
 let failed = 0;

@@ -203,30 +203,26 @@ const jobs = await dag(
 
 ### Reading results from multiple parents
 
-Use `job.getParents()` to fetch all parent jobs and their results:
+Use `job.getParents()` to list all parent references, then fetch each parent job to read its result:
 
 ```typescript
 const worker = new Worker(
   'tasks',
   async (job) => {
     if (job.name === 'D') {
-      const parents = await job.getParents();
-      // parents is an array of Job instances
-      const results = parents.map((p) => p.returnvalue);
+      const parentRefs = await job.getParents();
+      // parentRefs: Array<{ queue: string; id: string }>
+      // Fetch each parent job to read its return value:
+      const results = [];
+      for (const ref of parentRefs) {
+        const parentJob = await queue.getJob(ref.id);
+        if (parentJob) results.push(parentJob.returnvalue);
+      }
       return { merged: results };
     }
   },
   { connection },
 );
-```
-
-Alternatively, manually fetch specific parents if you know their IDs:
-
-```typescript
-const parentB = await Job.fromId(queue, 'B-job-id');
-const parentC = await Job.fromId(queue, 'C-job-id');
-const resultB = parentB?.returnvalue;
-const resultC = parentC?.returnvalue;
 ```
 
 ---

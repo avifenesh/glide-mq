@@ -11,6 +11,7 @@ interface ConnectionOptions {
   readFrom?: ReadFrom;
   clientAz?: string;
   inflightRequestsLimit?: number;  // default: 1000
+  requestTimeout?: number;         // command timeout in ms, default: 500
 }
 ```
 
@@ -153,6 +154,17 @@ Default 1000. At Worker concurrency=50, peak inflight is ~55 commands.
 const connection = {
   addresses: [{ host: 'localhost' }],
   inflightRequestsLimit: 2000,
+};
+```
+
+### requestTimeout
+
+Command timeout in milliseconds. Default: 500. Commands exceeding this throw a `TimeoutError`. Increase for operations that may take longer (e.g. `FT.CREATE` with many existing keys, `FUNCTION LOAD` with large libraries).
+
+```typescript
+const connection = {
+  addresses: [{ host: 'localhost', port: 6379 }],
+  requestTimeout: 2000,  // 2 seconds
 };
 ```
 

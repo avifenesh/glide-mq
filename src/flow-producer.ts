@@ -26,6 +26,10 @@ export interface JobNode {
 const LATE_PARENT_RECONCILE_ATTEMPTS = 5;
 const LATE_PARENT_RECONCILE_DELAY_MS = 10;
 
+/**
+ * Creates parent-child job flows and DAG workflows.
+ * Children are processed first; the parent runs after all children complete.
+ */
 export class FlowProducer {
   private opts: FlowProducerOptions;
   private client: Client | null = null;

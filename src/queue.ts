@@ -117,6 +117,10 @@ function mapSearchQueryOptions(opts: SearchQueryOptions): Record<string, any> {
   return result;
 }
 
+/**
+ * Queue manages job submission, retrieval, scheduling, and lifecycle operations.
+ * Connects to Valkey/Redis and uses server-side functions for atomic operations.
+ */
 export class Queue<D = any, R = any> extends EventEmitter {
   readonly name: string;
   private opts: QueueOptions;

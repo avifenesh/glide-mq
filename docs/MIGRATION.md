@@ -503,12 +503,20 @@ The processor function signature is identical. The only change is the connection
 | -                                                            | `queue.setGlobalRateLimit({ max, duration })`                           | glide-mq only      |
 | -                                                            | `queue.getGlobalRateLimit()`                                            | glide-mq only      |
 | -                                                            | `queue.removeGlobalRateLimit()`                                         | glide-mq only      |
+| -                                                            | `queue.getFlowUsage(parentJobId)`                                       | glide-mq only      |
+| -                                                            | `queue.getFlowBudget(flowId)`                                           | glide-mq only      |
+| -                                                            | `queue.readStream(jobId, opts?)`                                        | glide-mq only      |
+| -                                                            | `queue.signal(jobId, name, data?)`                                      | glide-mq only      |
+| -                                                            | `queue.getSuspendInfo(jobId)`                                           | glide-mq only      |
+| -                                                            | `queue.rateLimitGroup(groupKey, duration, opts?)`                       | glide-mq only      |
+| -                                                            | `queue.createJobIndex(opts?)`                                           | glide-mq only      |
+| -                                                            | `queue.vectorSearch(embedding, opts?)`                                  | glide-mq only      |
 
 ### Worker methods and options
 
 | BullMQ                                                                                                                        | glide-mq                                                                                                                                                  | Status  |
 | ----------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `new Worker(name, processor, { connection, concurrency, limiter, stalledInterval, maxStalledCount, lockDuration, settings })` | `new Worker(name, processor, { connection, concurrency, globalConcurrency, limiter, stalledInterval, maxStalledCount, lockDuration, backoffStrategies })` | Changed |
+| `new Worker(name, processor, { connection, concurrency, limiter, stalledInterval, maxStalledCount, lockDuration, settings })` | `new Worker(name, processor, { connection, concurrency, globalConcurrency, limiter, tokenLimiter, stalledInterval, maxStalledCount, lockDuration, backoffStrategies })` | Changed |
 | `worker.pause(doNotWaitActive?)`                                                                                              | `worker.pause(force?)`                                                                                                                                    | Full    |
 | `worker.resume()`                                                                                                             | `worker.resume()`                                                                                                                                         | Full    |
 | `worker.close(force?)`                                                                                                        | `worker.close(force?)`                                                                                                                                    | Full    |
@@ -549,6 +557,15 @@ The processor function signature is identical. The only change is the connection
 | `job.toJSON()`                                                                                | -                                                  | Use `job.data`, `job.opts`, etc. directly                   |
 | -                                                                                             | `job.abortSignal`                                  | glide-mq only                                               |
 | -                                                                                             | `job.isRevoked()`                                  | glide-mq only                                               |
+| -                                                                                             | `job.reportUsage(usage)`                           | glide-mq only                                               |
+| -                                                                                             | `job.reportTokens(count)`                          | glide-mq only                                               |
+| -                                                                                             | `job.stream(chunk)`                                | glide-mq only                                               |
+| -                                                                                             | `job.streamChunk(type, content?)`                  | glide-mq only                                               |
+| -                                                                                             | `job.suspend(opts?)`                               | glide-mq only                                               |
+| -                                                                                             | `job.storeVector(field, embedding)`                | glide-mq only                                               |
+| -                                                                                             | `job.rateLimitGroup(duration, opts?)`              | glide-mq only                                               |
+| -                                                                                             | `job.getParents()`                                 | glide-mq only                                               |
+| -                                                                                             | `job.currentFallback`                              | glide-mq only                                               |
 
 ### JobOptions
 
@@ -572,6 +589,10 @@ The processor function signature is identical. The only change is the connection
 | -                   | `ordering.rateLimit`   | glide-mq only                                                      |
 | -                   | `ordering.tokenBucket` | glide-mq only                                                      |
 | -                   | `cost`                 | glide-mq only                                                      |
+| -                   | `ttl`                  | glide-mq only                                                      |
+| -                   | `lockDuration`         | glide-mq only                                                      |
+| -                   | `fallbacks`            | glide-mq only                                                      |
+| -                   | `parents`              | glide-mq only (DAG multi-parent)                                   |
 
 ### QueueEvents events
 
@@ -1100,9 +1121,8 @@ const queue = new Queue('tasks', {
   },
 });
 
-// Retrieve DLQ jobs:
-const dlqQueue = new Queue('tasks-dlq', { connection });
-const dlqJobs = await dlqQueue.getDeadLetterJobs();
+// Retrieve DLQ jobs (called on the original queue, not the DLQ):
+const dlqJobs = await queue.getDeadLetterJobs();
 ```
 
 If you were managing a DLQ manually in BullMQ (e.g., moving jobs in the `failed` handler), switch to the native option above.
@@ -1247,15 +1267,27 @@ const connection = {
 
 **Batch processing** - `batch: { size, timeout }` worker option to receive multiple jobs in a single processor invocation. The processor receives an array of jobs and can return per-job results. BullMQ has no native batch mode.
 
-**Step jobs** - `job.moveToDelayed(timestampMs, nextStep?)` accepts an optional `nextStep` token so a processor can implement multi-step state machines. On re-entry, check `job.data.__step` (or your own field) to resume at the right step. BullMQ's `moveToDelayed` has no step parameter.
+**Step jobs** - `job.moveToDelayed(timestampMs, nextStep?)` accepts an optional `nextStep` token so a processor can implement multi-step state machines. On re-entry, check `job.data.step` to resume at the right step. BullMQ's `moveToDelayed` has no step parameter.
 
-**repeatAfterComplete** - Scheduler mode where the next job is enqueued only after the previous one completes, guaranteeing no overlap. Set via `upsertJobScheduler('name', { repeatAfterComplete: true, every: 60000 }, template)`. BullMQ has no equivalent.
+**repeatAfterComplete** - Scheduler mode where the next job is enqueued only after the previous one completes, guaranteeing no overlap. Set via `upsertJobScheduler('name', { repeatAfterComplete: 60000 }, template)` where the value is the delay in ms after completion. Mutually exclusive with `pattern` and `every`. BullMQ has no equivalent.
 
 **Pluggable serializers** - Pass a custom `{ serialize, deserialize }` object to `QueueOptions` and `WorkerOptions` to use MessagePack, Protobuf, or any format instead of JSON. BullMQ only supports JSON.
 
 **Job TTL** - `opts.ttl` auto-expires a job after the given number of milliseconds. If the job has not completed before the TTL elapses, it is moved to failed. BullMQ has no built-in TTL.
 
 **excludeData** - `queue.getJobs(type, start, end, { excludeData: true })` returns jobs without their `data` field, useful for lightweight dashboard listings of large-payload queues.
+
+**AI-native primitives** - Seven built-in primitives for LLM and agent workflows. BullMQ has none of these:
+
+- `job.reportUsage({ model, tokens, costs, latencyMs })` - per-job AI usage tracking with extensible token/cost categories
+- `job.stream(chunk)` / `job.streamChunk(type, content?)` - real-time LLM token streaming via per-job Valkey streams
+- `job.suspend(opts?)` / `queue.signal(jobId, name, data?)` - human-in-the-loop suspend/resume with external signals
+- `opts.fallbacks` / `job.currentFallback` - ordered model/provider failover chains
+- `tokenLimiter` on WorkerOptions - tokens-per-minute rate limiting alongside RPM
+- `FlowProducer.add(flow, { budget })` - flow-level token and cost caps with per-category limits and weighted totals
+- `opts.lockDuration` per job - adaptive stall detection for mixed fast/slow workloads
+
+**Vector search** - `queue.createJobIndex()`, `job.storeVector()`, `queue.vectorSearch()` for KNN similarity queries over job data via Valkey Search. BullMQ has no search integration.
 
 ---
 

@@ -42,11 +42,13 @@ All keys share a hash tag `{queueName}` to ensure cluster slot co-location. Defa
 | `glide:{queueName}:job:{id}`        | Hash       | Individual job data                                           |
 | `glide:{queueName}:log:{id}`        | List       | Per-job log entries                                           |
 | `glide:{queueName}:deps:{id}`       | Set        | Child job IDs for parent (flows)                              |
+| `glide:{queueName}:parents:{id}`    | Set        | Parent references for DAG multi-parent jobs                   |
 | `glide:{queueName}:ordering`        | Hash       | Per-key sequence counters                                     |
 | `glide:{queueName}:group:{key}`     | Hash       | Group state (concurrency, rate limit, token bucket)           |
-| `glide:{queueName}:groupq:{key}`    | List       | FIFO wait list for group-limited jobs                         |
+| `glide:{queueName}:groupq:{key}`    | Sorted Set | Ordered wait list for group-limited jobs (score = orderingSeq)|
 | `glide:{queueName}:ratelimited`     | Sorted Set | Rate-limited group promotion queue                            |
 | `glide:{queueName}:schedulers`      | Hash       | Job scheduler configs                                         |
+| `glide:{queueName}:lifo`            | List       | LIFO queue (jobs with lifo:true, consumed via RPOP)           |
 | `glide:{queueName}:jstream:{id}`    | Stream     | Per-job streaming channel                                     |
 | `glide:{queueName}:signals:{id}`    | List       | Signals delivered to a suspended job                          |
 | `glide:{queueName}:suspended`       | Sorted Set | Suspended jobs (score = timeout deadline)                     |
@@ -650,7 +652,16 @@ Atomically increments usage counters and checks budget limits.
 
 ### Keys (1): glide:{queueName}:budget:{flowId}
 
-### Args (2): tokens (string number), cost (string number)
+### Args (6)
+
+| Position | Name          | Type          | Description                                                        |
+| -------- | ------------- | ------------- | ------------------------------------------------------------------ |
+| 1        | tokensJson    | string (JSON) | Per-category token counts (e.g. `{"input":100,"output":50}`)       |
+| 2        | costsJson     | string (JSON) | Per-category cost amounts (e.g. `{"total":0.003}`)                 |
+| 3        | weightedTotal | string (num)  | Pre-computed weighted token total for maxTotalTokens check         |
+| 4        | totalCost     | string (num)  | Pre-computed total cost for maxTotalCost check                     |
+| 5        | maxTokensJson | string (JSON) | Per-category token caps from budget (e.g. `{"input":5000}`)       |
+| 6        | maxCostsJson  | string (JSON) | Per-category cost caps from budget (e.g. `{"total":1.0}`)         |
 
 Returns "no_budget", "ok", or "exceeded".
 

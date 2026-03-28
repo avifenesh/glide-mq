@@ -25,6 +25,7 @@ export interface IamCredentials {
   refreshIntervalSeconds?: number;
 }
 
+/** Options for connecting to a Valkey/Redis server or cluster. */
 export interface ConnectionOptions {
   addresses: { host: string; port: number }[];
   useTLS?: boolean;
@@ -60,6 +61,7 @@ export interface ConnectionOptions {
   requestTimeout?: number;
 }
 
+/** Configuration for dead letter queue routing. */
 export interface DeadLetterQueueOptions {
   /** Queue name to use as the dead letter queue. */
   name: string;
@@ -67,6 +69,7 @@ export interface DeadLetterQueueOptions {
   maxRetries?: number;
 }
 
+/** Configuration options for creating a Queue instance. */
 export interface QueueOptions {
   /** Connection options for creating a new client. Required unless `client` is provided. */
   connection?: ConnectionOptions;
@@ -94,6 +97,7 @@ export interface QueueOptions {
   events?: boolean;
 }
 
+/** Options for sandboxed (file-path) processors running in worker threads or child processes. */
 export interface SandboxOptions {
   /** Use worker_threads (default: true). When false, uses child_process.fork. */
   useWorkerThreads?: boolean;
@@ -101,6 +105,7 @@ export interface SandboxOptions {
   maxWorkers?: number;
 }
 
+/** Configuration options for creating a Worker instance. Extends QueueOptions. */
 export interface WorkerOptions extends QueueOptions {
   /**
    * Pre-existing GLIDE client for non-blocking commands (alias for `client`).
@@ -149,11 +154,13 @@ export interface WorkerOptions extends QueueOptions {
   metrics?: boolean;
 }
 
+/** Configuration options for a Broadcast (pub/sub) queue. */
 export interface BroadcastOptions extends QueueOptions {
   /** Max messages to retain in stream (must be a positive integer). Trimmed exactly (hard limit) on each publish. Opt-in; no trimming by default. */
   maxMessages?: number;
 }
 
+/** Configuration options for a BroadcastWorker (subscriber). */
 export interface BroadcastWorkerOptions extends WorkerOptions {
   /** Subscription name - becomes the consumer group name. Required for broadcast workers. */
   subscription: string;
@@ -184,6 +191,7 @@ export interface BroadcastWorkerOptions extends WorkerOptions {
   subjects?: string[];
 }
 
+/** Options for controlling individual job behavior (delay, priority, retry, etc.). */
 export interface JobOptions {
   /**
    * Custom job ID. Max 256 characters, must not contain control characters,
@@ -242,11 +250,13 @@ export interface JobOptions {
   }>;
 }
 
+/** Options for Queue.addAndWait(). Extends JobOptions with a wait timeout. */
 export interface AddAndWaitOptions extends JobOptions {
   /** Maximum time to wait for a completed/failed event before rejecting. Default: 30000ms. */
   waitTimeout?: number;
 }
 
+/** Configuration for time-window rate limiting. */
 export interface RateLimitConfig {
   /** Maximum jobs allowed within the time window. */
   max: number;
@@ -254,6 +264,7 @@ export interface RateLimitConfig {
   duration: number;
 }
 
+/** Configuration for token bucket rate limiting with burst capacity and refill rate. */
 export interface TokenBucketConfig {
   /** Maximum bucket capacity in tokens (burst size). */
   capacity: number;
@@ -284,12 +295,14 @@ export const JSON_SERIALIZER: Serializer = {
   deserialize: (raw) => JSON.parse(raw),
 };
 
+/** Generic job data payload type. */
 export interface JobData {
   [key: string]: unknown;
 }
 
 export type Processor<D = any, R = any> = (job: import('./job').Job<D, R>) => Promise<R>;
 
+/** Configuration for batch processing mode. */
 export interface BatchOptions {
   /** Maximum number of jobs to collect before invoking the batch processor. */
   size: number;
@@ -412,6 +425,7 @@ export interface VectorSearchResult<D = any, R = any> {
   score: number;
 }
 
+/** Definition of a job within a flow (parent-child hierarchy). */
 export interface FlowJob {
   name: string;
   queueName: string;
@@ -420,6 +434,7 @@ export interface FlowJob {
   children?: FlowJob[];
 }
 
+/** Configuration options for creating a FlowProducer instance. */
 export interface FlowProducerOptions {
   /** Connection options for creating a new client. Required unless `client` is provided. */
   connection?: ConnectionOptions;
@@ -438,6 +453,7 @@ export interface FlowProducerOptions {
   serializer?: Serializer;
 }
 
+/** Configuration options for creating a QueueEvents listener. */
 export interface QueueEventsOptions {
   connection: ConnectionOptions;
   prefix?: string;
@@ -447,6 +463,7 @@ export interface QueueEventsOptions {
   blockTimeout?: number;
 }
 
+/** Options for defining a job schedule (cron, interval, or repeat-after-complete). */
 export interface ScheduleOpts {
   /** Cron pattern (5 fields: minute hour dayOfMonth month dayOfWeek) */
   pattern?: string;
@@ -467,12 +484,14 @@ export interface ScheduleOpts {
   limit?: number;
 }
 
+/** Template for jobs created by a scheduler. */
 export interface JobTemplate {
   name?: string;
   data?: any;
   opts?: Omit<JobOptions, 'delay' | 'deduplication' | 'parent'>;
 }
 
+/** Stored state of a registered job scheduler. */
 export interface SchedulerEntry {
   pattern?: string;
   every?: number;
@@ -489,6 +508,7 @@ export interface SchedulerEntry {
   nextRun: number;
 }
 
+/** A single per-minute metrics data point. */
 export interface MetricsDataPoint {
   /** Minute-bucket epoch ms (floored to start of minute). */
   timestamp: number;
@@ -498,6 +518,7 @@ export interface MetricsDataPoint {
   avgDuration: number;
 }
 
+/** Options for querying metrics data points. */
 export interface MetricsOptions {
   /** Start index for data points (default 0). */
   start?: number;
@@ -505,6 +526,7 @@ export interface MetricsOptions {
   end?: number;
 }
 
+/** Aggregated metrics result with total count and per-minute data points. */
 export interface Metrics {
   /** Total count of completed or failed jobs. */
   count: number;
@@ -514,6 +536,7 @@ export interface Metrics {
   meta: { resolution: 'minute' };
 }
 
+/** Count of jobs in each state. */
 export interface JobCounts {
   waiting: number;
   active: number;
@@ -522,11 +545,13 @@ export interface JobCounts {
   failed: number;
 }
 
+/** Options for getJob() and getJobs() methods. */
 export interface GetJobsOptions {
   /** When true, excludes `data` and `returnvalue` fields from returned jobs. */
   excludeData?: boolean;
 }
 
+/** Options for searchJobs() method. */
 export interface SearchJobsOptions {
   state?: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed';
   name?: string;
@@ -536,6 +561,7 @@ export interface SearchJobsOptions {
   excludeData?: boolean;
 }
 
+/** Information about a live worker instance. */
 export interface WorkerInfo {
   id: string;
   addr: string;
@@ -570,6 +596,7 @@ export interface DAGFlow {
   nodes: DAGNode[];
 }
 
+/** Options for readStream() - reading entries from a job's streaming channel. */
 export interface ReadStreamOptions {
   lastId?: string;
   count?: number;

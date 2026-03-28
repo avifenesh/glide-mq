@@ -233,14 +233,23 @@ Arbitrary directed acyclic graphs where a job can depend on multiple parents (Bu
 ```ts
 import { FlowProducer, dag } from 'glide-mq';
 
-const flow = new FlowProducer({ connection });
-
-// Using the dag() helper for fan-in patterns
-await flow.addDAG(dag([
+// Option 1: dag() helper - standalone, creates its own FlowProducer
+const jobs = await dag([
   { name: 'fetch-a', queueName: 'tasks', data: { source: 'a' } },
   { name: 'fetch-b', queueName: 'tasks', data: { source: 'b' } },
   { name: 'aggregate', queueName: 'tasks', data: {}, deps: ['fetch-a', 'fetch-b'] },
-], connection));
+], connection);
+
+// Option 2: FlowProducer.addDAG() - when you manage the FlowProducer
+const flow = new FlowProducer({ connection });
+const jobs2 = await flow.addDAG({
+  nodes: [
+    { name: 'fetch-a', queueName: 'tasks', data: { source: 'a' } },
+    { name: 'fetch-b', queueName: 'tasks', data: { source: 'b' } },
+    { name: 'aggregate', queueName: 'tasks', data: {}, deps: ['fetch-a', 'fetch-b'] },
+  ],
+});
+await flow.close();
 ```
 
 ---

@@ -1,3 +1,4 @@
+/** Base error class for all glide-mq errors. */
 export class GlideMQError extends Error {
   constructor(message: string) {
     super(message);
@@ -5,6 +6,7 @@ export class GlideMQError extends Error {
   }
 }
 
+/** Thrown when a Valkey/Redis connection cannot be established. */
 export class ConnectionError extends GlideMQError {
   constructor(message: string) {
     super(message);
@@ -12,6 +14,7 @@ export class ConnectionError extends GlideMQError {
   }
 }
 
+/** Thrown to signal a job failure that should never be retried, regardless of attempts config. */
 export class UnrecoverableError extends GlideMQError {
   constructor(message: string) {
     super(message);
@@ -19,6 +22,7 @@ export class UnrecoverableError extends GlideMQError {
   }
 }
 
+/** Thrown by batch processors to report per-job results (mixed success/failure). */
 export class BatchError extends GlideMQError {
   readonly results: (unknown | Error)[];
 
@@ -29,6 +33,7 @@ export class BatchError extends GlideMQError {
   }
 }
 
+/** Internal control-flow error thrown by `job.moveToDelayed()`. Caught by the Worker. */
 export class DelayedError extends GlideMQError {
   readonly delayedUntil: number;
 
@@ -42,6 +47,7 @@ export class DelayedError extends GlideMQError {
   }
 }
 
+/** Internal control-flow error thrown by `job.moveToWaitingChildren()`. Caught by the Worker. */
 export class WaitingChildrenError extends GlideMQError {
   constructor(message = 'Job moved to waiting-children state') {
     super(message);
@@ -49,6 +55,7 @@ export class WaitingChildrenError extends GlideMQError {
   }
 }
 
+/** Internal control-flow error thrown by `job.suspend()`. Caught by the Worker. */
 export class SuspendError extends GlideMQError {
   constructor() {
     super('Job suspended');
@@ -56,6 +63,7 @@ export class SuspendError extends GlideMQError {
   }
 }
 
+/** Options controlling behavior when `job.rateLimitGroup()` is called. */
 export interface GroupRateLimitOptions {
   /** What happens to the current job. Default: 'requeue' (re-parks without consuming retry). */
   currentJob?: 'requeue' | 'fail';
@@ -65,6 +73,7 @@ export interface GroupRateLimitOptions {
   extend?: 'max' | 'replace';
 }
 
+/** Internal control-flow error thrown by `job.rateLimitGroup()`. Caught by the Worker. */
 export class GroupRateLimitError extends GlideMQError {
   readonly delayMs: number;
   readonly opts: Required<GroupRateLimitOptions>;

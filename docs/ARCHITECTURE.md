@@ -19,6 +19,7 @@ glide:{queueName}:events                # Stream - lifecycle events (completed, 
 glide:{queueName}:meta                  # Hash - queue metadata (paused, concurrency, rate limiter state,
                                 #        rateLimitMax, rateLimitDuration for global rate limit)
 glide:{queueName}:deps:{id}             # Set - child job IDs for parent (flows)
+glide:{queueName}:parents:{id}          # Set - parent references for DAG multi-parent jobs
 glide:{queueName}:parent:{id}           # Hash - parent queue + job ID reference
 glide:{queueName}:dedup                 # Hash - field=dedup_id, value=job_id|timestamp
 glide:{queueName}:rate                  # Hash - rate limiter counters (window start, count)
@@ -29,7 +30,8 @@ glide:{queueName}:group:{key}           # Hash - group state (active count, maxC
                                 #        rateMax, rateDuration, rateWindowStart, rateCount,
                                 #        tbCapacity, tbTokens, tbRefillRate, tbLastRefill,
                                 #        tbRefillRemainder)
-glide:{queueName}:groupq:{key}          # List - FIFO wait list for group-limited jobs
+glide:{queueName}:groupq:{key}          # ZSet - ordered wait list for group-limited jobs (score = orderingSeq)
+glide:{queueName}:lifo                   # List - LIFO queue (jobs with lifo:true, consumed via RPOP)
 glide:{queueName}:jstream:{id}           # Stream - per-job streaming channel (LLM token output)
 glide:{queueName}:signals:{id}           # List - signals delivered to a suspended job
 glide:{queueName}:suspended              # ZSet - suspended jobs (score = timeout deadline)
@@ -270,6 +272,18 @@ class Queue<D = any, R = any> extends EventEmitter {
   getJobScheduler(name: string): Promise<SchedulerEntry | null>;
   getRepeatableJobs(): Promise<{ name: string; entry: SchedulerEntry }[]>;
   removeJobScheduler(name: string): Promise<void>;
+
+  // AI primitives
+  getFlowUsage(parentJobId: string): Promise<FlowUsage>;
+  getFlowBudget(flowId: string): Promise<FlowBudget | null>;
+  readStream(jobId: string, opts?: ReadStreamOptions): Promise<StreamEntry[]>;
+  signal(jobId: string, name: string, data?: any): Promise<boolean>;
+  getSuspendInfo(jobId: string): Promise<SuspendInfo | null>;
+  rateLimitGroup(groupKey: string, duration: number, opts?: GroupRateLimitOptions): Promise<void>;
+
+  // Vector search
+  createJobIndex(opts?: JobIndexOptions): Promise<void>;
+  vectorSearch(embedding: number[] | Float32Array, opts?: VectorSearchOptions): Promise<VectorSearchResult[]>;
 }
 ```
 
@@ -305,9 +319,12 @@ interface WorkerOptions {
   maxStalledCount?: number; // max reclaims before fail
   promotionInterval?: number; // delayed job promotion interval
   limiter?: { max: number; duration: number };
+  tokenLimiter?: { maxTokens: number; duration: number; scope?: 'queue' | 'worker' | 'both' };
   backoffStrategies?: Record<string, (attemptsMade: number, err: Error) => number>;
   sandbox?: SandboxOptions; // run processor in child process/thread
   batch?: { size: number; timeout?: number }; // batch processing mode
+  events?: boolean; // skip XADD event emission (default: true)
+  metrics?: boolean; // skip HINCRBY metrics recording (default: true)
 }
 ```
 
@@ -328,11 +345,21 @@ class Job<D = any, R = any> {
   processedOn: number | undefined;
   parentId?: string;
   parentQueue?: string;
+  parentIds?: string[];
+  parentQueues?: string[];
   orderingKey?: string;
   groupKey?: string;
   cost?: number;
+  expireAt?: number;
+  schedulerName?: string;
+  budgetKey?: string;
+  fallbackIndex: number;
+  usage?: JobUsage;
+  tpmTokens?: number;
   abortSignal?: AbortSignal;
+  signals: SignalEntry[];
   discarded: boolean;
+  deserializationFailed: boolean;
 
   // Lifecycle
   log(message: string): Promise<void>;
@@ -345,11 +372,25 @@ class Job<D = any, R = any> {
   changePriority(newPriority: number): Promise<void>;
   changeDelay(newDelay: number): Promise<void>;
   moveToDelayed(timestampMs: number, nextStep?: string): Promise<never>;
+  moveToWaitingChildren(): Promise<never>;
   promote(): Promise<void>;
   waitUntilFinished(pollIntervalMs?: number, timeoutMs?: number): Promise<'completed' | 'failed'>;
+  suspend(opts?: SuspendOptions & { onResume?: (signals: SignalEntry[]) => Promise<any> }): Promise<never>;
+  rateLimitGroup(duration: number, opts?: GroupRateLimitOptions): Promise<never>;
+
+  // AI primitives
+  reportUsage(usage: JobUsage): Promise<void>;
+  reportTokens(count: number): Promise<void>;
+  stream(chunk: Record<string, string>): Promise<string>;
+  streamChunk(type: string, content?: string): Promise<string>;
+  storeVector(field: string, embedding: number[] | Float32Array): Promise<void>;
+
+  // Computed
+  get currentFallback(): { model: string; provider?: string; metadata?: Record<string, unknown> } | undefined;
 
   // Queries
   getChildrenValues(): Promise<Record<string, R>>;
+  getParents(): Promise<Array<{ queue: string; id: string }>>;
   getState(): Promise<string>;
   isCompleted(): Promise<boolean>;
   isFailed(): Promise<boolean>;
@@ -360,15 +401,28 @@ class Job<D = any, R = any> {
 }
 
 interface JobOptions {
+  jobId?: string;
   delay?: number;
   priority?: number; // 0 (highest) to 2^21
+  lifo?: boolean;
+  ordering?: {
+    key: string;
+    concurrency?: number;
+    rateLimit?: RateLimitConfig;
+    tokenBucket?: TokenBucketConfig;
+  };
+  cost?: number;
   attempts?: number;
   backoff?: { type: 'fixed' | 'exponential' | string; delay: number; jitter?: number };
   timeout?: number;
+  lockDuration?: number;
   removeOnComplete?: boolean | number | { age: number; count: number };
   removeOnFail?: boolean | number | { age: number; count: number };
   deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
   parent?: { queue: string; id: string };
+  parents?: Array<{ queue: string; id: string }>;
+  ttl?: number;
+  fallbacks?: Array<{ model: string; provider?: string; metadata?: Record<string, unknown> }>;
 }
 ```
 
@@ -390,8 +444,9 @@ class QueueEvents {
 ```typescript
 class FlowProducer {
   constructor(opts?: FlowProducerOptions);
-  add(flow: FlowJob): Promise<JobNode>;
+  add(flow: FlowJob, flowOpts?: { budget?: BudgetOptions }): Promise<JobNode>;
   addBulk(flows: FlowJob[]): Promise<JobNode[]>;
+  addDAG(dag: DAGFlow): Promise<Map<string, Job>>;
   close(): Promise<void>;
 }
 
@@ -507,7 +562,7 @@ Complex workflows with arbitrary dependency graphs are submitted via `FlowProduc
 
 ## Implementation History
 
-All phases are complete as of v0.13.0.
+All phases are complete as of v0.14.0.
 
 ### Phase 1: Core (Queue + Worker + Job) - Complete
 
