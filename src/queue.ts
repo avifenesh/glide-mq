@@ -81,6 +81,7 @@ import {
   retryJobs,
   rateLimitGroupExternal,
   signalJob,
+  sweepSuspended,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -89,6 +90,8 @@ const PIPELINE_CHUNK_SIZE = 1000;
 const SCHEDULER_LOCK_TTL_MS = 5000;
 const SCHEDULER_LOCK_RETRY_DELAY_MS = 25;
 const SCHEDULER_LOCK_MAX_ATTEMPTS = Math.ceil(SCHEDULER_LOCK_TTL_MS / SCHEDULER_LOCK_RETRY_DELAY_MS);
+const SUSPEND_SWEEP_INTERVAL_MS = 1000;
+const SUSPEND_SWEEP_LOCK_TTL_MS = 900;
 const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
 const MAX_USAGE_SUMMARY_KEY_READS = 100_000;
 const USAGE_MODEL_FIELD_PREFIX = 'models:';
@@ -261,6 +264,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
   private waitClients: Set<Client> = new Set();
   private waitRejectors: Set<(err: Error) => void> = new Set();
   private keys: QueueKeys;
+  private suspendedSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private suspendedSweepInFlight = false;
+  private suspendedSweepQueued = false;
 
   private serializer: Serializer;
   private skipEvents: boolean;
@@ -340,6 +346,76 @@ export class Queue<D = any, R = any> extends EventEmitter {
     return jobIds;
   }
 
+  private suspendSweepLockKey(): string {
+    return `${this.keys.suspended}:lock:__sweep__`;
+  }
+
+  private shouldStartSuspendSweepLoop(client: Client): boolean {
+    const ctorName = client?.constructor?.name;
+    return ctorName === 'GlideClient' || ctorName === 'GlideClusterClient';
+  }
+
+  private ensureSuspendSweepLoop(client: Client): void {
+    if (this.suspendedSweepTimer || this.closing || !this.shouldStartSuspendSweepLoop(client)) {
+      return;
+    }
+
+    this.suspendedSweepTimer = setInterval(() => {
+      this.runSuspendSweep(client);
+    }, SUSPEND_SWEEP_INTERVAL_MS);
+    this.suspendedSweepTimer.unref?.();
+  }
+
+  private clearSuspendSweepLoop(): void {
+    if (this.suspendedSweepTimer) {
+      clearInterval(this.suspendedSweepTimer);
+      this.suspendedSweepTimer = null;
+    }
+    this.suspendedSweepInFlight = false;
+    this.suspendedSweepQueued = false;
+  }
+
+  private runSuspendSweep(client: Client): void {
+    if (this.closing) return;
+    if (this.suspendedSweepInFlight) {
+      this.suspendedSweepQueued = true;
+      return;
+    }
+
+    this.suspendedSweepInFlight = true;
+    void this.sweepExpiredSuspended(client)
+      .catch((err) => {
+        if (this.listenerCount('error') > 0) {
+          this.emit('error', err instanceof Error ? err : new Error(String(err)));
+        }
+      })
+      .finally(() => {
+        this.suspendedSweepInFlight = false;
+        if (!this.closing && this.suspendedSweepQueued) {
+          this.suspendedSweepQueued = false;
+          this.runSuspendSweep(client);
+        }
+      });
+  }
+
+  private async sweepExpiredSuspended(client: Client): Promise<void> {
+    const lockKey = this.suspendSweepLockKey();
+    const token = randomBytes(8).toString('hex');
+    const acquired = await tryLock(client, lockKey, token, SUSPEND_SWEEP_LOCK_TTL_MS);
+    if (!acquired) return;
+
+    try {
+      const keyPrefix = this.keys.id.slice(0, -2);
+      await sweepSuspended(client, this.keys, Date.now(), keyPrefix);
+    } finally {
+      try {
+        await unlock(client, lockKey, token);
+      } catch {
+        // Best effort - the TTL ensures the sweep lock eventually expires.
+      }
+    }
+  }
+
   /** @internal */
   async getClient(): Promise<Client> {
     if (this.closing) {
@@ -373,6 +449,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         this.client = client;
         this.clientOwned = true;
       }
+      this.ensureSuspendSweepLoop(this.client);
     }
     return this.client;
   }
@@ -2478,6 +2555,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
+    this.clearSuspendSweepLoop();
     for (const rejectWaiter of this.waitRejectors) {
       try {
         rejectWaiter(new GlideMQError('Queue is closing'));

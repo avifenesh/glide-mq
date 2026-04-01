@@ -742,7 +742,7 @@ const resumed = await queue.signal(jobId, 'approve', { reviewer: 'alice' });
 1. `job.suspend(opts?)` stores a suspend request and throws `SuspendError`. The worker catches it, calls `glidemq_suspend` (FCALL), and moves the job to the `suspended` sorted set.
 2. `queue.signal(jobId, name, data?)` calls `glidemq_signal` (FCALL). The signal is appended to the job and the job is re-queued into the stream with state `waiting`.
 3. When the job is re-dispatched, the worker checks for a registered `onResume` continuation. If present (same worker instance), it is called with `signals[]` instead of the main processor. Otherwise, the main processor runs and reads `job.signals`.
-4. If `timeout` is set, `sweepExpiredSuspended` runs on each stalled recovery tick and fails timed-out suspended jobs with reason `'Suspend timeout exceeded'`.
+4. If `timeout` is set, glide-mq stores the deadline in the `suspended` sorted set and a lightweight background sweep in any live `Queue` or `Worker` runtime fails expired suspended jobs with reason `'Suspend timeout exceeded'`. This no longer depends on a worker staying online, but it does require at least one glide-mq process to remain connected to the queue.
 
 #### Options
 

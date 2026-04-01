@@ -408,6 +408,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private schedulerTimer: ReturnType<typeof setTimeout> | null = null;
   private schedulerRunning = false;
   private nextSchedulerWakeAt: number | null = null;
+  private suspendedTimeoutTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
   constructor(name: string, opts?: TestQueueOptions) {
     super();
@@ -1067,6 +1068,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   async signal(jobId: string, signalName: string, data?: any): Promise<boolean> {
     const record = this.jobs.get(jobId);
     if (!record || record.state !== 'suspended') return false;
+    this.clearSuspendedTimeout(jobId);
 
     if (!record.signals) record.signals = [];
     record.signals.push({ name: signalName, data: data ?? '', receivedAt: Date.now() });
@@ -1162,6 +1164,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   /** Close the queue, clear timers, and detach all workers. */
   async close(): Promise<void> {
     this.clearSchedulerTimer();
+    this.clearAllSuspendedTimeouts();
     this.removeAllListeners();
     this.workers.clear();
     TestQueue.registry.delete(this.name);
@@ -1185,6 +1188,46 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       this.schedulerTimer = null;
     }
     this.nextSchedulerWakeAt = null;
+  }
+
+  /** @internal */
+  scheduleSuspendedTimeout(record: TestJobRecord<D, R>): void {
+    this.clearSuspendedTimeout(record.id);
+    if (!record.suspendTimeout || record.suspendTimeout <= 0) return;
+
+    const delay = Math.max(0, record.suspendTimeout);
+    const timer = setTimeout(() => {
+      this.suspendedTimeoutTimers.delete(record.id);
+      const current = this.jobs.get(record.id);
+      if (!current || current.state !== 'suspended') return;
+
+      current.state = 'failed';
+      current.failedReason = 'Suspend timeout exceeded';
+      current.finishedOn = Date.now();
+
+      const job = new TestJob<D, R>(current);
+      job.failedReason = current.failedReason;
+      job.finishedOn = current.finishedOn;
+
+      this.recordMetric('failed', current.suspendedAt, current.finishedOn);
+      this.emit('failed', job, new Error(current.failedReason));
+    }, delay);
+    timer.unref?.();
+    this.suspendedTimeoutTimers.set(record.id, timer);
+  }
+
+  private clearSuspendedTimeout(jobId: string): void {
+    const timer = this.suspendedTimeoutTimers.get(jobId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.suspendedTimeoutTimers.delete(jobId);
+  }
+
+  private clearAllSuspendedTimeouts(): void {
+    for (const timer of this.suspendedTimeoutTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.suspendedTimeoutTimers.clear();
   }
 
   private ensureSchedulerLoop(): void {
@@ -1547,6 +1590,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       .catch((err: Error) => {
         // Handle suspend: the job is already marked suspended by TestJob.suspend()
         if (err instanceof SuspendError || err.name === 'SuspendError') {
+          this.queue.scheduleSuspendedTimeout(record);
           // State already set to 'suspended' by TestJob.suspend(). Nothing more to do.
           this.queue.emit('suspended', job, record.suspendReason);
           return;

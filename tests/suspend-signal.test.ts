@@ -3,7 +3,7 @@
  * Tests the human-in-the-loop workflow where jobs can be suspended
  * and resumed via external signals.
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
@@ -249,6 +249,33 @@ describe('Suspend/Signal (testing mode)', () => {
     await worker.close();
     await queue.close();
   });
+
+  it('suspend({ timeout }) fails even after the worker closes', async () => {
+    const queue = new TestQueue('test-suspend-timeout-no-worker');
+
+    const worker = new TestWorker(queue, async (job: any) => {
+      await job.suspend({ timeout: 250 });
+    });
+
+    const added = await queue.add('timeout-no-worker', {});
+
+    await waitFor(() => {
+      const record = queue.jobs.get(added!.id);
+      return record?.state === 'suspended';
+    }, 3000);
+
+    await worker.close();
+
+    await waitFor(() => {
+      const record = queue.jobs.get(added!.id);
+      return record?.state === 'failed';
+    }, 3000);
+
+    const failed = queue.jobs.get(added!.id);
+    expect(failed?.failedReason).toBe('Suspend timeout exceeded');
+
+    await queue.close();
+  });
 });
 
 // ---- Integration tests (against Valkey) ----
@@ -447,6 +474,45 @@ describeEachMode('Suspend/Signal', (CONNECTION) => {
     await worker.close();
     await queue.close();
   }, 25000);
+
+  it('suspend({ timeout }) fails without any worker still running', async () => {
+    const qName = uniqueQ();
+    queuesToFlush.push(qName);
+    const queue = new Queue(qName, { connection: CONNECTION });
+
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        await job.suspend({ timeout: 2000 });
+      },
+      {
+        connection: CONNECTION,
+        stalledInterval: 60000,
+      },
+    );
+    await worker.waitUntilReady();
+
+    const added = await queue.add('suspend-timeout-no-worker', {});
+
+    await waitFor(async () => {
+      const info = await queue.getSuspendInfo(added!.id);
+      return info !== null;
+    }, 8000);
+
+    await worker.close();
+
+    await waitFor(async () => {
+      const job = await queue.getJob(added!.id);
+      if (!job) return false;
+      return (await job.getState()) === 'failed';
+    }, 12000);
+
+    const job = await queue.getJob(added!.id);
+    expect(await job!.getState()).toBe('failed');
+    expect(job!.failedReason).toBe('Suspend timeout exceeded');
+
+    await queue.close();
+  }, 20000);
 
   it('suspend() without timeout waits indefinitely (signal after 2s works)', async () => {
     const qName = uniqueQ();
