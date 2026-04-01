@@ -1195,25 +1195,38 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     this.clearSuspendedTimeout(record.id);
     if (!record.suspendTimeout || record.suspendTimeout <= 0) return;
 
-    const delay = Math.max(0, record.suspendTimeout);
-    const timer = setTimeout(() => {
-      this.suspendedTimeoutTimers.delete(record.id);
-      const current = this.jobs.get(record.id);
-      if (!current || current.state !== 'suspended') return;
+    let remaining = Math.max(0, record.suspendTimeout);
 
-      current.state = 'failed';
-      current.failedReason = 'Suspend timeout exceeded';
-      current.finishedOn = Date.now();
+    const scheduleNextChunk = () => {
+      const chunk = Math.min(remaining, MAX_TIMEOUT_DELAY_MS);
+      const timer = setTimeout(() => {
+        this.suspendedTimeoutTimers.delete(record.id);
+        remaining -= chunk;
 
-      const job = new TestJob<D, R>(current);
-      job.failedReason = current.failedReason;
-      job.finishedOn = current.finishedOn;
+        if (remaining > 0) {
+          scheduleNextChunk();
+          return;
+        }
 
-      this.recordMetric('failed', current.suspendedAt, current.finishedOn);
-      this.emit('failed', job, new Error(current.failedReason));
-    }, delay);
-    timer.unref?.();
-    this.suspendedTimeoutTimers.set(record.id, timer);
+        const current = this.jobs.get(record.id);
+        if (!current || current.state !== 'suspended') return;
+
+        current.state = 'failed';
+        current.failedReason = 'Suspend timeout exceeded';
+        current.finishedOn = Date.now();
+
+        const job = new TestJob<D, R>(current);
+        job.failedReason = current.failedReason;
+        job.finishedOn = current.finishedOn;
+
+        this.recordMetric('failed', current.suspendedAt, current.finishedOn);
+        this.emit('failed', job, new Error(current.failedReason));
+      }, chunk);
+      timer.unref?.();
+      this.suspendedTimeoutTimers.set(record.id, timer);
+    };
+
+    scheduleNextChunk();
   }
 
   private clearSuspendedTimeout(jobId: string): void {

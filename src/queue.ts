@@ -91,7 +91,9 @@ const SCHEDULER_LOCK_TTL_MS = 5000;
 const SCHEDULER_LOCK_RETRY_DELAY_MS = 25;
 const SCHEDULER_LOCK_MAX_ATTEMPTS = Math.ceil(SCHEDULER_LOCK_TTL_MS / SCHEDULER_LOCK_RETRY_DELAY_MS);
 const SUSPEND_SWEEP_INTERVAL_MS = 1000;
-const SUSPEND_SWEEP_LOCK_TTL_MS = 900;
+const SUSPEND_SWEEP_IDLE_POLL_MS = 5000;
+const SUSPEND_SWEEP_LOCK_TTL_MS = 5000;
+const SUSPEND_NO_TIMEOUT_SCORE = 9_999_999_999_999;
 const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
 const MAX_USAGE_SUMMARY_KEY_READS = 100_000;
 const USAGE_MODEL_FIELD_PREFIX = 'models:';
@@ -264,7 +266,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
   private waitClients: Set<Client> = new Set();
   private waitRejectors: Set<(err: Error) => void> = new Set();
   private keys: QueueKeys;
-  private suspendedSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private suspendedSweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private suspendedSweepWakeAt = 0;
   private suspendedSweepInFlight = false;
   private suspendedSweepQueued = false;
 
@@ -351,28 +354,70 @@ export class Queue<D = any, R = any> extends EventEmitter {
   }
 
   private shouldStartSuspendSweepLoop(client: Client): boolean {
-    const ctorName = client?.constructor?.name;
-    return ctorName === 'GlideClient' || ctorName === 'GlideClusterClient';
+    return typeof (client as any)?.fcall === 'function' && typeof (client as any)?.zrangeWithScores === 'function';
   }
 
   private ensureSuspendSweepLoop(client: Client): void {
-    if (this.suspendedSweepTimer || this.closing || !this.shouldStartSuspendSweepLoop(client)) {
+    if (
+      this.suspendedSweepTimer ||
+      this.suspendedSweepInFlight ||
+      this.closing ||
+      !this.shouldStartSuspendSweepLoop(client)
+    ) {
       return;
     }
 
-    this.suspendedSweepTimer = setInterval(() => {
-      this.runSuspendSweep(client);
-    }, SUSPEND_SWEEP_INTERVAL_MS);
-    this.suspendedSweepTimer.unref?.();
+    this.scheduleNextSuspendSweep(client, 0);
   }
 
   private clearSuspendSweepLoop(): void {
     if (this.suspendedSweepTimer) {
-      clearInterval(this.suspendedSweepTimer);
+      clearTimeout(this.suspendedSweepTimer);
       this.suspendedSweepTimer = null;
     }
+    this.suspendedSweepWakeAt = 0;
     this.suspendedSweepInFlight = false;
     this.suspendedSweepQueued = false;
+  }
+
+  private scheduleNextSuspendSweep(client: Client, delayMs: number): void {
+    if (this.closing) return;
+
+    const delay = Math.max(0, Math.trunc(delayMs));
+    const target = Date.now() + delay;
+    if (this.suspendedSweepTimer && this.suspendedSweepWakeAt > 0 && this.suspendedSweepWakeAt <= target) {
+      return;
+    }
+
+    if (this.suspendedSweepTimer) {
+      clearTimeout(this.suspendedSweepTimer);
+      this.suspendedSweepTimer = null;
+    }
+
+    this.suspendedSweepWakeAt = target;
+    this.suspendedSweepTimer = setTimeout(() => {
+      this.suspendedSweepTimer = null;
+      this.suspendedSweepWakeAt = 0;
+      this.runSuspendSweep(client);
+    }, delay);
+    this.suspendedSweepTimer.unref?.();
+  }
+
+  private async nextSuspendedSweepDelay(client: Client): Promise<number> {
+    const nextDue = await this.nextSuspendedDueAt(client);
+    if (nextDue == null || nextDue >= SUSPEND_NO_TIMEOUT_SCORE) {
+      return SUSPEND_SWEEP_IDLE_POLL_MS;
+    }
+    return Math.max(1, Math.min(SUSPEND_SWEEP_IDLE_POLL_MS, nextDue - Date.now()));
+  }
+
+  private async nextSuspendedDueAt(client: Client): Promise<number | null> {
+    const entries = await (client as any).zrangeWithScores(this.keys.suspended, { start: 0, end: 0 });
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return null;
+    }
+    const score = Number(entries[0]?.score);
+    return Number.isFinite(score) ? score : null;
   }
 
   private runSuspendSweep(client: Client): void {
@@ -391,10 +436,20 @@ export class Queue<D = any, R = any> extends EventEmitter {
       })
       .finally(() => {
         this.suspendedSweepInFlight = false;
-        if (!this.closing && this.suspendedSweepQueued) {
+        if (this.closing) return;
+        if (this.suspendedSweepQueued) {
           this.suspendedSweepQueued = false;
-          this.runSuspendSweep(client);
+          this.scheduleNextSuspendSweep(client, 0);
+          return;
         }
+        void this.nextSuspendedSweepDelay(client)
+          .then((delay) => this.scheduleNextSuspendSweep(client, delay))
+          .catch((err) => {
+            if (this.listenerCount('error') > 0) {
+              this.emit('error', err instanceof Error ? err : new Error(String(err)));
+            }
+            this.scheduleNextSuspendSweep(client, SUSPEND_SWEEP_INTERVAL_MS);
+          });
       });
   }
 
