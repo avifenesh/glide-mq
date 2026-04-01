@@ -3,6 +3,9 @@ import { randomBytes } from 'crypto';
 import type { JobUsage, ScheduleOpts, SchedulerEntry } from './types';
 
 const DEFAULT_PREFIX = 'glide';
+export const USAGE_BUCKET_MS = 60_000;
+export const USAGE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+export const USAGE_RETENTION_SECONDS = Math.ceil(USAGE_RETENTION_MS / 1000);
 
 // 1MB max payload size to prevent DoS
 export const MAX_JOB_DATA_SIZE = 1048576;
@@ -93,6 +96,8 @@ export function keyPrefixPattern(prefix: string, queueName: string): string {
 export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
   const p = keyPrefix(prefix, queueName);
   return {
+    name: queueName,
+    usageQueues: usageQueuesKey(prefix),
     id: `${p}:id`,
     stream: `${p}:stream`,
     scheduled: `${p}:scheduled`,
@@ -122,7 +127,16 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     signals: (id: string) => `${p}:signals:${id}`,
     budget: (flowId: string) => `${p}:budget:${flowId}`,
     tpm: `${p}:tpm`,
+    usageBucket: (bucketTs: number) => `${p}:usage:${bucketTs}`,
   };
+}
+
+export function usageQueuesKey(prefix = DEFAULT_PREFIX): string {
+  return `${prefix}:usage:queues`;
+}
+
+export function floorUsageBucket(timestampMs: number): number {
+  return Math.floor(timestampMs / USAGE_BUCKET_MS) * USAGE_BUCKET_MS;
 }
 
 // Priority encoding: (priority * 2^42) + timestamp_ms

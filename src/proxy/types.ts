@@ -1,4 +1,14 @@
-import type { ConnectionOptions, JobOptions } from '../types';
+import type {
+  ConnectionOptions,
+  JobOptions,
+  JobTemplate,
+  JobUsage,
+  Metrics,
+  ScheduleOpts,
+  SchedulerEntry,
+  UsageSummary,
+  WorkerInfo,
+} from '../types';
 import type { Client } from '../types';
 
 /**
@@ -85,7 +95,7 @@ export interface AddBulkResponse {
 export interface GetJobResponse {
   id: string;
   name: string;
-  data: unknown;
+  data?: unknown;
   opts: Record<string, unknown>;
   timestamp: number;
   attemptsMade: number;
@@ -96,6 +106,12 @@ export interface GetJobResponse {
   finishedOn?: number;
   processedOn?: number;
   parentId?: string;
+  usage?: JobUsage;
+}
+
+/** Response body for GET /queues/:name/jobs. */
+export interface ListJobsResponse {
+  jobs: GetJobResponse[];
 }
 
 /**
@@ -124,3 +140,76 @@ export interface HealthResponse {
 export interface ErrorResponse {
   error: string;
 }
+
+/** Request body for POST /queues/:name/jobs/wait. */
+export interface WaitJobRequest extends Omit<AddJobRequest, 'opts'> {
+  opts?: AddJobRequest['opts'] & { waitTimeout?: number };
+}
+
+/** Response body for POST /queues/:name/jobs/wait. */
+export interface WaitJobResponse {
+  result: unknown;
+}
+
+/** Response body for GET /queues/:name/metrics. */
+export type MetricsResponse = Metrics;
+
+/** Response body for GET /queues/:name/workers. */
+export interface WorkersResponse {
+  workers: WorkerInfo[];
+}
+
+/** Response body for POST /queues/:name/drain. */
+export interface DrainResponse {
+  delayed: boolean;
+  drained: true;
+}
+
+/** Response body for POST /queues/:name/retry. */
+export interface RetryJobsResponse {
+  retried: number;
+}
+
+/** Response body for DELETE /queues/:name/clean. */
+export interface CleanJobsResponse {
+  removed: string[];
+}
+
+/** Request body for PUT /queues/:name/schedulers/:id. */
+export interface UpsertSchedulerRequest {
+  schedule: ScheduleOpts;
+  template?: JobTemplate;
+}
+
+/** Response body for GET /queues/:name/schedulers. */
+export interface ListSchedulersResponse {
+  schedulers: Array<{ name: string; entry: SchedulerEntry }>;
+}
+
+/** Response body for GET /queues/:name/schedulers/:id. */
+export interface GetSchedulerResponse {
+  entry: SchedulerEntry;
+  name: string;
+}
+
+/** Response body for scheduler write endpoints. */
+export interface SchedulerMutationResponse {
+  removed?: true;
+  upserted?: true;
+}
+
+/** Request body for POST /broadcast/:name. */
+export interface BroadcastPublishRequest {
+  subject: string;
+  data?: unknown;
+  opts?: AddJobRequest['opts'];
+}
+
+/** Response body for POST /broadcast/:name when a message is published. */
+export interface BroadcastPublishResponse {
+  id: string;
+  subject: string;
+}
+
+/** Response body for GET /usage/summary. */
+export type UsageSummaryResponse = UsageSummary;

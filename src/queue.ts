@@ -26,6 +26,9 @@ import type {
   JobIndexOptions,
   VectorSearchOptions,
   VectorSearchResult,
+  UsageSummary,
+  UsageSummaryOptions,
+  UsageQueueSummary,
 } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
@@ -49,6 +52,9 @@ import {
   validateQueueName,
   MAX_ORDERING_KEY_LENGTH,
   validateJobId,
+  floorUsageBucket,
+  usageQueuesKey,
+  USAGE_BUCKET_MS,
 } from './utils';
 import {
   createBlockingClient,
@@ -82,6 +88,125 @@ const PIPELINE_CHUNK_SIZE = 1000;
 const SCHEDULER_LOCK_TTL_MS = 5000;
 const SCHEDULER_LOCK_RETRY_DELAY_MS = 25;
 const SCHEDULER_LOCK_MAX_ATTEMPTS = Math.ceil(SCHEDULER_LOCK_TTL_MS / SCHEDULER_LOCK_RETRY_DELAY_MS);
+const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
+const USAGE_MODEL_FIELD_PREFIX = 'models:';
+const USAGE_TOKEN_FIELD_PREFIX = 'tokens:';
+const USAGE_COST_FIELD_PREFIX = 'costs:';
+
+type UsageAccumulator = Pick<
+  UsageSummary,
+  'jobCount' | 'tokens' | 'totalTokens' | 'costs' | 'totalCost' | 'costUnit' | 'models'
+>;
+
+function newClientBatch(client: Client): InstanceType<typeof Batch> | InstanceType<typeof ClusterBatch> {
+  return isClusterClient(client) ? new ClusterBatch(false) : new Batch(false);
+}
+
+function parseUsageNumber(raw: string | undefined): number {
+  if (raw == null) return 0;
+  const value = parseFloat(raw);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function createUsageQueueSummary(): UsageQueueSummary {
+  return {
+    jobCount: 0,
+    tokens: Object.create(null) as Record<string, number>,
+    totalTokens: 0,
+    costs: Object.create(null) as Record<string, number>,
+    totalCost: 0,
+    costUnit: undefined,
+    models: Object.create(null) as Record<string, number>,
+  };
+}
+
+function createUsageSummaryResult(startTime: number, endTime: number): UsageSummary {
+  return {
+    startTime,
+    endTime,
+    bucketSizeMs: USAGE_BUCKET_MS,
+    queues: [],
+    jobCount: 0,
+    tokens: Object.create(null) as Record<string, number>,
+    totalTokens: 0,
+    costs: Object.create(null) as Record<string, number>,
+    totalCost: 0,
+    costUnit: undefined,
+    models: Object.create(null) as Record<string, number>,
+    perQueue: Object.create(null) as Record<string, UsageQueueSummary>,
+  };
+}
+
+function mergeUsageBucketFields(target: UsageAccumulator, fields: Record<string, string>): void {
+  target.jobCount += parseUsageNumber(fields.jobCount);
+  target.totalTokens += parseUsageNumber(fields.totalTokens);
+  target.totalCost += parseUsageNumber(fields.totalCost);
+
+  if (fields.costUnit && !target.costUnit) {
+    target.costUnit = fields.costUnit;
+  }
+
+  for (const [field, rawValue] of Object.entries(fields)) {
+    const value = parseUsageNumber(rawValue);
+    if (!Number.isFinite(value) || value === 0) continue;
+
+    if (field.startsWith(USAGE_MODEL_FIELD_PREFIX)) {
+      const model = field.slice(USAGE_MODEL_FIELD_PREFIX.length);
+      if (model) target.models[model] = (target.models[model] || 0) + value;
+      continue;
+    }
+
+    if (field.startsWith(USAGE_TOKEN_FIELD_PREFIX)) {
+      const tokenKey = field.slice(USAGE_TOKEN_FIELD_PREFIX.length);
+      if (tokenKey) target.tokens[tokenKey] = (target.tokens[tokenKey] || 0) + value;
+      continue;
+    }
+
+    if (field.startsWith(USAGE_COST_FIELD_PREFIX)) {
+      const costKey = field.slice(USAGE_COST_FIELD_PREFIX.length);
+      if (costKey) target.costs[costKey] = (target.costs[costKey] || 0) + value;
+    }
+  }
+}
+
+function hasUsageBucketData(fields: Record<string, string>): boolean {
+  for (const [field, rawValue] of Object.entries(fields)) {
+    if (field === 'costUnit') continue;
+    if (parseUsageNumber(rawValue) !== 0) return true;
+  }
+  return false;
+}
+
+function resolveUsageWindow(opts?: UsageSummaryOptions): {
+  startTime: number;
+  endTime: number;
+  bucketStarts: number[];
+} {
+  const endTime = opts?.endTime ?? Date.now();
+  if (!Number.isFinite(endTime) || endTime < 0) {
+    throw new GlideMQError('endTime must be a finite non-negative number');
+  }
+
+  const windowMs = opts?.windowMs ?? DEFAULT_USAGE_WINDOW_MS;
+  if (!Number.isFinite(windowMs) || windowMs <= 0) {
+    throw new GlideMQError('windowMs must be a finite positive number');
+  }
+
+  const startTime = opts?.startTime ?? Math.max(0, endTime - windowMs);
+  if (!Number.isFinite(startTime) || startTime < 0) {
+    throw new GlideMQError('startTime must be a finite non-negative number');
+  }
+  if (startTime > endTime) {
+    throw new GlideMQError('startTime must be less than or equal to endTime');
+  }
+
+  const bucketStarts: number[] = [];
+  for (let ts = floorUsageBucket(startTime); ts <= floorUsageBucket(endTime); ts += USAGE_BUCKET_MS) {
+    bucketStarts.push(ts);
+  }
+
+  return { startTime, endTime, bucketStarts };
+}
 
 function validateOrderingKey(orderingKey: string): void {
   if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
@@ -1852,6 +1977,109 @@ export class Queue<D = any, R = any> extends EventEmitter {
       exceeded: fields.exceeded === '1',
       onExceeded: (fields.onExceeded as 'pause' | 'fail') || 'fail',
     };
+  }
+
+  /**
+   * Aggregate reported AI usage across queues for a rolling time window.
+   * Uses per-minute buckets recorded by job.reportUsage(), avoiding job-hash scans.
+   */
+  async getUsageSummary(opts?: UsageSummaryOptions): Promise<UsageSummary> {
+    const client = await this.getClient();
+    return Queue.getUsageSummary({
+      ...opts,
+      client,
+      prefix: this.opts.prefix,
+    });
+  }
+
+  /**
+   * Aggregate reported AI usage across queues for a rolling time window.
+   * Pass either an existing client or connection options for a temporary client.
+   */
+  static async getUsageSummary(
+    opts: UsageSummaryOptions & Pick<QueueOptions, 'client' | 'connection' | 'prefix'>,
+  ): Promise<UsageSummary> {
+    const { startTime, endTime, bucketStarts } = resolveUsageWindow(opts);
+    const summary = createUsageSummaryResult(startTime, endTime);
+
+    let client = opts.client;
+    let clientOwned = false;
+    if (!client) {
+      if (!opts.connection) {
+        throw new GlideMQError('getUsageSummary requires either `client` or `connection`');
+      }
+      client = await createClient(opts.connection);
+      clientOwned = true;
+    }
+
+    try {
+      const prefix = opts.prefix;
+      const requestedQueues = opts.queues
+        ? Array.from(
+            new Set(
+              opts.queues.map((name) => {
+                validateQueueName(name);
+                return name;
+              }),
+            ),
+          )
+        : null;
+
+      const queues =
+        requestedQueues ??
+        Array.from(await client.smembers(usageQueuesKey(prefix))).map((queueName) => String(queueName));
+
+      if (queues.length === 0 || bucketStarts.length === 0) {
+        return summary;
+      }
+
+      const bucketRequests: Array<{ key: string; queueName: string }> = [];
+      for (const queueName of queues) {
+        const queueKeys = buildKeys(queueName, prefix);
+        for (const bucketTs of bucketStarts) {
+          bucketRequests.push({
+            key: queueKeys.usageBucket(bucketTs),
+            queueName,
+          });
+        }
+      }
+
+      for (let offset = 0; offset < bucketRequests.length; offset += PIPELINE_CHUNK_SIZE) {
+        const chunk = bucketRequests.slice(offset, offset + PIPELINE_CHUNK_SIZE);
+        const batch = newClientBatch(client);
+        for (const request of chunk) {
+          (batch as any).hgetall(request.key);
+        }
+
+        const results = await client.exec(batch as any, false);
+        if (!results) continue;
+
+        for (let i = 0; i < chunk.length && i < results.length; i++) {
+          const fields = hashDataToRecord(results[i] as any);
+          if (!fields || !hasUsageBucketData(fields)) continue;
+
+          let queueSummary = summary.perQueue[chunk[i].queueName];
+          if (!queueSummary) {
+            queueSummary = createUsageQueueSummary();
+            summary.perQueue[chunk[i].queueName] = queueSummary;
+          }
+
+          mergeUsageBucketFields(summary, fields);
+          mergeUsageBucketFields(queueSummary, fields);
+        }
+      }
+
+      summary.queues = Object.keys(summary.perQueue).sort();
+      return summary;
+    } finally {
+      if (clientOwned) {
+        try {
+          await client.close();
+        } catch {
+          // Best effort for temporary clients used by static summary reads.
+        }
+      }
+    }
   }
 
   /**

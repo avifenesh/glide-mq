@@ -6,8 +6,8 @@
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import { Job } from '../src/job';
-import { buildKeys, MAX_JOB_DATA_SIZE } from '../src/utils';
-import { TestQueue, TestWorker } from '../src/testing';
+import { buildKeys } from '../src/utils';
+import { TestQueue } from '../src/testing';
 import type { JobUsage } from '../src/types';
 
 vi.mock('@glidemq/speedkey');
@@ -40,7 +40,12 @@ describe('Job.reportUsage (unit)', () => {
     vi.clearAllMocks();
     mockClient = makeMockClient();
     mockBatch = {
+      expire: vi.fn(),
+      hdel: vi.fn(),
       hset: vi.fn(),
+      hincrBy: vi.fn(),
+      hincrByFloat: vi.fn(),
+      sadd: vi.fn(),
       xadd: vi.fn(),
     };
     (Batch as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockBatch);
@@ -120,6 +125,35 @@ describe('Job.reportUsage (unit)', () => {
 
     expect(job.usage?.model).toBe('claude-sonnet-4-20250514');
     expect(job.usage?.tokens?.input).toBe(200);
+  });
+
+  it('clears stale persisted usage fields before writing a replacement snapshot', async () => {
+    mockClient.hmget.mockResolvedValueOnce([
+      'gpt-4o',
+      'openai',
+      JSON.stringify({ input: 100, output: 50 }),
+      '150',
+      JSON.stringify({ total: 0.003 }),
+      '0.003',
+      'usd',
+      '800',
+      '0',
+      String(Date.now()),
+    ]);
+
+    const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
+    await job.reportUsage({ model: 'gpt-4o-mini' });
+
+    expect(mockBatch.hdel).toHaveBeenCalledWith(
+      keys.job('1'),
+      expect.arrayContaining(['usage:tokens', 'usage:totalTokens']),
+    );
+    expect(mockBatch.hset).toHaveBeenCalledWith(
+      keys.job('1'),
+      expect.objectContaining({
+        'usage:model': 'gpt-4o-mini',
+      }),
+    );
   });
 
   it('rejects negative value in tokens map', async () => {
@@ -310,17 +344,22 @@ const FlowProducerImpl = require('../dist/flow-producer').FlowProducer;
 
 describeEachMode('AI Metadata integration', (CONNECTION) => {
   const Q = 'test-ai-meta-' + Date.now();
+  const Q2 = `${Q}-other`;
   let queue: any;
+  let otherQueue: any;
   let cleanupClient: any;
 
   beforeAll(async () => {
     cleanupClient = await createCleanupClient(CONNECTION);
     queue = new QueueImpl(Q, { connection: CONNECTION });
+    otherQueue = new QueueImpl(Q2, { connection: CONNECTION });
   });
 
   afterAll(async () => {
     await queue.close();
+    await otherQueue.close();
     await flushQueue(cleanupClient, Q);
+    await flushQueue(cleanupClient, Q2);
     cleanupClient.close();
   });
 
@@ -435,5 +474,72 @@ describeEachMode('AI Metadata integration', (CONNECTION) => {
 
     await worker.close(true);
     await fp.close();
+  });
+
+  it('getUsageSummary aggregates latest usage across queues and supports filtering', async () => {
+    const summaryQueueName = `${Q}-summary-${Date.now()}`;
+    const summaryOtherQueueName = `${summaryQueueName}-other`;
+    const summaryQueue = new QueueImpl(summaryQueueName, { connection: CONNECTION });
+    const summaryOtherQueue = new QueueImpl(summaryOtherQueueName, { connection: CONNECTION });
+
+    try {
+      const first = await summaryQueue.add('summary-a', { prompt: 'first' });
+      const second = await summaryOtherQueue.add('summary-b', { prompt: 'second' });
+
+      const firstJob = await summaryQueue.getJob(first.id);
+      const secondJob = await summaryOtherQueue.getJob(second.id);
+      expect(firstJob).not.toBeNull();
+      expect(secondJob).not.toBeNull();
+
+      await firstJob!.reportUsage({
+        costs: { total: 0.01 },
+        costUnit: 'usd',
+        model: 'gpt-5.4',
+        tokens: { input: 120 },
+      });
+      await firstJob!.reportUsage({
+        costs: { total: 0.004 },
+        costUnit: 'usd',
+        model: 'gpt-5.4-mini',
+        tokens: { input: 30, output: 20 },
+      });
+      await secondJob!.reportUsage({
+        costs: { total: 0.001 },
+        costUnit: 'usd',
+        model: 'text-embedding-3-small',
+        tokens: { input: 25 },
+      });
+
+      const summary = await queue.getUsageSummary({
+        queues: [summaryQueueName, summaryOtherQueueName],
+        windowMs: 5 * 60 * 1000,
+      });
+      expect(summary.jobCount).toBe(2);
+      expect(summary.totalTokens).toBe(75);
+      expect(summary.totalCost).toBeCloseTo(0.005, 10);
+      expect(summary.models['gpt-5.4-mini']).toBe(1);
+      expect(summary.models['text-embedding-3-small']).toBe(1);
+      expect(summary.models['gpt-5.4']).toBeUndefined();
+      expect(summary.queues.sort()).toEqual([summaryQueueName, summaryOtherQueueName].sort());
+      expect(summary.perQueue[summaryQueueName].jobCount).toBe(1);
+      expect(summary.perQueue[summaryQueueName].totalTokens).toBe(50);
+      expect(summary.perQueue[summaryQueueName].totalCost).toBeCloseTo(0.004, 10);
+      expect(summary.perQueue[summaryOtherQueueName].jobCount).toBe(1);
+      expect(summary.perQueue[summaryOtherQueueName].totalTokens).toBe(25);
+
+      const filtered = await queue.getUsageSummary({
+        queues: [summaryQueueName],
+        windowMs: 5 * 60 * 1000,
+      });
+      expect(filtered.queues).toEqual([summaryQueueName]);
+      expect(filtered.jobCount).toBe(1);
+      expect(filtered.totalTokens).toBe(50);
+      expect(filtered.models['gpt-5.4-mini']).toBe(1);
+    } finally {
+      await summaryQueue.close();
+      await summaryOtherQueue.close();
+      await flushQueue(cleanupClient, summaryQueueName);
+      await flushQueue(cleanupClient, summaryOtherQueueName);
+    }
   });
 });
