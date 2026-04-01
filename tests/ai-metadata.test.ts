@@ -16,7 +16,10 @@ vi.mock('@glidemq/speedkey');
 
 function makeMockClient(overrides: Record<string, unknown> = {}) {
   return {
-    fcall: vi.fn(),
+    fcall: vi.fn(async (fn: string) => {
+      if (fn === 'glidemq_tryLock' || fn === 'glidemq_unlock') return 1;
+      return null;
+    }),
     hset: vi.fn().mockResolvedValue(1),
     hget: vi.fn().mockResolvedValue(null),
     hgetall: vi.fn().mockResolvedValue([]),
@@ -232,6 +235,18 @@ describe('Job.reportUsage (unit)', () => {
         ['jobId', '1'],
       ]),
     );
+  });
+
+  it('serializes usage writes with a per-job lock', async () => {
+    const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
+    await job.reportUsage({ model: 'gpt-4o', tokens: { input: 100, output: 50 } });
+
+    expect(mockClient.fcall).toHaveBeenCalledWith(
+      'glidemq_tryLock',
+      [`${keys.job('1')}:usage-lock`],
+      expect.any(Array),
+    );
+    expect(mockClient.fcall).toHaveBeenCalledWith('glidemq_unlock', [`${keys.job('1')}:usage-lock`], expect.any(Array));
   });
 
   it('does not require entryId (callable from any context)', async () => {
@@ -535,6 +550,13 @@ describeEachMode('AI Metadata integration', (CONNECTION) => {
       expect(filtered.jobCount).toBe(1);
       expect(filtered.totalTokens).toBe(50);
       expect(filtered.models['gpt-5.4-mini']).toBe(1);
+
+      await expect(
+        queue.getUsageSummary({
+          queues: [summaryQueueName, summaryOtherQueueName, `${summaryQueueName}-third`],
+          windowMs: 30 * 24 * 60 * 60 * 1000,
+        }),
+      ).rejects.toThrow('usage summary request exceeds maximum bucket reads');
     } finally {
       await summaryQueue.close();
       await summaryOtherQueue.close();

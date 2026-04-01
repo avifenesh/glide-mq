@@ -624,7 +624,7 @@ describe('HTTP Proxy', () => {
       });
 
       const summaryRes = await fetch(
-        `${baseUrl}/usage/summary?window=300000&queues=${encodeURIComponent(`${firstQueueName},${secondQueueName}`)}`,
+        `${baseUrl}/usage/summary?windowMs=300000&queues=${encodeURIComponent(`${firstQueueName},${secondQueueName}`)}`,
       );
       expect(summaryRes.status).toBe(200);
       const summaryBody = await summaryRes.json();
@@ -644,6 +644,11 @@ describe('HTTP Proxy', () => {
       expect(filteredBody.queues).toEqual([firstQueueName]);
       expect(filteredBody.jobCount).toBe(1);
       expect(filteredBody.totalTokens).toBe(40);
+
+      const invalidWindowRes = await fetch(`${baseUrl}/usage/summary?window=1000&windowMs=2000`);
+      expect(invalidWindowRes.status).toBe(400);
+      const invalidWindowBody = await invalidWindowRes.json();
+      expect(invalidWindowBody.error).toContain('window and windowMs must match');
     } finally {
       await firstQueue.close();
       await secondQueue.close();

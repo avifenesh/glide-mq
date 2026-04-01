@@ -46,6 +46,7 @@ import {
   floorUsageBucket,
   normalizeScheduleDate,
   USAGE_BUCKET_MS,
+  USAGE_RETENTION_MS,
   validateAndResolveUsage,
   validateSchedulerBounds,
   validateSchedulerEvery,
@@ -116,14 +117,15 @@ function resolveUsageWindow(opts?: UsageSummaryOptions): { startTime: number; en
     throw new GlideMQError('windowMs must be a finite positive number');
   }
 
-  const startTime = opts?.startTime ?? Math.max(0, endTime - windowMs);
-  if (!Number.isFinite(startTime) || startTime < 0) {
+  const requestedStartTime = opts?.startTime ?? Math.max(0, endTime - windowMs);
+  if (!Number.isFinite(requestedStartTime) || requestedStartTime < 0) {
     throw new GlideMQError('startTime must be a finite non-negative number');
   }
-  if (startTime > endTime) {
+  if (requestedStartTime > endTime) {
     throw new GlideMQError('startTime must be less than or equal to endTime');
   }
-
+  const earliestRetainedStart = Math.max(0, endTime - USAGE_RETENTION_MS);
+  const startTime = Math.max(earliestRetainedStart, requestedStartTime);
   return { startTime, endTime };
 }
 

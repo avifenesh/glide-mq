@@ -1106,9 +1106,17 @@ export function createRoutes(
       const startRaw = queryValue(req, 'start');
       const endRaw = queryValue(req, 'end');
       const windowRaw = queryValue(req, 'window');
+      const windowMsRaw = queryValue(req, 'windowMs');
+      if (windowRaw !== undefined && windowMsRaw !== undefined && windowRaw !== windowMsRaw) {
+        throw httpError(400, 'window and windowMs must match when both are provided');
+      }
       const startTime = startRaw !== undefined ? parseInteger(startRaw, 'start', { min: 0 }) : undefined;
       const endTime = endRaw !== undefined ? parseInteger(endRaw, 'end', { min: 0 }) : undefined;
-      const windowMs = windowRaw !== undefined ? parseInteger(windowRaw, 'window', { min: 1 }) : undefined;
+      const effectiveWindowRaw = windowMsRaw ?? windowRaw;
+      const windowMs =
+        effectiveWindowRaw !== undefined
+          ? parseInteger(effectiveWindowRaw, windowMsRaw !== undefined ? 'windowMs' : 'window', { min: 1 })
+          : undefined;
 
       const summary = await Queue.getUsageSummary({
         client: opts.client,

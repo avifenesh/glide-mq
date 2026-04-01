@@ -840,34 +840,34 @@ See [ADVANCED.md](./ADVANCED.md#vector-search-index-management) for index manage
 
 The proxy (`glide-mq/proxy`) exposes queue, scheduler, flow, and broadcast endpoints over HTTP:
 
-| Method | Path                                 | Description                                                                                |
-| ------ | ------------------------------------ | ------------------------------------------------------------------------------------------ |
-| POST   | /queues/:name/jobs                   | Add a single job.                                                                          |
-| POST   | /queues/:name/jobs/bulk              | Add multiple jobs in one request.                                                          |
-| GET    | /queues/:name/jobs?state=waiting     | List jobs by state. Supports `start`, `end`, and `excludeData=true`.                       |
-| POST   | /queues/:name/jobs/wait              | Add a job and wait for the final worker result in the same request.                        |
-| GET    | /queues/:name/jobs/:id               | Fetch one job by ID.                                                                       |
-| POST   | /queues/:name/jobs/:id/priority      | Change a waiting/prioritized/delayed job's priority.                                       |
-| POST   | /queues/:name/jobs/:id/delay         | Change a job's delay or move it into delayed state.                                        |
-| POST   | /queues/:name/jobs/:id/promote       | Promote a delayed job immediately.                                                         |
-| GET    | /queues/:name/jobs/:id/stream        | SSE stream of job output chunks. Supports `Last-Event-ID` and `?lastId=`.                  |
-| POST   | /queues/:name/jobs/:id/signal        | Send a signal to a suspended job. Body: `{ "name": "...", "data": ... }`.                  |
-| GET    | /queues/:name/events                 | Queue-wide SSE stream of lifecycle events. Supports `Last-Event-ID` and `?lastId=` replay. |
-| POST   | /queues/:name/pause                  | Pause the queue.                                                                           |
-| POST   | /queues/:name/resume                 | Resume the queue.                                                                          |
-| GET    | /queues/:name/counts                 | Return waiting/active/delayed/completed/failed counts.                                     |
-| GET    | /queues/:name/metrics?type=completed | Return total count plus per-minute metrics data.                                           |
-| GET    | /queues/:name/workers                | List live workers for the queue.                                                           |
-| POST   | /queues/:name/drain                  | Remove waiting jobs. Pass `?delayed=true` to also remove delayed jobs.                     |
-| POST   | /queues/:name/retry                  | Retry failed jobs. Optional body/query `count`.                                            |
-| DELETE | /queues/:name/clean                  | Remove old completed/failed jobs. Requires `state` and `age` seconds; optional `limit`.    |
-| GET    | /queues/:name/schedulers             | List registered schedulers.                                                                |
-| GET    | /queues/:name/schedulers/:id         | Fetch one scheduler entry by name.                                                         |
-| PUT    | /queues/:name/schedulers/:id         | Upsert a scheduler. Body: `{ schedule, template? }`.                                       |
-| DELETE | /queues/:name/schedulers/:id         | Remove a scheduler by name.                                                                |
-| GET    | /queues/:name/flows/:parentId/usage  | Aggregate AI usage across a flow.                                                          |
-| GET    | /queues/:name/flows/:flowId/budget   | Read current flow budget state.                                                            |
-| GET    | /usage/summary                       | Rolling AI usage summary. Supports `window`, `start`, `end`, and `queues=a,b`.             |
-| POST   | /broadcast/:name                     | Publish a broadcast message. Body: `{ subject, data, opts? }`.                             |
-| GET    | /broadcast/:name/events              | SSE broadcast stream. Requires `subscription`; optional `subjects=a.*,b.>` filter.         |
-| GET    | /health                              | Health check and proxy uptime.                                                             |
+| Method | Path                                 | Description                                                                                                                                              |
+| ------ | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | /queues/:name/jobs                   | Add a single job.                                                                                                                                        |
+| POST   | /queues/:name/jobs/bulk              | Add multiple jobs in one request.                                                                                                                        |
+| GET    | /queues/:name/jobs?state=waiting     | List jobs by state. Supports `start`, `end`, and `excludeData=true`.                                                                                     |
+| POST   | /queues/:name/jobs/wait              | Add a job and wait for the final worker result in the same request.                                                                                      |
+| GET    | /queues/:name/jobs/:id               | Fetch one job by ID.                                                                                                                                     |
+| POST   | /queues/:name/jobs/:id/priority      | Change a waiting/prioritized/delayed job's priority.                                                                                                     |
+| POST   | /queues/:name/jobs/:id/delay         | Change a job's delay or move it into delayed state.                                                                                                      |
+| POST   | /queues/:name/jobs/:id/promote       | Promote a delayed job immediately.                                                                                                                       |
+| GET    | /queues/:name/jobs/:id/stream        | SSE stream of job output chunks. Supports `Last-Event-ID` and `?lastId=`.                                                                                |
+| POST   | /queues/:name/jobs/:id/signal        | Send a signal to a suspended job. Body: `{ "name": "...", "data": ... }`.                                                                                |
+| GET    | /queues/:name/events                 | Queue-wide SSE stream of lifecycle events. Supports `Last-Event-ID` and `?lastId=` replay.                                                               |
+| POST   | /queues/:name/pause                  | Pause the queue.                                                                                                                                         |
+| POST   | /queues/:name/resume                 | Resume the queue.                                                                                                                                        |
+| GET    | /queues/:name/counts                 | Return waiting/active/delayed/completed/failed counts.                                                                                                   |
+| GET    | /queues/:name/metrics?type=completed | Return total count plus per-minute metrics data.                                                                                                         |
+| GET    | /queues/:name/workers                | List live workers for the queue.                                                                                                                         |
+| POST   | /queues/:name/drain                  | Remove waiting jobs. Pass `?delayed=true` to also remove delayed jobs.                                                                                   |
+| POST   | /queues/:name/retry                  | Retry failed jobs. Optional body/query `count`.                                                                                                          |
+| DELETE | /queues/:name/clean                  | Remove old completed/failed jobs. Requires `state` and `age` seconds; optional `limit`.                                                                  |
+| GET    | /queues/:name/schedulers             | List registered schedulers.                                                                                                                              |
+| GET    | /queues/:name/schedulers/:id         | Fetch one scheduler entry by name.                                                                                                                       |
+| PUT    | /queues/:name/schedulers/:id         | Upsert a scheduler. Body: `{ schedule, template? }`.                                                                                                     |
+| DELETE | /queues/:name/schedulers/:id         | Remove a scheduler by name.                                                                                                                              |
+| GET    | /queues/:name/flows/:parentId/usage  | Aggregate AI usage across a flow.                                                                                                                        |
+| GET    | /queues/:name/flows/:flowId/budget   | Read current flow budget state.                                                                                                                          |
+| GET    | /usage/summary                       | Rolling AI usage summary. Supports `windowMs` (or legacy `window`) in ms, `start`/`end` as epoch ms, and `queues=a,b` (for example `?windowMs=3600000`). |
+| POST   | /broadcast/:name                     | Publish a broadcast message. Body: `{ subject, data, opts? }`.                                                                                           |
+| GET    | /broadcast/:name/events              | SSE broadcast stream. Requires `subscription`; optional `subjects=a.*,b.>` filter.                                                                       |
+| GET    | /health                              | Health check and proxy uptime.                                                                                                                           |

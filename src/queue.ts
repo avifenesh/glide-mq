@@ -55,6 +55,7 @@ import {
   floorUsageBucket,
   usageQueuesKey,
   USAGE_BUCKET_MS,
+  USAGE_RETENTION_MS,
 } from './utils';
 import {
   createBlockingClient,
@@ -89,6 +90,7 @@ const SCHEDULER_LOCK_TTL_MS = 5000;
 const SCHEDULER_LOCK_RETRY_DELAY_MS = 25;
 const SCHEDULER_LOCK_MAX_ATTEMPTS = Math.ceil(SCHEDULER_LOCK_TTL_MS / SCHEDULER_LOCK_RETRY_DELAY_MS);
 const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
+const MAX_USAGE_SUMMARY_KEY_READS = 100_000;
 const USAGE_MODEL_FIELD_PREFIX = 'models:';
 const USAGE_TOKEN_FIELD_PREFIX = 'tokens:';
 const USAGE_COST_FIELD_PREFIX = 'costs:';
@@ -192,13 +194,16 @@ function resolveUsageWindow(opts?: UsageSummaryOptions): {
     throw new GlideMQError('windowMs must be a finite positive number');
   }
 
-  const startTime = opts?.startTime ?? Math.max(0, endTime - windowMs);
-  if (!Number.isFinite(startTime) || startTime < 0) {
+  const requestedStartTime = opts?.startTime ?? Math.max(0, endTime - windowMs);
+  if (!Number.isFinite(requestedStartTime) || requestedStartTime < 0) {
     throw new GlideMQError('startTime must be a finite non-negative number');
   }
-  if (startTime > endTime) {
+  if (requestedStartTime > endTime) {
     throw new GlideMQError('startTime must be less than or equal to endTime');
   }
+
+  const earliestRetainedStart = Math.max(0, endTime - USAGE_RETENTION_MS);
+  const startTime = Math.max(earliestRetainedStart, requestedStartTime);
 
   const bucketStarts: number[] = [];
   for (let ts = floorUsageBucket(startTime); ts <= floorUsageBucket(endTime); ts += USAGE_BUCKET_MS) {
@@ -2033,39 +2038,39 @@ export class Queue<D = any, R = any> extends EventEmitter {
         return summary;
       }
 
-      const bucketRequests: Array<{ key: string; queueName: string }> = [];
-      for (const queueName of queues) {
-        const queueKeys = buildKeys(queueName, prefix);
-        for (const bucketTs of bucketStarts) {
-          bucketRequests.push({
-            key: queueKeys.usageBucket(bucketTs),
-            queueName,
-          });
-        }
+      const totalBucketReads = queues.length * bucketStarts.length;
+      if (totalBucketReads > MAX_USAGE_SUMMARY_KEY_READS) {
+        throw new GlideMQError(
+          `usage summary request exceeds maximum bucket reads (${totalBucketReads} > ${MAX_USAGE_SUMMARY_KEY_READS}); reduce queues or windowMs`,
+        );
       }
 
-      for (let offset = 0; offset < bucketRequests.length; offset += PIPELINE_CHUNK_SIZE) {
-        const chunk = bucketRequests.slice(offset, offset + PIPELINE_CHUNK_SIZE);
-        const batch = newClientBatch(client);
-        for (const request of chunk) {
-          (batch as any).hgetall(request.key);
-        }
+      for (const queueName of queues) {
+        const queueKeys = buildKeys(queueName, prefix);
+        let queueSummary: UsageQueueSummary | undefined;
 
-        const results = await client.exec(batch as any, false);
-        if (!results) continue;
-
-        for (let i = 0; i < chunk.length && i < results.length; i++) {
-          const fields = hashDataToRecord(results[i] as any);
-          if (!fields || !hasUsageBucketData(fields)) continue;
-
-          let queueSummary = summary.perQueue[chunk[i].queueName];
-          if (!queueSummary) {
-            queueSummary = createUsageQueueSummary();
-            summary.perQueue[chunk[i].queueName] = queueSummary;
+        for (let offset = 0; offset < bucketStarts.length; offset += PIPELINE_CHUNK_SIZE) {
+          const chunk = bucketStarts.slice(offset, offset + PIPELINE_CHUNK_SIZE);
+          const batch = newClientBatch(client);
+          for (const bucketTs of chunk) {
+            (batch as any).hgetall(queueKeys.usageBucket(bucketTs));
           }
 
-          mergeUsageBucketFields(summary, fields);
-          mergeUsageBucketFields(queueSummary, fields);
+          const results = await client.exec(batch as any, false);
+          if (!results) continue;
+
+          for (let i = 0; i < chunk.length && i < results.length; i++) {
+            const fields = hashDataToRecord(results[i] as any);
+            if (!fields || !hasUsageBucketData(fields)) continue;
+
+            if (!queueSummary) {
+              queueSummary = createUsageQueueSummary();
+              summary.perQueue[queueName] = queueSummary;
+            }
+
+            mergeUsageBucketFields(summary, fields);
+            mergeUsageBucketFields(queueSummary, fields);
+          }
         }
       }
 
