@@ -17,6 +17,9 @@ import os from 'os';
 import type {
   JobOptions,
   JobUsage,
+  UsageSummary,
+  UsageSummaryOptions,
+  UsageQueueSummary,
   JobCounts,
   Metrics,
   MetricsOptions,
@@ -40,7 +43,10 @@ import {
   computeFollowingSchedulerNextRun,
   computeInitialSchedulerNextRun,
   computeWeightedTotal,
+  floorUsageBucket,
   normalizeScheduleDate,
+  USAGE_BUCKET_MS,
+  USAGE_RETENTION_MS,
   validateAndResolveUsage,
   validateSchedulerBounds,
   validateSchedulerEvery,
@@ -49,6 +55,79 @@ import {
 } from './utils';
 
 const MAX_TIMEOUT_DELAY_MS = 2_147_483_647;
+const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
+
+function createUsageQueueSummary(): UsageQueueSummary {
+  return {
+    jobCount: 0,
+    tokens: Object.create(null) as Record<string, number>,
+    totalTokens: 0,
+    costs: Object.create(null) as Record<string, number>,
+    totalCost: 0,
+    costUnit: undefined,
+    models: Object.create(null) as Record<string, number>,
+  };
+}
+
+function createUsageSummary(startTime: number, endTime: number): UsageSummary {
+  return {
+    startTime,
+    endTime,
+    bucketSizeMs: USAGE_BUCKET_MS,
+    queues: [],
+    jobCount: 0,
+    tokens: Object.create(null) as Record<string, number>,
+    totalTokens: 0,
+    costs: Object.create(null) as Record<string, number>,
+    totalCost: 0,
+    costUnit: undefined,
+    models: Object.create(null) as Record<string, number>,
+    perQueue: Object.create(null) as Record<string, UsageQueueSummary>,
+  };
+}
+
+function mergeUsage(target: UsageSummary | UsageQueueSummary, usage: JobUsage): void {
+  target.jobCount += 1;
+  target.totalTokens += Number.isFinite(usage.totalTokens) ? usage.totalTokens! : 0;
+  target.totalCost += Number.isFinite(usage.totalCost) ? usage.totalCost! : 0;
+  if (usage.costUnit && !target.costUnit) target.costUnit = usage.costUnit;
+  if (usage.model) target.models[usage.model] = (target.models[usage.model] || 0) + 1;
+
+  if (usage.tokens) {
+    for (const [key, value] of Object.entries(usage.tokens)) {
+      if (Number.isFinite(value)) target.tokens[key] = (target.tokens[key] || 0) + value;
+    }
+  }
+
+  if (usage.costs) {
+    for (const [key, value] of Object.entries(usage.costs)) {
+      if (Number.isFinite(value)) target.costs[key] = (target.costs[key] || 0) + value;
+    }
+  }
+}
+
+function resolveUsageWindow(opts?: UsageSummaryOptions): { startTime: number; endTime: number } {
+  const endTime = opts?.endTime ?? Date.now();
+  if (!Number.isFinite(endTime) || endTime < 0) {
+    throw new GlideMQError('endTime must be a finite non-negative number');
+  }
+
+  const windowMs = opts?.windowMs ?? DEFAULT_USAGE_WINDOW_MS;
+  if (!Number.isFinite(windowMs) || windowMs <= 0) {
+    throw new GlideMQError('windowMs must be a finite positive number');
+  }
+
+  const requestedStartTime = opts?.startTime ?? Math.max(0, endTime - windowMs);
+  if (!Number.isFinite(requestedStartTime) || requestedStartTime < 0) {
+    throw new GlideMQError('startTime must be a finite non-negative number');
+  }
+  if (requestedStartTime > endTime) {
+    throw new GlideMQError('startTime must be less than or equal to endTime');
+  }
+  const earliestRetainedStart = Math.max(0, endTime - USAGE_RETENTION_MS);
+  const startTime = Math.max(earliestRetainedStart, requestedStartTime);
+  return { startTime, endTime };
+}
 
 // ---- Lightweight in-memory Job representation ----
 
@@ -83,6 +162,8 @@ export interface TestJobRecord<D = any, R = any> {
   budgetKey?: string;
   /** @internal Usage metadata reported by the processor. */
   usage?: JobUsage;
+  /** @internal Epoch ms when usage was last reported. */
+  usageReportedAt?: number;
   /** @internal Stored vectors for vector search testing. */
   vectors?: Map<string, number[]>;
 }
@@ -176,6 +257,7 @@ export class TestJob<D = any, R = any> {
     const resolved = validateAndResolveUsage(usage);
     this.usage = resolved;
     this._record.usage = resolved;
+    this._record.usageReportedAt = Date.now();
   }
 
   async reportTokens(count: number): Promise<void> {
@@ -303,6 +385,7 @@ interface TestBudgetState {
  * - No sandbox processor support
  */
 export class TestQueue<D = any, R = any> extends EventEmitter {
+  private static registry: Map<string, TestQueue<any, any>> = new Map();
   readonly name: string;
   /** @internal */ readonly jobs: Map<string, TestJobRecord<D, R>> = new Map();
   /** @internal */ readonly dedupSet: Set<string> = new Set();
@@ -331,6 +414,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     this.name = name;
     this.opts = opts ?? {};
     this.serializer = this.opts.serializer ?? JSON_SERIALIZER;
+    TestQueue.registry.set(name, this);
   }
 
   /** Add a single job. Returns null if deduplicated or duplicate custom ID. */
@@ -810,6 +894,45 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Aggregate reported AI usage across all TestQueue instances or a selected subset.
+   * Mirrors the production Queue.getUsageSummary() surface.
+   */
+  async getUsageSummary(opts?: UsageSummaryOptions): Promise<UsageSummary> {
+    const { startTime, endTime } = resolveUsageWindow(opts);
+    const summary = createUsageSummary(startTime, endTime);
+    const selectedQueues = opts?.queues
+      ? Array.from(new Set(opts.queues))
+          .map((name) => TestQueue.registry.get(name))
+          .filter(Boolean)
+      : Array.from(TestQueue.registry.values());
+
+    for (const queue of selectedQueues) {
+      if (!queue) continue;
+      let queueSummary: UsageQueueSummary | undefined;
+
+      for (const record of queue.jobs.values()) {
+        if (!record.usage || record.usageReportedAt == null) continue;
+
+        const reportedBucket = floorUsageBucket(record.usageReportedAt);
+        if (reportedBucket < floorUsageBucket(startTime) || reportedBucket > floorUsageBucket(endTime)) {
+          continue;
+        }
+
+        if (!queueSummary) {
+          queueSummary = createUsageQueueSummary();
+          summary.perQueue[queue.name] = queueSummary;
+        }
+
+        mergeUsage(summary, record.usage);
+        mergeUsage(queueSummary, record.usage);
+      }
+    }
+
+    summary.queues = Object.keys(summary.perQueue).sort();
+    return summary;
+  }
+
+  /**
    * @internal Set a budget for a flow (used by test setup).
    */
   setBudget(
@@ -1041,6 +1164,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     this.clearSchedulerTimer();
     this.removeAllListeners();
     this.workers.clear();
+    TestQueue.registry.delete(this.name);
   }
 
   /** @internal Called by TestWorker when it attaches. */

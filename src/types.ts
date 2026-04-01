@@ -633,6 +633,57 @@ export interface JobUsage {
   cached?: boolean;
 }
 
+/** Options for aggregating reported usage across one or more queues. */
+export interface UsageSummaryOptions {
+  /**
+   * Start of the query window in epoch milliseconds (inclusive).
+   * When omitted, `windowMs` is used relative to `endTime`.
+   */
+  startTime?: number;
+  /**
+   * End of the query window in epoch milliseconds (inclusive).
+   * Defaults to `Date.now()`.
+   */
+  endTime?: number;
+  /**
+   * Window length in milliseconds when `startTime` is omitted.
+   * Defaults to 1 hour.
+   */
+  windowMs?: number;
+  /**
+   * Restrict the summary to specific queues.
+   * When omitted, all queues with recorded usage under the current prefix are included.
+   */
+  queues?: string[];
+}
+
+/** Aggregated usage totals for a single queue inside a usage summary response. */
+export interface UsageQueueSummary {
+  jobCount: number;
+  tokens: Record<string, number>;
+  totalTokens: number;
+  costs: Record<string, number>;
+  totalCost: number;
+  costUnit?: string;
+  models: Record<string, number>;
+}
+
+/** Rolling aggregate usage summary across one or more queues. */
+export interface UsageSummary {
+  startTime: number;
+  endTime: number;
+  bucketSizeMs: number;
+  queues: string[];
+  jobCount: number;
+  tokens: Record<string, number>;
+  totalTokens: number;
+  costs: Record<string, number>;
+  totalCost: number;
+  costUnit?: string;
+  models: Record<string, number>;
+  perQueue: Record<string, UsageQueueSummary>;
+}
+
 /** Options for suspending a job. */
 export interface SuspendOptions {
   /** Human-readable reason for the suspension. */

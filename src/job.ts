@@ -1,20 +1,135 @@
+import { randomBytes } from 'crypto';
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { JobOptions, JobUsage, Client, Serializer, SuspendOptions, SignalEntry } from './types';
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
-import { removeJob, failJob, changePriority, changeDelay, promoteJob } from './functions/index';
+import { changeDelay, changePriority, failJob, promoteJob, removeJob, tryLock, unlock } from './functions/index';
 import { GlideMQError, DelayedError, WaitingChildrenError, GroupRateLimitError, SuspendError } from './errors';
 import type { GroupRateLimitOptions } from './errors';
 import {
   calculateBackoff,
   decompress,
+  floorUsageBucket,
   isPlainStepPayload,
   parseJsonRecord,
   validateAndResolveUsage,
   MAX_JOB_DATA_SIZE,
+  USAGE_RETENTION_SECONDS,
 } from './utils';
 import { isClusterClient } from './connection';
+
+const JOB_USAGE_HASH_FIELDS = [
+  'usage:model',
+  'usage:provider',
+  'usage:tokens',
+  'usage:totalTokens',
+  'usage:costs',
+  'usage:totalCost',
+  'usage:costUnit',
+  'usage:latencyMs',
+  'usage:cached',
+  'usage:bucketTs',
+] as const;
+
+const USAGE_MODEL_FIELD_PREFIX = 'models:';
+const USAGE_TOKEN_FIELD_PREFIX = 'tokens:';
+const USAGE_COST_FIELD_PREFIX = 'costs:';
+const REPORT_USAGE_LOCK_TTL_MS = 5000;
+const REPORT_USAGE_LOCK_RETRY_DELAY_MS = 25;
+const REPORT_USAGE_LOCK_MAX_ATTEMPTS = Math.ceil(REPORT_USAGE_LOCK_TTL_MS / REPORT_USAGE_LOCK_RETRY_DELAY_MS);
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseStoredUsage(values: (unknown | null)[]): { bucketTs?: number; usage?: JobUsage } {
+  const model = values[0] ? String(values[0]) : undefined;
+  const provider = values[1] ? String(values[1]) : undefined;
+  const tokensStr = values[2] ? String(values[2]) : undefined;
+  const totalTokens = values[3] != null ? parseFloat(String(values[3])) : undefined;
+  const costsStr = values[4] ? String(values[4]) : undefined;
+  const totalCost = values[5] != null ? parseFloat(String(values[5])) : undefined;
+  const costUnit = values[6] ? String(values[6]) : undefined;
+  const latencyMs = values[7] != null ? parseInt(String(values[7]), 10) : undefined;
+  const cached =
+    values[8] == null ? undefined : String(values[8]) === '1' ? true : String(values[8]) === '0' ? false : undefined;
+  const bucketTs = values[9] != null ? parseInt(String(values[9]), 10) : undefined;
+
+  const usage: JobUsage = {
+    model,
+    provider,
+    tokens: tokensStr ? parseJsonRecord(tokensStr) : undefined,
+    totalTokens: Number.isFinite(totalTokens) ? totalTokens : undefined,
+    costs: costsStr ? parseJsonRecord(costsStr) : undefined,
+    totalCost: Number.isFinite(totalCost) ? totalCost : undefined,
+    costUnit,
+    latencyMs: Number.isFinite(latencyMs) ? latencyMs : undefined,
+    cached,
+  };
+
+  return {
+    bucketTs: Number.isFinite(bucketTs) ? bucketTs : undefined,
+    usage:
+      usage.model !== undefined ||
+      usage.provider !== undefined ||
+      usage.tokens !== undefined ||
+      usage.totalTokens !== undefined ||
+      usage.costs !== undefined ||
+      usage.totalCost !== undefined ||
+      usage.costUnit !== undefined ||
+      usage.latencyMs !== undefined ||
+      usage.cached !== undefined
+        ? usage
+        : undefined,
+  };
+}
+
+function hasUsageFields(usage: JobUsage): boolean {
+  return (
+    usage.model !== undefined ||
+    usage.provider !== undefined ||
+    usage.tokens !== undefined ||
+    usage.totalTokens !== undefined ||
+    usage.costs !== undefined ||
+    usage.totalCost !== undefined ||
+    usage.costUnit !== undefined ||
+    usage.latencyMs !== undefined ||
+    usage.cached !== undefined
+  );
+}
+
+function applyUsageDelta(batch: Batch | ClusterBatch, bucketKey: string, usage: JobUsage, delta: 1 | -1): void {
+  const scalarDelta = delta;
+  batch.hincrBy(bucketKey, 'jobCount', scalarDelta);
+  if (Number.isFinite(usage.totalTokens)) {
+    batch.hincrByFloat(bucketKey, 'totalTokens', (usage.totalTokens ?? 0) * scalarDelta);
+  }
+  if (Number.isFinite(usage.totalCost)) {
+    batch.hincrByFloat(bucketKey, 'totalCost', (usage.totalCost ?? 0) * scalarDelta);
+  }
+  if (usage.costUnit && delta > 0) {
+    batch.hset(bucketKey, { costUnit: usage.costUnit });
+  }
+  if (usage.model) {
+    batch.hincrByFloat(bucketKey, `${USAGE_MODEL_FIELD_PREFIX}${usage.model}`, scalarDelta);
+  }
+  if (usage.tokens) {
+    for (const [key, value] of Object.entries(usage.tokens)) {
+      if (Number.isFinite(value) && value !== 0) {
+        batch.hincrByFloat(bucketKey, `${USAGE_TOKEN_FIELD_PREFIX}${key}`, value * scalarDelta);
+      }
+    }
+  }
+  if (usage.costs) {
+    for (const [key, value] of Object.entries(usage.costs)) {
+      if (Number.isFinite(value) && value !== 0) {
+        batch.hincrByFloat(bucketKey, `${USAGE_COST_FIELD_PREFIX}${key}`, value * scalarDelta);
+      }
+    }
+  }
+  batch.expire(bucketKey, USAGE_RETENTION_SECONDS);
+}
 
 /** Try to parse a string as JSON; return the original string if parsing fails. */
 function tryParseJson(s: string): any {
@@ -207,35 +322,72 @@ export class Job<D = any, R = any> {
    */
   async reportUsage(usage: JobUsage): Promise<void> {
     const resolved = validateAndResolveUsage(usage);
+    const hasUsage = hasUsageFields(resolved);
+    const usageLockKey = `${this.queueKeys.job(this.id)}:usage-lock`;
+    const usageLockToken = randomBytes(16).toString('hex');
+    let locked = false;
 
-    const fields: Record<string, string> = {};
-    if (resolved.model !== undefined) fields['usage:model'] = resolved.model;
-    if (resolved.provider !== undefined) fields['usage:provider'] = resolved.provider;
-    if (resolved.tokens !== undefined) fields['usage:tokens'] = JSON.stringify(resolved.tokens);
-    if (resolved.totalTokens !== undefined) fields['usage:totalTokens'] = resolved.totalTokens.toString();
-    if (resolved.costs !== undefined) fields['usage:costs'] = JSON.stringify(resolved.costs);
-    if (resolved.totalCost !== undefined) fields['usage:totalCost'] = resolved.totalCost.toString();
-    if (resolved.costUnit !== undefined) fields['usage:costUnit'] = resolved.costUnit;
-    if (resolved.latencyMs !== undefined) fields['usage:latencyMs'] = resolved.latencyMs.toString();
-    if (resolved.cached !== undefined) fields['usage:cached'] = resolved.cached ? '1' : '0';
-
-    const isCluster = isClusterClient(this.client);
-    const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
-
-    batch.hset(this.queueKeys.job(this.id), fields);
-    batch.xadd(this.queueKeys.events, [
-      ['event', 'usage'],
-      ['jobId', this.id],
-      ['data', JSON.stringify(resolved)],
-    ]);
-
-    if (isCluster) {
-      await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false);
-    } else {
-      await (this.client as GlideClient).exec(batch as Batch, false);
+    for (let attempt = 0; attempt < REPORT_USAGE_LOCK_MAX_ATTEMPTS; attempt++) {
+      locked = await tryLock(this.client, usageLockKey, usageLockToken, REPORT_USAGE_LOCK_TTL_MS);
+      if (locked) break;
+      await delay(REPORT_USAGE_LOCK_RETRY_DELAY_MS);
     }
 
-    this.usage = resolved;
+    if (!locked) {
+      throw new GlideMQError('reportUsage lock timeout; try again');
+    }
+
+    try {
+      const previousValues = await this.client.hmget(this.queueKeys.job(this.id), [...JOB_USAGE_HASH_FIELDS]);
+      const previous = parseStoredUsage(previousValues ?? []);
+      const bucketTs = floorUsageBucket(Date.now());
+
+      const fields: Record<string, string> = {};
+      if (resolved.model !== undefined) fields['usage:model'] = resolved.model;
+      if (resolved.provider !== undefined) fields['usage:provider'] = resolved.provider;
+      if (resolved.tokens !== undefined) fields['usage:tokens'] = JSON.stringify(resolved.tokens);
+      if (resolved.totalTokens !== undefined) fields['usage:totalTokens'] = resolved.totalTokens.toString();
+      if (resolved.costs !== undefined) fields['usage:costs'] = JSON.stringify(resolved.costs);
+      if (resolved.totalCost !== undefined) fields['usage:totalCost'] = resolved.totalCost.toString();
+      if (resolved.costUnit !== undefined) fields['usage:costUnit'] = resolved.costUnit;
+      if (resolved.latencyMs !== undefined) fields['usage:latencyMs'] = resolved.latencyMs.toString();
+      if (resolved.cached !== undefined) fields['usage:cached'] = resolved.cached ? '1' : '0';
+      if (hasUsage) fields['usage:bucketTs'] = bucketTs.toString();
+
+      const isCluster = isClusterClient(this.client);
+      const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
+
+      batch.hdel(this.queueKeys.job(this.id), [...JOB_USAGE_HASH_FIELDS]);
+      if (hasUsage) {
+        batch.hset(this.queueKeys.job(this.id), fields);
+      }
+      if (previous.usage && previous.bucketTs !== undefined) {
+        applyUsageDelta(batch, this.queueKeys.usageBucket(previous.bucketTs), previous.usage, -1);
+      }
+      if (hasUsage) {
+        applyUsageDelta(batch, this.queueKeys.usageBucket(bucketTs), resolved, 1);
+        batch.sadd(this.queueKeys.usageQueues, [this.queueKeys.name]);
+      }
+      batch.xadd(this.queueKeys.events, [
+        ['event', 'usage'],
+        ['jobId', this.id],
+        ['data', JSON.stringify(resolved)],
+      ]);
+
+      if (isCluster) {
+        await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false);
+      } else {
+        await (this.client as GlideClient).exec(batch as Batch, false);
+      }
+
+      this.usage = hasUsage ? resolved : undefined;
+    } finally {
+      try {
+        await unlock(this.client, usageLockKey, usageLockToken);
+      } catch {
+        // The lock has a short TTL, so unlock is best-effort on teardown paths.
+      }
+    }
   }
 
   /**

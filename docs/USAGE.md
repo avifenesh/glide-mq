@@ -10,7 +10,7 @@
 - [Broadcast / BroadcastWorker](#broadcast--broadcastworker)
 - [Event Listeners](#event-listeners)
 - [AI-native Primitives](#ai-native-primitives)
-  - [Job Metadata (reportUsage / getFlowUsage)](#job-metadata-reportusage--getflowusage)
+  - [Job Metadata (reportUsage / getFlowUsage / getUsageSummary)](#job-metadata-reportusage--getflowusage--getusagesummary)
   - [Job Streaming Channel (stream / readStream)](#job-streaming-channel-stream--readstream)
   - [Suspend/Resume with Signals](#suspendresume-with-signals)
   - [Fallback Chains](#fallback-chains)
@@ -621,7 +621,7 @@ The job is marked as permanently failed regardless of the `attempts` configurati
 
 glide-mq ships 7 AI-native primitives plus vector search. They work in both production (Valkey) and testing mode (in-memory).
 
-### Job Metadata (reportUsage / getFlowUsage)
+### Job Metadata (reportUsage / getFlowUsage / getUsageSummary)
 
 Track token usage, cost, and latency per job for cost attribution and observability.
 
@@ -649,9 +649,13 @@ const worker = new Worker(
 // Aggregate usage for a job flow (parent + all children)
 const usage = await queue.getFlowUsage(parentJobId);
 console.log(usage.totalTokens, usage.totalCost);
+
+// Aggregate rolling usage across queues for the last hour (default window)
+const summary = await queue.getUsageSummary({ queues: ['llm-tasks', 'embeddings'] });
+console.log(summary.totalTokens, summary.perQueue['llm-tasks']?.models);
 ```
 
-`reportUsage()` persists usage to the job hash in Valkey. `job.usage` is populated when the job is fetched via `getJob()`. `getFlowUsage()` walks the job tree downward from the parent and sums all fields.
+`reportUsage()` persists usage to the job hash in Valkey. `job.usage` is populated when the job is fetched via `getJob()`. `getFlowUsage()` walks the job tree downward from the parent and sums all fields. `getUsageSummary()` reads rolling per-minute buckets, so it can summarize total tokens, cost, model counts, and per-queue breakdowns without scanning job hashes.
 
 ### Job Streaming Channel (stream / readStream)
 
@@ -834,9 +838,36 @@ See [ADVANCED.md](./ADVANCED.md#vector-search-index-management) for index manage
 
 ### Proxy Endpoints
 
-The proxy (glide-mq/proxy) exposes two AI-specific endpoints:
+The proxy (`glide-mq/proxy`) exposes queue, scheduler, flow, and broadcast endpoints over HTTP:
 
-| Method | Path                          | Description                                                                                                |
-| ------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| GET    | /queues/:name/jobs/:id/stream | SSE stream of job output chunks. Supports Last-Event-ID header and ?lastId query param.                    |
-| POST   | /queues/:name/jobs/:id/signal | Send a signal to a suspended job. Body: { "name": "...", "data": ... }. Returns { "resumed": true/false }. |
+| Method | Path                                 | Description                                                                                                                                              |
+| ------ | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | /queues/:name/jobs                   | Add a single job.                                                                                                                                        |
+| POST   | /queues/:name/jobs/bulk              | Add multiple jobs in one request.                                                                                                                        |
+| GET    | /queues/:name/jobs?state=waiting     | List jobs by state. Supports `start`, `end`, and `excludeData=true`.                                                                                     |
+| POST   | /queues/:name/jobs/wait              | Add a job and wait for the final worker result in the same request.                                                                                      |
+| GET    | /queues/:name/jobs/:id               | Fetch one job by ID.                                                                                                                                     |
+| POST   | /queues/:name/jobs/:id/priority      | Change a waiting/prioritized/delayed job's priority.                                                                                                     |
+| POST   | /queues/:name/jobs/:id/delay         | Change a job's delay or move it into delayed state.                                                                                                      |
+| POST   | /queues/:name/jobs/:id/promote       | Promote a delayed job immediately.                                                                                                                       |
+| GET    | /queues/:name/jobs/:id/stream        | SSE stream of job output chunks. Supports `Last-Event-ID` and `?lastId=`.                                                                                |
+| POST   | /queues/:name/jobs/:id/signal        | Send a signal to a suspended job. Body: `{ "name": "...", "data": ... }`.                                                                                |
+| GET    | /queues/:name/events                 | Queue-wide SSE stream of lifecycle events. Supports `Last-Event-ID` and `?lastId=` replay.                                                               |
+| POST   | /queues/:name/pause                  | Pause the queue.                                                                                                                                         |
+| POST   | /queues/:name/resume                 | Resume the queue.                                                                                                                                        |
+| GET    | /queues/:name/counts                 | Return waiting/active/delayed/completed/failed counts.                                                                                                   |
+| GET    | /queues/:name/metrics?type=completed | Return total count plus per-minute metrics data.                                                                                                         |
+| GET    | /queues/:name/workers                | List live workers for the queue.                                                                                                                         |
+| POST   | /queues/:name/drain                  | Remove waiting jobs. Pass `?delayed=true` to also remove delayed jobs.                                                                                   |
+| POST   | /queues/:name/retry                  | Retry failed jobs. Optional body/query `count`.                                                                                                          |
+| DELETE | /queues/:name/clean                  | Remove old completed/failed jobs. Requires `state` and `age` seconds; optional `limit`.                                                                  |
+| GET    | /queues/:name/schedulers             | List registered schedulers.                                                                                                                              |
+| GET    | /queues/:name/schedulers/:id         | Fetch one scheduler entry by name.                                                                                                                       |
+| PUT    | /queues/:name/schedulers/:id         | Upsert a scheduler. Body: `{ schedule, template? }`.                                                                                                     |
+| DELETE | /queues/:name/schedulers/:id         | Remove a scheduler by name.                                                                                                                              |
+| GET    | /queues/:name/flows/:parentId/usage  | Aggregate AI usage across a flow.                                                                                                                        |
+| GET    | /queues/:name/flows/:flowId/budget   | Read current flow budget state.                                                                                                                          |
+| GET    | /usage/summary                       | Rolling AI usage summary. Supports `windowMs` (or legacy `window`) in ms, `start`/`end` as epoch ms, and `queues=a,b` (for example `?windowMs=3600000`). |
+| POST   | /broadcast/:name                     | Publish a broadcast message. Body: `{ subject, data, opts? }`.                                                                                           |
+| GET    | /broadcast/:name/events              | SSE broadcast stream. Requires `subscription`; optional `subjects=a.*,b.>` filter.                                                                       |
+| GET    | /health                              | Health check and proxy uptime.                                                                                                                           |
