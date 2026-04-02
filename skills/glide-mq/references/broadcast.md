@@ -118,9 +118,21 @@ matcher('inventory.low');     // false
 | Retry | Per job | Per subscriber, per message |
 | Trimming | Auto (completion/removal) | `maxMessages` option |
 
+## HTTP Proxy
+
+Cross-language producers and consumers can use the proxy instead of `Broadcast` / `BroadcastWorker` directly:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/broadcast/:name` | Publish `{ subject, data?, opts? }` |
+| GET | `/broadcast/:name/events` | SSE fan-out stream. Requires `subscription`; optional `subjects=a.*,b.>` |
+
+SSE payloads arrive as `event: message` with JSON `{ id, subject, data, timestamp }`.
+
 ## Gotchas
 
 - `subscription` is required on BroadcastWorker - it becomes the consumer group name.
+- Proxy SSE `subscription` follows the same rule and becomes the consumer-group name.
 - Subject filtering requires publishing with a `name` using dotted convention.
 - `>` wildcard must be the **last** token in the pattern.
 - `startFrom: '0-0'` replays all retained history (backfill).

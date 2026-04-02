@@ -1,11 +1,13 @@
 import type { Request, Response, Router } from 'express';
-import { createBlockingClient } from '../connection';
+import { randomBytes } from 'crypto';
+import { createBlockingClient, createClient } from '../connection';
 import { Broadcast } from '../broadcast';
 import { BroadcastWorker } from '../broadcast-worker';
+import { FlowProducer, type JobNode } from '../flow-producer';
 import { Job } from '../job';
 import { Queue } from '../queue';
-import type { JobTemplate, ScheduleOpts, WorkerInfo } from '../types';
-import { buildKeys, compileSubjectMatcher, validateJobId, validateQueueName } from '../utils';
+import type { BudgetOptions, Client, DAGFlow, FlowJob, JobTemplate, ScheduleOpts, WorkerInfo } from '../types';
+import { buildKeys, compileSubjectMatcher, hashDataToRecord, validateJobId, validateQueueName } from '../utils';
 import type { AddJobRequest, AddJobResponse, AddJobSkippedResponse, ProxyOptions } from './types';
 
 const MAX_BULK_SIZE = 1000;
@@ -27,6 +29,24 @@ type SharedBroadcastStream = {
   closing: boolean;
   ready: Promise<void>;
   worker: BroadcastWorker<any, void>;
+};
+
+type FlowKind = 'tree' | 'dag';
+
+type FlowJobRef = {
+  jobId: string;
+  queueName: string;
+};
+
+type FlowNodeSummary = ReturnType<typeof serializeJob> & {
+  flowId: string;
+  queueName: string;
+  parentIds?: string[];
+  parentQueues?: string[];
+};
+
+type FlowTreeNode = FlowNodeSummary & {
+  children: FlowTreeNode[];
 };
 
 /** Extract a single string from a route param (Express 5 params can be string | string[]). */
@@ -235,6 +255,153 @@ function serializeJob(job: Job<any, any>, state: string) {
   };
 }
 
+function serializeDeadLetterJob(job: Job<any, any>) {
+  const envelope =
+    job.data && typeof job.data === 'object' && !Array.isArray(job.data)
+      ? (job.data as {
+          attemptsMade?: unknown;
+          data?: unknown;
+          failedReason?: unknown;
+          originalJobId?: unknown;
+          originalQueue?: unknown;
+        })
+      : undefined;
+
+  return {
+    attemptsMade:
+      typeof envelope?.attemptsMade === 'number'
+        ? envelope.attemptsMade
+        : typeof envelope?.attemptsMade === 'string'
+          ? Number(envelope.attemptsMade)
+          : job.attemptsMade,
+    data: envelope?.data ?? job.data,
+    failedReason: typeof envelope?.failedReason === 'string' ? envelope.failedReason : job.failedReason,
+    id: job.id,
+    name: job.name,
+    originalJobId: typeof envelope?.originalJobId === 'string' ? envelope.originalJobId : undefined,
+    originalQueue: typeof envelope?.originalQueue === 'string' ? envelope.originalQueue : undefined,
+    timestamp: job.timestamp,
+  };
+}
+
+function flowMetaKey(flowId: string, prefix = 'glide'): string {
+  return `${prefix}:flow:${flowId}:meta`;
+}
+
+function flowJobsKey(flowId: string, prefix = 'glide'): string {
+  return `${prefix}:flow:${flowId}:jobs`;
+}
+
+function flowRootsKey(flowId: string, prefix = 'glide'): string {
+  return `${prefix}:flow:${flowId}:roots`;
+}
+
+function encodeFlowJobRef(ref: FlowJobRef): string {
+  return `${ref.queueName}:${ref.jobId}`;
+}
+
+function decodeFlowJobRef(raw: string): FlowJobRef | null {
+  const separator = raw.indexOf(':');
+  if (separator <= 0 || separator === raw.length - 1) return null;
+  return {
+    jobId: raw.slice(separator + 1),
+    queueName: raw.slice(0, separator),
+  };
+}
+
+function collectFlowQueueNames(flow: FlowJob, acc: Set<string> = new Set()): Set<string> {
+  acc.add(flow.queueName);
+  for (const child of flow.children ?? []) {
+    collectFlowQueueNames(child, acc);
+  }
+  return acc;
+}
+
+function collectDagQueueNames(dag: DAGFlow): Set<string> {
+  const names = new Set<string>();
+  for (const node of dag.nodes) {
+    names.add(node.queueName);
+  }
+  return names;
+}
+
+function buildFlowTreeNodes(
+  flowId: string,
+  roots: FlowJobRef[],
+  nodes: FlowNodeSummary[],
+): FlowTreeNode[] {
+  const nodeMap = new Map<string, FlowNodeSummary>();
+  const childrenByParent = new Map<string, FlowNodeSummary[]>();
+
+  for (const node of nodes) {
+    nodeMap.set(encodeFlowJobRef({ jobId: node.id, queueName: node.queueName }), node);
+
+    const parentRefs: FlowJobRef[] = [];
+    if (node.parentIds && node.parentQueues && node.parentIds.length === node.parentQueues.length) {
+      for (let i = 0; i < node.parentIds.length; i++) {
+        parentRefs.push({ jobId: node.parentIds[i], queueName: node.parentQueues[i] });
+      }
+    } else if (node.parentId) {
+      parentRefs.push({ jobId: node.parentId, queueName: node.queueName });
+    }
+
+    for (const parentRef of parentRefs) {
+      const key = encodeFlowJobRef(parentRef);
+      const siblings = childrenByParent.get(key);
+      if (siblings) siblings.push(node);
+      else childrenByParent.set(key, [node]);
+    }
+  }
+
+  function visit(ref: FlowJobRef, path: Set<string>): FlowTreeNode {
+    const key = encodeFlowJobRef(ref);
+    const node = nodeMap.get(key);
+    if (!node) {
+      return {
+        attemptsMade: 0,
+        data: null,
+        failedReason: undefined,
+        finishedOn: undefined,
+        flowId,
+        id: ref.jobId,
+        name: '',
+        opts: {},
+        parentId: undefined,
+        parentIds: undefined,
+        parentQueues: undefined,
+        processedOn: undefined,
+        progress: 0,
+        queueName: ref.queueName,
+        returnvalue: undefined,
+        state: 'missing',
+        timestamp: 0,
+        usage: undefined,
+        children: [],
+      };
+    }
+
+    const children = (childrenByParent.get(key) ?? [])
+      .slice()
+      .sort((a, b) => a.timestamp - b.timestamp || a.queueName.localeCompare(b.queueName) || a.id.localeCompare(b.id))
+      .map((child) => {
+        const childKey = encodeFlowJobRef({ jobId: child.id, queueName: child.queueName });
+        if (path.has(childKey)) {
+          return { ...child, children: [] };
+        }
+        const nextPath = new Set(path);
+        nextPath.add(childKey);
+        return visit({ jobId: child.id, queueName: child.queueName }, nextPath);
+      });
+
+    return { ...node, children };
+  }
+
+  return roots
+    .slice()
+    .sort((a, b) => a.queueName.localeCompare(b.queueName) || a.jobId.localeCompare(b.jobId))
+    .map((root) => visit(root, new Set([encodeFlowJobRef(root)])));
+}
+
 function validateJobOpts(
   optsIn: Record<string, unknown> | undefined,
   prefix: string,
@@ -334,6 +501,7 @@ export function createRoutes(
   const activeQueueEventClosers = new Set<() => void>();
   const startTime = Date.now();
   const allowedQueues = opts.queues ? new Set(opts.queues) : null;
+  const flowPrefix = opts.prefix ?? 'glide';
   const errorHandler =
     opts.onError ??
     ((err: Error, queueName: string) => {
@@ -341,12 +509,171 @@ export function createRoutes(
     });
   let draining = false;
   let closed = false;
+  let sharedClient: Client | null = null;
+  let sharedClientOwned = false;
 
   function requireConnection(feature: string) {
     if (!opts.connection) {
       throw httpError(500, `Proxy requires \`connection\` for ${feature}`);
     }
     return opts.connection;
+  }
+
+  async function getSharedClient(): Promise<Client> {
+    if (sharedClient) return sharedClient;
+    if (opts.client) {
+      sharedClient = opts.client;
+      sharedClientOwned = false;
+      return sharedClient;
+    }
+    if (!opts.connection) {
+      throw httpError(500, 'Proxy requires either `client` or `connection`');
+    }
+    sharedClient = await createClient(opts.connection);
+    sharedClientOwned = true;
+    return sharedClient;
+  }
+
+  function assertAllowedFlowQueues(queueNames: Iterable<string>): void {
+    if (!allowedQueues) return;
+    for (const queueName of queueNames) {
+      if (!allowedQueues.has(queueName)) {
+        throw httpError(403, 'Queue is not in the allowlist');
+      }
+    }
+  }
+
+  async function registerFlowRecord(
+    flowId: string,
+    kind: FlowKind,
+    roots: FlowJobRef[],
+    jobs: FlowJobRef[],
+  ): Promise<void> {
+    const client = await getSharedClient();
+    const metaKey = flowMetaKey(flowId, flowPrefix);
+    const jobsKey = flowJobsKey(flowId, flowPrefix);
+    const rootsKey = flowRootsKey(flowId, flowPrefix);
+    await client.hset(metaKey, {
+      createdAt: Date.now().toString(),
+      kind,
+    });
+    await client.del([jobsKey, rootsKey]);
+    if (jobs.length > 0) {
+      await client.sadd(
+        jobsKey,
+        jobs
+          .slice()
+          .sort((a, b) => a.queueName.localeCompare(b.queueName) || a.jobId.localeCompare(b.jobId))
+          .map(encodeFlowJobRef),
+      );
+      for (const jobRef of jobs) {
+        await client.hset(buildKeys(jobRef.queueName, opts.prefix).job(jobRef.jobId), { flowId });
+      }
+    }
+    if (roots.length > 0) {
+      await client.sadd(
+        rootsKey,
+        roots
+          .slice()
+          .sort((a, b) => a.queueName.localeCompare(b.queueName) || a.jobId.localeCompare(b.jobId))
+          .map(encodeFlowJobRef),
+      );
+    }
+  }
+
+  async function loadFlowRecord(flowId: string): Promise<{
+    createdAt: number;
+    jobs: FlowJobRef[];
+    kind: FlowKind;
+    roots: FlowJobRef[];
+  } | null> {
+    const client = await getSharedClient();
+    const metaRecord = hashDataToRecord(await client.hgetall(flowMetaKey(flowId, flowPrefix)));
+    if (!metaRecord || !metaRecord.kind) return null;
+
+    const jobsRaw = await client.smembers(flowJobsKey(flowId, flowPrefix));
+    const rootsRaw = await client.smembers(flowRootsKey(flowId, flowPrefix));
+    const jobs = Array.from(jobsRaw ?? [])
+      .map((entry) => decodeFlowJobRef(String(entry)))
+      .filter((entry): entry is FlowJobRef => entry !== null);
+    const roots = Array.from(rootsRaw ?? [])
+      .map((entry) => decodeFlowJobRef(String(entry)))
+      .filter((entry): entry is FlowJobRef => entry !== null);
+
+    return {
+      createdAt: Number(metaRecord.createdAt || '0'),
+      jobs,
+      kind: metaRecord.kind === 'dag' ? 'dag' : 'tree',
+      roots,
+    };
+  }
+
+  async function deleteFlowRecord(flowId: string): Promise<void> {
+    const client = await getSharedClient();
+    await client.del([flowMetaKey(flowId, flowPrefix), flowJobsKey(flowId, flowPrefix), flowRootsKey(flowId, flowPrefix)]);
+  }
+
+  async function buildFlowSnapshot(flowId: string): Promise<{
+    budget: unknown;
+    counts: Record<string, number>;
+    createdAt: number;
+    flowId: string;
+    kind: FlowKind;
+    nodes: FlowNodeSummary[];
+    roots: FlowJobRef[];
+    tree: FlowTreeNode[];
+    usage: unknown;
+  } | null> {
+    const record = await loadFlowRecord(flowId);
+    if (!record) return null;
+    assertAllowedFlowQueues(record.jobs.map((job) => job.queueName));
+
+    const nodes: FlowNodeSummary[] = [];
+    const counts: Record<string, number> = Object.create(null);
+
+    for (const ref of record.jobs) {
+      const queue = await getQueue(ref.queueName);
+      const job = await queue.getJob(ref.jobId);
+      if (!job) continue;
+      const state = await job.getState();
+      counts[state] = (counts[state] || 0) + 1;
+      nodes.push({
+        ...serializeJob(job, state),
+        flowId,
+        parentIds: job.parentIds,
+        parentQueues: job.parentQueues,
+        queueName: ref.queueName,
+      });
+    }
+
+    let usage: unknown = null;
+    let budget: unknown = null;
+    if (record.roots.length === 1) {
+      const [root] = record.roots;
+      const rootQueue = await getQueue(root.queueName);
+      try {
+        usage = await rootQueue.getFlowUsage(root.jobId);
+      } catch {
+        usage = null;
+      }
+      try {
+        budget = await rootQueue.getFlowBudget(root.jobId);
+      } catch {
+        budget = null;
+      }
+    }
+
+    return {
+      budget,
+      counts,
+      createdAt: record.createdAt,
+      flowId,
+      kind: record.kind,
+      nodes: nodes.sort((a, b) => a.timestamp - b.timestamp || a.queueName.localeCompare(b.queueName) || a.id.localeCompare(b.id)),
+      roots: record.roots.slice().sort((a, b) => a.queueName.localeCompare(b.queueName) || a.jobId.localeCompare(b.jobId)),
+      tree: buildFlowTreeNodes(flowId, record.roots, nodes),
+      usage,
+    };
   }
 
   function getQueue(name: string): Promise<Queue> {
@@ -666,6 +993,93 @@ export function createRoutes(
     }
   });
 
+  router.get('/queues/:name/dlq', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+      const queue = await getQueue(param(req, 'name'));
+      const startRaw = queryValue(req, 'start');
+      const endRaw = queryValue(req, 'end');
+      const start = startRaw !== undefined ? parseInteger(startRaw, 'start', { min: 0 }) : 0;
+      const end = endRaw !== undefined ? parseInteger(endRaw, 'end', { allowNegativeOne: true, min: 0 }) : -1;
+      const jobs = await queue.getDeadLetterJobs(start, end);
+      res.status(200).json({
+        count: jobs.length,
+        jobs: jobs.map((job) => serializeDeadLetterJob(job)),
+      });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  router.post('/queues/:name/dlq/replay-all', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+      const body = req.body as { count?: unknown } | undefined;
+      const countRaw = typeof body?.count === 'number' ? String(body.count) : queryValue(req, 'count');
+      const count = countRaw !== undefined ? parseInteger(countRaw, 'count', { min: 1 }) : undefined;
+      const queue = await getQueue(param(req, 'name'));
+      const dlqJobs = await queue.getDeadLetterJobs(0, count !== undefined ? count - 1 : -1);
+      const replayedJobs: Array<{ id: string; name: string; sourceId: string }> = [];
+
+      for (const job of dlqJobs) {
+        const replayed = await queue.replayDeadLetterJob(job.id);
+        if (!replayed) continue;
+        replayedJobs.push({ id: replayed.id, name: replayed.name, sourceId: job.id });
+      }
+
+      res.status(200).json({ jobs: replayedJobs, replayed: replayedJobs.length });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  router.get('/queues/:name/dlq/:id', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+      const queue = await getQueue(param(req, 'name'));
+      const job = await queue.getDeadLetterJob(param(req, 'id'));
+      if (!job) {
+        throw httpError(404, 'DLQ job not found');
+      }
+      res.status(200).json(serializeDeadLetterJob(job));
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  router.post('/queues/:name/dlq/:id/replay', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+      const queue = await getQueue(param(req, 'name'));
+      const replayed = await queue.replayDeadLetterJob(param(req, 'id'));
+      if (!replayed) {
+        throw httpError(404, 'DLQ job not found');
+      }
+      res.status(200).json({ name: replayed.name, newJobId: replayed.id });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  router.delete('/queues/:name/dlq/:id', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+      const queue = await getQueue(param(req, 'name'));
+      const removed = await queue.removeDeadLetterJob(param(req, 'id'));
+      if (!removed) {
+        throw httpError(404, 'DLQ job not found');
+      }
+      res.status(200).json({ removed: true });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
   router.post('/queues/:name/jobs/:id/priority', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
@@ -782,6 +1196,108 @@ export function createRoutes(
 
       res.end();
     } catch (err) {
+      if (!res.headersSent) {
+        const { status, message } = errorResponse(err);
+        res.status(status).json({ error: message });
+      } else {
+        res.end();
+      }
+    }
+  });
+
+  router.get('/queues/:name/jobs/:id/events', async (req: Request, res: Response) => {
+    let closeConnection: (() => void) | undefined;
+    try {
+      if (!checkAllowlist(req, res)) return;
+      const queue = await getQueue(param(req, 'name'));
+      const jobId = param(req, 'id');
+      const job = await queue.getJob(jobId);
+      if (!job) {
+        throw httpError(404, 'Job not found');
+      }
+
+      const connection = requireConnection('job events SSE');
+      const keys = buildKeys(param(req, 'name'), opts.prefix);
+      const client = await createBlockingClient(connection);
+      let lastId = (req.headers['last-event-id'] as string) || queryValue(req, 'lastId') || '$';
+      let connectionClosed = false;
+
+      closeConnection = () => {
+        if (connectionClosed) return;
+        connectionClosed = true;
+        try {
+          client.close();
+        } catch {
+          /* ignore */
+        }
+        try {
+          res.end();
+        } catch {
+          /* ignore */
+        }
+      };
+
+      req.on('close', closeConnection);
+      startSse(res);
+      writeSseComment(res, 'connected');
+
+      while (!connectionClosed) {
+        let result;
+        try {
+          result = await client.xread({ [keys.events]: lastId }, { block: SSE_BLOCK_MS, count: 100 });
+        } catch (err) {
+          if (connectionClosed) break;
+          throw err;
+        }
+
+        if (connectionClosed) break;
+        if (!result) {
+          const latestJob = await queue.getJob(jobId);
+          if (!latestJob) break;
+          const state = await latestJob.getState();
+          if (state === 'completed' || state === 'failed') break;
+          writeSseComment(res);
+          continue;
+        }
+
+        let sawTerminalEvent = false;
+        for (const streamEntry of result) {
+          const entries = streamEntry.value;
+          for (const [entryId, fieldPairs] of Object.entries(entries)) {
+            if (!fieldPairs) continue;
+
+            let eventType: string | undefined;
+            const payload: Record<string, string> = Object.create(null);
+            for (const [field, value] of fieldPairs) {
+              const fieldStr = String(field);
+              if (fieldStr === 'event') {
+                eventType = String(value);
+              } else {
+                payload[fieldStr] = String(value);
+              }
+            }
+
+            lastId = String(entryId);
+            if (!eventType) continue;
+
+            const decoded = decodeEventPayload(payload);
+            if (String(decoded.jobId ?? '') !== jobId) continue;
+            writeSse(res, decoded, { event: eventType, id: lastId });
+
+            if (eventType === 'completed' || eventType === 'failed') {
+              sawTerminalEvent = true;
+              break;
+            }
+          }
+          if (sawTerminalEvent) break;
+        }
+
+        if (sawTerminalEvent) break;
+      }
+
+      res.end();
+    } catch (err) {
+      closeConnection?.();
       if (!res.headersSent) {
         const { status, message } = errorResponse(err);
         res.status(status).json({ error: message });
@@ -939,6 +1455,30 @@ export function createRoutes(
     }
   });
 
+  router.get('/queues/:name/suspended', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+      const queue = await getQueue(param(req, 'name'));
+      const startRaw = queryValue(req, 'start');
+      const endRaw = queryValue(req, 'end');
+      const excludeDataRaw = queryValue(req, 'excludeData');
+      const start = startRaw !== undefined ? parseInteger(startRaw, 'start', { min: 0 }) : 0;
+      const end = endRaw !== undefined ? parseInteger(endRaw, 'end', { allowNegativeOne: true, min: 0 }) : -1;
+      const excludeData = excludeDataRaw !== undefined ? parseBoolean(excludeDataRaw, 'excludeData') : false;
+      const jobs = await queue.getSuspendedJobs(start, end, { excludeData });
+      const serialized = await Promise.all(
+        jobs.map(async (job) => ({
+          ...serializeJob(job, 'suspended'),
+          suspend: await queue.getSuspendInfo(job.id),
+        })),
+      );
+      res.status(200).json({ jobs: serialized.filter((job) => job.suspend != null) });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
   router.post('/queues/:name/drain', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
@@ -1081,6 +1621,192 @@ export function createRoutes(
     }
   });
 
+  router.post('/flows', async (req: Request, res: Response) => {
+    try {
+      const body = req.body as
+        | { budget?: BudgetOptions; dag?: DAGFlow; flow?: FlowJob }
+        | undefined;
+
+      if (!body || (!!body.flow && !!body.dag) || (!body.flow && !body.dag)) {
+        throw httpError(400, 'Body must include exactly one of: flow, dag');
+      }
+
+      const producer = new FlowProducer({
+        client: opts.client,
+        connection: opts.connection,
+        prefix: opts.prefix,
+      });
+
+      try {
+        if (body.flow) {
+          const queueNames = collectFlowQueueNames(body.flow);
+          for (const queueName of queueNames) {
+            validateQueueName(queueName);
+          }
+          assertAllowedFlowQueues(queueNames);
+
+          const node = await producer.add(body.flow, body.budget ? { budget: body.budget } : undefined);
+          const refs: FlowJobRef[] = [];
+
+          const collectRefs = (flowDef: FlowJob, jobNode: JobNode) => {
+            refs.push({ jobId: jobNode.job.id, queueName: flowDef.queueName });
+            if (!flowDef.children || !jobNode.children) return;
+            for (let i = 0; i < flowDef.children.length && i < jobNode.children.length; i++) {
+              collectRefs(flowDef.children[i], jobNode.children[i]);
+            }
+          };
+
+          collectRefs(body.flow, node);
+
+          const root = { jobId: node.job.id, queueName: body.flow.queueName };
+          const flowId = node.job.id;
+          await registerFlowRecord(flowId, 'tree', [root], refs);
+
+          res.status(201).json({
+            flowId,
+            kind: 'tree',
+            nodeCount: refs.length,
+            root,
+            roots: [root],
+          });
+          return;
+        }
+
+        const dag = body.dag!;
+        if (body.budget) {
+          throw httpError(400, 'budget is currently supported only for tree flows');
+        }
+        const queueNames = collectDagQueueNames(dag);
+        for (const queueName of queueNames) {
+          validateQueueName(queueName);
+        }
+        assertAllowedFlowQueues(queueNames);
+
+        const jobs = await producer.addDAG(dag);
+        const flowId = randomBytes(12).toString('hex');
+        const refs = dag.nodes.map((dagNode) => {
+          const job = jobs.get(dagNode.name);
+          if (!job) {
+            throw httpError(500, `Missing DAG job for node ${dagNode.name}`);
+          }
+          return { jobId: job.id, queueName: dagNode.queueName };
+        });
+        const roots = dag.nodes
+          .filter((dagNode) => !dagNode.deps || dagNode.deps.length === 0)
+          .map((dagNode) => ({ jobId: jobs.get(dagNode.name)!.id, queueName: dagNode.queueName }));
+
+        await registerFlowRecord(flowId, 'dag', roots, refs);
+        res.status(201).json({
+          flowId,
+          jobs: dag.nodes.map((dagNode) => ({
+            id: jobs.get(dagNode.name)!.id,
+            name: dagNode.name,
+            queueName: dagNode.queueName,
+          })),
+          kind: 'dag',
+          nodeCount: refs.length,
+          roots,
+        });
+      } finally {
+        await producer.close().catch(() => undefined);
+      }
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  router.get('/flows/:id', async (req: Request, res: Response) => {
+    try {
+      const snapshot = await buildFlowSnapshot(param(req, 'id'));
+      if (!snapshot) {
+        throw httpError(404, 'Flow not found');
+      }
+
+      res.status(200).json({
+        budget: snapshot.budget,
+        counts: snapshot.counts,
+        createdAt: snapshot.createdAt,
+        flowId: snapshot.flowId,
+        kind: snapshot.kind,
+        nodes: snapshot.nodes,
+        roots: snapshot.roots,
+        usage: snapshot.usage,
+      });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  router.get('/flows/:id/tree', async (req: Request, res: Response) => {
+    try {
+      const snapshot = await buildFlowSnapshot(param(req, 'id'));
+      if (!snapshot) {
+        throw httpError(404, 'Flow not found');
+      }
+
+      res.status(200).json({
+        budget: snapshot.budget,
+        counts: snapshot.counts,
+        createdAt: snapshot.createdAt,
+        flowId: snapshot.flowId,
+        kind: snapshot.kind,
+        roots: snapshot.roots,
+        tree: snapshot.tree,
+        usage: snapshot.usage,
+      });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  router.delete('/flows/:id', async (req: Request, res: Response) => {
+    try {
+      const flowId = param(req, 'id');
+      const record = await loadFlowRecord(flowId);
+      if (!record) {
+        throw httpError(404, 'Flow not found');
+      }
+      assertAllowedFlowQueues(record.jobs.map((job) => job.queueName));
+
+      let revoked = 0;
+      let flagged = 0;
+      let skipped = 0;
+      const jobs: Array<{ id: string; queueName: string; state?: string; status: string }> = [];
+
+      for (const ref of record.jobs) {
+        const queue = await getQueue(ref.queueName);
+        const job = await queue.getJob(ref.jobId);
+        if (!job) {
+          skipped += 1;
+          jobs.push({ id: ref.jobId, queueName: ref.queueName, status: 'missing' });
+          continue;
+        }
+
+        const state = await job.getState();
+        if (state === 'completed' || state === 'failed') {
+          skipped += 1;
+          jobs.push({ id: ref.jobId, queueName: ref.queueName, state, status: 'skipped' });
+          continue;
+        }
+
+        const status = await queue.revoke(ref.jobId);
+        if (status === 'revoked') revoked += 1;
+        else if (status === 'flagged') flagged += 1;
+        else skipped += 1;
+        jobs.push({ id: ref.jobId, queueName: ref.queueName, state, status });
+      }
+
+      await deleteFlowRecord(flowId);
+      res.status(200).json({ flagged, flowId, jobs, revoked, skipped });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
   router.get('/usage/summary', async (req: Request, res: Response) => {
     try {
       const requestedQueues = parseCsvQuery(req, 'queues');
@@ -1135,6 +1861,23 @@ export function createRoutes(
     }
   });
 
+  router.get('/queues/:name/jobs/:id/suspend', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+
+      const queue = await getQueue(param(req, 'name'));
+      const info = await queue.getSuspendInfo(param(req, 'id'));
+      if (!info) {
+        throw httpError(404, 'Job is not suspended');
+      }
+
+      res.status(200).json(info);
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
   router.post('/queues/:name/jobs/:id/signal', async (req: Request, res: Response) => {
     try {
       if (!checkAllowlist(req, res)) return;
@@ -1149,6 +1892,72 @@ export function createRoutes(
 
       const resumed = await queue.signal(jobId, body.name, body.data);
       res.status(200).json({ resumed });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  router.post('/queues/:name/jobs/:id/revoke', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+
+      const queue = await getQueue(param(req, 'name'));
+      const status = await queue.revoke(param(req, 'id'));
+      if (status === 'not_found') {
+        throw httpError(404, 'Job not found');
+      }
+
+      res.status(200).json({ status });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  router.get('/queues/:name/rate-limit', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+      const queue = await getQueue(param(req, 'name'));
+      const rateLimit = await queue.getGlobalRateLimit();
+      res.status(200).json({ rateLimit });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  router.put('/queues/:name/rate-limit', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+      const body = req.body as { duration?: unknown; max?: unknown } | undefined;
+      if (
+        !body ||
+        typeof body.max !== 'number' ||
+        !Number.isFinite(body.max) ||
+        body.max <= 0 ||
+        typeof body.duration !== 'number' ||
+        !Number.isFinite(body.duration) ||
+        body.duration <= 0
+      ) {
+        throw httpError(400, 'Body must include positive numeric fields: max, duration');
+      }
+
+      const queue = await getQueue(param(req, 'name'));
+      await queue.setGlobalRateLimit({ duration: body.duration, max: body.max });
+      res.status(200).json({ rateLimit: { duration: body.duration, max: body.max } });
+    } catch (err) {
+      const { status, message } = errorResponse(err);
+      res.status(status).json({ error: message });
+    }
+  });
+
+  router.delete('/queues/:name/rate-limit', async (req: Request, res: Response) => {
+    try {
+      if (!checkAllowlist(req, res)) return;
+      const queue = await getQueue(param(req, 'name'));
+      await queue.removeGlobalRateLimit();
+      res.status(200).json({ removed: true, rateLimit: null });
     } catch (err) {
       const { status, message } = errorResponse(err);
       res.status(status).json({ error: message });
@@ -1242,10 +2051,19 @@ export function createRoutes(
     await Promise.allSettled(Array.from(broadcastStreams.values()).map((stream) => stream.close()));
     await Promise.allSettled(Array.from(queueCache.values()).map((queue) => queue.close()));
     await Promise.allSettled(Array.from(broadcastCache.values()).map((broadcast) => broadcast.close()));
+    if (sharedClientOwned && sharedClient) {
+      try {
+        sharedClient.close();
+      } catch {
+        /* ignore close errors on shutdown */
+      }
+    }
 
     queueCache.clear();
     broadcastCache.clear();
     broadcastStreams.clear();
+    sharedClient = null;
+    sharedClientOwned = false;
     closed = true;
   }
 

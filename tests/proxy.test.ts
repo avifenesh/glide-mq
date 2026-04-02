@@ -272,6 +272,81 @@ describe('HTTP Proxy', () => {
     expect(body.error).toBe('Job not found');
   });
 
+  it('DLQ inspection, replay, replay-all, and delete endpoints work', async () => {
+    const queueName = uniqueQueue('dlq');
+    const dlqName = uniqueQueue('dlq-dead');
+    const queue = new Queue(queueName, {
+      connection: CONNECTION,
+      deadLetterQueue: { name: dlqName },
+    });
+    const worker = new Worker(
+      queueName,
+      async () => {
+        throw new Error('budget exceeded');
+      },
+      {
+        blockTimeout: 500,
+        concurrency: 1,
+        connection: CONNECTION,
+        deadLetterQueue: { name: dlqName },
+      },
+    );
+
+    try {
+      await worker.waitUntilReady();
+
+      await queue.add('dlq-a', { seq: 1 }, { attempts: 1 });
+      await queue.add('dlq-b', { seq: 2 }, { attempts: 1 });
+      await queue.add('dlq-c', { seq: 3 }, { attempts: 1 });
+
+      await waitFor(async () => (await queue.getDeadLetterJobs()).length === 3, 10000);
+      await worker.close(true);
+
+      const listRes = await fetch(`${baseUrl}/queues/${queueName}/dlq`);
+      expect(listRes.status).toBe(200);
+      const listBody = await listRes.json();
+      expect(listBody.count).toBe(3);
+      expect(listBody.jobs[0].originalQueue).toBe(queueName);
+      expect(listBody.jobs[0].failedReason).toBe('budget exceeded');
+
+      const [first, second] = listBody.jobs as Array<{ id: string }>;
+
+      const getRes = await fetch(`${baseUrl}/queues/${queueName}/dlq/${first.id}`);
+      expect(getRes.status).toBe(200);
+      const getBody = await getRes.json();
+      expect(getBody.id).toBe(first.id);
+      expect(getBody.originalQueue).toBe(queueName);
+
+      const replayRes = await fetch(`${baseUrl}/queues/${queueName}/dlq/${first.id}/replay`, { method: 'POST' });
+      expect(replayRes.status).toBe(200);
+      const replayBody = await replayRes.json();
+      expect(replayBody.newJobId).toBeTruthy();
+
+      await waitFor(async () => {
+        const replayed = await queue.getJob(replayBody.newJobId);
+        return Boolean(replayed);
+      });
+
+      const deleteRes = await fetch(`${baseUrl}/queues/${queueName}/dlq/${second.id}`, { method: 'DELETE' });
+      expect(deleteRes.status).toBe(200);
+      expect((await deleteRes.json()).removed).toBe(true);
+
+      const replayAllRes = await fetch(`${baseUrl}/queues/${queueName}/dlq/replay-all?count=1`, { method: 'POST' });
+      expect(replayAllRes.status).toBe(200);
+      const replayAllBody = await replayAllRes.json();
+      expect(replayAllBody.replayed).toBe(1);
+      expect(replayAllBody.jobs).toHaveLength(1);
+
+      const finalListRes = await fetch(`${baseUrl}/queues/${queueName}/dlq`);
+      expect(finalListRes.status).toBe(200);
+      const finalListBody = await finalListRes.json();
+      expect(finalListBody.count).toBe(0);
+    } finally {
+      await worker.close(true).catch(() => undefined);
+      await queue.close();
+    }
+  });
+
   it('POST /queues/:name/pause + resume - returns 200 with state', async () => {
     const queueName = uniqueQueue('pause');
 
@@ -406,6 +481,81 @@ describe('HTTP Proxy', () => {
       expect(metricsBody.data.length).toBeGreaterThanOrEqual(1);
     } finally {
       await worker.close(true);
+    }
+  });
+
+  it('suspended job inspection, revoke, and rate-limit endpoints work', async () => {
+    const suspendedQueueName = uniqueQueue('suspended');
+    const suspendedQueue = new Queue(suspendedQueueName, { connection: CONNECTION });
+    const suspendedWorker = new Worker(
+      suspendedQueueName,
+      async (job: any) => {
+        if (job.signals.length === 0) {
+          await job.suspend({ reason: 'awaiting-review', timeout: 60000 });
+        }
+        return { resumed: true };
+      },
+      { blockTimeout: 500, concurrency: 1, connection: CONNECTION },
+    );
+
+    const revokeQueueName = uniqueQueue('revoke-http');
+    const revokeQueue = new Queue(revokeQueueName, { connection: CONNECTION });
+
+    try {
+      await suspendedWorker.waitUntilReady();
+
+      const suspendedJob = await suspendedQueue.add('needs-review', { step: 'approve' });
+      await waitFor(async () => (await suspendedQueue.getSuspendInfo(suspendedJob.id)) !== null, 10000);
+
+      const suspendedListRes = await fetch(`${baseUrl}/queues/${suspendedQueueName}/suspended`);
+      expect(suspendedListRes.status).toBe(200);
+      const suspendedListBody = await suspendedListRes.json();
+      expect(suspendedListBody.jobs).toHaveLength(1);
+      expect(suspendedListBody.jobs[0].id).toBe(suspendedJob.id);
+      expect(suspendedListBody.jobs[0].suspend.reason).toBe('awaiting-review');
+
+      const suspendInfoRes = await fetch(`${baseUrl}/queues/${suspendedQueueName}/jobs/${suspendedJob.id}/suspend`);
+      expect(suspendInfoRes.status).toBe(200);
+      const suspendInfoBody = await suspendInfoRes.json();
+      expect(suspendInfoBody.reason).toBe('awaiting-review');
+
+      const revokeJob = await revokeQueue.add('cancel-me', { ok: true });
+      const revokeRes = await fetch(`${baseUrl}/queues/${revokeQueueName}/jobs/${revokeJob.id}/revoke`, {
+        method: 'POST',
+      });
+      expect(revokeRes.status).toBe(200);
+      expect((await revokeRes.json()).status).toBe('revoked');
+
+      await waitFor(async () => {
+        const fetched = await revokeQueue.getJob(revokeJob.id);
+        return (await fetched?.getState()) === 'failed';
+      });
+      const revokedFetched = await revokeQueue.getJob(revokeJob.id);
+      expect(revokedFetched?.failedReason).toBe('revoked');
+
+      const initialRateRes = await fetch(`${baseUrl}/queues/${revokeQueueName}/rate-limit`);
+      expect(initialRateRes.status).toBe(200);
+      expect((await initialRateRes.json()).rateLimit).toBeNull();
+
+      const putRateRes = await fetch(`${baseUrl}/queues/${revokeQueueName}/rate-limit`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ duration: 60000, max: 5 }),
+      });
+      expect(putRateRes.status).toBe(200);
+      expect((await putRateRes.json()).rateLimit).toEqual({ duration: 60000, max: 5 });
+
+      const getRateRes = await fetch(`${baseUrl}/queues/${revokeQueueName}/rate-limit`);
+      expect(getRateRes.status).toBe(200);
+      expect((await getRateRes.json()).rateLimit).toEqual({ duration: 60000, max: 5 });
+
+      const deleteRateRes = await fetch(`${baseUrl}/queues/${revokeQueueName}/rate-limit`, { method: 'DELETE' });
+      expect(deleteRateRes.status).toBe(200);
+      expect((await deleteRateRes.json()).rateLimit).toBeNull();
+    } finally {
+      await suspendedWorker.close(true).catch(() => undefined);
+      await suspendedQueue.close();
+      await revokeQueue.close();
     }
   });
 
@@ -598,6 +748,156 @@ describe('HTTP Proxy', () => {
     }
   });
 
+  it('flow HTTP endpoints create, inspect, and delete tree flows', async () => {
+    const queueName = uniqueQueue('flow-http-tree');
+    const queue = new Queue(queueName, { connection: CONNECTION });
+    let flowId: string | null = null;
+
+    try {
+      const createRes = await fetch(`${baseUrl}/flows`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          budget: { maxTotalTokens: 5000, onExceeded: 'pause' },
+          flow: {
+            children: [
+              { data: { step: 'child-a' }, name: 'child-a', queueName },
+              {
+                children: [{ data: { step: 'grandchild' }, name: 'grandchild', queueName }],
+                data: { step: 'child-b' },
+                name: 'child-b',
+                queueName,
+              },
+            ],
+            data: { step: 'root' },
+            name: 'root',
+            queueName,
+          },
+        }),
+      });
+      expect(createRes.status).toBe(201);
+      const createBody = await createRes.json();
+      flowId = createBody.flowId;
+      expect(createBody.kind).toBe('tree');
+      expect(createBody.nodeCount).toBe(4);
+      expect(createBody.root.queueName).toBe(queueName);
+      expect(createBody.roots).toHaveLength(1);
+
+      const inspectRes = await fetch(`${baseUrl}/flows/${flowId}`);
+      expect(inspectRes.status).toBe(200);
+      const inspectBody = await inspectRes.json();
+      expect(inspectBody.flowId).toBe(flowId);
+      expect(inspectBody.kind).toBe('tree');
+      expect(inspectBody.nodes).toHaveLength(4);
+      expect(inspectBody.nodes.map((node: any) => node.name).sort()).toEqual(['child-a', 'child-b', 'grandchild', 'root']);
+      expect(inspectBody.budget.maxTotalTokens).toBe(5000);
+      expect(inspectBody.budget.onExceeded).toBe('pause');
+      expect(inspectBody.usage.jobCount).toBe(0);
+
+      const treeRes = await fetch(`${baseUrl}/flows/${flowId}/tree`);
+      expect(treeRes.status).toBe(200);
+      const treeBody = await treeRes.json();
+      expect(treeBody.tree).toHaveLength(1);
+      expect(treeBody.tree[0].name).toBe('root');
+      expect(treeBody.tree[0].children).toHaveLength(2);
+      const childB = treeBody.tree[0].children.find((node: any) => node.name === 'child-b');
+      expect(childB.children).toHaveLength(1);
+      expect(childB.children[0].name).toBe('grandchild');
+
+      const deleteRes = await fetch(`${baseUrl}/flows/${flowId}`, { method: 'DELETE' });
+      expect(deleteRes.status).toBe(200);
+      const deleteBody = await deleteRes.json();
+      expect(deleteBody.flowId).toBe(flowId);
+      expect(deleteBody.jobs).toHaveLength(4);
+      expect(deleteBody.revoked + deleteBody.flagged + deleteBody.skipped).toBe(4);
+
+      const rootJob = await queue.getJob(flowId);
+      expect(rootJob).not.toBeNull();
+      const rootState = await rootJob!.getState();
+      expect(['failed', 'waiting-children']).toContain(rootState);
+
+      const missingRes = await fetch(`${baseUrl}/flows/${flowId}`);
+      expect(missingRes.status).toBe(404);
+    } finally {
+      await queue.close();
+      if (flowId) {
+        await fetch(`${baseUrl}/flows/${flowId}`, { method: 'DELETE' }).catch(() => undefined);
+      }
+    }
+  });
+
+  it('flow HTTP endpoints create DAG flows and reject unsupported DAG budgets', async () => {
+    const queueName = uniqueQueue('flow-http-dag');
+    let flowId: string | null = null;
+
+    try {
+      const invalidRes = await fetch(`${baseUrl}/flows`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          budget: { maxTotalTokens: 1000, onExceeded: 'fail' },
+          dag: {
+            nodes: [
+              { data: { step: 'A' }, name: 'A', queueName },
+              { data: { step: 'B' }, deps: ['A'], name: 'B', queueName },
+            ],
+          },
+        }),
+      });
+      expect(invalidRes.status).toBe(400);
+      const invalidBody = await invalidRes.json();
+      expect(invalidBody.error).toContain('tree flows');
+
+      const createRes = await fetch(`${baseUrl}/flows`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dag: {
+            nodes: [
+              { data: { step: 'A' }, name: 'A', queueName },
+              { data: { step: 'B' }, deps: ['A'], name: 'B', queueName },
+              { data: { step: 'C' }, deps: ['A'], name: 'C', queueName },
+              { data: { step: 'D' }, deps: ['B', 'C'], name: 'D', queueName },
+            ],
+          },
+        }),
+      });
+      expect(createRes.status).toBe(201);
+      const createBody = await createRes.json();
+      flowId = createBody.flowId;
+      expect(createBody.kind).toBe('dag');
+      expect(createBody.nodeCount).toBe(4);
+      expect(createBody.roots).toEqual([{ jobId: expect.any(String), queueName }]);
+
+      const inspectRes = await fetch(`${baseUrl}/flows/${flowId}`);
+      expect(inspectRes.status).toBe(200);
+      const inspectBody = await inspectRes.json();
+      expect(inspectBody.kind).toBe('dag');
+      expect(inspectBody.nodes).toHaveLength(4);
+      expect(inspectBody.budget).toBeNull();
+      expect(inspectBody.usage.jobCount).toBe(0);
+      expect(inspectBody.usage.totalTokens).toBe(0);
+      const nodeD = inspectBody.nodes.find((node: any) => node.name === 'D');
+      expect(nodeD.parentIds).toHaveLength(2);
+
+      const treeRes = await fetch(`${baseUrl}/flows/${flowId}/tree`);
+      expect(treeRes.status).toBe(200);
+      const treeBody = await treeRes.json();
+      expect(treeBody.tree).toHaveLength(1);
+      expect(treeBody.tree[0].name).toBe('A');
+      const childNames = treeBody.tree[0].children.map((node: any) => node.name).sort();
+      expect(childNames).toEqual(['B', 'C']);
+      for (const child of treeBody.tree[0].children) {
+        expect(child.children).toHaveLength(1);
+        expect(child.children[0].name).toBe('D');
+      }
+    } finally {
+      if (flowId) {
+        await fetch(`${baseUrl}/flows/${flowId}`, { method: 'DELETE' }).catch(() => undefined);
+      }
+    }
+  });
+
   it('global usage summary endpoint aggregates across queues and supports filtering', async () => {
     const firstQueueName = uniqueQueue('usage-a');
     const secondQueueName = uniqueQueue('usage-b');
@@ -677,6 +977,54 @@ describe('HTTP Proxy', () => {
       expect(event.data.name).toBe('replayed-job');
     } finally {
       await reader.close();
+    }
+  });
+
+  it('per-job lifecycle SSE replays matching events only', async () => {
+    const queueName = uniqueQueue('job-events');
+    const queue = new Queue(queueName, { connection: CONNECTION });
+    const worker = new Worker(
+      queueName,
+      async (job: any) => {
+        await job.updateProgress(50);
+        return { ok: true };
+      },
+      { blockTimeout: 500, concurrency: 1, connection: CONNECTION },
+    );
+
+    try {
+      await worker.waitUntilReady();
+      const job = await queue.add('stream-me', { hello: 'world' });
+
+      await waitFor(async () => {
+        const fetched = await queue.getJob(job.id);
+        return (await fetched?.getState()) === 'completed';
+      }, 10000);
+
+      const response = await fetch(`${baseUrl}/queues/${queueName}/jobs/${job.id}/events`, {
+        headers: { 'Last-Event-ID': '0' },
+      });
+      expect(response.status).toBe(200);
+
+      const reader = createSseReader(response);
+      const seenEvents: SseEvent[] = [];
+      try {
+        for (let i = 0; i < 10; i++) {
+          const event = await reader.nextEvent();
+          seenEvents.push(event);
+          if (event.event === 'completed') break;
+        }
+      } finally {
+        await reader.close();
+      }
+
+      expect(seenEvents.some((event) => event.event === 'added' && event.data.jobId === job.id)).toBe(true);
+      expect(seenEvents.some((event) => event.event === 'progress' && String(event.data.jobId) === job.id)).toBe(true);
+      expect(seenEvents.some((event) => event.event === 'completed' && event.data.jobId === job.id)).toBe(true);
+      expect(seenEvents.every((event) => String(event.data.jobId) === job.id)).toBe(true);
+    } finally {
+      await worker.close(true).catch(() => undefined);
+      await queue.close();
     }
   });
 

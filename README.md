@@ -6,7 +6,7 @@
 
 High-performance message queue for Node.js with first-class AI orchestration. Built on Valkey/Redis Streams with a Rust NAPI core.
 
-Completes and fetches the next job in a single server-side function call (1 RTT per job), hash-tags every key for zero-config clustering, and ships seven built-in primitives for LLM orchestration - cost tracking, token streaming, human-in-the-loop, model failover, TPM rate limiting, budget caps, and vector search.
+Completes and fetches the next job in a single server-side function call (1 RTT per job), hash-tags every key for zero-config clustering, and ships AI-native primitives for cost tracking, token streaming, human-in-the-loop suspend/resume, model failover, TPM rate limiting, budget caps, rolling usage summaries, and vector search.
 
 ```bash
 npm install glide-mq
@@ -81,14 +81,14 @@ const worker = new Worker(
 | **Client**          | Rust NAPI bindings via [valkey-glide](https://github.com/valkey-io/valkey-glide) - no JS protocol parsing |
 | **Server logic**    | Persistent Valkey Function library (FUNCTION LOAD + FCALL) - no per-call EVAL                             |
 | **Cluster**         | Hash-tagged keys (`glide:{queueName}:*`) route to the same slot automatically                             |
-| **AI-native**       | Cost tracking, token streaming, suspend/resume, fallback chains, TPM limits, budget caps                  |
+| **AI-native**       | Cost tracking, token streaming, suspend/resume, fallback chains, TPM limits, budget caps, usage summaries |
 | **Vector search**   | KNN similarity queries over job data via Valkey Search                                                    |
 
 ## AI-native primitives
 
 Seven primitives for LLM and agent workflows, built into the core API.
 
-- **Cost tracking** - `job.reportUsage()` records model, tokens, cost, latency per job. `queue.getFlowUsage()` aggregates across flows.
+- **Cost tracking** - `job.reportUsage()` records model, tokens, cost, latency per job. `queue.getFlowUsage()` aggregates across flows and `queue.getUsageSummary()` rolls usage up across queues.
 - **Token streaming** - `job.stream(chunk)` pushes LLM output tokens in real time. `queue.readStream(jobId)` consumes them with optional long-polling.
 - **Suspend/resume** - `job.suspend()` pauses mid-processor for human approval or webhook callback. `queue.signal(jobId, name, data)` resumes with external input.
 - **Fallback chains** - ordered `fallbacks` array on job options. On failure, the next retry reads `job.currentFallback` for the alternate model/provider.
@@ -114,7 +114,7 @@ See [Usage - AI-native primitives](docs/USAGE.md#ai-native-primitives) for full 
 - **Serverless** - lightweight `Producer` and `ServerlessPool` for Lambda/Edge
 - **OpenTelemetry** - automatic span emission with bring-your-own tracer
 - **In-memory testing** - `TestQueue` and `TestWorker` with zero Valkey dependency
-- **Cross-language** - HTTP proxy and wire protocol for non-Node.js services
+- **Cross-language** - HTTP proxy with request-reply, SSE streams, schedulers, flow create/read/tree/delete, usage summaries, and broadcast fan-out for non-Node.js services
 
 ## Performance
 
@@ -155,12 +155,12 @@ All examples live in [glidemq-examples](https://github.com/avifenesh/glidemq-exa
 
 | Guide                                  | Topics                                                      |
 | -------------------------------------- | ----------------------------------------------------------- |
-| [Usage](docs/USAGE.md)                 | Queue, Worker, Producer, batch, request-reply, cluster mode |
+| [Usage](docs/USAGE.md)                 | Queue, Worker, Producer, request-reply, SSE, proxy, flow HTTP API, usage summaries |
 | [Workflows](docs/WORKFLOWS.md)         | FlowProducer, DAG, chain/group/chord, dynamic children      |
 | [Advanced](docs/ADVANCED.md)           | Schedulers, rate limiting, dedup, compression, retries, DLQ |
 | [Broadcast](docs/BROADCAST.md)         | Pub/sub fan-out, subject filtering                          |
 | [Observability](docs/OBSERVABILITY.md) | OpenTelemetry, metrics, job logs, dashboard                 |
-| [Serverless](docs/SERVERLESS.md)       | Producer, ServerlessPool, Lambda/Edge                       |
+| [Serverless](docs/SERVERLESS.md)       | Producer, ServerlessPool, Lambda/Edge, HTTP proxy          |
 | [Testing](docs/TESTING.md)             | In-memory TestQueue and TestWorker                          |
 | [Wire Protocol](docs/WIRE_PROTOCOL.md) | Cross-language FCALL specs, Python/Go examples              |
 | [Step Jobs](docs/STEP_JOBS.md)         | Step-job workflows with moveToDelayed                       |
@@ -178,7 +178,7 @@ All examples live in [glidemq-examples](https://github.com/avifenesh/glidemq-exa
 | [@glidemq/fastify](https://github.com/avifenesh/glidemq-fastify)     | Fastify plugin                                |
 | [@glidemq/nestjs](https://github.com/avifenesh/glidemq-nestjs)       | NestJS module                                 |
 | [@glidemq/hapi](https://github.com/avifenesh/glidemq-hapi)           | Hapi plugin                                   |
-| [glidemq.dev](https://glidemq.dev/)                                | Full documentation site                       |
+| [glidemq.dev](https://www.glidemq.dev/) | Full documentation site                       |
 
 ## Contributing
 
