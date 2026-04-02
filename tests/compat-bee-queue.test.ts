@@ -697,11 +697,12 @@ describeEachMode('Bee-Queue: Short poll intervals', (CONNECTION) => {
     // Let it poll several times with no jobs
     await new Promise((r) => setTimeout(r, 1000));
 
+    const completed = new Promise<void>((resolve) => {
+      worker.once('completed', () => resolve());
+    });
+
     // Add a job to verify it still works
     await queue.add('quick-task', { v: 1 });
-    const completed = new Promise<void>((resolve) => {
-      worker.on('completed', () => resolve());
-    });
 
     await completed;
     await worker.close();

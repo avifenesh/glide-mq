@@ -11,6 +11,12 @@ import { TestQueue, TestWorker } from '../src/testing';
 
 vi.mock('@glidemq/speedkey');
 
+async function alignToTokenWindowStart(windowMs: number, bufferMs = 25): Promise<void> {
+  const offset = Date.now() % windowMs;
+  if (offset <= bufferMs) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, windowMs - offset + bufferMs));
+}
+
 // ---- Unit tests (mocked client) ----
 
 function makeMockClient(overrides: Record<string, unknown> = {}) {
@@ -147,6 +153,8 @@ describe('TestWorker TPM enforcement', () => {
       },
     );
 
+    await alignToTokenWindowStart(WINDOW_MS);
+
     // Add 3 jobs - first two consume 1200 tokens total (exceeds 1000 limit).
     // Third job should be delayed until the window resets.
     await queue.add('job1', {});
@@ -191,6 +199,8 @@ describe('TestWorker TPM enforcement', () => {
         tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS },
       },
     );
+
+    await alignToTokenWindowStart(WINDOW_MS);
 
     await queue.add('job1', {});
     await queue.add('job2', {});
@@ -274,6 +284,8 @@ describe('TestWorker TPM enforcement', () => {
         tokenLimiter: { maxTokens: 1000, duration: WINDOW_MS },
       },
     );
+
+    await alignToTokenWindowStart(WINDOW_MS);
 
     await queue.add('job1', {});
     await queue.add('job2', {});
