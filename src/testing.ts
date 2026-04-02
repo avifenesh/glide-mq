@@ -1195,7 +1195,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     this.clearSuspendedTimeout(record.id);
     if (!record.suspendTimeout || record.suspendTimeout <= 0) return;
 
-    let remaining = Math.max(0, record.suspendTimeout);
+    const suspendedAt = record.suspendedAt ?? Date.now();
+    let remaining = Math.max(0, suspendedAt + record.suspendTimeout - Date.now());
 
     const scheduleNextChunk = () => {
       const chunk = Math.min(remaining, MAX_TIMEOUT_DELAY_MS);

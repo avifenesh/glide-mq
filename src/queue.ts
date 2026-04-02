@@ -424,7 +424,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
       // timeouts created by other processes after it becomes idle.
       return SUSPEND_SWEEP_IDLE_POLL_MS;
     }
-    return Math.max(1, Math.min(SUSPEND_SWEEP_IDLE_POLL_MS, nextDue - Date.now()));
+    const delta = nextDue - Date.now();
+    if (delta <= 0) {
+      return SUSPEND_SWEEP_INTERVAL_MS;
+    }
+    return Math.min(SUSPEND_SWEEP_IDLE_POLL_MS, delta);
   }
 
   private async nextSuspendedDueAt(client: Client): Promise<number | null> {
