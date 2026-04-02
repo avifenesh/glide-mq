@@ -81,7 +81,7 @@ process.on('SIGTERM', async () => { await serverlessPool.closeAll(); });
 
 ## HTTP Proxy
 
-Express-based HTTP proxy for queue access from any language/environment.
+Express-based HTTP proxy for enqueueing, request-reply, queue telemetry, and SSE consumption from any language/environment.
 
 ```typescript
 import { createProxyServer } from 'glide-mq/proxy';
@@ -105,17 +105,44 @@ await proxy.close();  // shuts down all cached Queue instances
 |--------|------|-------------|
 | POST | `/queues/:name/jobs` | Add single job `{ name, data?, opts? }` |
 | POST | `/queues/:name/jobs/bulk` | Add bulk `{ jobs: [...] }` (max 1000) |
+| GET | `/queues/:name/jobs?state=waiting` | List jobs by state (`waiting`, `active`, `delayed`, `completed`, `failed`) |
+| POST | `/queues/:name/jobs/wait` | Add and wait for worker result `{ result }` |
 | GET | `/queues/:name/jobs/:id` | Get job details |
+| POST | `/queues/:name/jobs/:id/priority` | Change priority |
+| POST | `/queues/:name/jobs/:id/delay` | Change delay |
+| POST | `/queues/:name/jobs/:id/promote` | Promote delayed job immediately |
+| GET | `/queues/:name/jobs/:id/stream` | SSE stream of `job.stream()` output with `Last-Event-ID` / `?lastId=` resume |
+| POST | `/queues/:name/jobs/:id/signal` | Resume a suspended job with `{ name, data? }` |
+| GET | `/queues/:name/events` | Queue-wide lifecycle SSE stream |
 | GET | `/queues/:name/counts` | Get job counts |
-| GET | `/queues/:name/events` | SSE stream of queue lifecycle events |
+| GET | `/queues/:name/metrics?type=completed` | Get minute-bucket metrics |
+| GET | `/queues/:name/workers` | List live workers |
 | POST | `/queues/:name/pause` | Pause queue |
 | POST | `/queues/:name/resume` | Resume queue |
-| GET | `/queues/:name/jobs/:id/stream` | SSE stream of job output chunks |
-| POST | `/queues/:name/jobs/:id/signal` | Send a signal to a suspended job |
-| GET | `/usage/summary` | Rolling usage totals across one or more queues |
-| POST | `/broadcast/:name` | Publish a broadcast message |
-| GET | `/broadcast/:name/events` | Durable broadcast SSE stream |
+| POST | `/queues/:name/drain` | Drain waiting jobs (`?delayed=true` to include delayed) |
+| POST | `/queues/:name/retry` | Retry failed jobs |
+| DELETE | `/queues/:name/clean?state=completed&age=60` | Remove old completed/failed jobs |
+| GET | `/queues/:name/schedulers` | List schedulers |
+| GET | `/queues/:name/schedulers/:id` | Fetch one scheduler by name |
+| PUT | `/queues/:name/schedulers/:id` | Upsert scheduler `{ schedule, template? }` |
+| DELETE | `/queues/:name/schedulers/:id` | Remove scheduler |
+| POST | `/flows` | Create a tree flow or DAG over HTTP. Body: `{ flow, budget? }` or `{ dag }` |
+| GET | `/flows/:id` | Inspect flow snapshot (nodes, roots, counts, usage, budget) |
+| GET | `/flows/:id/tree` | Inspect the nested tree view for a flow or DAG |
+| DELETE | `/flows/:id` | Revoke or flag remaining jobs in a flow and remove the HTTP flow record |
+| GET | `/queues/:name/flows/:parentId/usage` | Aggregate flow usage |
+| GET | `/queues/:name/flows/:flowId/budget` | Read flow budget state |
+| GET | `/usage/summary` | Rolling usage summary (`windowMs`, `start`, `end`, `queues=a,b`) |
+| POST | `/broadcast/:name` | Publish broadcast `{ subject, data?, opts? }` |
+| GET | `/broadcast/:name/events` | Broadcast SSE stream. Requires `subscription`, optional `subjects=a.*,b.>` |
 | GET | `/health` | `{ status, uptime, queues }` |
+
+### Proxy Notes
+
+- Add your own auth/rate limiting middleware before exposing the proxy publicly.
+- Queue-wide SSE and broadcast SSE require `connection`, not just `client`, because they allocate blocking readers.
+- `queues` is an allowlist. Unlisted queue names return `403`.
+- `POST /flows` supports FlowProducer-style trees and DAG payloads. HTTP budgets are currently supported for tree flows only.
 
 ## Testing (In-Memory)
 
@@ -191,5 +218,6 @@ const worker = new TestWorker(queue, async (jobs) => {
 - `serverlessPool` is a module-level singleton - shared across handler invocations.
 - HTTP proxy requires `express` as a peer dependency.
 - Proxy `queues` option is an allowlist - unlisted names get 403, and the same allowlist applies to `/usage/summary?queues=...` and `/broadcast/:name`.
+- Queue-wide/broadcast SSE proxy routes require `connection`, not only `client`.
 - TestQueue `isPaused()` is synchronous (real Queue returns Promise).
 - Test mode does not honor `delay` or `moveToDelayed`.

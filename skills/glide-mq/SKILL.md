@@ -6,7 +6,7 @@ description: >-
   configuration for queues, workers, delayed/priority jobs, schedulers, batch
   processing, DAG workflows, request-reply, serverless producers, and AI-native
   primitives (usage tracking, token streaming, suspend/resume, budget caps,
-  fallback chains, dual-axis rate limiting, vector search). Triggers on
+  fallback chains, dual-axis rate limiting, rolling usage summaries, vector search, HTTP proxy/SSE). Triggers on
   "glide-mq", "glidemq", "job queue valkey", "background tasks valkey",
   "message queue redis streams", "glide-mq LLM queue",
   "glide-mq AI orchestration queue", "glide-mq token rate limiting",
@@ -60,7 +60,9 @@ Use this skill when:
 - Setting budget caps (tokens, cost) on workflow flows
 - Configuring fallback chains for model/provider failover
 - Dual-axis rate limiting (RPM + TPM) for LLM API compliance
+- Aggregating rolling usage/cost summaries across queues
 - Searching jobs by vector similarity (KNN) with Valkey Search
+- Exposing queues or broadcasts over the HTTP proxy, including SSE endpoints
 - Integrating with frameworks (Hono, Fastify, NestJS, Hapi)
 - Deploying in serverless environments (Lambda, Vercel Edge)
 
@@ -178,7 +180,7 @@ await worker.run();
 | Connection errors or TLS/IAM setup | [references/connection.md](references/connection.md) |
 | Stalled jobs or lock issues | [references/worker.md](references/worker.md) - Stalled Jobs |
 | Need real-time job events | [references/observability.md](references/observability.md) |
-| Integrating with Fastify/NestJS/Hono | [Framework Integrations](https://glidemq.dev/integrations/) |
+| Integrating with Fastify/NestJS/Hono | [Framework Integrations](https://www.glidemq.dev/integrations/) |
 | Deploying to Lambda/Vercel Edge | [references/serverless.md](references/serverless.md) |
 | Need deduplication or idempotent jobs | [references/queue.md](references/queue.md) - Dedup |
 | Need rate limiting | [references/queue.md](references/queue.md) - Rate Limit |
@@ -189,8 +191,11 @@ await worker.run();
 | Need to cap token/cost budget on a flow | [references/ai-native.md](references/ai-native.md) - Budget |
 | Need model fallback on failure | [references/ai-native.md](references/ai-native.md) - Fallback Chains |
 | Need RPM + TPM rate limiting for LLM APIs | [references/ai-native.md](references/ai-native.md) - Dual-Axis Rate Limiting |
+| Need rolling usage/cost summary across queues | [references/ai-native.md](references/ai-native.md) - Usage Metadata |
 | Need vector similarity search over jobs | [references/search.md](references/search.md) |
 | Need to aggregate usage across a flow | [references/ai-native.md](references/ai-native.md) - Flow Usage |
+| Need to create or inspect flows over HTTP | [references/serverless.md](references/serverless.md) - HTTP Proxy |
+| Need cross-language HTTP or SSE access | [references/serverless.md](references/serverless.md) - HTTP Proxy |
 
 ## Critical Notes
 
@@ -212,4 +217,4 @@ await worker.run();
 
 ## Full Documentation
 
-https://glidemq.dev/
+https://www.glidemq.dev/

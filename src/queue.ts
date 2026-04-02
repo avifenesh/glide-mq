@@ -79,6 +79,7 @@ import {
   cleanJobs,
   drainQueue,
   retryJobs,
+  removeJob,
   rateLimitGroupExternal,
   signalJob,
   sweepSuspended,
@@ -261,6 +262,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   private opts: QueueOptions;
   private client: Client | null = null;
   private clientOwned = true;
+  private queueMetaConfigSynced = false;
   private _clusterMode: boolean | undefined;
   private closing = false;
   private waitClients: Set<Client> = new Set();
@@ -537,8 +539,61 @@ export class Queue<D = any, R = any> extends EventEmitter {
         this.clientOwned = true;
       }
     }
+    if (!this.queueMetaConfigSynced) {
+      await this.syncQueueMetaConfig(this.client);
+      this.queueMetaConfigSynced = true;
+    }
     this.ensureSuspendSweepLoop(this.client);
     return this.client;
+  }
+
+  private async syncQueueMetaConfig(client: Client): Promise<void> {
+    if (!this.opts.deadLetterQueue?.name) return;
+    await client.hset(this.keys.meta, {
+      deadLetterQueueName: this.opts.deadLetterQueue.name,
+    });
+  }
+
+  private async resolveDeadLetterQueueName(client: Client): Promise<string | null> {
+    if (this.opts.deadLetterQueue?.name) {
+      return this.opts.deadLetterQueue.name;
+    }
+    const stored = await client.hget(this.keys.meta, 'deadLetterQueueName');
+    return stored ? String(stored) : null;
+  }
+
+  private async loadJobsByIdsForKeys<TD = D, TR = R>(
+    client: Client,
+    queueKeys: QueueKeys,
+    jobIds: string[],
+    opts?: { excludeData?: boolean; serializer?: Serializer },
+  ): Promise<Job<TD, TR>[]> {
+    if (jobIds.length === 0) return [];
+
+    const excludeData = opts?.excludeData === true;
+    const jobs: Job<TD, TR>[] = [];
+
+    for (let offset = 0; offset < jobIds.length; offset += PIPELINE_CHUNK_SIZE) {
+      const chunk = jobIds.slice(offset, offset + PIPELINE_CHUNK_SIZE);
+      const batch = this.newBatch();
+      if (excludeData) {
+        for (const id of chunk) (batch as any).hmget(queueKeys.job(id), JOB_METADATA_FIELDS);
+      } else {
+        for (const id of chunk) (batch as any).hgetall(queueKeys.job(id));
+      }
+      const batchResults = await client.exec(batch as any, false);
+      if (!batchResults) continue;
+
+      for (let i = 0; i < batchResults.length; i++) {
+        const hash = excludeData
+          ? hmgetArrayToRecord(batchResults[i] as (unknown | null)[], JOB_METADATA_FIELDS)
+          : hashDataToRecord(batchResults[i] as any);
+        if (!hash) continue;
+        jobs.push(Job.fromHash<TD, TR>(client, queueKeys, chunk[i], hash, opts?.serializer, excludeData));
+      }
+    }
+
+    return jobs;
   }
 
   /**
@@ -2309,45 +2364,168 @@ export class Queue<D = any, R = any> extends EventEmitter {
    * @param opts - Set `excludeData: true` to omit `data` and `returnvalue` fields
    */
   async getDeadLetterJobs(start = 0, end = -1, opts?: GetJobsOptions): Promise<Job<D, R>[]> {
-    if (!this.opts.deadLetterQueue) return [];
     const client = await this.getClient();
-    const dlqKeys = buildKeys(this.opts.deadLetterQueue.name, this.opts.prefix);
+    const dlqName = await this.resolveDeadLetterQueueName(client);
+    if (!dlqName) return [];
+    const dlqKeys = buildKeys(dlqName, this.opts.prefix);
+    const targetCount = end >= 0 ? end - start + 1 : Number.POSITIVE_INFINITY;
+    const loadPagedJobs = async (candidateJobIds: string[]): Promise<Job<D, R>[]> => {
+      if (candidateJobIds.length === 0) return [];
 
-    const entries = await client.xrange(
+      const selected: Job<D, R>[] = [];
+      let seenExisting = 0;
+
+      for (let offset = 0; offset < candidateJobIds.length; offset += PIPELINE_CHUNK_SIZE) {
+        const chunkJobIds = candidateJobIds.slice(offset, offset + PIPELINE_CHUNK_SIZE);
+        const chunkJobs = await this.loadJobsByIdsForKeys(client, dlqKeys, chunkJobIds, {
+          excludeData: opts?.excludeData,
+          serializer: undefined,
+        });
+
+        if (seenExisting + chunkJobs.length <= start) {
+          seenExisting += chunkJobs.length;
+          continue;
+        }
+
+        const sliceStart = Math.max(0, start - seenExisting);
+        const remaining = Number.isFinite(targetCount) ? targetCount - selected.length : undefined;
+        selected.push(...chunkJobs.slice(sliceStart, remaining != null ? sliceStart + remaining : undefined));
+        seenExisting += chunkJobs.length;
+
+        if (Number.isFinite(targetCount) && selected.length >= targetCount) {
+          break;
+        }
+      }
+
+      return selected;
+    };
+
+    const limitedEntries = await client.xrange(
       dlqKeys.stream,
       InfBoundary.NegativeInfinity,
       InfBoundary.PositiveInfinity,
       end >= 0 ? { count: end + 1 } : undefined,
     );
-    if (!entries) return [];
+    if (!limitedEntries) return [];
 
-    const jobIds = extractJobIdsFromStreamEntries(entries);
-    const sliced = jobIds.slice(start, end >= 0 ? end + 1 : undefined);
-    if (sliced.length === 0) return [];
-    const excludeData = opts?.excludeData === true;
-    const jobs: Job<D, R>[] = [];
-    for (let offset = 0; offset < sliced.length; offset += PIPELINE_CHUNK_SIZE) {
-      const chunk = sliced.slice(offset, offset + PIPELINE_CHUNK_SIZE);
-      const batch = this.newBatch();
-      if (excludeData) {
-        for (const id of chunk) (batch as any).hmget(dlqKeys.job(id), JOB_METADATA_FIELDS);
-      } else {
-        for (const id of chunk) (batch as any).hgetall(dlqKeys.job(id));
-      }
-      const batchResults = await client.exec(batch as any, false);
-      if (batchResults) {
-        for (let i = 0; i < batchResults.length; i++) {
-          const hash = excludeData
-            ? hmgetArrayToRecord(batchResults[i] as (unknown | null)[], JOB_METADATA_FIELDS)
-            : hashDataToRecord(batchResults[i] as any);
-          if (!hash) continue;
-          // DLQ envelope is always JSON (written by Worker.moveToDLQ with JSON.stringify),
-          // regardless of the queue's custom serializer.
-          jobs.push(Job.fromHash<D, R>(client, dlqKeys, chunk[i], hash, undefined, excludeData));
+    let jobs = await loadPagedJobs(extractJobIdsFromStreamEntries(limitedEntries));
+    if (!Number.isFinite(targetCount) || jobs.length >= targetCount) {
+      return jobs;
+    }
+
+    const allEntries = await client.xrange(dlqKeys.stream, InfBoundary.NegativeInfinity, InfBoundary.PositiveInfinity);
+    if (!allEntries) return jobs;
+
+    jobs = await loadPagedJobs(extractJobIdsFromStreamEntries(allEntries));
+    return jobs;
+  }
+
+  /**
+   * Retrieve a single job from the configured dead letter queue.
+   * Returns null when no DLQ is configured or the DLQ job does not exist.
+   */
+  async getDeadLetterJob(jobId: string, opts?: GetJobsOptions): Promise<Job<D, R> | null> {
+    const client = await this.getClient();
+    const dlqName = await this.resolveDeadLetterQueueName(client);
+    if (!dlqName) return null;
+    const dlqKeys = buildKeys(dlqName, this.opts.prefix);
+    const jobs = await this.loadJobsByIdsForKeys(client, dlqKeys, [jobId], {
+      excludeData: opts?.excludeData,
+      serializer: undefined,
+    });
+    return jobs[0] ?? null;
+  }
+
+  /**
+   * Remove a single job from the configured dead letter queue.
+   * Returns false when no DLQ is configured or the DLQ job does not exist.
+   */
+  async removeDeadLetterJob(jobId: string): Promise<boolean> {
+    const client = await this.getClient();
+    const dlqName = await this.resolveDeadLetterQueueName(client);
+    if (!dlqName) return false;
+    const dlqKeys = buildKeys(dlqName, this.opts.prefix);
+    const existing = await this.getDeadLetterJob(jobId, { excludeData: true });
+    if (!existing) return false;
+    await removeJob(client, dlqKeys, jobId);
+    return true;
+  }
+
+  /**
+   * Replay a job from the dead letter queue back to its original queue.
+   * Returns the newly added job, or null when the DLQ job does not exist.
+   */
+  async replayDeadLetterJob(jobId: string): Promise<Job<any, any> | null> {
+    const dlqJob = await this.getDeadLetterJob(jobId);
+    if (!dlqJob) return null;
+
+    const envelope = dlqJob.data as
+      | {
+          attemptsMade?: number;
+          data?: unknown;
+          failedReason?: string;
+          originalJobId?: string;
+          originalQueue?: string;
+        }
+      | undefined;
+
+    if (!envelope?.originalQueue || typeof envelope.originalQueue !== 'string') {
+      throw new GlideMQError('DLQ entry is missing originalQueue metadata');
+    }
+    validateQueueName(envelope.originalQueue);
+
+    const client = await this.getClient();
+    const originalQueue = new Queue<any, any>(envelope.originalQueue, {
+      client,
+      compression: this.opts.compression,
+      connection: this.opts.connection,
+      prefix: this.opts.prefix,
+      serializer: this.serializer,
+    });
+
+    try {
+      let replayData = envelope.data;
+      let replayOpts: JobOptions | undefined;
+
+      if (envelope.originalJobId) {
+        const originalJob = await originalQueue.getJob(envelope.originalJobId);
+        if (originalJob) {
+          replayData = originalJob.data;
+          replayOpts = { ...originalJob.opts };
         }
       }
+
+      if (replayOpts) {
+        delete replayOpts.jobId;
+        delete replayOpts.delay;
+        delete replayOpts.deduplication;
+        delete replayOpts.parent;
+      }
+
+      const replayed = await originalQueue.add(dlqJob.name, replayData ?? null, replayOpts);
+      if (!replayed) {
+        throw new GlideMQError('DLQ replay was skipped due to duplicate or deduplicated job constraints');
+      }
+
+      await this.removeDeadLetterJob(jobId);
+      return replayed;
+    } finally {
+      await originalQueue.close().catch(() => undefined);
     }
-    return jobs;
+  }
+
+  /**
+   * Retrieve jobs currently in the suspended state.
+   * Results are ordered by the suspended ZSet score (timeout deadline).
+   */
+  async getSuspendedJobs(start = 0, end = -1, opts?: GetJobsOptions): Promise<Job<D, R>[]> {
+    const client = await this.getClient();
+    const members = await client.zrange(this.keys.suspended, { start, end: end >= 0 ? end : -1 });
+    const jobIds = members.map((member) => String(member));
+    return this.loadJobsByIdsForKeys(client, this.keys, jobIds, {
+      excludeData: opts?.excludeData,
+      serializer: this.serializer,
+    });
   }
 
   /**

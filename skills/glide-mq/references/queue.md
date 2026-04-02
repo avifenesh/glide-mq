@@ -163,6 +163,18 @@ const usage = await queue.getFlowUsage(parentJobId);
 // }
 ```
 
+### Rolling Usage Summary
+
+```typescript
+const summary = await queue.getUsageSummary({
+  queues: ['tasks', 'embeddings'],
+  windowMs: 3_600_000,
+});
+
+// Static form:
+const sameSummary = await Queue.getUsageSummary({ connection, queues: ['tasks'] });
+```
+
 ## Flow Budget
 
 ```typescript
@@ -223,6 +235,7 @@ See [references/ai-native.md](ai-native.md) and [references/search.md](search.md
 - `addAndWait()` rejects if dedup returns null. Does not support `removeOnComplete`/`removeOnFail`.
 - `queue.add()` returns `null` on custom jobId collision or deduplication skip.
 - `FlowProducer.add()` throws on duplicate jobId (flows cannot be partial).
+- `getUsageSummary()` is for queue-wide rollups. Use `getJob()` / `job.usage` for per-job detail.
 - Payload size limit: job data must be <= 1 MB after serialization, before compression.
 - Same serializer must be used on Queue, Worker, and FlowProducer. Mismatch causes silent corruption.
 - `lifo` and `ordering.key` are mutually exclusive - throws at enqueue time.

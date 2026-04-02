@@ -152,11 +152,9 @@ console.log('Tracing active:', isTracingEnabled());
 
 ---
 
----
-
 ## AI Usage Telemetry
 
-### reportUsage and span attributes
+### reportUsage and persisted usage fields
 
 When job.reportUsage() is called inside a processor, the usage metadata is persisted to the job hash. Usage data is stored as hash fields on the job key:
 
@@ -172,9 +170,32 @@ When job.reportUsage() is called inside a processor, the usage metadata is persi
 | usage:latencyMs   | string (int)   | Inference latency in ms                                        |
 | usage:cached      | string         | true if response was cached                                    |
 
+`reportUsage()` overwrites the previous usage payload for that job and updates the rolling per-minute usage buckets used by `getUsageSummary()`.
+
 ### Flow-level usage aggregation
 
-queue.getFlowUsage(parentJobId) traverses the job tree and returns aggregated tokens and costs maps, totalTokens, totalCost, plus a models map (model name to job count), costUnit, and jobCount.
+`queue.getFlowUsage(parentJobId)` traverses the job tree and returns aggregated tokens and costs maps, `totalTokens`, `totalCost`, plus a models map (model name to job count), `costUnit`, and `jobCount`.
+
+### Rolling usage summary
+
+Use `queue.getUsageSummary()` (or `Queue.getUsageSummary()`) to aggregate usage across queues without scanning job hashes:
+
+```typescript
+const summary = await queue.getUsageSummary({
+  queues: ['llm-tasks', 'embeddings'],
+  windowMs: 3_600_000,
+});
+
+// {
+//   totalTokens,
+//   totalCost,
+//   jobCount,
+//   models: { 'gpt-5.4': 12 },
+//   perQueue: { 'llm-tasks': { ... } }
+// }
+```
+
+The proxy exposes the same rollup over HTTP at `GET /usage/summary`.
 
 ### Budget exceeded events
 
@@ -185,6 +206,20 @@ Budget state can be queried via queue.getFlowBudget(flowId) which returns { maxT
 ### Token-per-minute (TPM) metrics
 
 When tokenLimiter is configured on a worker, token consumption is tracked either locally (in-memory), in Valkey (glide:{queueName}:tpm), or both (default). This enables dual-axis monitoring: RPM (jobs per window) and TPM (tokens per window).
+
+---
+
+## Proxy SSE Endpoints
+
+When you want live observability from another process or language, the HTTP proxy exposes three SSE surfaces:
+
+| Path | Description |
+| ---- | ----------- |
+| `/queues/:name/events` | Queue-wide lifecycle events with `Last-Event-ID` / `?lastId=` replay |
+| `/queues/:name/jobs/:id/stream` | Per-job output stream for `job.stream()` / `job.streamChunk()` |
+| `/broadcast/:name/events` | Broadcast fan-out SSE stream with `subscription` and optional `subjects` filters |
+
+These endpoints require the proxy to be created with `connection`, because they allocate blocking readers internally.
 
 ---
 

@@ -161,6 +161,19 @@ const usage = await queue.getFlowUsage(parentJobId);
 
 Walks the parent job and all children via the deps set. Includes usage from the parent itself.
 
+### Rolling Usage Summary
+
+```typescript
+const summary = await queue.getUsageSummary({
+  queues: ['tasks', 'embeddings'],
+  windowMs: 3_600_000,
+});
+
+// { totalTokens, totalCost, jobCount, models, perQueue }
+```
+
+This reads rolling per-minute buckets instead of scanning job hashes, so it is the right primitive for dashboards and queue-wide cost telemetry.
+
 ### Budget Monitoring
 
 ```typescript
@@ -169,6 +182,18 @@ if (budget && budget.exceeded) {
   console.warn(`Flow ${flowId} exceeded budget: ${budget.usedTokens} tokens, $${budget.usedCost}`);
 }
 ```
+
+## Proxy SSE Surfaces
+
+For cross-language observability, the HTTP proxy exposes:
+
+| Path | Description |
+|------|-------------|
+| `/queues/:name/events` | Queue-wide lifecycle events via SSE with `Last-Event-ID` resume |
+| `/queues/:name/jobs/:id/stream` | Per-job streaming output via SSE |
+| `/broadcast/:name/events` | Broadcast SSE with `subscription` and optional `subjects` filters |
+
+These routes require the proxy to be created with `connection`, because they allocate blocking readers internally.
 
 ## OpenTelemetry
 

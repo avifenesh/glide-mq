@@ -172,3 +172,25 @@ await emailWorker.close();
 ```
 
 Both `Broadcast` and `BroadcastWorker` support graceful shutdown via `close()`. The worker drains in-progress jobs before disconnecting.
+
+## HTTP proxy
+
+The proxy exposes broadcast publish and SSE fan-out over HTTP:
+
+```http
+POST /broadcast/notifications
+Content-Type: application/json
+
+{ "subject": "orders.created", "data": { "orderId": 42 } }
+```
+
+```http
+GET /broadcast/notifications/events?subscription=analytics&subjects=orders.*,inventory.low
+Accept: text/event-stream
+```
+
+- `subscription` is required on the SSE route and becomes the consumer-group name, just like `BroadcastWorker`.
+- `subjects` is optional and uses the same NATS-style matcher syntax as `BroadcastWorker`.
+- SSE messages are emitted as `event: message` with JSON `{ id, subject, data, timestamp }`.
+
+See [Usage - Proxy Endpoints](./USAGE.md#proxy-endpoints) for the full HTTP route table.

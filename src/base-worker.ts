@@ -283,6 +283,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     // Create consumer group on the stream (idempotent)
     await createConsumerGroup(this.commandClient, this.queueKeys.stream, this.consumerGroup, this.startFrom);
 
+    if (this.opts.deadLetterQueue?.name) {
+      await this.commandClient.hset(this.queueKeys.meta, {
+        deadLetterQueueName: this.opts.deadLetterQueue.name,
+      });
+    }
+
     // Check if global concurrency / rate limit are configured (refreshed on scheduler tick)
     await this.refreshMetaFlags();
 

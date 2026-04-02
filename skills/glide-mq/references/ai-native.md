@@ -44,10 +44,30 @@ interface JobUsage {
 }
 ```
 
-- Calling `reportUsage()` multiple times overwrites previous values.
+- Calling `reportUsage()` multiple times overwrites previous values on that job.
 - Token counts must not be negative (throws).
 - Emits a `'usage'` event on the events stream with the full usage object.
 - Stored in the job hash as `usage:model`, `usage:tokens` (JSON), `usage:costs` (JSON), `usage:totalTokens`, `usage:totalCost`, `usage:costUnit`.
+- Also updates rolling per-minute usage buckets used by `queue.getUsageSummary()`.
+
+### Rolling Usage Summary (queue.getUsageSummary / Queue.getUsageSummary)
+
+```typescript
+const summary = await queue.getUsageSummary({
+  queues: ['inference', 'embeddings'],
+  windowMs: 3_600_000,   // last hour
+});
+
+// {
+//   totalTokens,
+//   totalCost,
+//   jobCount,
+//   models: Record<string, number>,
+//   perQueue: Record<string, { totalTokens, totalCost, jobCount, models }>
+// }
+```
+
+Use `Queue.getUsageSummary()` when you want the same rollup without an existing queue instance. The HTTP proxy exposes the same aggregation at `GET /usage/summary`.
 
 ## 2. Token Streaming (job.stream / job.streamChunk / queue.readStream)
 
@@ -136,6 +156,8 @@ const worker = new Worker('content-review', async (job) => {
 ```
 
 `job.suspend()` throws `SuspendError` internally - no code after it executes. The job moves to `'suspended'` state.
+
+If `timeout` is set, glide-mq stores the deadline on the suspended sorted set and any live `Queue` or `Worker` runtime can fail expired suspended jobs with `'Suspend timeout exceeded'`. This no longer depends on the original worker staying online, but it does require at least one glide-mq process to remain connected to the queue.
 
 ### Resuming (Queue Side)
 
@@ -355,6 +377,7 @@ Walks the parent and all children via the deps set. Useful for cost reporting, b
 - `job.suspend()` and `job.moveToWaitingChildren()` both throw internally - no code after them executes.
 - `job.reportUsage()` and `job.reportTokens()` reject negative values.
 - `reportUsage()` overwrites previous usage data on the same job.
+- `getUsageSummary()` reads rolling buckets, not job hashes, so it is cheap for queue-wide summaries but not a replacement for per-job detail.
 - `reportTokens()` overwrites the previous value - it does not accumulate.
 - Budget enforcement happens at the flow level, not per-job. Individual jobs report usage; the budget key tracks aggregates.
 - Fallback chains require `attempts >= fallbacks.length + 1` (original + N fallbacks).

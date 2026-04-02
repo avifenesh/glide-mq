@@ -207,6 +207,51 @@ await pool.closeAll();
 - **Container freeze/thaw**: GLIDE auto-reconnects on next command
 - **SIGTERM**: Call `serverlessPool.closeAll()` or `producer.close()` for clean shutdown
 
+## HTTP Proxy
+
+Use `createProxyServer()` when you need cross-language producers, request-reply, or SSE consumers from environments that should not host long-lived queue objects.
+
+```typescript
+import { createProxyServer } from 'glide-mq/proxy';
+
+const proxy = createProxyServer({
+  connection: CONNECTION,
+  queues: ['emails', 'events'], // optional allowlist
+  compression: 'gzip',
+});
+
+proxy.app.listen(3000);
+```
+
+### Proxy Options
+
+| Option | Type | Notes |
+| ------ | ---- | ----- |
+| `connection` | `ConnectionOptions` | Required unless `client` is provided. Required for queue-wide/broadcast SSE routes. |
+| `client` | `Client` | Shared GLIDE client for non-blocking routes. |
+| `prefix` | `string` | Key prefix (default: `glide`). |
+| `queues` | `string[]` | Optional allowlist. Unlisted queue names return `403`. |
+| `compression` | `'none' \| 'gzip'` | Transparent job payload compression. |
+| `onError` | `(err, queueName) => void` | Queue-level error hook. |
+
+### Route Surface
+
+The proxy now covers the main queue-management surface:
+
+- Queue writes: add, bulk add, add-and-wait, pause/resume, drain, retry, clean
+- Job operations: fetch job, list jobs by state, change priority, change delay, promote delayed jobs, stream job output over SSE, send suspend/resume signals
+- Queue telemetry: counts, metrics, live workers, queue-wide events over SSE
+- Scheduler APIs: list, fetch, upsert, remove
+- Flow APIs: create tree flows or DAGs, inspect flow snapshots, read nested tree views, revoke outstanding flow jobs
+- AI APIs: flow usage, flow budget, rolling usage summary
+- Broadcast APIs: publish plus SSE fan-out with `subscription` and `subjects` filters
+- Health: `/health`
+
+See [Usage - Proxy Endpoints](./USAGE.md#proxy-endpoints) for the exact method/path table.
+
+- Add your own auth and rate limiting middleware before exposing the proxy publicly. `glide-mq/proxy` does not ship built-in auth.
+- Queue-wide SSE (`/queues/:name/events`) and broadcast SSE (`/broadcast/:name/events`) need `connection`, not only a shared `client`, because they allocate blocking readers.
+
 ## AI Primitives in Serverless
 
 The Producer class supports all job options including fallbacks and lockDuration. However, AI-specific runtime operations (reportUsage, stream, suspend) are only available inside a Worker processor.
@@ -215,4 +260,5 @@ For serverless AI patterns:
 
 - **Enqueue with fallbacks**: Set fallbacks in JobOptions when adding jobs from Lambda/Edge.
 - **Budget on flows**: Create flows via FlowProducer with budget options from any environment.
-- **Read results**: Use queue.getFlowUsage() or queue.readStream() from a serverless function to read back AI usage or streaming output after the worker processes the job.
+- **Cross-language flow orchestration**: Use `POST /flows` to create tree flows or DAGs over HTTP. Flow budgets in the HTTP API are currently supported on tree flows only.
+- **Read results**: Use `queue.getFlowUsage()`, `queue.getUsageSummary()`, or `queue.readStream()` from a serverless function to read back AI usage or streaming output after the worker processes the job.
