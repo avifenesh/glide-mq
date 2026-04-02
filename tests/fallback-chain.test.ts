@@ -13,7 +13,7 @@ const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
 import { TestQueue, TestWorker } from '../src/testing';
-import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
 function uid() {
   return `fb-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -248,7 +248,7 @@ describeEachMode('Fallback chains', (CONNECTION) => {
         { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
       );
 
-      worker.on('failed', (j: any) => {
+      worker.on('failed', () => {
         failCount++;
         if (failCount < 2) {
           setTimeout(async () => {

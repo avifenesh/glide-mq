@@ -4,7 +4,6 @@
  * Run: npx vitest run tests/dual-rate-limit.test.ts
  */
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
-import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import { Job } from '../src/job';
 import { buildKeys } from '../src/utils';
 import { TestQueue, TestWorker } from '../src/testing';

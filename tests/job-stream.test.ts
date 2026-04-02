@@ -4,10 +4,9 @@
  * Run: npx vitest run tests/job-stream.test.ts
  */
 import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
-import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import { Job } from '../src/job';
 import { buildKeys, MAX_JOB_DATA_SIZE } from '../src/utils';
-import { TestQueue, TestWorker } from '../src/testing';
+import { TestQueue } from '../src/testing';
 
 vi.mock('@glidemq/speedkey');
 

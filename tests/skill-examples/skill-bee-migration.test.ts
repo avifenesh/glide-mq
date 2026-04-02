@@ -73,7 +73,7 @@ describe('Bee SKILL.md - connection and basic usage', () => {
     const qName = uid('bee-jobcreate');
     const queue = track(new Queue(qName, { connection }));
 
-    const job = await queue.add(
+    await queue.add(
       'send-email',
       { email: 'user@example.com' },
       {
@@ -95,7 +95,7 @@ describe('Bee SKILL.md - connection and basic usage', () => {
     const worker = track(
       new Worker(
         qName,
-        async (job) => {
+        async () => {
           processed.push({ processed: true });
           return { processed: true };
         },
@@ -134,7 +134,7 @@ describe('Bee SKILL.md - connection and basic usage', () => {
     const queue = track(new Queue(qName, { connection }));
     let done = false;
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -156,7 +156,7 @@ describe('Bee SKILL.md - connection and basic usage', () => {
     const qName = uid('bee-stall');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(
+    track(
       new Worker(qName, async () => 'ok', {
         connection,
         lockDuration: 30000,
@@ -197,7 +197,7 @@ describe('Bee api-mapping.md', () => {
     const queue = track(new Queue(qName, { connection: conn, prefix: 'glide' }));
     const processed: any[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -212,7 +212,7 @@ describe('Bee api-mapping.md', () => {
       ),
     );
 
-    const events = track(new QueueEvents(qName, { connection: conn }));
+    track(new QueueEvents(qName, { connection: conn }));
 
     await queue.add('test', { x: 1 });
     await waitFor(() => processed.length > 0);
@@ -321,7 +321,7 @@ describe('Bee api-mapping.md', () => {
     const queue = track(new Queue(qName, { connection }));
     const results: any[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -342,7 +342,7 @@ describe('Bee api-mapping.md', () => {
     const queue = track(new Queue(qName, { connection }));
     const results: any[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -362,7 +362,7 @@ describe('Bee api-mapping.md', () => {
     const queue = track(new Queue(qName, { connection }));
     let done = false;
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -537,7 +537,7 @@ describe('Bee api-mapping.md', () => {
     const completedIds: string[] = [];
     events.on('completed', ({ jobId }: any) => completedIds.push(jobId));
 
-    const worker = track(new Worker(qName, async () => 'ok', { connection }));
+    track(new Worker(qName, async () => 'ok', { connection }));
 
     const job = await queue.add('qe-test', { x: 1 });
     await waitFor(() => completedIds.length > 0, 5000);
@@ -548,10 +548,10 @@ describe('Bee api-mapping.md', () => {
     const qName = uid('bee-am-addwait');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(
+    track(
       new Worker(
         qName,
-        async (job) => {
+        async () => {
           return { result: 'done' };
         },
         { connection },
@@ -566,7 +566,7 @@ describe('Bee api-mapping.md', () => {
     const qName = uid('bee-am-custom-backoff');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async () => {
@@ -663,7 +663,7 @@ describe('Bee new-features.md', () => {
     const queue = track(new Queue(qName, { connection }));
     const batchSizes: number[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (jobs: any[]) => {
@@ -727,7 +727,7 @@ describe('Bee new-features.md', () => {
     const qName = uid('bee-nf-ratelimit');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(
+    track(
       new Worker(qName, async () => 'ok', {
         connection,
         limiter: { max: 100, duration: 60000 },
@@ -746,7 +746,7 @@ describe('Bee new-features.md', () => {
     const dlqName = uid('bee-nf-dlq-target');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async () => {
@@ -810,7 +810,7 @@ describe('Bee new-features.md', () => {
     const qName = uid('bee-nf-addwait');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -862,7 +862,7 @@ describe('Bee new-features.md', () => {
     const queue = new TestQueue('tasks');
     const processed: any[] = [];
 
-    const worker = new TestWorker(queue, async (job: any) => {
+    const worker = new TestWorker(queue, async (_job: any) => {
       processed.push({ processed: true });
       return { processed: true };
     });
@@ -885,7 +885,7 @@ describe('Bee new-features.md', () => {
     const completedIds: string[] = [];
     events.on('completed', ({ jobId }: any) => completedIds.push(jobId));
 
-    const worker = track(new Worker(qName, async () => 'ok', { connection }));
+    track(new Worker(qName, async () => 'ok', { connection }));
 
     const job = await queue.add('qe-test', {});
     await waitFor(() => completedIds.length > 0, 5000);
@@ -896,7 +896,7 @@ describe('Bee new-features.md', () => {
     const qName = uid('bee-nf-metrics');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(new Worker(qName, async () => 'ok', { connection }));
+    track(new Worker(qName, async () => 'ok', { connection }));
 
     await queue.add('metric', {});
     await waitFor(async () => {
