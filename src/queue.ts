@@ -414,13 +414,15 @@ export class Queue<D = any, R = any> extends EventEmitter {
     this.suspendedSweepTimer.unref?.();
   }
 
-  private async nextSuspendedSweepDelay(client: Client, acquiredLock: boolean): Promise<number | null> {
+  private async nextSuspendedSweepDelay(client: Client, acquiredLock: boolean): Promise<number> {
     if (!acquiredLock) {
       return SUSPEND_SWEEP_INTERVAL_MS;
     }
     const nextDue = await this.nextSuspendedDueAt(client);
     if (nextDue == null || nextDue >= SUSPEND_NO_TIMEOUT_SCORE) {
-      return null;
+      // Keep a low-frequency poll alive so this queue can pick up new suspended
+      // timeouts created by other processes after it becomes idle.
+      return SUSPEND_SWEEP_IDLE_POLL_MS;
     }
     return Math.max(1, Math.min(SUSPEND_SWEEP_IDLE_POLL_MS, nextDue - Date.now()));
   }
@@ -462,9 +464,6 @@ export class Queue<D = any, R = any> extends EventEmitter {
           }
           try {
             const delay = await this.nextSuspendedSweepDelay(client, acquiredLock);
-            if (delay == null) {
-              return;
-            }
             this.scheduleNextSuspendSweep(client, delay);
           } catch (err) {
             if (this.listenerCount('error') > 0) {
