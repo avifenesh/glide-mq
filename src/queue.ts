@@ -2368,20 +2368,56 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const dlqName = await this.resolveDeadLetterQueueName(client);
     if (!dlqName) return [];
     const dlqKeys = buildKeys(dlqName, this.opts.prefix);
+    const targetCount = end >= 0 ? end - start + 1 : Number.POSITIVE_INFINITY;
+    const loadPagedJobs = async (candidateJobIds: string[]): Promise<Job<D, R>[]> => {
+      if (candidateJobIds.length === 0) return [];
 
-    const entries = await client.xrange(
+      const selected: Job<D, R>[] = [];
+      let seenExisting = 0;
+
+      for (let offset = 0; offset < candidateJobIds.length; offset += PIPELINE_CHUNK_SIZE) {
+        const chunkJobIds = candidateJobIds.slice(offset, offset + PIPELINE_CHUNK_SIZE);
+        const chunkJobs = await this.loadJobsByIdsForKeys(client, dlqKeys, chunkJobIds, {
+          excludeData: opts?.excludeData,
+          serializer: undefined,
+        });
+
+        if (seenExisting + chunkJobs.length <= start) {
+          seenExisting += chunkJobs.length;
+          continue;
+        }
+
+        const sliceStart = Math.max(0, start - seenExisting);
+        const remaining = Number.isFinite(targetCount) ? targetCount - selected.length : undefined;
+        selected.push(...chunkJobs.slice(sliceStart, remaining != null ? sliceStart + remaining : undefined));
+        seenExisting += chunkJobs.length;
+
+        if (Number.isFinite(targetCount) && selected.length >= targetCount) {
+          break;
+        }
+      }
+
+      return selected;
+    };
+
+    const limitedEntries = await client.xrange(
       dlqKeys.stream,
       InfBoundary.NegativeInfinity,
       InfBoundary.PositiveInfinity,
+      end >= 0 ? { count: end + 1 } : undefined,
     );
-    if (!entries) return [];
+    if (!limitedEntries) return [];
 
-    const jobIds = extractJobIdsFromStreamEntries(entries);
-    const jobs = await this.loadJobsByIdsForKeys(client, dlqKeys, jobIds, {
-      excludeData: opts?.excludeData,
-      serializer: undefined,
-    });
-    return jobs.slice(start, end >= 0 ? end + 1 : undefined);
+    let jobs = await loadPagedJobs(extractJobIdsFromStreamEntries(limitedEntries));
+    if (!Number.isFinite(targetCount) || jobs.length >= targetCount) {
+      return jobs;
+    }
+
+    const allEntries = await client.xrange(dlqKeys.stream, InfBoundary.NegativeInfinity, InfBoundary.PositiveInfinity);
+    if (!allEntries) return jobs;
+
+    jobs = await loadPagedJobs(extractJobIdsFromStreamEntries(allEntries));
+    return jobs;
   }
 
   /**
@@ -2436,6 +2472,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (!envelope?.originalQueue || typeof envelope.originalQueue !== 'string') {
       throw new GlideMQError('DLQ entry is missing originalQueue metadata');
     }
+    validateQueueName(envelope.originalQueue);
 
     const client = await this.getClient();
     const originalQueue = new Queue<any, any>(envelope.originalQueue, {

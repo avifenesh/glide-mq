@@ -1,6 +1,7 @@
+import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { Request, Response, Router } from 'express';
 import { randomBytes } from 'crypto';
-import { createBlockingClient, createClient } from '../connection';
+import { createBlockingClient, createClient, isClusterClient } from '../connection';
 import { Broadcast } from '../broadcast';
 import { BroadcastWorker } from '../broadcast-worker';
 import { FlowProducer, type JobNode } from '../flow-producer';
@@ -251,6 +252,7 @@ function serializeJob(job: Job<any, any>, state: string) {
     finishedOn: job.finishedOn,
     processedOn: job.processedOn,
     parentId: job.parentId,
+    parentQueue: job.parentQueue,
     usage: job.usage,
   };
 }
@@ -285,15 +287,19 @@ function serializeDeadLetterJob(job: Job<any, any>) {
 }
 
 function flowMetaKey(flowId: string, prefix = 'glide'): string {
-  return `${prefix}:flow:${flowId}:meta`;
+  return `${prefix}:{flow:${flowId}}:meta`;
 }
 
 function flowJobsKey(flowId: string, prefix = 'glide'): string {
-  return `${prefix}:flow:${flowId}:jobs`;
+  return `${prefix}:{flow:${flowId}}:jobs`;
 }
 
 function flowRootsKey(flowId: string, prefix = 'glide'): string {
-  return `${prefix}:flow:${flowId}:roots`;
+  return `${prefix}:{flow:${flowId}}:roots`;
+}
+
+function newClientBatch(client: Client): InstanceType<typeof Batch> | InstanceType<typeof ClusterBatch> {
+  return isClusterClient(client) ? new ClusterBatch(false) : new Batch(false);
 }
 
 function encodeFlowJobRef(ref: FlowJobRef): string {
@@ -325,11 +331,7 @@ function collectDagQueueNames(dag: DAGFlow): Set<string> {
   return names;
 }
 
-function buildFlowTreeNodes(
-  flowId: string,
-  roots: FlowJobRef[],
-  nodes: FlowNodeSummary[],
-): FlowTreeNode[] {
+function buildFlowTreeNodes(flowId: string, roots: FlowJobRef[], nodes: FlowNodeSummary[]): FlowTreeNode[] {
   const nodeMap = new Map<string, FlowNodeSummary>();
   const childrenByParent = new Map<string, FlowNodeSummary[]>();
 
@@ -342,7 +344,7 @@ function buildFlowTreeNodes(
         parentRefs.push({ jobId: node.parentIds[i], queueName: node.parentQueues[i] });
       }
     } else if (node.parentId) {
-      parentRefs.push({ jobId: node.parentId, queueName: node.queueName });
+      parentRefs.push({ jobId: node.parentId, queueName: node.parentQueue ?? node.queueName });
     }
 
     for (const parentRef of parentRefs) {
@@ -367,6 +369,7 @@ function buildFlowTreeNodes(
         name: '',
         opts: {},
         parentId: undefined,
+        parentQueue: undefined,
         parentIds: undefined,
         parentQueues: undefined,
         processedOn: undefined,
@@ -559,16 +562,15 @@ export function createRoutes(
     });
     await client.del([jobsKey, rootsKey]);
     if (jobs.length > 0) {
-      await client.sadd(
-        jobsKey,
-        jobs
-          .slice()
-          .sort((a, b) => a.queueName.localeCompare(b.queueName) || a.jobId.localeCompare(b.jobId))
-          .map(encodeFlowJobRef),
-      );
-      for (const jobRef of jobs) {
-        await client.hset(buildKeys(jobRef.queueName, opts.prefix).job(jobRef.jobId), { flowId });
+      const sortedJobs = jobs
+        .slice()
+        .sort((a, b) => a.queueName.localeCompare(b.queueName) || a.jobId.localeCompare(b.jobId));
+      await client.sadd(jobsKey, sortedJobs.map(encodeFlowJobRef));
+      const batch = newClientBatch(client);
+      for (const jobRef of sortedJobs) {
+        (batch as any).hset(buildKeys(jobRef.queueName, opts.prefix).job(jobRef.jobId), { flowId });
       }
+      await client.exec(batch as any, false);
     }
     if (roots.length > 0) {
       await client.sadd(
@@ -610,7 +612,11 @@ export function createRoutes(
 
   async function deleteFlowRecord(flowId: string): Promise<void> {
     const client = await getSharedClient();
-    await client.del([flowMetaKey(flowId, flowPrefix), flowJobsKey(flowId, flowPrefix), flowRootsKey(flowId, flowPrefix)]);
+    await client.del([
+      flowMetaKey(flowId, flowPrefix),
+      flowJobsKey(flowId, flowPrefix),
+      flowRootsKey(flowId, flowPrefix),
+    ]);
   }
 
   async function buildFlowSnapshot(flowId: string): Promise<{
@@ -677,8 +683,12 @@ export function createRoutes(
       createdAt: record.createdAt,
       flowId,
       kind: record.kind,
-      nodes: nodes.sort((a, b) => a.timestamp - b.timestamp || a.queueName.localeCompare(b.queueName) || a.id.localeCompare(b.id)),
-      roots: record.roots.slice().sort((a, b) => a.queueName.localeCompare(b.queueName) || a.jobId.localeCompare(b.jobId)),
+      nodes: nodes.sort(
+        (a, b) => a.timestamp - b.timestamp || a.queueName.localeCompare(b.queueName) || a.id.localeCompare(b.id),
+      ),
+      roots: record.roots
+        .slice()
+        .sort((a, b) => a.queueName.localeCompare(b.queueName) || a.jobId.localeCompare(b.jobId)),
       tree: buildFlowTreeNodes(flowId, record.roots, nodes),
       usage,
     };
@@ -1233,6 +1243,7 @@ export function createRoutes(
       closeConnection = () => {
         if (connectionClosed) return;
         connectionClosed = true;
+        activeQueueEventClosers.delete(closeConnection!);
         try {
           client.close();
         } catch {
@@ -1245,6 +1256,7 @@ export function createRoutes(
         }
       };
 
+      activeQueueEventClosers.add(closeConnection);
       req.on('close', closeConnection);
       startSse(res);
       writeSseComment(res, 'connected');
@@ -1303,7 +1315,7 @@ export function createRoutes(
         if (sawTerminalEvent) break;
       }
 
-      res.end();
+      closeConnection();
     } catch (err) {
       closeConnection?.();
       if (!res.headersSent) {
@@ -1631,9 +1643,7 @@ export function createRoutes(
 
   router.post('/flows', async (req: Request, res: Response) => {
     try {
-      const body = req.body as
-        | { budget?: BudgetOptions; dag?: DAGFlow; flow?: FlowJob }
-        | undefined;
+      const body = req.body as { budget?: BudgetOptions; dag?: DAGFlow; flow?: FlowJob } | undefined;
 
       if (!body || (!!body.flow && !!body.dag) || (!body.flow && !body.dag)) {
         throw httpError(400, 'Body must include exactly one of: flow, dag');

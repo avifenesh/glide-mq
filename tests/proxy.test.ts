@@ -749,8 +749,9 @@ describe('HTTP Proxy', () => {
   });
 
   it('flow HTTP endpoints create, inspect, and delete tree flows', async () => {
-    const queueName = uniqueQueue('flow-http-tree');
-    const queue = new Queue(queueName, { connection: CONNECTION });
+    const rootQueueName = uniqueQueue('flow-http-tree-root');
+    const childQueueName = uniqueQueue('flow-http-tree-child');
+    const queue = new Queue(rootQueueName, { connection: CONNECTION });
     let flowId: string | null = null;
 
     try {
@@ -761,17 +762,17 @@ describe('HTTP Proxy', () => {
           budget: { maxTotalTokens: 5000, onExceeded: 'pause' },
           flow: {
             children: [
-              { data: { step: 'child-a' }, name: 'child-a', queueName },
+              { data: { step: 'child-a' }, name: 'child-a', queueName: childQueueName },
               {
-                children: [{ data: { step: 'grandchild' }, name: 'grandchild', queueName }],
+                children: [{ data: { step: 'grandchild' }, name: 'grandchild', queueName: childQueueName }],
                 data: { step: 'child-b' },
                 name: 'child-b',
-                queueName,
+                queueName: rootQueueName,
               },
             ],
             data: { step: 'root' },
             name: 'root',
-            queueName,
+            queueName: rootQueueName,
           },
         }),
       });
@@ -780,7 +781,7 @@ describe('HTTP Proxy', () => {
       flowId = createBody.flowId;
       expect(createBody.kind).toBe('tree');
       expect(createBody.nodeCount).toBe(4);
-      expect(createBody.root.queueName).toBe(queueName);
+      expect(createBody.root.queueName).toBe(rootQueueName);
       expect(createBody.roots).toHaveLength(1);
 
       const inspectRes = await fetch(`${baseUrl}/flows/${flowId}`);
@@ -789,7 +790,13 @@ describe('HTTP Proxy', () => {
       expect(inspectBody.flowId).toBe(flowId);
       expect(inspectBody.kind).toBe('tree');
       expect(inspectBody.nodes).toHaveLength(4);
-      expect(inspectBody.nodes.map((node: any) => node.name).sort()).toEqual(['child-a', 'child-b', 'grandchild', 'root']);
+      expect(inspectBody.nodes.map((node: any) => node.name).sort()).toEqual([
+        'child-a',
+        'child-b',
+        'grandchild',
+        'root',
+      ]);
+      expect(inspectBody.nodes.find((node: any) => node.name === 'child-a').parentQueue).toBe(rootQueueName);
       expect(inspectBody.budget.maxTotalTokens).toBe(5000);
       expect(inspectBody.budget.onExceeded).toBe('pause');
       expect(inspectBody.usage.jobCount).toBe(0);
@@ -800,9 +807,13 @@ describe('HTTP Proxy', () => {
       expect(treeBody.tree).toHaveLength(1);
       expect(treeBody.tree[0].name).toBe('root');
       expect(treeBody.tree[0].children).toHaveLength(2);
+      expect(treeBody.tree[0].queueName).toBe(rootQueueName);
+      expect(treeBody.tree[0].children.find((node: any) => node.name === 'child-a').queueName).toBe(childQueueName);
       const childB = treeBody.tree[0].children.find((node: any) => node.name === 'child-b');
       expect(childB.children).toHaveLength(1);
       expect(childB.children[0].name).toBe('grandchild');
+      expect(childB.children[0].queueName).toBe(childQueueName);
+      expect(childB.children[0].parentQueue).toBe(rootQueueName);
 
       const deleteRes = await fetch(`${baseUrl}/flows/${flowId}`, { method: 'DELETE' });
       expect(deleteRes.status).toBe(200);
