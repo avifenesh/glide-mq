@@ -54,11 +54,13 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Publish
+        if: github.event_name == 'push' || github.event.inputs.publish == 'true'
         run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Verify
+        if: github.event_name == 'push' || github.event.inputs.publish == 'true'
         run: |
           sleep 10
           npm view glide-mq@${{ env.VERSION }} version

@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.15.0] - 2026-04-02
+
+### Added
+
+- **HTTP proxy parity expansion** (#192): queue-wide events SSE, per-job lifecycle SSE, `jobs/wait`, workers, metrics, scheduler CRUD, rolling usage summary, broadcast publish/SSE, DLQ inspection/replay, suspended-job inspection, revoke, and queue global rate-limit HTTP management.
+- **Flow HTTP API** (#205): `POST /flows`, `GET /flows/:id`, `GET /flows/:id/tree`, and `DELETE /flows/:id` for tree flows and DAGs, with flow inspection responses that include usage, budget, roots, and node state.
+- `queue.getUsageSummary()` plus `/usage/summary` for time-windowed usage aggregation across queues.
+
+### Changed
+
+- Examples now live in the dedicated `glidemq-examples` repository, and the docs/skills/integration guides were refreshed to point at the new example catalog and current proxy surface.
+
+### Fixed
+
+- **Suspend timeout enforcement no longer depends on the original worker staying alive** (#193). Timed-out suspended jobs are now swept by any live glide-mq runtime with a connected `Queue` or `Worker`.
+- Flow HTTP internals now handle cross-queue parent references correctly, use cluster-safe flow record keys, clean up SSE readers on proxy shutdown, and avoid DLQ pagination/replay gaps caused by deleted stream entries.
+- CI cluster bootstrap now installs plain `valkey-server` / `valkey-cli` binaries for the cluster path while keeping `valkey-bundle` for standalone/search coverage.
+
 ## [0.14.0] - 2026-03-28
 
 ### Breaking Changes
