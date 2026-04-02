@@ -296,6 +296,40 @@ describe('Queue.close()', () => {
 
     await expect(queue.getClient()).rejects.toThrow('Queue is closing');
   });
+
+  it('should ignore async ClosingError during client shutdown', async () => {
+    const closingError = new Error('');
+    closingError.name = 'ClosingError';
+    mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1');
+    mockClient.close.mockRejectedValueOnce(closingError);
+
+    const queue = new Queue('test-queue', { connection: connectionOpts });
+    await queue.add('job', {});
+
+    await expect(queue.close()).resolves.toBeUndefined();
+    expect(mockClient.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('should wait for in-flight suspend sweep work before closing the client', async () => {
+    let resolveSweep!: () => void;
+    const sweepTask = new Promise<void>((resolve) => {
+      resolveSweep = resolve;
+    });
+    const queue = new Queue('test-queue', { connection: connectionOpts });
+    (queue as any).client = mockClient;
+    (queue as any).clientOwned = true;
+    (queue as any).suspendedSweepTasks = new Set([sweepTask]);
+
+    const closePromise = queue.close();
+    await Promise.resolve();
+
+    expect(mockClient.close).not.toHaveBeenCalled();
+
+    resolveSweep();
+    await closePromise;
+
+    expect(mockClient.close).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('Queue error event', () => {

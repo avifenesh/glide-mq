@@ -280,11 +280,16 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
     const broadcast = new Broadcast(Q, { connection: CONNECTION });
 
     const received = { sub1: [], sub2: [] } as Record<string, any[]>;
+    let releaseProcessing!: () => void;
+    const processingReleased = new Promise<void>((resolve) => {
+      releaseProcessing = resolve;
+    });
 
     const worker1 = new BroadcastWorker(
       Q,
       async (job) => {
         received.sub1.push(job.data);
+        await processingReleased;
       },
       { connection: CONNECTION, subscription: 'dedup-sub-1', blockTimeout: 500 },
     );
@@ -293,6 +298,7 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
       Q,
       async (job) => {
         received.sub2.push(job.data);
+        await processingReleased;
       },
       { connection: CONNECTION, subscription: 'dedup-sub-2', blockTimeout: 500 },
     );
@@ -306,6 +312,8 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
       { deduplication: { id: 'unique-1', mode: 'simple', ttl: 5000 } },
     );
     expect(id1).not.toBeNull();
+
+    await waitFor(() => received.sub1.length === 1 && received.sub2.length === 1, 5000);
 
     // Duplicate - should be skipped
     const id2 = await broadcast.publish(
@@ -323,6 +331,7 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
     expect(received.sub1[0]).toEqual({ event: 'deduped' });
     expect(received.sub2[0]).toEqual({ event: 'deduped' });
 
+    releaseProcessing();
     await worker1.close(true);
     await worker2.close(true);
     await broadcast.close();

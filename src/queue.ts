@@ -81,6 +81,7 @@ import {
   retryJobs,
   rateLimitGroupExternal,
   signalJob,
+  sweepSuspended,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -89,6 +90,10 @@ const PIPELINE_CHUNK_SIZE = 1000;
 const SCHEDULER_LOCK_TTL_MS = 5000;
 const SCHEDULER_LOCK_RETRY_DELAY_MS = 25;
 const SCHEDULER_LOCK_MAX_ATTEMPTS = Math.ceil(SCHEDULER_LOCK_TTL_MS / SCHEDULER_LOCK_RETRY_DELAY_MS);
+const SUSPEND_SWEEP_INTERVAL_MS = 1000;
+const SUSPEND_SWEEP_IDLE_POLL_MS = 5000;
+const SUSPEND_SWEEP_LOCK_TTL_MS = 5000;
+const SUSPEND_NO_TIMEOUT_SCORE = 9_999_999_999_999;
 const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
 const MAX_USAGE_SUMMARY_KEY_READS = 100_000;
 const USAGE_MODEL_FIELD_PREFIX = 'models:';
@@ -261,6 +266,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
   private waitClients: Set<Client> = new Set();
   private waitRejectors: Set<(err: Error) => void> = new Set();
   private keys: QueueKeys;
+  private suspendedSweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private suspendedSweepWakeAt = 0;
+  private suspendedSweepInFlight = false;
+  private suspendedSweepQueued = false;
+  private suspendedSweepTasks: Set<Promise<void>> = new Set();
 
   private serializer: Serializer;
   private skipEvents: boolean;
@@ -340,6 +350,159 @@ export class Queue<D = any, R = any> extends EventEmitter {
     return jobIds;
   }
 
+  private suspendSweepLockKey(): string {
+    return `${this.keys.suspended}:lock:__sweep__`;
+  }
+
+  private shouldStartSuspendSweepLoop(client: Client): boolean {
+    return typeof (client as any)?.fcall === 'function';
+  }
+
+  private ensureSuspendSweepLoop(client: Client): void {
+    if (
+      this.suspendedSweepTimer ||
+      this.suspendedSweepInFlight ||
+      this.closing ||
+      !this.shouldStartSuspendSweepLoop(client)
+    ) {
+      return;
+    }
+
+    this.scheduleNextSuspendSweep(client, SUSPEND_SWEEP_INTERVAL_MS);
+  }
+
+  private clearSuspendSweepLoop(): void {
+    if (this.suspendedSweepTimer) {
+      clearTimeout(this.suspendedSweepTimer);
+      this.suspendedSweepTimer = null;
+    }
+    this.suspendedSweepWakeAt = 0;
+    this.suspendedSweepQueued = false;
+    if (this.suspendedSweepTasks.size === 0) {
+      this.suspendedSweepInFlight = false;
+    }
+  }
+
+  private trackSuspendSweepTask(task: Promise<void>): Promise<void> {
+    this.suspendedSweepTasks.add(task);
+    void task.finally(() => {
+      this.suspendedSweepTasks.delete(task);
+    });
+    return task;
+  }
+
+  private scheduleNextSuspendSweep(client: Client, delayMs: number): void {
+    if (this.closing) return;
+
+    const delay = Math.max(0, Math.trunc(delayMs));
+    const target = Date.now() + delay;
+    if (this.suspendedSweepTimer && this.suspendedSweepWakeAt > 0 && this.suspendedSweepWakeAt <= target) {
+      return;
+    }
+
+    if (this.suspendedSweepTimer) {
+      clearTimeout(this.suspendedSweepTimer);
+      this.suspendedSweepTimer = null;
+    }
+
+    this.suspendedSweepWakeAt = target;
+    this.suspendedSweepTimer = setTimeout(() => {
+      this.suspendedSweepTimer = null;
+      this.suspendedSweepWakeAt = 0;
+      this.runSuspendSweep(client);
+    }, delay);
+    this.suspendedSweepTimer.unref?.();
+  }
+
+  private async nextSuspendedSweepDelay(client: Client, acquiredLock: boolean): Promise<number> {
+    if (!acquiredLock) {
+      return SUSPEND_SWEEP_INTERVAL_MS;
+    }
+    const nextDue = await this.nextSuspendedDueAt(client);
+    if (nextDue == null || nextDue >= SUSPEND_NO_TIMEOUT_SCORE) {
+      // Keep a low-frequency poll alive so this queue can pick up new suspended
+      // timeouts created by other processes after it becomes idle.
+      return SUSPEND_SWEEP_IDLE_POLL_MS;
+    }
+    const delta = nextDue - Date.now();
+    if (delta <= 0) {
+      return SUSPEND_SWEEP_INTERVAL_MS;
+    }
+    return Math.min(SUSPEND_SWEEP_IDLE_POLL_MS, delta);
+  }
+
+  private async nextSuspendedDueAt(client: Client): Promise<number | null> {
+    const members = await client.zrange(this.keys.suspended, { start: 0, end: 0 });
+    const firstMember = Array.isArray(members) ? members[0] : null;
+    if (firstMember == null) {
+      return null;
+    }
+    const score = await client.zscore(this.keys.suspended, firstMember);
+    if (score == null) {
+      return null;
+    }
+    const numericScore = typeof score === 'number' ? score : Number(score);
+    return Number.isFinite(numericScore) ? numericScore : null;
+  }
+
+  private runSuspendSweep(client: Client): void {
+    if (this.closing) return;
+    if (this.suspendedSweepInFlight) {
+      this.suspendedSweepQueued = true;
+      return;
+    }
+
+    this.suspendedSweepInFlight = true;
+    void this.trackSuspendSweepTask(
+      (async () => {
+        let acquiredLock = false;
+        try {
+          acquiredLock = await this.sweepExpiredSuspended(client);
+        } catch (err) {
+          if (this.listenerCount('error') > 0) {
+            this.emit('error', err instanceof Error ? err : new Error(String(err)));
+          }
+        } finally {
+          this.suspendedSweepInFlight = false;
+          if (this.closing) return;
+          if (this.suspendedSweepQueued) {
+            this.suspendedSweepQueued = false;
+            this.scheduleNextSuspendSweep(client, 0);
+            return;
+          }
+          try {
+            const delay = await this.nextSuspendedSweepDelay(client, acquiredLock);
+            this.scheduleNextSuspendSweep(client, delay);
+          } catch (err) {
+            if (this.listenerCount('error') > 0) {
+              this.emit('error', err instanceof Error ? err : new Error(String(err)));
+            }
+            this.scheduleNextSuspendSweep(client, SUSPEND_SWEEP_INTERVAL_MS);
+          }
+        }
+      })(),
+    );
+  }
+
+  private async sweepExpiredSuspended(client: Client): Promise<boolean> {
+    const lockKey = this.suspendSweepLockKey();
+    const token = randomBytes(8).toString('hex');
+    const acquired = await tryLock(client, lockKey, token, SUSPEND_SWEEP_LOCK_TTL_MS);
+    if (!acquired) return false;
+
+    try {
+      const keyPrefix = this.keys.id.slice(0, -2);
+      await sweepSuspended(client, this.keys, Date.now(), keyPrefix);
+      return true;
+    } finally {
+      try {
+        await unlock(client, lockKey, token);
+      } catch {
+        // Best effort - the TTL ensures the sweep lock eventually expires.
+      }
+    }
+  }
+
   /** @internal */
   async getClient(): Promise<Client> {
     if (this.closing) {
@@ -374,6 +537,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         this.clientOwned = true;
       }
     }
+    this.ensureSuspendSweepLoop(this.client);
     return this.client;
   }
 
@@ -2478,6 +2642,19 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
+    this.clearSuspendSweepLoop();
+    if (this.suspendedSweepTasks.size > 0) {
+      await Promise.allSettled(this.suspendedSweepTasks);
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const handleCloseError = (err: unknown) => {
+      // Speedkey can reject close() if the transport is already shutting down.
+      // Queue.close() is intentionally idempotent, so treat that as best-effort cleanup.
+      if ((err as { name?: string } | null)?.name === 'ClosingError') return;
+      if (this.listenerCount('error') > 0) {
+        this.emit('error', err as Error);
+      }
+    };
     for (const rejectWaiter of this.waitRejectors) {
       try {
         rejectWaiter(new GlideMQError('Queue is closing'));
@@ -2486,21 +2663,26 @@ export class Queue<D = any, R = any> extends EventEmitter {
       }
     }
     this.waitRejectors.clear();
+    const closePromises: Promise<void>[] = [];
     for (const waitClient of this.waitClients) {
-      try {
-        waitClient.close();
-      } catch (closeErr) {
-        if (this.listenerCount('error') > 0) {
-          this.emit('error', closeErr as Error);
-        }
-      }
+      closePromises.push(
+        Promise.resolve()
+          .then(() => waitClient.close())
+          .catch(handleCloseError),
+      );
     }
     this.waitClients.clear();
     if (this.client) {
-      if (this.clientOwned) {
-        this.client.close();
-      }
+      const client = this.client;
       this.client = null;
+      if (this.clientOwned) {
+        closePromises.push(
+          Promise.resolve()
+            .then(() => client.close())
+            .catch(handleCloseError),
+        );
+      }
     }
+    await Promise.all(closePromises);
   }
 }
