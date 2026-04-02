@@ -59,7 +59,7 @@ describeEachMode('Budget middleware', (CONNECTION) => {
     flow = new FlowProducer({ connection: CONNECTION });
     queue = new Queue(queueName, { connection: CONNECTION });
 
-    await flow.add(
+    const node = await flow.add(
       {
         name: 'parent',
         queueName,
@@ -97,7 +97,7 @@ describeEachMode('Budget middleware', (CONNECTION) => {
     flow = new FlowProducer({ connection: CONNECTION });
     queue = new Queue(queueName, { connection: CONNECTION });
 
-    await flow.add(
+    const node = await flow.add(
       {
         name: 'parent',
         queueName,
@@ -155,7 +155,7 @@ describeEachMode('Budget middleware', (CONNECTION) => {
     flow = new FlowProducer({ connection: CONNECTION });
     queue = new Queue(queueName, { connection: CONNECTION });
 
-    await flow.add(
+    const node = await flow.add(
       {
         name: 'parent',
         queueName,
@@ -196,7 +196,7 @@ describeEachMode('Budget middleware', (CONNECTION) => {
     flow = new FlowProducer({ connection: CONNECTION });
     queue = new Queue(queueName, { connection: CONNECTION });
 
-    await flow.add(
+    const node = await flow.add(
       {
         name: 'parent',
         queueName,

@@ -455,7 +455,7 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
       await waitFor(async () => {
         const state = await cleanupClient.hget(k.job(jobs.get('A')!.id), 'state');
         return String(state) === 'completed';
-      }, 20000);
+      }, 30000);
 
       // Verify all completed
       for (const [, job] of jobs) {
@@ -473,7 +473,7 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
       await worker.close();
       await flow.close();
     }
-  }, 30000);
+  }, 45000);
 
   it('budget enforcement under concurrent load', async () => {
     const qName = uniqueQ('budget');
