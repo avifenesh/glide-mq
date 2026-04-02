@@ -90,7 +90,6 @@ const results = await queue.vectorSearch(
     k: 10,                             // nearest neighbours (default: 10)
     filter: '@state:{completed}',      // pre-filter expression
     indexName: 'embeddings-idx',       // default: '{queueName}-idx'
-    returnFields: ['name', 'summary'], // fields to return (default: all)
     scoreField: '__score',             // score field name (default: '__score')
   },
 );
@@ -108,7 +107,6 @@ interface VectorSearchOptions {
   indexName?: string;           // default: '{queueName}-idx'
   k?: number;                   // nearest neighbours (default: 10)
   filter?: string;              // pre-filter expression (default: '*')
-  returnFields?: string[];      // fields to return
   scoreField?: string;          // score field name (default: '__score')
   searchOptions?: SearchQueryOptions;
 }
@@ -144,26 +142,22 @@ interface SearchQueryOptions {
 
 ## Storing Vectors in Jobs
 
-Store the embedding as a Buffer in the job data. The vector field must be written to the job hash as a raw binary FLOAT32 buffer for Valkey Search to index it.
+Create the job first, then store the embedding with `job.storeVector(...)`. This writes the raw FLOAT32 buffer to the job hash in the format Valkey Search expects.
 
 ```typescript
 // When adding jobs with embeddings
 const embedding = await getEmbedding(text);
-const vecBuffer = Buffer.from(new Float32Array(embedding).buffer);
-
-await queue.add('document', {
+const job = await queue.add('document', {
   text,
   summary: 'A document about...',
   category: 'research',
-}, {
-  // Store the vector in a custom hash field via job data
-  // The actual vector must be set on the job hash after creation
 });
-
-// Write the vector field to the job hash
-const job = await queue.getJob(jobId);
-// Use the client directly to HSET the binary vector field
+if (job) {
+  await job.storeVector('embedding', embedding);
+}
 ```
+
+Testing mode provides parity via `TestJob.storeVector(...)`, `TestQueue.createJobIndex(...)`, and `TestQueue.vectorSearch(...)`.
 
 ## Dropping an Index
 

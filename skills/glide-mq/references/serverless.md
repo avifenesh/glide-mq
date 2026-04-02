@@ -81,7 +81,7 @@ process.on('SIGTERM', async () => { await serverlessPool.closeAll(); });
 
 ## HTTP Proxy
 
-Express-based HTTP proxy for enqueueing from any language/environment.
+Express-based HTTP proxy for queue access from any language/environment.
 
 ```typescript
 import { createProxyServer } from 'glide-mq/proxy';
@@ -107,8 +107,14 @@ await proxy.close();  // shuts down all cached Queue instances
 | POST | `/queues/:name/jobs/bulk` | Add bulk `{ jobs: [...] }` (max 1000) |
 | GET | `/queues/:name/jobs/:id` | Get job details |
 | GET | `/queues/:name/counts` | Get job counts |
+| GET | `/queues/:name/events` | SSE stream of queue lifecycle events |
 | POST | `/queues/:name/pause` | Pause queue |
 | POST | `/queues/:name/resume` | Resume queue |
+| GET | `/queues/:name/jobs/:id/stream` | SSE stream of job output chunks |
+| POST | `/queues/:name/jobs/:id/signal` | Send a signal to a suspended job |
+| GET | `/usage/summary` | Rolling usage totals across one or more queues |
+| POST | `/broadcast/:name` | Publish a broadcast message |
+| GET | `/broadcast/:name/events` | Durable broadcast SSE stream |
 | GET | `/health` | `{ status, uptime, queues }` |
 
 ## Testing (In-Memory)
@@ -184,6 +190,6 @@ const worker = new TestWorker(queue, async (jobs) => {
 - Producer `close()` does NOT close an externally provided `client`.
 - `serverlessPool` is a module-level singleton - shared across handler invocations.
 - HTTP proxy requires `express` as a peer dependency.
-- Proxy `queues` option is an allowlist - unlisted names get 403.
+- Proxy `queues` option is an allowlist - unlisted names get 403, and the same allowlist applies to `/usage/summary?queues=...` and `/broadcast/:name`.
 - TestQueue `isPaused()` is synchronous (real Queue returns Promise).
 - Test mode does not honor `delay` or `moveToDelayed`.

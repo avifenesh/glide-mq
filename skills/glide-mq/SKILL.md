@@ -8,9 +8,10 @@ description: >-
   primitives (usage tracking, token streaming, suspend/resume, budget caps,
   fallback chains, dual-axis rate limiting, vector search). Triggers on
   "glide-mq", "glidemq", "job queue valkey", "background tasks valkey",
-  "message queue redis streams", "LLM queue", "AI orchestration queue",
-  "token rate limiting", "model fallback", "human-in-the-loop queue",
-  "vector search jobs", "AI pipeline queue".
+  "message queue redis streams", "glide-mq LLM queue",
+  "glide-mq AI orchestration queue", "glide-mq token rate limiting",
+  "glide-mq model fallback", "glide-mq human-in-the-loop queue",
+  "glide-mq vector search", "glide-mq AI pipeline".
 license: Apache-2.0
 metadata:
   author: glide-mq
@@ -177,7 +178,7 @@ await worker.run();
 | Connection errors or TLS/IAM setup | [references/connection.md](references/connection.md) |
 | Stalled jobs or lock issues | [references/worker.md](references/worker.md) - Stalled Jobs |
 | Need real-time job events | [references/observability.md](references/observability.md) |
-| Integrating with Fastify/NestJS/Hono | [Framework Integrations](https://avifenesh.github.io/glidemq.dev/integrations/) |
+| Integrating with Fastify/NestJS/Hono | [Framework Integrations](https://glidemq.dev/integrations/) |
 | Deploying to Lambda/Vercel Edge | [references/serverless.md](references/serverless.md) |
 | Need deduplication or idempotent jobs | [references/queue.md](references/queue.md) - Dedup |
 | Need rate limiting | [references/queue.md](references/queue.md) - Rate Limit |
@@ -201,6 +202,14 @@ await worker.run();
 - Connection format uses `addresses: [{ host, port }]` array, NOT `{ host, port }` object
 - **Never use `customCommand`** - use typed API methods with dummy keys for cluster routing
 
+## Done When
+
+- `npm test` or the project-equivalent test command passes
+- `await queue.getJobCounts()` matches the expected queue state
+- no jobs are left unexpectedly stuck in `active`
+- any QueueEvents or SSE behavior touched by the change has been smoke-tested
+- temporary queues, workers, and listeners are closed cleanly
+
 ## Full Documentation
 
-https://avifenesh.github.io/glidemq.dev/
+https://glidemq.dev/

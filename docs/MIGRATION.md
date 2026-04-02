@@ -329,6 +329,10 @@ glide-mq is a strict superset of BullMQ's core job queue semantics. At-least-onc
 
 ---
 
+## Why migrate
+
+glide-mq keeps familiar queueing patterns while reducing round trips, avoiding Lua script cache churn, and adding open-source features such as per-key concurrency, AI-native usage tracking, suspend/resume, and vector search.
+
 ## Prerequisites
 
 - Node.js 20+
@@ -1193,6 +1197,10 @@ const queue = new Queue('tasks', {
 Useful when job payloads are large (15 KB JSON → 331 bytes with gzip, 98% reduction).
 
 ---
+
+## Gaps and workarounds
+
+This guide now separates compatibility notes into [Resolved gaps](#resolved-gaps) and [Current gaps](#current-gaps). Start with Current gaps if you are checking migration blockers.
 
 ## Resolved gaps
 

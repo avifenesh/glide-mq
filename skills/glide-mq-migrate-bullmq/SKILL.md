@@ -4,9 +4,10 @@ description: >-
   Migrates Node.js applications from BullMQ to glide-mq. Covers connection
   config conversion, API mapping, breaking changes, and new features available
   after migration. Use when converting BullMQ queues and workers to glide-mq,
-  replacing bullmq, or comparing BullMQ vs glide-mq APIs. Triggers on
-  "bullmq to glide-mq", "replace bullmq", "migrate from bullmq", "bullmq
-  alternative", "switch from bullmq", "convert bullmq", "bullmq migration".
+  replacing bullmq with glide-mq, or comparing BullMQ vs glide-mq APIs.
+  Triggers on "bullmq to glide-mq", "replace bullmq with glide-mq",
+  "migrate from bullmq", "switch from bullmq to glide-mq",
+  "convert bullmq to glide-mq", "bullmq migration glide-mq".
 license: Apache-2.0
 metadata:
   author: glide-mq
@@ -367,6 +368,8 @@ Most production deployments run c=5 to c=20, where glide-mq's 1-RTT architecture
 - [ ] Run test suite: npm test
 - [ ] Confirm queue counts: await queue.getJobCounts()
 - [ ] Confirm no jobs stuck in active state
+- [ ] Smoke-test QueueEvents or SSE listeners if the app exposes them
+- [ ] Confirm workers, queues, and connections close cleanly
 ```
 
 ---
@@ -389,6 +392,6 @@ Most production deployments run c=5 to c=20, where glide-mq's 1-RTT architecture
 
 ## Full Documentation
 
-- [Migration Guide](https://avifenesh.github.io/glidemq.dev/migration/from-bullmq)
+- [Migration Guide](https://glidemq.dev/migration/from-bullmq)
 - [New Features Reference](references/new-features.md)
 - [Connection Mapping Reference](references/connection-mapping.md)

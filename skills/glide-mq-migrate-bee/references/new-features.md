@@ -442,5 +442,9 @@ KNN similarity search over job hashes via Valkey Search.
 await queue.createJobIndex({
   vectorField: { name: 'embedding', dimensions: 1536 },
 });
+const job = await queue.add('document', { text: 'Hello world' });
+if (job) {
+  await job.storeVector('embedding', queryEmbedding);
+}
 const results = await queue.vectorSearch(queryEmbedding, { k: 10 });
 ```

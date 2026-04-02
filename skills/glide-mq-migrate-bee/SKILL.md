@@ -4,9 +4,9 @@ description: >-
   Migrates Node.js applications from Bee-Queue to glide-mq. Covers the chained
   builder-to-options API conversion, Queue/Worker separation, and event mapping.
   Use when converting bee-queue projects to glide-mq, replacing bee-queue with
-  a modern alternative, or planning a bee-queue migration. Triggers on
-  "bee-queue to glide-mq", "replace bee-queue", "migrate from bee-queue",
-  "bee queue alternative", "beequeue migration".
+  glide-mq, or planning a bee-queue migration. Triggers on
+  "bee-queue to glide-mq", "replace bee-queue with glide-mq",
+  "migrate from bee-queue", "beequeue migration glide-mq".
 license: Apache-2.0
 metadata:
   author: glide-mq
@@ -308,8 +308,12 @@ Features Bee-Queue does not have that are available after migration:
 - [ ] Convert checkHealth() to getJobCounts()
 - [ ] Update event listeners (queue.on to worker.on or QueueEvents)
 - [ ] Convert per-job events (job.on) to QueueEvents
-- [ ] Replace require() with import (glide-mq is ESM)
+- [ ] Keep the project's existing module system (CommonJS or ESM)
 - [ ] Run full test suite
+- [ ] Confirm queue counts: await queue.getJobCounts()
+- [ ] Confirm no jobs stuck in active state
+- [ ] Smoke-test QueueEvents or SSE listeners if the app exposes them
+- [ ] Confirm workers, queues, and connections close cleanly
 ```
 
 ## Troubleshooting
@@ -318,7 +322,7 @@ Features Bee-Queue does not have that are available after migration:
 |-------|-------|-----|
 | `queue.createJob is not a function` | API changed | Use `queue.add(name, data, opts)` |
 | `queue.process is not a function` | Separated producer/consumer | Use `new Worker(name, handler, opts)` |
-| `Cannot use require()` | glide-mq is ESM-only | Change to `import` statements |
+| `Cannot use require()` | Module system mismatch | Keep the project's existing module system; glide-mq supports CommonJS and ESM |
 | `job.reportProgress is not a function` | API renamed | Use `job.updateProgress(number)` |
 | `Cannot find module 'bee-queue'` | Leftover import | `grep -r "bee-queue" src/` to find remaining |
 | `Missing job name` | Bee-Queue had no name | Add a name as first arg to `queue.add()` |
