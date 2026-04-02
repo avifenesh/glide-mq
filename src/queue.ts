@@ -438,7 +438,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
       return null;
     }
     const score = await client.zscore(this.keys.suspended, firstMember);
-    return typeof score === 'number' && Number.isFinite(score) ? score : null;
+    if (score == null) {
+      return null;
+    }
+    const numericScore = typeof score === 'number' ? score : Number(score);
+    return Number.isFinite(numericScore) ? numericScore : null;
   }
 
   private runSuspendSweep(client: Client): void {
