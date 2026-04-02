@@ -2658,14 +2658,22 @@ export class Queue<D = any, R = any> extends EventEmitter {
     this.waitRejectors.clear();
     const closePromises: Promise<void>[] = [];
     for (const waitClient of this.waitClients) {
-      closePromises.push(Promise.resolve().then(() => waitClient.close()).catch(handleCloseError));
+      closePromises.push(
+        Promise.resolve()
+          .then(() => waitClient.close())
+          .catch(handleCloseError),
+      );
     }
     this.waitClients.clear();
     if (this.client) {
       const client = this.client;
       this.client = null;
       if (this.clientOwned) {
-        closePromises.push(Promise.resolve().then(() => client.close()).catch(handleCloseError));
+        closePromises.push(
+          Promise.resolve()
+            .then(() => client.close())
+            .catch(handleCloseError),
+        );
       }
     }
     await Promise.all(closePromises);
