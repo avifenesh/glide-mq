@@ -407,6 +407,7 @@ describe('Valkey Search integration', () => {
     if (!requireSearch()) return;
 
     const qName = 'search-int-1-' + Date.now();
+    const idxName = `${qName}-idx`;
     const q = new Queue(qName, { connection: CONNECTION });
 
     try {
@@ -448,6 +449,7 @@ describe('Valkey Search integration', () => {
     if (!requireSearch()) return;
 
     const qName = 'search-int-2-' + Date.now();
+    const idxName = `${qName}-idx`;
     const q = new Queue(qName, { connection: CONNECTION });
 
     try {
@@ -487,6 +489,7 @@ describe('Valkey Search integration', () => {
     if (!requireSearch()) return;
 
     const qName = 'search-int-3-' + Date.now();
+    const idxName = `${qName}-idx`;
     const q = new Queue(qName, { connection: CONNECTION });
 
     try {
