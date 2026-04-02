@@ -355,7 +355,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   }
 
   private shouldStartSuspendSweepLoop(client: Client): boolean {
-    return typeof (client as any)?.fcall === 'function' && typeof (client as any)?.zrangeWithScores === 'function';
+    return typeof (client as any)?.fcall === 'function';
   }
 
   private ensureSuspendSweepLoop(client: Client): void {
@@ -368,7 +368,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       return;
     }
 
-    this.scheduleNextSuspendSweep(client, 0);
+    this.scheduleNextSuspendSweep(client, SUSPEND_SWEEP_INTERVAL_MS);
   }
 
   private clearSuspendSweepLoop(): void {
@@ -414,21 +414,25 @@ export class Queue<D = any, R = any> extends EventEmitter {
     this.suspendedSweepTimer.unref?.();
   }
 
-  private async nextSuspendedSweepDelay(client: Client): Promise<number> {
+  private async nextSuspendedSweepDelay(client: Client, acquiredLock: boolean): Promise<number | null> {
+    if (!acquiredLock) {
+      return SUSPEND_SWEEP_INTERVAL_MS;
+    }
     const nextDue = await this.nextSuspendedDueAt(client);
     if (nextDue == null || nextDue >= SUSPEND_NO_TIMEOUT_SCORE) {
-      return SUSPEND_SWEEP_IDLE_POLL_MS;
+      return null;
     }
     return Math.max(1, Math.min(SUSPEND_SWEEP_IDLE_POLL_MS, nextDue - Date.now()));
   }
 
   private async nextSuspendedDueAt(client: Client): Promise<number | null> {
-    const entries = await (client as any).zrangeWithScores(this.keys.suspended, { start: 0, end: 0 });
-    if (!Array.isArray(entries) || entries.length === 0) {
+    const members = await client.zrange(this.keys.suspended, { start: 0, end: 0 });
+    const firstMember = Array.isArray(members) ? members[0] : null;
+    if (firstMember == null) {
       return null;
     }
-    const score = Number(entries[0]?.score);
-    return Number.isFinite(score) ? score : null;
+    const score = await client.zscore(this.keys.suspended, firstMember);
+    return typeof score === 'number' && Number.isFinite(score) ? score : null;
   }
 
   private runSuspendSweep(client: Client): void {
@@ -441,8 +445,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
     this.suspendedSweepInFlight = true;
     void this.trackSuspendSweepTask(
       (async () => {
+        let acquiredLock = false;
         try {
-          await this.sweepExpiredSuspended(client);
+          acquiredLock = await this.sweepExpiredSuspended(client);
         } catch (err) {
           if (this.listenerCount('error') > 0) {
             this.emit('error', err instanceof Error ? err : new Error(String(err)));
@@ -456,7 +461,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
             return;
           }
           try {
-            const delay = await this.nextSuspendedSweepDelay(client);
+            const delay = await this.nextSuspendedSweepDelay(client, acquiredLock);
+            if (delay == null) {
+              return;
+            }
             this.scheduleNextSuspendSweep(client, delay);
           } catch (err) {
             if (this.listenerCount('error') > 0) {
@@ -469,15 +477,16 @@ export class Queue<D = any, R = any> extends EventEmitter {
     );
   }
 
-  private async sweepExpiredSuspended(client: Client): Promise<void> {
+  private async sweepExpiredSuspended(client: Client): Promise<boolean> {
     const lockKey = this.suspendSweepLockKey();
     const token = randomBytes(8).toString('hex');
     const acquired = await tryLock(client, lockKey, token, SUSPEND_SWEEP_LOCK_TTL_MS);
-    if (!acquired) return;
+    if (!acquired) return false;
 
     try {
       const keyPrefix = this.keys.id.slice(0, -2);
       await sweepSuspended(client, this.keys, Date.now(), keyPrefix);
+      return true;
     } finally {
       try {
         await unlock(client, lockKey, token);
@@ -520,8 +529,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
         this.client = client;
         this.clientOwned = true;
       }
-      this.ensureSuspendSweepLoop(this.client);
     }
+    this.ensureSuspendSweepLoop(this.client);
     return this.client;
   }
 
@@ -2630,6 +2639,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (this.suspendedSweepTasks.size > 0) {
       await Promise.allSettled(this.suspendedSweepTasks);
     }
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     const handleCloseError = (err: unknown) => {
       // Speedkey can reject close() if the transport is already shutting down.
       // Queue.close() is intentionally idempotent, so treat that as best-effort cleanup.
@@ -2648,14 +2658,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
     this.waitRejectors.clear();
     const closePromises: Promise<void>[] = [];
     for (const waitClient of this.waitClients) {
-      closePromises.push(Promise.resolve(waitClient.close()).catch(handleCloseError));
+      closePromises.push(Promise.resolve().then(() => waitClient.close()).catch(handleCloseError));
     }
     this.waitClients.clear();
     if (this.client) {
       const client = this.client;
       this.client = null;
       if (this.clientOwned) {
-        closePromises.push(Promise.resolve(client.close()).catch(handleCloseError));
+        closePromises.push(Promise.resolve().then(() => client.close()).catch(handleCloseError));
       }
     }
     await Promise.all(closePromises);
