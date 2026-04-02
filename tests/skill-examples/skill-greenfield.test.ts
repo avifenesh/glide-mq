@@ -23,10 +23,8 @@ const { Broadcast } = require('../../dist/broadcast') as typeof import('../../sr
 const { BroadcastWorker } = require('../../dist/broadcast-worker') as typeof import('../../src/broadcast-worker');
 const { ServerlessPool, serverlessPool } =
   require('../../dist/serverless-pool') as typeof import('../../src/serverless-pool');
-const { UnrecoverableError, WaitingChildrenError, BatchError } =
-  require('../../dist/errors') as typeof import('../../src/errors');
-const { gracefulShutdown } = require('../../dist/graceful-shutdown') as typeof import('../../src/graceful-shutdown');
-const { chain, group, chord, dag } = require('../../dist/workflows') as typeof import('../../src/workflows');
+const { UnrecoverableError } = require('../../dist/errors') as typeof import('../../src/errors');
+const { chain, group, chord } = require('../../dist/workflows') as typeof import('../../src/workflows');
 const { matchSubject, compileSubjectMatcher } = require('../../dist/utils') as typeof import('../../src/utils');
 
 import { flushQueue, createCleanupClient, STANDALONE, waitFor } from '../helpers/fixture';
@@ -146,7 +144,7 @@ describe('SKILL.md examples', () => {
     const queue = track(new Queue(qName, { connection }));
     const batchResults: number[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (jobs: any[]) => {
@@ -170,7 +168,7 @@ describe('SKILL.md examples', () => {
     const qName = uid('skill-addwait');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -297,7 +295,7 @@ describe('queue.md examples', () => {
     const queue = track(new Queue(qName, { connection }));
     const dlqQueue = track(new Queue(dlqName, { connection }));
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async () => {
@@ -330,7 +328,7 @@ describe('worker.md examples', () => {
     const queue = track(new Queue(qName, { connection }));
     const results: any[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -356,7 +354,7 @@ describe('worker.md examples', () => {
     const worker = track(
       new Worker(
         qName,
-        async (job) => {
+        async () => {
           return { done: true };
         },
         { connection },
@@ -451,7 +449,7 @@ describe('worker.md examples', () => {
     const queue = track(new Queue(qName, { connection }));
     const processed: string[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -467,7 +465,7 @@ describe('worker.md examples', () => {
       ),
     );
 
-    const job = await queue.add('revocable', { data: 'test' });
+    await queue.add('revocable', { data: 'test' });
     // Just verify the job was added and queue.revoke works
     // Revoking a waiting job should return 'revoked'
     const nextJob = await queue.add('also-revocable', { data: 'test2' });
@@ -665,7 +663,7 @@ describe('observability.md examples', () => {
       completedIds.push(jobId);
     });
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async () => {
@@ -685,7 +683,7 @@ describe('observability.md examples', () => {
     const queue = track(new Queue(qName, { connection, events: false }));
     const processed: string[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -706,7 +704,7 @@ describe('observability.md examples', () => {
     const queue = track(new Queue(qName, { connection }));
     let jobId: string | undefined;
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -733,7 +731,7 @@ describe('observability.md examples', () => {
     const queue = track(new Queue(qName, { connection }));
     let done = false;
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -774,7 +772,7 @@ describe('observability.md examples', () => {
     const qName = uid('obs-metrics');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(new Worker(qName, async () => 'ok', { connection }));
+    track(new Worker(qName, async () => 'ok', { connection }));
 
     await queue.add('metric-test', {});
     await waitFor(async () => {
@@ -791,7 +789,7 @@ describe('observability.md examples', () => {
     const qName = uid('obs-no-metrics');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(
+    track(
       new Worker(qName, async () => 'ok', {
         connection,
         metrics: false,
@@ -928,10 +926,10 @@ describe('workflows.md examples', () => {
     const results: any[] = [];
 
     // Child workers
-    const childWorker = track(
+    track(
       new Worker(
         childQ,
-        async (job) => {
+        async () => {
           return { count: 10 };
         },
         { connection },
@@ -939,7 +937,7 @@ describe('workflows.md examples', () => {
     );
 
     // Parent worker
-    const parentWorker = track(
+    track(
       new Worker(
         parentQ,
         async (job) => {
@@ -970,7 +968,7 @@ describe('workflows.md examples', () => {
     const qName = uid('flow-chain');
     const processed: string[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -1002,7 +1000,7 @@ describe('workflows.md examples', () => {
     const qName = uid('flow-group');
     const processed: string[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -1033,7 +1031,7 @@ describe('workflows.md examples', () => {
     const qName = uid('flow-chord');
     const processed: string[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -1146,7 +1144,7 @@ describe('Compression examples', () => {
     const queue = track(new Queue(qName, { connection, compression: 'gzip' }));
     const processed: any[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {

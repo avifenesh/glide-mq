@@ -6,7 +6,7 @@
  * 2. Testing mode: TestQueue.createJobIndex + vectorSearch round-trip
  * 3. Integration tests: require valkey-bundle with search module loaded
  */
-import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi, afterEach } from 'vitest';
 
 const { GlideFt } = require('@glidemq/speedkey') as typeof import('@glidemq/speedkey');
 
@@ -177,7 +177,7 @@ describe('storeVector buffer encoding', () => {
 // ---- Testing mode ----
 
 describe('Testing mode - vector search', () => {
-  const { TestQueue, TestJob } = require('../dist/testing') as typeof import('../src/testing');
+  const { TestQueue } = require('../dist/testing') as typeof import('../src/testing');
 
   it('createJobIndex + vectorSearch round-trip', async () => {
     const q = new TestQueue('vec-test-1');
@@ -281,7 +281,6 @@ describe('Testing mode - vector search', () => {
 describe('Valkey Search integration', () => {
   const { GlideClient } = require('@glidemq/speedkey') as typeof import('@glidemq/speedkey');
   const { Queue } = require('../dist/queue') as typeof import('../src/queue');
-  const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 
   const CONNECTION = {
     addresses: [{ host: 'localhost', port: 6379 }],
@@ -553,7 +552,6 @@ describe('Valkey Search integration', () => {
     if (!requireSearch()) return;
 
     const qName = 'search-int-6-' + Date.now();
-    const idxName = `${qName}-idx`;
     const q = new Queue(qName, { connection: CONNECTION });
 
     try {

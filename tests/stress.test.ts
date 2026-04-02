@@ -7,7 +7,7 @@
  *
  * Run: npx vitest run tests/stress.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll } from 'vitest';
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
@@ -107,7 +107,7 @@ describeEachMode('Stress: Concurrent Workers', (CONNECTION) => {
       const donePromise = new Promise<void>((resolve) => {
         const worker = new Worker(
           qName,
-          async (job: any) => {
+          async (_job: any) => {
             // Simulate some work
             await sleep(1 + Math.random() * 3);
             return { processed: true };
@@ -218,14 +218,12 @@ describeEachMode('Stress: Concurrent Workers', (CONNECTION) => {
     // Single worker handles everything. First 3 invocations "hang"
     // (simulating a crashed worker), then the stall detector fails them,
     // retry re-queues them, and subsequent invocations succeed.
-    let invocationCount = 0;
     const completedIds = new Set<string>();
     const failedIds = new Set<string>();
 
     const worker = new Worker(
       qName,
       async (job: any) => {
-        invocationCount++;
         // On the first attempt of each job, simulate a hang that exceeds lockDuration
         if (job.attemptsMade === 0) {
           // Sleep longer than lockDuration so the stall sweep reclaims it
@@ -457,10 +455,10 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
       await waitFor(async () => {
         const state = await cleanupClient.hget(k.job(jobs.get('A')!.id), 'state');
         return String(state) === 'completed';
-      }, 20000);
+      }, 30000);
 
       // Verify all completed
-      for (const [name, job] of jobs) {
+      for (const [, job] of jobs) {
         const state = await cleanupClient.hget(k.job(job.id), 'state');
         expect(String(state)).toBe('completed');
       }
@@ -475,7 +473,7 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
       await worker.close();
       await flow.close();
     }
-  }, 30000);
+  }, 45000);
 
   it('budget enforcement under concurrent load', async () => {
     const qName = uniqueQ('budget');

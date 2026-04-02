@@ -12,11 +12,9 @@ const { Queue } = require('../../dist/queue') as typeof import('../../src/queue'
 const { Worker } = require('../../dist/worker') as typeof import('../../src/worker');
 const { FlowProducer } = require('../../dist/flow-producer') as typeof import('../../src/flow-producer');
 const { QueueEvents } = require('../../dist/queue-events') as typeof import('../../src/queue-events');
-const { Producer } = require('../../dist/producer') as typeof import('../../src/producer');
 const { Broadcast } = require('../../dist/broadcast') as typeof import('../../src/broadcast');
 const { BroadcastWorker } = require('../../dist/broadcast-worker') as typeof import('../../src/broadcast-worker');
 const { UnrecoverableError } = require('../../dist/errors') as typeof import('../../src/errors');
-const { gracefulShutdown } = require('../../dist/graceful-shutdown') as typeof import('../../src/graceful-shutdown');
 
 import { flushQueue, createCleanupClient, STANDALONE, waitFor } from '../helpers/fixture';
 
@@ -82,7 +80,7 @@ describe('BullMQ SKILL.md - connection conversion', () => {
     const queue = track(new Queue(qName, { connection }));
     const processed: string[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -123,7 +121,7 @@ describe('BullMQ SKILL.md - connection conversion', () => {
     const completedIds: string[] = [];
     qe.on('completed', ({ jobId }: any) => completedIds.push(jobId));
 
-    const worker = track(new Worker(qName, async () => 'done', { connection }));
+    track(new Worker(qName, async () => 'done', { connection }));
 
     const job = await queue.add('test', { x: 1 });
     await waitFor(() => completedIds.length > 0, 5000);
@@ -195,7 +193,7 @@ describe('BullMQ SKILL.md - connection conversion', () => {
         {
           connection,
           backoffStrategies: {
-            jitter: (attemptsMade) => 100 + Math.random() * 100,
+            jitter: (_attemptsMade) => 100 + Math.random() * 100,
             linear: (attemptsMade) => 100 * attemptsMade,
           },
         },
@@ -388,7 +386,7 @@ describe('BullMQ new-features.md', () => {
     const { TestQueue, TestWorker } = require('../../dist/testing');
 
     const queue = new TestQueue<{ email: string }, { sent: boolean }>('tasks');
-    const worker = new TestWorker(queue, async (job: any) => {
+    const worker = new TestWorker(queue, async (_job: any) => {
       return { sent: true };
     });
 
@@ -430,7 +428,7 @@ describe('BullMQ new-features.md', () => {
     const queue = track(new Queue(qName, { connection }));
     const batchSizes: number[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (jobs: any[]) => {
@@ -448,11 +446,11 @@ describe('BullMQ new-features.md', () => {
   }, 15000);
 
   it('Workflow helpers - chain, group, chord (new-features.md:253)', async () => {
-    const { chain, group, chord } = require('../../dist/workflows');
+    const { chain } = require('../../dist/workflows');
     const qName = uid('bmq-nf-workflow');
     const processed: string[] = [];
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -484,7 +482,7 @@ describe('BullMQ new-features.md', () => {
     const qName = uid('bmq-nf-addwait');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(
+    track(
       new Worker(
         qName,
         async (job) => {
@@ -540,7 +538,7 @@ describe('BullMQ new-features.md', () => {
     const qName = uid('bmq-nf-globalconc');
     const queue = track(new Queue(qName, { connection }));
 
-    const worker = track(
+    track(
       new Worker(qName, async () => 'ok', {
         connection,
         concurrency: 10,
