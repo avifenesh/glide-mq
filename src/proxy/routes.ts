@@ -653,12 +653,20 @@ export function createRoutes(
       const rootQueue = await getQueue(root.queueName);
       try {
         usage = await rootQueue.getFlowUsage(root.jobId);
-      } catch {
+      } catch (err) {
+        errorHandler(
+          err instanceof Error ? new Error(`Failed to load flow usage: ${err.message}`) : new Error(String(err)),
+          root.queueName,
+        );
         usage = null;
       }
       try {
         budget = await rootQueue.getFlowBudget(root.jobId);
-      } catch {
+      } catch (err) {
+        errorHandler(
+          err instanceof Error ? new Error(`Failed to load flow budget: ${err.message}`) : new Error(String(err)),
+          root.queueName,
+        );
         budget = null;
       }
     }
