@@ -270,6 +270,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   private suspendedSweepWakeAt = 0;
   private suspendedSweepInFlight = false;
   private suspendedSweepQueued = false;
+  private suspendedSweepTasks: Set<Promise<void>> = new Set();
 
   private serializer: Serializer;
   private skipEvents: boolean;
@@ -376,8 +377,18 @@ export class Queue<D = any, R = any> extends EventEmitter {
       this.suspendedSweepTimer = null;
     }
     this.suspendedSweepWakeAt = 0;
-    this.suspendedSweepInFlight = false;
     this.suspendedSweepQueued = false;
+    if (this.suspendedSweepTasks.size === 0) {
+      this.suspendedSweepInFlight = false;
+    }
+  }
+
+  private trackSuspendSweepTask(task: Promise<void>): Promise<void> {
+    this.suspendedSweepTasks.add(task);
+    void task.finally(() => {
+      this.suspendedSweepTasks.delete(task);
+    });
+    return task;
   }
 
   private scheduleNextSuspendSweep(client: Client, delayMs: number): void {
@@ -428,29 +439,34 @@ export class Queue<D = any, R = any> extends EventEmitter {
     }
 
     this.suspendedSweepInFlight = true;
-    void this.sweepExpiredSuspended(client)
-      .catch((err) => {
-        if (this.listenerCount('error') > 0) {
-          this.emit('error', err instanceof Error ? err : new Error(String(err)));
-        }
-      })
-      .finally(() => {
-        this.suspendedSweepInFlight = false;
-        if (this.closing) return;
-        if (this.suspendedSweepQueued) {
-          this.suspendedSweepQueued = false;
-          this.scheduleNextSuspendSweep(client, 0);
-          return;
-        }
-        void this.nextSuspendedSweepDelay(client)
-          .then((delay) => this.scheduleNextSuspendSweep(client, delay))
-          .catch((err) => {
+    void this.trackSuspendSweepTask(
+      (async () => {
+        try {
+          await this.sweepExpiredSuspended(client);
+        } catch (err) {
+          if (this.listenerCount('error') > 0) {
+            this.emit('error', err instanceof Error ? err : new Error(String(err)));
+          }
+        } finally {
+          this.suspendedSweepInFlight = false;
+          if (this.closing) return;
+          if (this.suspendedSweepQueued) {
+            this.suspendedSweepQueued = false;
+            this.scheduleNextSuspendSweep(client, 0);
+            return;
+          }
+          try {
+            const delay = await this.nextSuspendedSweepDelay(client);
+            this.scheduleNextSuspendSweep(client, delay);
+          } catch (err) {
             if (this.listenerCount('error') > 0) {
               this.emit('error', err instanceof Error ? err : new Error(String(err)));
             }
             this.scheduleNextSuspendSweep(client, SUSPEND_SWEEP_INTERVAL_MS);
-          });
-      });
+          }
+        }
+      })(),
+    );
   }
 
   private async sweepExpiredSuspended(client: Client): Promise<void> {
@@ -2611,6 +2627,17 @@ export class Queue<D = any, R = any> extends EventEmitter {
     if (this.closing) return;
     this.closing = true;
     this.clearSuspendSweepLoop();
+    if (this.suspendedSweepTasks.size > 0) {
+      await Promise.allSettled(this.suspendedSweepTasks);
+    }
+    const handleCloseError = (err: unknown) => {
+      // Speedkey can reject close() if the transport is already shutting down.
+      // Queue.close() is intentionally idempotent, so treat that as best-effort cleanup.
+      if ((err as { name?: string } | null)?.name === 'ClosingError') return;
+      if (this.listenerCount('error') > 0) {
+        this.emit('error', err as Error);
+      }
+    };
     for (const rejectWaiter of this.waitRejectors) {
       try {
         rejectWaiter(new GlideMQError('Queue is closing'));
@@ -2619,21 +2646,18 @@ export class Queue<D = any, R = any> extends EventEmitter {
       }
     }
     this.waitRejectors.clear();
+    const closePromises: Promise<void>[] = [];
     for (const waitClient of this.waitClients) {
-      try {
-        waitClient.close();
-      } catch (closeErr) {
-        if (this.listenerCount('error') > 0) {
-          this.emit('error', closeErr as Error);
-        }
-      }
+      closePromises.push(Promise.resolve(waitClient.close()).catch(handleCloseError));
     }
     this.waitClients.clear();
     if (this.client) {
-      if (this.clientOwned) {
-        this.client.close();
-      }
+      const client = this.client;
       this.client = null;
+      if (this.clientOwned) {
+        closePromises.push(Promise.resolve(client.close()).catch(handleCloseError));
+      }
     }
+    await Promise.all(closePromises);
   }
 }
