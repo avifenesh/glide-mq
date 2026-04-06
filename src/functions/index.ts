@@ -106,6 +106,16 @@ local function markOrderingDone(jobKey, jobId, hintOrderingKey, hintOrderingSeq)
   end
 end
 
+-- Advance nextSeq past any skip markers left by debounce on ordered jobs.
+-- Skip markers are hash fields 'skip:<seq>' set when debounce deletes an ordered job.
+-- Returns the advanced nextSeq. Cleans up markers via HDEL as it goes.
+local function advancePastSkips(groupHashKey, nextSeq)
+  while redis.call('HDEL', groupHashKey, 'skip:' .. tostring(nextSeq)) == 1 do
+    nextSeq = nextSeq + 1
+  end
+  return nextSeq
+end
+
 -- Refill token bucket using remainder accumulator for precision.
 -- tbRefillRate is in millitokens/second. Returns current millitokens after refill.
 -- Side effect: updates tbTokens, tbLastRefill, tbRefillRemainder on the group hash.
@@ -277,6 +287,13 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   end
   local streamKey = prefix .. 'stream'
   local nextSeq = tonumber(g.nextSeq) or 0
+  if nextSeq > 0 then
+    local advanced = advancePastSkips(groupHashKey, nextSeq)
+    if advanced > nextSeq then
+      redis.call('HSET', groupHashKey, 'nextSeq', tostring(advanced))
+      nextSeq = advanced
+    end
+  end
   local promoted = 0
   local maxIter = available + 20
   local iter = 0
@@ -1082,6 +1099,13 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
             for pf = 1, #priGrpFields, 2 do priGrp[priGrpFields[pf]] = priGrpFields[pf + 1] end
             local priOrdSeq = tonumber(redis.call('HGET', priJobKey, 'orderingSeq')) or 0
             local priNextSeq = tonumber(priGrp.nextSeq) or 0
+            if priNextSeq > 0 then
+              local priAdv = advancePastSkips(priGroupHashKey, priNextSeq)
+              if priAdv > priNextSeq then
+                redis.call('HSET', priGroupHashKey, 'nextSeq', tostring(priAdv))
+                priNextSeq = priAdv
+              end
+            end
             local priMaxConc = tonumber(priGrp.maxConcurrency) or 0
             local priActive = tonumber(priGrp.active) or 0
             local priWaitListKey = prefix .. 'groupq:' .. priGroupKey
@@ -1217,6 +1241,13 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local nextReturning = false
     if nextJobOrderingSeq > 0 then
       local nextExpectedSeq = tonumber(nGrp.nextSeq) or 0
+      if nextExpectedSeq > 0 then
+        local relAdv = advancePastSkips(nextGroupHashKey, nextExpectedSeq)
+        if relAdv > nextExpectedSeq then
+          redis.call('HSET', nextGroupHashKey, 'nextSeq', tostring(relAdv))
+          nextExpectedSeq = relAdv
+        end
+      end
       if nextExpectedSeq > 0 and nextJobOrderingSeq > nextExpectedSeq then
         redis.call('XACK', streamKey, group, nextEntryId)
         redis.call('XDEL', streamKey, nextEntryId)
@@ -1615,8 +1646,14 @@ redis.register_function('glidemq_dedup', function(keys, args)
         local jobKey = prefix .. 'job:' .. existingJobId
         local state = redis.call('HGET', jobKey, 'state')
         if state == 'delayed' or state == 'prioritized' then
+          local delOrderingKey = redis.call('HGET', jobKey, 'groupKey')
+          local delOrderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
           redis.call('ZREM', scheduledKey, existingJobId)
           markOrderingDone(jobKey, existingJobId)
+          if delOrderingKey and delOrderingKey ~= '' and delOrderingSeq > 0 then
+            local groupHashKey = prefix .. 'group:' .. delOrderingKey
+            redis.call('HSET', groupHashKey, 'skip:' .. tostring(delOrderingSeq), '1')
+          end
           redis.call('DEL', jobKey)
           if skipEvents ~= '1' then emitEvent(eventsKey, 'removed', existingJobId, nil) end
         elseif state and state ~= 'completed' and state ~= 'failed' then
@@ -1868,6 +1905,13 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
         canPromote = math.min(canPromote, math.max(0, maxConc - active))
       end
       local prNextSeq = tonumber(prGrp.nextSeq) or 0
+      if prNextSeq > 0 then
+        local prAdv = advancePastSkips(groupHashKey, prNextSeq)
+        if prAdv > prNextSeq then
+          redis.call('HSET', groupHashKey, 'nextSeq', tostring(prAdv))
+          prNextSeq = prAdv
+        end
+      end
       local groupPromoted = 0
       local prIter = 0
       local prMaxIter = canPromote + 20
@@ -2033,6 +2077,13 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     local isReturningStepJob = false
     if jobOrderingSeq > 0 then
       local nextSeq = tonumber(grp.nextSeq) or 0
+      if nextSeq > 0 then
+        local mAdv = advancePastSkips(groupHashKey, nextSeq)
+        if mAdv > nextSeq then
+          redis.call('HSET', groupHashKey, 'nextSeq', tostring(mAdv))
+          nextSeq = mAdv
+        end
+      end
       if nextSeq > 0 and jobOrderingSeq > nextSeq then
         if streamKey ~= '' and entryId ~= '' and group ~= '' then
           redis.call('XACK', streamKey, group, entryId)

@@ -7,6 +7,7 @@
 import { it, expect, beforeAll, afterAll } from 'vitest';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
+const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
@@ -291,6 +292,173 @@ describeEachMode('Deduplication - debounce mode', (CONNECTION) => {
     expect(job2).not.toBeNull();
     expect(job2!.id).not.toBe(job1!.id);
   });
+});
+
+describeEachMode('Deduplication - debounce + ordering (skip marker)', (CONNECTION) => {
+  const Q = 'test-dedup-debounce-ordering-' + Date.now();
+  let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    queue = new Queue(Q, { connection: CONNECTION });
+  });
+
+  afterAll(async () => {
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('sets skip marker when debounce deletes an ordered prioritized job', async () => {
+    const k = buildKeys(Q);
+    const groupKey = 'skip-test';
+
+    const job1 = await queue.add(
+      'task',
+      { v: 'old' },
+      {
+        delay: 60000,
+        ordering: { key: groupKey, groupConcurrency: 5 },
+        deduplication: { id: 'deb-ord-1', mode: 'debounce' },
+      },
+    );
+    expect(job1).not.toBeNull();
+
+    const seq1 = await cleanupClient.hget(k.job(job1!.id), 'orderingSeq');
+    expect(Number(seq1)).toBe(1);
+
+    // Debounce: replace job1 with job2
+    const job2 = await queue.add(
+      'task',
+      { v: 'new' },
+      {
+        delay: 60000,
+        ordering: { key: groupKey, groupConcurrency: 5 },
+        deduplication: { id: 'deb-ord-1', mode: 'debounce' },
+      },
+    );
+    expect(job2).not.toBeNull();
+    expect(job2!.id).not.toBe(job1!.id);
+
+    // Old job should be gone
+    const oldExists = await cleanupClient.exists([k.job(job1!.id)]);
+    expect(oldExists).toBe(0);
+
+    // Skip marker should exist for seq=1
+    const skipMarker = await cleanupClient.hget(k.group(groupKey), 'skip:1');
+    expect(skipMarker).toBe('1');
+  });
+
+  it('resolves skip chain from multiple consecutive debounces', async () => {
+    const k = buildKeys(Q);
+    const groupKey = 'chain-test';
+
+    // Create and debounce 3 times
+    const job1 = await queue.add(
+      'task',
+      { v: 1 },
+      {
+        delay: 60000,
+        ordering: { key: groupKey, groupConcurrency: 5 },
+        deduplication: { id: 'deb-chain', mode: 'debounce' },
+      },
+    );
+    expect(job1).not.toBeNull();
+
+    const job2 = await queue.add(
+      'task',
+      { v: 2 },
+      {
+        delay: 60000,
+        ordering: { key: groupKey, groupConcurrency: 5 },
+        deduplication: { id: 'deb-chain', mode: 'debounce' },
+      },
+    );
+    expect(job2).not.toBeNull();
+
+    const job3 = await queue.add(
+      'task',
+      { v: 3 },
+      {
+        delay: 60000,
+        ordering: { key: groupKey, groupConcurrency: 5 },
+        deduplication: { id: 'deb-chain', mode: 'debounce' },
+      },
+    );
+    expect(job3).not.toBeNull();
+
+    // Skip markers for seq=1 and seq=2 should exist
+    const skip1 = await cleanupClient.hget(k.group(groupKey), 'skip:1');
+    const skip2 = await cleanupClient.hget(k.group(groupKey), 'skip:2');
+    expect(skip1).toBe('1');
+    expect(skip2).toBe('1');
+
+    // job3 should have seq=3 and be the only live job
+    const seq3 = await cleanupClient.hget(k.job(job3!.id), 'orderingSeq');
+    expect(Number(seq3)).toBe(3);
+
+    // nextSeq should be 1 (not yet resolved - lazy resolution)
+    const nextSeqBefore = await cleanupClient.hget(k.group(groupKey), 'nextSeq');
+    expect(Number(nextSeqBefore)).toBe(1);
+  });
+
+  it('end-to-end: jobs complete without deadlock after debounce deletes an ordered job', async () => {
+    // Reproduction of issue #206:
+    // debounce deletes a prioritized ordered job, creating a nextSeq gap.
+    // Without the fix, all subsequent jobs deadlock.
+    // With the fix (skip marker), the ordering gate resolves the gap and all jobs complete.
+    const Q2 = 'test-dedup-e2e-deadlock-' + Date.now();
+    const groupKey = 'e2e-group';
+    const q = new Queue(Q2, { connection: CONNECTION });
+    const completed: string[] = [];
+
+    const ORD = { key: groupKey, groupConcurrency: 2 };
+    // jobA uses delay so it lands in `delayed` state (scheduled ZSet).
+    // Debounce only fires on delayed/prioritized jobs - this ensures the gap is created.
+    const jobA = await q.add('task', { v: 'A' }, {
+      delay: 60000,
+      ordering: ORD,
+      deduplication: { id: 'deb-e2e-a', mode: 'debounce' },
+    });
+    // jobB and jobC go directly to stream (no delay) - seq=2,3
+    const jobB = await q.add('task', { v: 'B' }, { ordering: ORD, deduplication: { id: 'deb-e2e-b', mode: 'debounce' } });
+    const jobC = await q.add('task', { v: 'C' }, { ordering: ORD, deduplication: { id: 'deb-e2e-c', mode: 'debounce' } });
+    expect(jobA).not.toBeNull();
+
+    // Debounce jobA (seq=1) before it is promoted - creates skip:1, replacement gets seq=4 (no delay)
+    const jobA2 = await q.add('task', { v: 'A-new' }, { ordering: ORD, deduplication: { id: 'deb-e2e-a', mode: 'debounce' } });
+    expect(jobA2).not.toBeNull();
+    expect(jobA2!.id).not.toBe(jobA!.id);
+
+    // We now have: skip:1 on group hash, live jobs at seq=2 (B), seq=3 (C), seq=4 (A2)
+    // Without fix: after processing seq=2,3, nextSeq would be stuck at 1 → A2 at seq=4 blocked forever
+    // With fix: skip:1 resolved when ordering gate is reached → all jobs complete
+
+    const allJobIds = new Set([jobB!.id, jobC!.id, jobA2!.id]);
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('deadlock: not all jobs completed within timeout')), 15000);
+      const worker = new Worker(
+        Q2,
+        async (job: any) => {
+          completed.push(job.id);
+          if (allJobIds.has(job.id) && completed.filter(id => allJobIds.has(id)).length >= 3) {
+            clearTimeout(timeout);
+            setTimeout(() => worker.close(true).then(resolve), 200);
+          }
+          return 'ok';
+        },
+        { connection: CONNECTION, concurrency: 2, blockTimeout: 500 },
+      );
+      worker.on('error', () => {});
+    });
+
+    await q.close();
+    await flushQueue(cleanupClient, Q2);
+
+    expect(completed.filter(id => allJobIds.has(id))).toHaveLength(3);
+  }, 20000);
 });
 
 describeEachMode('Deduplication - dedup hash tracking', (CONNECTION) => {
