@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.15.1] - 2026-04-06
+
+### Fixed
+
+- **`debounce` + `ordering.key` deadlock** (#206): when debounce cancelled a pending ordered job, the deleted sequence created a permanent `nextSeq` gap that blocked all subsequent jobs in the group. Fixed via lightweight skip markers (`skip:<seq>` on the group hash) resolved lazily at all five ordering gates. `LIBRARY_VERSION` bumped to `81` - existing standalone clients reload the fix automatically on next connection.
+
+---
+
 ## [0.15.0] - 2026-04-02
 
 ### Added
