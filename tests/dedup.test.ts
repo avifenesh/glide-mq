@@ -416,18 +416,34 @@ describeEachMode('Deduplication - debounce + ordering (skip marker)', (CONNECTIO
     const ORD = { key: groupKey, groupConcurrency: 2 };
     // jobA uses delay so it lands in `delayed` state (scheduled ZSet).
     // Debounce only fires on delayed/prioritized jobs - this ensures the gap is created.
-    const jobA = await q.add('task', { v: 'A' }, {
-      delay: 60000,
-      ordering: ORD,
-      deduplication: { id: 'deb-e2e-a', mode: 'debounce' },
-    });
+    const jobA = await q.add(
+      'task',
+      { v: 'A' },
+      {
+        delay: 60000,
+        ordering: ORD,
+        deduplication: { id: 'deb-e2e-a', mode: 'debounce' },
+      },
+    );
     // jobB and jobC go directly to stream (no delay) - seq=2,3
-    const jobB = await q.add('task', { v: 'B' }, { ordering: ORD, deduplication: { id: 'deb-e2e-b', mode: 'debounce' } });
-    const jobC = await q.add('task', { v: 'C' }, { ordering: ORD, deduplication: { id: 'deb-e2e-c', mode: 'debounce' } });
+    const jobB = await q.add(
+      'task',
+      { v: 'B' },
+      { ordering: ORD, deduplication: { id: 'deb-e2e-b', mode: 'debounce' } },
+    );
+    const jobC = await q.add(
+      'task',
+      { v: 'C' },
+      { ordering: ORD, deduplication: { id: 'deb-e2e-c', mode: 'debounce' } },
+    );
     expect(jobA).not.toBeNull();
 
     // Debounce jobA (seq=1) before it is promoted - creates skip:1, replacement gets seq=4 (no delay)
-    const jobA2 = await q.add('task', { v: 'A-new' }, { ordering: ORD, deduplication: { id: 'deb-e2e-a', mode: 'debounce' } });
+    const jobA2 = await q.add(
+      'task',
+      { v: 'A-new' },
+      { ordering: ORD, deduplication: { id: 'deb-e2e-a', mode: 'debounce' } },
+    );
     expect(jobA2).not.toBeNull();
     expect(jobA2!.id).not.toBe(jobA!.id);
 
@@ -443,7 +459,7 @@ describeEachMode('Deduplication - debounce + ordering (skip marker)', (CONNECTIO
         Q2,
         async (job: any) => {
           completed.push(job.id);
-          if (allJobIds.has(job.id) && completed.filter(id => allJobIds.has(id)).length >= 3) {
+          if (allJobIds.has(job.id) && completed.filter((id) => allJobIds.has(id)).length >= 3) {
             clearTimeout(timeout);
             setTimeout(() => worker.close(true).then(resolve), 200);
           }
@@ -457,7 +473,7 @@ describeEachMode('Deduplication - debounce + ordering (skip marker)', (CONNECTIO
     await q.close();
     await flushQueue(cleanupClient, Q2);
 
-    expect(completed.filter(id => allJobIds.has(id))).toHaveLength(3);
+    expect(completed.filter((id) => allJobIds.has(id))).toHaveLength(3);
   }, 20000);
 });
 
