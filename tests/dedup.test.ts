@@ -310,7 +310,7 @@ describeEachMode('Deduplication - debounce + ordering (skip marker)', (CONNECTIO
     cleanupClient.close();
   });
 
-  it('sets skip marker when debounce deletes an ordered prioritized job', async () => {
+  it('sets skip marker when debounce deletes an ordered delayed job', async () => {
     const k = buildKeys(Q);
     const groupKey = 'skip-test';
 
@@ -319,7 +319,7 @@ describeEachMode('Deduplication - debounce + ordering (skip marker)', (CONNECTIO
       { v: 'old' },
       {
         delay: 60000,
-        ordering: { key: groupKey, groupConcurrency: 5 },
+        ordering: { key: groupKey, concurrency: 5 },
         deduplication: { id: 'deb-ord-1', mode: 'debounce' },
       },
     );
@@ -334,7 +334,7 @@ describeEachMode('Deduplication - debounce + ordering (skip marker)', (CONNECTIO
       { v: 'new' },
       {
         delay: 60000,
-        ordering: { key: groupKey, groupConcurrency: 5 },
+        ordering: { key: groupKey, concurrency: 5 },
         deduplication: { id: 'deb-ord-1', mode: 'debounce' },
       },
     );
@@ -360,7 +360,7 @@ describeEachMode('Deduplication - debounce + ordering (skip marker)', (CONNECTIO
       { v: 1 },
       {
         delay: 60000,
-        ordering: { key: groupKey, groupConcurrency: 5 },
+        ordering: { key: groupKey, concurrency: 5 },
         deduplication: { id: 'deb-chain', mode: 'debounce' },
       },
     );
@@ -371,7 +371,7 @@ describeEachMode('Deduplication - debounce + ordering (skip marker)', (CONNECTIO
       { v: 2 },
       {
         delay: 60000,
-        ordering: { key: groupKey, groupConcurrency: 5 },
+        ordering: { key: groupKey, concurrency: 5 },
         deduplication: { id: 'deb-chain', mode: 'debounce' },
       },
     );
@@ -382,7 +382,7 @@ describeEachMode('Deduplication - debounce + ordering (skip marker)', (CONNECTIO
       { v: 3 },
       {
         delay: 60000,
-        ordering: { key: groupKey, groupConcurrency: 5 },
+        ordering: { key: groupKey, concurrency: 5 },
         deduplication: { id: 'deb-chain', mode: 'debounce' },
       },
     );
@@ -413,7 +413,7 @@ describeEachMode('Deduplication - debounce + ordering (skip marker)', (CONNECTIO
     const q = new Queue(Q2, { connection: CONNECTION });
     const completed: string[] = [];
 
-    const ORD = { key: groupKey, groupConcurrency: 2 };
+    const ORD = { key: groupKey, concurrency: 2 };
     // jobA uses delay so it lands in `delayed` state (scheduled ZSet).
     // Debounce only fires on delayed/prioritized jobs - this ensures the gap is created.
     const jobA = await q.add(

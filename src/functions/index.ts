@@ -40,7 +40,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 78: glidemq_fail increments fallbackIndex on retry when job has fallbacks configured.
 // Version 79: Budget middleware: glidemq_checkBudget, glidemq_recordUsageAndCheckBudget.
 // Version 80: Budget v2: per-category token/cost tracking, weighted totals, per-category limits.
-export const LIBRARY_VERSION = '80';
+// Version 81: Fix debounce + ordering nextSeq deadlock: advancePastSkips() helper, skip markers in all ordering gates.
+export const LIBRARY_VERSION = '81';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1646,12 +1647,12 @@ redis.register_function('glidemq_dedup', function(keys, args)
         local jobKey = prefix .. 'job:' .. existingJobId
         local state = redis.call('HGET', jobKey, 'state')
         if state == 'delayed' or state == 'prioritized' then
-          local delOrderingKey = redis.call('HGET', jobKey, 'groupKey')
+          local delGroupKey = redis.call('HGET', jobKey, 'groupKey')
           local delOrderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
           redis.call('ZREM', scheduledKey, existingJobId)
           markOrderingDone(jobKey, existingJobId)
-          if delOrderingKey and delOrderingKey ~= '' and delOrderingSeq > 0 then
-            local groupHashKey = prefix .. 'group:' .. delOrderingKey
+          if delGroupKey and delGroupKey ~= '' and delOrderingSeq > 0 then
+            local groupHashKey = prefix .. 'group:' .. delGroupKey
             redis.call('HSET', groupHashKey, 'skip:' .. tostring(delOrderingSeq), '1')
           end
           redis.call('DEL', jobKey)
