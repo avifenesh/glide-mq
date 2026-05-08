@@ -962,6 +962,7 @@ describe('Scheduler', () => {
     const scheduler = new Scheduler(mockClient as any, queueKeys, {
       promotionInterval: 5000,
       stalledInterval: 1000,
+      lockDuration: 1000,
       consumerId: 'test-consumer',
     });
 
@@ -974,7 +975,7 @@ describe('Scheduler', () => {
       [
         CONSUMER_GROUP,
         'test-consumer',
-        '1000', // minIdleMs = stalledInterval
+        '1000', // minIdleMs = max(lockDuration, stalledInterval)
         '1', // maxStalledCount default
         expect.any(String), // timestamp
         queueKeys.failed,
@@ -1096,6 +1097,7 @@ describe('Scheduler', () => {
 
     const scheduler = new Scheduler(mockClient as any, queueKeys, {
       stalledInterval: 15000,
+      lockDuration: 15000,
       maxStalledCount: 3,
       consumerId: 'my-consumer',
     });
@@ -1107,6 +1109,28 @@ describe('Scheduler', () => {
       'glidemq_reclaimStalled',
       [queueKeys.stream, queueKeys.events],
       [CONSUMER_GROUP, 'my-consumer', '15000', '3', now.toString(), queueKeys.failed],
+    );
+  });
+
+  it('reclaimStalledJobs uses max(lockDuration, stalledInterval) as effective stall threshold', async () => {
+    const now = 1700000000000;
+    vi.setSystemTime(now);
+    mockClient.fcall = vi.fn().mockResolvedValue(0);
+
+    // lockDuration > stalledInterval -> threshold should be lockDuration
+    const scheduler = new Scheduler(mockClient as any, queueKeys, {
+      stalledInterval: 5000,
+      lockDuration: 60000,
+      maxStalledCount: 1,
+      consumerId: 'long-lock',
+    });
+
+    await scheduler.reclaimStalledJobs();
+
+    expect(mockClient.fcall).toHaveBeenCalledWith(
+      'glidemq_reclaimStalled',
+      [queueKeys.stream, queueKeys.events],
+      [CONSUMER_GROUP, 'long-lock', '60000', '1', now.toString(), queueKeys.failed],
     );
   });
 });
