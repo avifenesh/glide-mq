@@ -132,7 +132,11 @@ describeEachMode('list-active counter underflow (issue #217)', (CONNECTION) => {
 
     // Reclaim sweeper fires twice (stalledCount: 1 -> 2 -> exceed): job moves to failed, list-active DECR (guarded) to 0.
     const now = Date.now();
-    await cleanupClient.fcall('glidemq_reclaimStalledListJobs', [k.stream, k.events], ['5000', '1', String(now), k.failed]);
+    await cleanupClient.fcall(
+      'glidemq_reclaimStalledListJobs',
+      [k.stream, k.events],
+      ['5000', '1', String(now), k.failed],
+    );
     expect(await getListActive(cleanupClient, k)).toBe(0);
 
     // Original worker resumes (entryId=''), tries to complete. This unguarded DECR currently underflows.
@@ -169,7 +173,11 @@ describeEachMode('list-active counter underflow (issue #217)', (CONNECTION) => {
   // Parametric sweep: pre-set list-active to 0, trigger each path on a fresh
   // active list-sourced job, assert the counter never goes negative.
   // Covers the 10 unguarded DECR sites enumerated in the issue.
-  type Site = { name: string; setup?: (k: any, jobId: string) => Promise<void>; call: (k: any, jobId: string) => Promise<void> };
+  type Site = {
+    name: string;
+    setup?: (k: any, jobId: string) => Promise<void>;
+    call: (k: any, jobId: string) => Promise<void>;
+  };
   const sites: Site[] = [
     {
       name: 'glidemq_complete',
