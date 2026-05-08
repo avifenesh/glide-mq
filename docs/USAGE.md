@@ -207,8 +207,8 @@ const worker = new Worker(
     connection,
     concurrency: 10, // process up to 10 jobs in parallel (default: 1)
     blockTimeout: 5_000, // XREADGROUP BLOCK timeout in ms
-    stalledInterval: 30_000, // how often to check for stalled jobs
-    lockDuration: 30_000, // stall detection window per job
+    stalledInterval: 30_000, // how often the scheduler checks for stalled jobs (cadence)
+    lockDuration: 30_000, // stall detection window per job (threshold) - jobs idle this long are reclaimed
     limiter: { max: 100, duration: 60_000 }, // rate limit: 100 jobs / min
     deadLetterQueue: { name: 'dlq' }, // inherited from QueueOptions - can also set on Queue constructor
     backoffStrategies: {
@@ -832,6 +832,8 @@ Jobs report token consumption via job.reportTokens(count) or automatically via j
 
 Override the worker-level lockDuration for individual jobs via opts.lockDuration. Useful for mixed workloads where some jobs are fast and others are long-running. The per-job lockDuration is read by glidemq_reclaimStalled and glidemq_reclaimStalledListJobs to set the stall threshold per job.
 
+The stall threshold resolution chain is: per-job `opts.lockDuration` (if set) > worker-level `lockDuration` > `stalledInterval`. Use a short `stalledInterval` only to make the scheduler check more often - it is not the threshold. To get fast stall recovery, set `lockDuration` to the small value, not `stalledInterval`.
+
 ### Vector Search (createJobIndex / storeVector / vectorSearch)
 
 Create a Valkey Search index over job hashes, store vector embeddings, and run KNN similarity search. Requires the Valkey Search module.
@@ -860,53 +862,53 @@ proxy.app.listen(3000);
 - Add your own auth/rate-limit middleware before exposing the proxy to a network. The proxy does not ship built-in authentication.
 - Queue-wide SSE (`/queues/:name/events`) and broadcast SSE (`/broadcast/:name/events`) require `connection`, not just a shared `client`, because they allocate blocking readers internally.
 
-| Method | Path                                 | Description                                                                                                                                                 |
-| ------ | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | /queues/:name/jobs                   | Add a single job.                                                                                                                                           |
-| POST   | /queues/:name/jobs/bulk              | Add multiple jobs in one request.                                                                                                                           |
-| GET    | /queues/:name/jobs?state=waiting     | List jobs by state. Supports `start`, `end`, and `excludeData=true`.                                                                                        |
-| POST   | /queues/:name/jobs/wait              | Add a job and wait for the final worker result in the same request.                                                                                         |
-| GET    | /queues/:name/jobs/:id               | Fetch one job by ID.                                                                                                                                        |
-| POST   | /queues/:name/jobs/:id/priority      | Change a waiting/prioritized/delayed job's priority.                                                                                                        |
-| POST   | /queues/:name/jobs/:id/delay         | Change a job's delay or move it into delayed state.                                                                                                         |
-| POST   | /queues/:name/jobs/:id/promote       | Promote a delayed job immediately.                                                                                                                          |
-| GET    | /queues/:name/jobs/:id/stream        | SSE stream of job output chunks. Supports `Last-Event-ID` and `?lastId=`.                                                                                   |
-| GET    | /queues/:name/jobs/:id/events        | SSE stream of lifecycle events for one job only. Supports `Last-Event-ID` and `?lastId=` replay.                                                           |
-| GET    | /queues/:name/jobs/:id/suspend       | Read suspend metadata for one suspended job.                                                                                                                |
-| POST   | /queues/:name/jobs/:id/signal        | Send a signal to a suspended job. Body: `{ "name": "...", "data": ... }`.                                                                                   |
-| POST   | /queues/:name/jobs/:id/revoke        | Revoke a job. Returns `{ status: "revoked" }` or `{ status: "flagged" }`.                                                                                 |
-| GET    | /queues/:name/dlq                    | List dead-letter jobs for the queue. Supports `start` and `end`.                                                                                            |
-| GET    | /queues/:name/dlq/:id                | Fetch one dead-letter job by DLQ job ID.                                                                                                                    |
-| POST   | /queues/:name/dlq/:id/replay         | Replay one dead-letter job back into its original queue.                                                                                                    |
-| POST   | /queues/:name/dlq/replay-all         | Replay multiple dead-letter jobs. Optional body/query `count`.                                                                                              |
-| DELETE | /queues/:name/dlq/:id                | Permanently remove one dead-letter job.                                                                                                                     |
-| GET    | /queues/:name/events                 | Queue-wide SSE stream of lifecycle events. Supports `Last-Event-ID` and `?lastId=` replay.                                                                  |
-| POST   | /queues/:name/pause                  | Pause the queue.                                                                                                                                            |
-| POST   | /queues/:name/resume                 | Resume the queue.                                                                                                                                           |
-| GET    | /queues/:name/counts                 | Return waiting/active/delayed/completed/failed counts.                                                                                                      |
-| GET    | /queues/:name/metrics?type=completed | Return total count plus per-minute metrics data.                                                                                                            |
-| GET    | /queues/:name/workers                | List live workers for the queue.                                                                                                                            |
-| GET    | /queues/:name/suspended              | List jobs currently in the suspended state, including suspend metadata.                                                                                     |
-| GET    | /queues/:name/rate-limit             | Read the current queue-wide global rate limit.                                                                                                              |
-| PUT    | /queues/:name/rate-limit             | Set the queue-wide global rate limit. Body: `{ max, duration }`.                                                                                            |
-| DELETE | /queues/:name/rate-limit             | Remove the queue-wide global rate limit.                                                                                                                    |
-| POST   | /queues/:name/drain                  | Remove waiting jobs. Pass `?delayed=true` to also remove delayed jobs.                                                                                      |
-| POST   | /queues/:name/retry                  | Retry failed jobs. Optional body/query `count`.                                                                                                             |
-| DELETE | /queues/:name/clean                  | Remove old completed/failed jobs. Requires `state` and `age` seconds; optional `limit`.                                                                     |
-| GET    | /queues/:name/schedulers             | List registered schedulers.                                                                                                                                 |
-| GET    | /queues/:name/schedulers/:id         | Fetch one scheduler entry by name.                                                                                                                          |
-| PUT    | /queues/:name/schedulers/:id         | Upsert a scheduler. Body: `{ schedule, template? }`.                                                                                                        |
-| DELETE | /queues/:name/schedulers/:id         | Remove a scheduler by name.                                                                                                                                 |
-| POST   | /flows                               | Create a tree flow or DAG over HTTP. Body: `{ flow, budget? }` or `{ dag }`. `budget` is currently supported for tree flows only.                         |
-| GET    | /flows/:id                           | Read the current flow snapshot: nodes, roots, counts, usage, and budget state.                                                                              |
-| GET    | /flows/:id/tree                      | Read the nested tree view for a tree flow or DAG.                                                                                                           |
-| DELETE | /flows/:id                           | Revoke or flag remaining jobs in the flow and remove the HTTP flow record.                                                                                  |
-| GET    | /queues/:name/flows/:parentId/usage  | Aggregate AI usage across a flow.                                                                                                                           |
-| GET    | /queues/:name/flows/:flowId/budget   | Read current flow budget state.                                                                                                                             |
+| Method | Path                                 | Description                                                                                                                                              |
+| ------ | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | /queues/:name/jobs                   | Add a single job.                                                                                                                                        |
+| POST   | /queues/:name/jobs/bulk              | Add multiple jobs in one request.                                                                                                                        |
+| GET    | /queues/:name/jobs?state=waiting     | List jobs by state. Supports `start`, `end`, and `excludeData=true`.                                                                                     |
+| POST   | /queues/:name/jobs/wait              | Add a job and wait for the final worker result in the same request.                                                                                      |
+| GET    | /queues/:name/jobs/:id               | Fetch one job by ID.                                                                                                                                     |
+| POST   | /queues/:name/jobs/:id/priority      | Change a waiting/prioritized/delayed job's priority.                                                                                                     |
+| POST   | /queues/:name/jobs/:id/delay         | Change a job's delay or move it into delayed state.                                                                                                      |
+| POST   | /queues/:name/jobs/:id/promote       | Promote a delayed job immediately.                                                                                                                       |
+| GET    | /queues/:name/jobs/:id/stream        | SSE stream of job output chunks. Supports `Last-Event-ID` and `?lastId=`.                                                                                |
+| GET    | /queues/:name/jobs/:id/events        | SSE stream of lifecycle events for one job only. Supports `Last-Event-ID` and `?lastId=` replay.                                                         |
+| GET    | /queues/:name/jobs/:id/suspend       | Read suspend metadata for one suspended job.                                                                                                             |
+| POST   | /queues/:name/jobs/:id/signal        | Send a signal to a suspended job. Body: `{ "name": "...", "data": ... }`.                                                                                |
+| POST   | /queues/:name/jobs/:id/revoke        | Revoke a job. Returns `{ status: "revoked" }` or `{ status: "flagged" }`.                                                                                |
+| GET    | /queues/:name/dlq                    | List dead-letter jobs for the queue. Supports `start` and `end`.                                                                                         |
+| GET    | /queues/:name/dlq/:id                | Fetch one dead-letter job by DLQ job ID.                                                                                                                 |
+| POST   | /queues/:name/dlq/:id/replay         | Replay one dead-letter job back into its original queue.                                                                                                 |
+| POST   | /queues/:name/dlq/replay-all         | Replay multiple dead-letter jobs. Optional body/query `count`.                                                                                           |
+| DELETE | /queues/:name/dlq/:id                | Permanently remove one dead-letter job.                                                                                                                  |
+| GET    | /queues/:name/events                 | Queue-wide SSE stream of lifecycle events. Supports `Last-Event-ID` and `?lastId=` replay.                                                               |
+| POST   | /queues/:name/pause                  | Pause the queue.                                                                                                                                         |
+| POST   | /queues/:name/resume                 | Resume the queue.                                                                                                                                        |
+| GET    | /queues/:name/counts                 | Return waiting/active/delayed/completed/failed counts.                                                                                                   |
+| GET    | /queues/:name/metrics?type=completed | Return total count plus per-minute metrics data.                                                                                                         |
+| GET    | /queues/:name/workers                | List live workers for the queue.                                                                                                                         |
+| GET    | /queues/:name/suspended              | List jobs currently in the suspended state, including suspend metadata.                                                                                  |
+| GET    | /queues/:name/rate-limit             | Read the current queue-wide global rate limit.                                                                                                           |
+| PUT    | /queues/:name/rate-limit             | Set the queue-wide global rate limit. Body: `{ max, duration }`.                                                                                         |
+| DELETE | /queues/:name/rate-limit             | Remove the queue-wide global rate limit.                                                                                                                 |
+| POST   | /queues/:name/drain                  | Remove waiting jobs. Pass `?delayed=true` to also remove delayed jobs.                                                                                   |
+| POST   | /queues/:name/retry                  | Retry failed jobs. Optional body/query `count`.                                                                                                          |
+| DELETE | /queues/:name/clean                  | Remove old completed/failed jobs. Requires `state` and `age` seconds; optional `limit`.                                                                  |
+| GET    | /queues/:name/schedulers             | List registered schedulers.                                                                                                                              |
+| GET    | /queues/:name/schedulers/:id         | Fetch one scheduler entry by name.                                                                                                                       |
+| PUT    | /queues/:name/schedulers/:id         | Upsert a scheduler. Body: `{ schedule, template? }`.                                                                                                     |
+| DELETE | /queues/:name/schedulers/:id         | Remove a scheduler by name.                                                                                                                              |
+| POST   | /flows                               | Create a tree flow or DAG over HTTP. Body: `{ flow, budget? }` or `{ dag }`. `budget` is currently supported for tree flows only.                        |
+| GET    | /flows/:id                           | Read the current flow snapshot: nodes, roots, counts, usage, and budget state.                                                                           |
+| GET    | /flows/:id/tree                      | Read the nested tree view for a tree flow or DAG.                                                                                                        |
+| DELETE | /flows/:id                           | Revoke or flag remaining jobs in the flow and remove the HTTP flow record.                                                                               |
+| GET    | /queues/:name/flows/:parentId/usage  | Aggregate AI usage across a flow.                                                                                                                        |
+| GET    | /queues/:name/flows/:flowId/budget   | Read current flow budget state.                                                                                                                          |
 | GET    | /usage/summary                       | Rolling AI usage summary. Supports `windowMs` (or legacy `window`) in ms, `start`/`end` as epoch ms, and `queues=a,b` (for example `?windowMs=3600000`). |
-| POST   | /broadcast/:name                     | Publish a broadcast message. Body: `{ subject, data, opts? }`.                                                                                              |
-| GET    | /broadcast/:name/events              | SSE broadcast stream. Requires `subscription`; optional `subjects=a.*,b.>` filter.                                                                          |
-| GET    | /health                              | Health check and proxy uptime.                                                                                                                              |
+| POST   | /broadcast/:name                     | Publish a broadcast message. Body: `{ subject, data, opts? }`.                                                                                           |
+| GET    | /broadcast/:name/events              | SSE broadcast stream. Requires `subscription`; optional `subjects=a.*,b.>` filter.                                                                       |
+| GET    | /health                              | Health check and proxy uptime.                                                                                                                           |
 
 - `POST /flows` supports both FlowProducer-style trees and DAG payloads. Queue names inside the submitted flow must pass the proxy allowlist.
 - Flow budgets are persisted and returned through `/flows/:id` and `/queues/:name/flows/:id/budget`, but HTTP-submitted budgets are currently supported only for tree flows, not DAG payloads.
