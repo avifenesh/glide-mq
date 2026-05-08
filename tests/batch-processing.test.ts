@@ -396,6 +396,187 @@ describeEachMode('Worker batch processing', (CONNECTION) => {
     await queue.close();
     await flushQueue(cleanupClient, qName);
   }, 20000);
+
+  // Regression: https://github.com/avifenesh/glide-mq/issues/212
+  // tryPopFromLists used to bypass batch mode and dispatch priority/LIFO jobs
+  // through the single-job processor, which in batch mode is a throwing sentinel
+  // ("Single-job processor called in batch mode"). The tests below cover both
+  // concurrency=1 (processJob inline path) and concurrency>1 (dispatchJob path),
+  // plus a mixed priority + stream case.
+  for (const concurrency of [1, 4]) {
+    it(`processes priority jobs in batch mode (concurrency=${concurrency})`, async () => {
+      const qName = Q + '-prio-c' + concurrency;
+      const queue = new Queue(qName, { connection: CONNECTION });
+      const batches: number[][] = [];
+      const errors: Error[] = [];
+
+      const done = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('timeout waiting for priority jobs')), 15000);
+        let totalProcessed = 0;
+
+        const worker = new Worker(
+          qName,
+          async (jobs: any[]) => {
+            batches.push(jobs.map((j: any) => j.data.i));
+            totalProcessed += jobs.length;
+            if (totalProcessed >= 5) {
+              clearTimeout(timeout);
+              setTimeout(() => worker.close(true).then(resolve), 200);
+            }
+            return jobs.map(() => 'ok');
+          },
+          {
+            connection: CONNECTION,
+            concurrency,
+            blockTimeout: 500,
+            batch: { size: 10, timeout: 100 },
+          },
+        );
+        const onPossibleSentinel = (err: Error) => {
+          errors.push(err);
+          if (err && err.message && err.message.includes('Single-job processor called in batch mode')) {
+            clearTimeout(timeout);
+            worker.close(true).finally(() => reject(err));
+          }
+        };
+        worker.on('error', onPossibleSentinel);
+        worker.on('failed', (_job: any, err: Error) => onPossibleSentinel(err));
+      });
+
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Priority jobs land in the priority sorted set and are popped via
+      // tryPopFromLists - the path that bypassed batch mode.
+      for (let i = 0; i < 5; i++) {
+        await queue.add('prio-job', { i }, { priority: 10 - i });
+      }
+
+      await done;
+
+      const sentinelErr = errors.find((e) => e.message.includes('Single-job processor called in batch mode'));
+      expect(sentinelErr).toBeUndefined();
+
+      const totalSeen = batches.reduce((a, b) => a + b.length, 0);
+      expect(totalSeen).toBe(5);
+
+      await queue.close();
+      await flushQueue(cleanupClient, qName);
+    }, 20000);
+  }
+
+  // Defense-in-depth: with concurrency > 1, prefetch defaults to
+  // concurrency * batchSize, so a single popLists can return more than
+  // batchSize jobs. tryPopFromLists must chunk so each batch the user sees
+  // respects opts.batch.size.
+  it('list-popped batches respect batch.size cap (concurrency > 1)', async () => {
+    const qName = Q + '-prio-cap';
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const batchSizes: number[] = [];
+
+    const concurrency = 3;
+    const size = 4;
+    const total = concurrency * size; // 12 - one full pop, multiple chunks
+
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout waiting for capped batches')), 15000);
+      let processed = 0;
+
+      const worker = new Worker(
+        qName,
+        async (jobs: any[]) => {
+          batchSizes.push(jobs.length);
+          processed += jobs.length;
+          if (processed >= total) {
+            clearTimeout(timeout);
+            setTimeout(() => worker.close(true).then(resolve), 200);
+          }
+          return jobs.map(() => 'ok');
+        },
+        {
+          connection: CONNECTION,
+          concurrency,
+          blockTimeout: 500,
+          batch: { size, timeout: 100 },
+        },
+      );
+      worker.on('error', () => {});
+    });
+
+    await new Promise((r) => setTimeout(r, 500));
+
+    for (let i = 0; i < total; i++) {
+      await queue.add('prio', { i }, { priority: 5 });
+    }
+
+    await done;
+
+    expect(batchSizes.reduce((a, b) => a + b, 0)).toBe(total);
+    for (const s of batchSizes) {
+      expect(s).toBeGreaterThan(0);
+      expect(s).toBeLessThanOrEqual(size);
+    }
+
+    await queue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 20000);
+
+  it('processes mixed priority + non-priority jobs in batch mode', async () => {
+    const qName = Q + '-mixed-prio';
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const seenIds: any[] = [];
+    const errors: Error[] = [];
+
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout waiting for mixed jobs')), 15000);
+
+      const worker = new Worker(
+        qName,
+        async (jobs: any[]) => {
+          for (const j of jobs) seenIds.push(j.data.i);
+          if (seenIds.length >= 6) {
+            clearTimeout(timeout);
+            setTimeout(() => worker.close(true).then(resolve), 200);
+          }
+          return jobs.map(() => 'ok');
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 500,
+          batch: { size: 4, timeout: 100 },
+        },
+      );
+      const onPossibleSentinel = (err: Error) => {
+        errors.push(err);
+        if (err && err.message && err.message.includes('Single-job processor called in batch mode')) {
+          clearTimeout(timeout);
+          worker.close(true).finally(() => reject(err));
+        }
+      };
+      worker.on('error', onPossibleSentinel);
+      worker.on('failed', (_job: any, err: Error) => onPossibleSentinel(err));
+    });
+
+    await new Promise((r) => setTimeout(r, 500));
+
+    for (let i = 0; i < 3; i++) {
+      await queue.add('prio', { i: `p${i}` }, { priority: 5 });
+    }
+    for (let i = 0; i < 3; i++) {
+      await queue.add('plain', { i: `n${i}` });
+    }
+
+    await done;
+
+    const sentinelErr = errors.find((e) => e.message.includes('Single-job processor called in batch mode'));
+    expect(sentinelErr).toBeUndefined();
+
+    expect(seenIds).toHaveLength(6);
+    expect(seenIds.slice().sort()).toEqual(['n0', 'n1', 'n2', 'p0', 'p1', 'p2']);
+
+    await queue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 20000);
 });
 
 describeEachMode('Worker batch validation', (CONNECTION) => {

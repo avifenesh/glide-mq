@@ -23,6 +23,8 @@ import { isClusterClient } from './connection';
 export interface SchedulerOptions {
   promotionInterval?: number;
   stalledInterval?: number;
+  /** Worker-level lockDuration. Used as the effective stall threshold (in conjunction with stalledInterval). */
+  lockDuration?: number;
   maxStalledCount?: number;
   consumerId?: string;
   /** Called at the end of each promotion tick to refresh cached meta flags. */
@@ -50,6 +52,7 @@ export class Scheduler {
   private queueKeys: ReturnType<typeof buildKeys>;
   private promotionInterval: number;
   private stalledInterval: number;
+  private lockDuration: number;
   private maxStalledCount: number;
   private consumerId: string;
   private consumerGroup: string;
@@ -72,6 +75,7 @@ export class Scheduler {
     this.queueKeys = queueKeys;
     this.promotionInterval = opts.promotionInterval ?? 5000;
     this.stalledInterval = opts.stalledInterval ?? 30000;
+    this.lockDuration = opts.lockDuration ?? 30000;
     this.maxStalledCount = opts.maxStalledCount ?? 1;
     this.consumerId = opts.consumerId ?? 'scheduler';
     this.consumerGroup = opts.consumerGroup ?? CONSUMER_GROUP;
@@ -269,7 +273,7 @@ export class Scheduler {
   }
 
   /**
-   * Reclaim stalled jobs whose consumers haven't ACKed within the stalled interval.
+   * Reclaim stalled jobs whose consumers haven't ACKed within the stall threshold.
    * Calls FCALL glidemq_reclaimStalled via XAUTOCLAIM semantics in Lua.
    */
   async reclaimStalledJobs(): Promise<number> {
@@ -282,6 +286,7 @@ export class Scheduler {
       Date.now(),
       this.consumerGroup,
       this.broadcastMode,
+      this.lockDuration,
     );
   }
 
@@ -296,6 +301,7 @@ export class Scheduler {
       this.stalledInterval,
       this.maxStalledCount,
       Date.now(),
+      this.lockDuration,
     );
   }
 

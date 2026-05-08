@@ -962,6 +962,7 @@ describe('Scheduler', () => {
     const scheduler = new Scheduler(mockClient as any, queueKeys, {
       promotionInterval: 5000,
       stalledInterval: 1000,
+      lockDuration: 1000,
       consumerId: 'test-consumer',
     });
 
@@ -974,10 +975,12 @@ describe('Scheduler', () => {
       [
         CONSUMER_GROUP,
         'test-consumer',
-        '1000', // minIdleMs = stalledInterval
+        '1000', // minIdleMs = stalledInterval (XAUTOCLAIM cadence)
         '1', // maxStalledCount default
         expect.any(String), // timestamp
         queueKeys.failed,
+        '0', // broadcastMode
+        '1000', // workerLockDuration = lockDuration
       ],
     );
 
@@ -1096,6 +1099,7 @@ describe('Scheduler', () => {
 
     const scheduler = new Scheduler(mockClient as any, queueKeys, {
       stalledInterval: 15000,
+      lockDuration: 15000,
       maxStalledCount: 3,
       consumerId: 'my-consumer',
     });
@@ -1106,7 +1110,29 @@ describe('Scheduler', () => {
     expect(mockClient.fcall).toHaveBeenCalledWith(
       'glidemq_reclaimStalled',
       [queueKeys.stream, queueKeys.events],
-      [CONSUMER_GROUP, 'my-consumer', '15000', '3', now.toString(), queueKeys.failed],
+      [CONSUMER_GROUP, 'my-consumer', '15000', '3', now.toString(), queueKeys.failed, '0', '15000'],
+    );
+  });
+
+  it('reclaimStalledJobs passes worker lockDuration as a separate arg', async () => {
+    const now = 1700000000000;
+    vi.setSystemTime(now);
+    mockClient.fcall = vi.fn().mockResolvedValue(0);
+
+    const scheduler = new Scheduler(mockClient as any, queueKeys, {
+      stalledInterval: 5000,
+      lockDuration: 60000,
+      maxStalledCount: 1,
+      consumerId: 'long-lock',
+    });
+
+    await scheduler.reclaimStalledJobs();
+
+    expect(mockClient.fcall).toHaveBeenCalledWith(
+      'glidemq_reclaimStalled',
+      [queueKeys.stream, queueKeys.events],
+      // minIdleMs=stalledInterval (XAUTOCLAIM cadence), workerLockDuration=lockDuration (per-entry threshold)
+      [CONSUMER_GROUP, 'long-lock', '5000', '1', now.toString(), queueKeys.failed, '0', '60000'],
     );
   });
 });

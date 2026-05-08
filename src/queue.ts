@@ -83,6 +83,7 @@ import {
   rateLimitGroupExternal,
   signalJob,
   sweepSuspended,
+  getActiveListJobIds,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -344,9 +345,24 @@ export class Queue<D = any, R = any> extends EventEmitter {
     }
     const results = await client.exec(batch as any, false);
     const jobIds: string[] = [];
-    if (results) {
-      for (const result of results) {
-        if (result) jobIds.push(...extractJobIdsFromStreamEntries(result as any));
+    if (!results) return jobIds;
+    // Speedkey's batch xrange returns Array<{ key: string; value: [field, value][] }>
+    // per entry. The standalone xrange returns Record<entryId, fields>. Handle both.
+    for (const result of results) {
+      if (!result) continue;
+      if (Array.isArray(result)) {
+        for (const entry of result as Array<{ key?: unknown; value?: [unknown, unknown][] }>) {
+          const fieldPairs = entry?.value;
+          if (!Array.isArray(fieldPairs)) continue;
+          for (const [field, value] of fieldPairs) {
+            if (String(field) === 'jobId') {
+              jobIds.push(String(value));
+              break;
+            }
+          }
+        }
+      } else if (typeof result === 'object') {
+        jobIds.push(...extractJobIdsFromStreamEntries(result as any));
       }
     }
     return jobIds;
@@ -1750,17 +1766,25 @@ export class Queue<D = any, R = any> extends EventEmitter {
         break;
       }
       case 'active': {
+        // Active jobs come from two sources: stream PEL (XPENDING) for stream-backed
+        // jobs, and the per-queue job hashes for list-backed jobs (priority/LIFO),
+        // which are invisible to XPENDING. List-backed IDs come from a SCAN-based
+        // FCALL (glidemq_getActiveListJobIds).
+        let streamJobIds: string[] = [];
         try {
           const pendingEntries = await client.xpendingWithOptions(this.keys.stream, CONSUMER_GROUP, {
             start: InfBoundary.NegativeInfinity,
             end: InfBoundary.PositiveInfinity,
-            count: end >= 0 ? end + 1 : 10000,
+            count: 10000,
           });
-          const entryIds = pendingEntries.slice(start, end >= 0 ? end + 1 : undefined).map((e) => String(e[0]));
-          jobIds = await this.resolveActiveJobIds(client, entryIds);
+          const entryIds = pendingEntries.map((e) => String(e[0]));
+          streamJobIds = await this.resolveActiveJobIds(client, entryIds);
         } catch {
-          jobIds = [];
+          streamJobIds = [];
         }
+        const listJobIds = await getActiveListJobIds(client, this.keys, 0, -1);
+        const all = streamJobIds.concat(listJobIds);
+        jobIds = all.slice(start, end >= 0 ? end + 1 : undefined);
         break;
       }
       case 'delayed':

@@ -143,6 +143,17 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
         if (!this.globalConcurrencyEnabled) {
           await this.commandClient.incrBy(this.queueKeys.listActive, jobIds.length);
         }
+        // Batch mode: route list-popped jobs through the batch processor.
+        // Single-job processor is a throwing sentinel in batch mode (#212).
+        // Chunk by batchSize so one pop (up to concurrency * batchSize jobs
+        // when prefetch defaults apply) does not exceed the user's batch.size.
+        if (this.batchMode) {
+          const entries = jobIds.map((jobId) => ({ jobId, entryId: '' }));
+          for (let i = 0; i < entries.length; i += this.batchSize) {
+            await this.activateAndProcessBatch(entries.slice(i, i + this.batchSize));
+          }
+          return true;
+        }
         for (const jobId of jobIds) {
           if (this.concurrency === 1) {
             this.activeCount++;

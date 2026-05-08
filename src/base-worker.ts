@@ -296,6 +296,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     this.scheduler = new Scheduler(this.commandClient, this.queueKeys, {
       promotionInterval: this.opts.promotionInterval,
       stalledInterval: this.stalledInterval,
+      lockDuration: this.lockDuration,
       maxStalledCount: this.maxStalledCount,
       consumerId: this.consumerId,
       consumerGroup: this.consumerGroup,

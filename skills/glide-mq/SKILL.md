@@ -15,7 +15,7 @@ description: >-
 license: Apache-2.0
 metadata:
   author: glide-mq
-  version: "0.14.0"
+  version: '0.14.0'
   tags: glide-mq, message-queue, valkey, redis, job-queue, worker, streams, ai-native, llm, vector-search
   sources: docs/USAGE.md, docs/ADVANCED.md, docs/WORKFLOWS.md, docs/BROADCAST.md, docs/SERVERLESS.md, docs/TESTING.md, docs/OBSERVABILITY.md
 ---
@@ -34,10 +34,14 @@ const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 const queue = new Queue('tasks', { connection });
 await queue.add('send-email', { to: 'user@example.com', subject: 'Hello' });
 
-const worker = new Worker('tasks', async (job) => {
-  console.log(`Processing ${job.name}:`, job.data);
-  return { sent: true };
-}, { connection, concurrency: 10 });
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    console.log(`Processing ${job.name}:`, job.data);
+    return { sent: true };
+  },
+  { connection, concurrency: 10 },
+);
 
 worker.on('completed', (job) => console.log(`Done: ${job.id}`));
 worker.on('failed', (job, err) => console.error(`Failed: ${job.id}`, err.message));
@@ -46,6 +50,7 @@ worker.on('failed', (job, err) => console.error(`Failed: ${job.id}`, err.message
 ## When to Apply
 
 Use this skill when:
+
 - Creating or configuring queues, workers, or producers
 - Adding jobs (single, bulk, delayed, priority)
 - Setting up retries, backoff, or dead-letter queues
@@ -68,18 +73,18 @@ Use this skill when:
 
 ## Core API by Priority
 
-| Priority | Category | Impact | Reference |
-|----------|----------|--------|-----------|
-| 1 | Queue & Job Operations | CRITICAL | [references/queue.md](references/queue.md) |
-| 2 | Worker & Processing | CRITICAL | [references/worker.md](references/worker.md) |
-| 3 | Connection & Config | HIGH | [references/connection.md](references/connection.md) |
-| 4 | Workflows & FlowProducer | HIGH | [references/workflows.md](references/workflows.md) |
-| 5 | Broadcast (Fan-Out) | MEDIUM | [references/broadcast.md](references/broadcast.md) |
-| 6 | Schedulers (Cron/Interval) | MEDIUM | [references/schedulers.md](references/schedulers.md) |
-| 7 | Observability & Events | MEDIUM | [references/observability.md](references/observability.md) |
-| 8 | AI-Native Primitives | HIGH | [references/ai-native.md](references/ai-native.md) |
-| 9 | Vector Search | MEDIUM | [references/search.md](references/search.md) |
-| 10 | Serverless & Testing | LOW | [references/serverless.md](references/serverless.md) |
+| Priority | Category                   | Impact   | Reference                                                  |
+| -------- | -------------------------- | -------- | ---------------------------------------------------------- |
+| 1        | Queue & Job Operations     | CRITICAL | [references/queue.md](references/queue.md)                 |
+| 2        | Worker & Processing        | CRITICAL | [references/worker.md](references/worker.md)               |
+| 3        | Connection & Config        | HIGH     | [references/connection.md](references/connection.md)       |
+| 4        | Workflows & FlowProducer   | HIGH     | [references/workflows.md](references/workflows.md)         |
+| 5        | Broadcast (Fan-Out)        | MEDIUM   | [references/broadcast.md](references/broadcast.md)         |
+| 6        | Schedulers (Cron/Interval) | MEDIUM   | [references/schedulers.md](references/schedulers.md)       |
+| 7        | Observability & Events     | MEDIUM   | [references/observability.md](references/observability.md) |
+| 8        | AI-Native Primitives       | HIGH     | [references/ai-native.md](references/ai-native.md)         |
+| 9        | Vector Search              | MEDIUM   | [references/search.md](references/search.md)               |
+| 10       | Serverless & Testing       | LOW      | [references/serverless.md](references/serverless.md)       |
 
 ## Key Patterns
 
@@ -96,17 +101,17 @@ await queue.add('low-priority', data, { priority: 10 });
 // Retries with exponential backoff
 await queue.add('webhook', data, {
   attempts: 5,
-  backoff: { type: 'exponential', delay: 1000 }
+  backoff: { type: 'exponential', delay: 1000 },
 });
 ```
 
 ### Bulk Ingestion (10,000 jobs in ~350ms)
 
 ```typescript
-const jobs = items.map(item => ({
+const jobs = items.map((item) => ({
   name: 'process',
   data: item,
-  opts: { jobId: `item-${item.id}` }
+  opts: { jobId: `item-${item.id}` },
 }));
 await queue.addBulk(jobs);
 ```
@@ -114,21 +119,34 @@ await queue.addBulk(jobs);
 ### Batch Worker (Process Multiple Jobs at Once)
 
 ```typescript
-const worker = new Worker('analytics', async (jobs) => {
-  // jobs is Job[] when batch is enabled
-  await db.insertMany('events', jobs.map(j => j.data));
-}, {
-  connection,
-  batch: { size: 50, timeout: 5000 }
-});
+const worker = new Worker(
+  'analytics',
+  async (jobs) => {
+    // jobs is Job[] when batch is enabled
+    await db.insertMany(
+      'events',
+      jobs.map((j) => j.data),
+    );
+  },
+  {
+    connection,
+    batch: { size: 50, timeout: 5000 },
+  },
+);
 ```
+
+Batch mode is composable with `priority` and `lifo: true` jobs - list-popped jobs are dispatched into the same batch processor (chunked by `batch.size`).
 
 ### Request-Reply (addAndWait)
 
 ```typescript
-const result = await queue.addAndWait('compute', { input: 42 }, {
-  waitTimeout: 30_000
-});
+const result = await queue.addAndWait(
+  'compute',
+  { input: 42 },
+  {
+    waitTimeout: 30_000,
+  },
+);
 console.log(result); // processor return value
 ```
 
@@ -169,33 +187,33 @@ await worker.run();
 
 ## Problem-to-Reference Mapping
 
-| Problem | Start With |
-|---------|------------|
-| Need to create a queue and add jobs | [references/queue.md](references/queue.md) |
-| Need to process jobs with workers | [references/worker.md](references/worker.md) |
-| Jobs failing, need retries/backoff | [references/queue.md](references/queue.md) - Retry section |
-| Need parent-child job dependencies | [references/workflows.md](references/workflows.md) |
-| Need fan-out to multiple consumers | [references/broadcast.md](references/broadcast.md) |
-| Need cron or repeating jobs | [references/schedulers.md](references/schedulers.md) |
-| Connection errors or TLS/IAM setup | [references/connection.md](references/connection.md) |
-| Stalled jobs or lock issues | [references/worker.md](references/worker.md) - Stalled Jobs |
-| Need real-time job events | [references/observability.md](references/observability.md) |
-| Integrating with Fastify/NestJS/Hono | [Framework Integrations](https://www.glidemq.dev/integrations/) |
-| Deploying to Lambda/Vercel Edge | [references/serverless.md](references/serverless.md) |
-| Need deduplication or idempotent jobs | [references/queue.md](references/queue.md) - Dedup |
-| Need rate limiting | [references/queue.md](references/queue.md) - Rate Limit |
-| Running tests without Valkey | [references/serverless.md](references/serverless.md) - Testing |
-| Need to track LLM tokens/cost per job | [references/ai-native.md](references/ai-native.md) - Usage Metadata |
-| Need to stream LLM output tokens | [references/ai-native.md](references/ai-native.md) - Token Streaming |
-| Need human approval before proceeding | [references/ai-native.md](references/ai-native.md) - Suspend/Resume |
-| Need to cap token/cost budget on a flow | [references/ai-native.md](references/ai-native.md) - Budget |
-| Need model fallback on failure | [references/ai-native.md](references/ai-native.md) - Fallback Chains |
-| Need RPM + TPM rate limiting for LLM APIs | [references/ai-native.md](references/ai-native.md) - Dual-Axis Rate Limiting |
-| Need rolling usage/cost summary across queues | [references/ai-native.md](references/ai-native.md) - Usage Metadata |
-| Need vector similarity search over jobs | [references/search.md](references/search.md) |
-| Need to aggregate usage across a flow | [references/ai-native.md](references/ai-native.md) - Flow Usage |
-| Need to create or inspect flows over HTTP | [references/serverless.md](references/serverless.md) - HTTP Proxy |
-| Need cross-language HTTP or SSE access | [references/serverless.md](references/serverless.md) - HTTP Proxy |
+| Problem                                       | Start With                                                                   |
+| --------------------------------------------- | ---------------------------------------------------------------------------- |
+| Need to create a queue and add jobs           | [references/queue.md](references/queue.md)                                   |
+| Need to process jobs with workers             | [references/worker.md](references/worker.md)                                 |
+| Jobs failing, need retries/backoff            | [references/queue.md](references/queue.md) - Retry section                   |
+| Need parent-child job dependencies            | [references/workflows.md](references/workflows.md)                           |
+| Need fan-out to multiple consumers            | [references/broadcast.md](references/broadcast.md)                           |
+| Need cron or repeating jobs                   | [references/schedulers.md](references/schedulers.md)                         |
+| Connection errors or TLS/IAM setup            | [references/connection.md](references/connection.md)                         |
+| Stalled jobs or lock issues                   | [references/worker.md](references/worker.md) - Stalled Jobs                  |
+| Need real-time job events                     | [references/observability.md](references/observability.md)                   |
+| Integrating with Fastify/NestJS/Hono          | [Framework Integrations](https://www.glidemq.dev/integrations/)              |
+| Deploying to Lambda/Vercel Edge               | [references/serverless.md](references/serverless.md)                         |
+| Need deduplication or idempotent jobs         | [references/queue.md](references/queue.md) - Dedup                           |
+| Need rate limiting                            | [references/queue.md](references/queue.md) - Rate Limit                      |
+| Running tests without Valkey                  | [references/serverless.md](references/serverless.md) - Testing               |
+| Need to track LLM tokens/cost per job         | [references/ai-native.md](references/ai-native.md) - Usage Metadata          |
+| Need to stream LLM output tokens              | [references/ai-native.md](references/ai-native.md) - Token Streaming         |
+| Need human approval before proceeding         | [references/ai-native.md](references/ai-native.md) - Suspend/Resume          |
+| Need to cap token/cost budget on a flow       | [references/ai-native.md](references/ai-native.md) - Budget                  |
+| Need model fallback on failure                | [references/ai-native.md](references/ai-native.md) - Fallback Chains         |
+| Need RPM + TPM rate limiting for LLM APIs     | [references/ai-native.md](references/ai-native.md) - Dual-Axis Rate Limiting |
+| Need rolling usage/cost summary across queues | [references/ai-native.md](references/ai-native.md) - Usage Metadata          |
+| Need vector similarity search over jobs       | [references/search.md](references/search.md)                                 |
+| Need to aggregate usage across a flow         | [references/ai-native.md](references/ai-native.md) - Flow Usage              |
+| Need to create or inspect flows over HTTP     | [references/serverless.md](references/serverless.md) - HTTP Proxy            |
+| Need cross-language HTTP or SSE access        | [references/serverless.md](references/serverless.md) - HTTP Proxy            |
 
 ## Critical Notes
 

@@ -41,7 +41,10 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 79: Budget middleware: glidemq_checkBudget, glidemq_recordUsageAndCheckBudget.
 // Version 80: Budget v2: per-category token/cost tracking, weighted totals, per-category limits.
 // Version 81: Fix debounce + ordering nextSeq deadlock: advancePastSkips() helper, skip markers in all ordering gates.
-export const LIBRARY_VERSION = '81';
+// Version 82: Guard every list-active DECR with > 0 check via decrListActive() helper - prevents counter underflow on duplicate complete/fail/suspend, reclaim races, etc. (#217).
+// Version 83: glidemq_getActiveListJobIds - bounded SCAN that returns active list-sourced jobIds for getJobs('active') visibility (#213).
+// Version 84: glidemq_reclaimStalled / glidemq_reclaimStalledListJobs accept workerLockDuration arg - per-entry threshold falls back to it before minIdleMs, so per-job opts.lockDuration overrides still fire under XAUTOCLAIM gating (#213).
+export const LIBRARY_VERSION = '84';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -51,6 +54,18 @@ export const CONSUMER_GROUP = 'workers';
 export const LIBRARY_SOURCE = `#!lua name=glidemq
 
 local PRIORITY_SHIFT = 4398046511104
+
+-- Guarded decrement of the per-queue list-active counter.
+-- Used at every site that tracks completion/failure/release of a list-sourced
+-- job (entryId == ''). The guard is required because healListActive cannot
+-- recover from a negative counter (its early-out at <= 0 is intentional - it
+-- only repairs positive drift from worker crashes), so a duplicate decrement
+-- would latch the counter negative forever.
+local function decrListActive(listActiveKey)
+  if not listActiveKey or listActiveKey == '' then return end
+  local la = tonumber(redis.call('GET', listActiveKey)) or 0
+  if la > 0 then redis.call('DECR', listActiveKey) end
+end
 
 local function emitEvent(eventsKey, eventType, jobId, extraFields)
   local fields = {'event', eventType, 'jobId', tostring(jobId)}
@@ -925,7 +940,7 @@ redis.register_function('glidemq_complete', function(keys, args)
       end
     end
   end
-  if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
+  if entryId == '' then decrListActive(prefix .. 'list-active') end
   return 1
 end)
 
@@ -979,7 +994,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
   if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-  if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
+  if entryId == '' then decrListActive(prefix .. 'list-active') end
 
   -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
   if broadcastMode ~= '1' then
@@ -1408,7 +1423,7 @@ redis.register_function('glidemq_fail', function(keys, args)
       'attemptsMade', tostring(attemptsMade),
       'delay', tostring(backoffDelay)
     })
-    if entryId == '' then redis.call('DECR', string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
+    if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
     return 'retrying'
   else
     redis.call('ZADD', failedKey, timestamp, jobId)
@@ -1449,7 +1464,7 @@ redis.register_function('glidemq_fail', function(keys, args)
         end
       end
     end
-    if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
+    if entryId == '' then decrListActive(prefix .. 'list-active') end
     return 'failed'
   end
 end)
@@ -1464,6 +1479,10 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   local timestamp = tonumber(args[5])
   local failedKey = args[6]
   local broadcastMode = args[7] or '0'
+  -- Worker-level lockDuration. Used as the per-entry stall threshold when the
+  -- job has no opts.lockDuration of its own. Falls back to minIdleMs (the
+  -- stalledInterval cadence) when neither is set, matching old behavior. (#213)
+  local workerLockDuration = tonumber(args[8]) or 0
   local result = redis.call('XAUTOCLAIM', streamKey, group, consumer, minIdleMs, '0-0')
   local entries = result[2]
   if not entries or #entries == 0 then
@@ -1494,7 +1513,14 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       local vals = redis.call('HMGET', jobKey, 'lastActive', 'opts')
       local lastActive = tonumber(vals[1])
       local jobLockDuration = extractLockDurationFromOpts(vals[2])
-      local effectiveIdle = (jobLockDuration > 0) and jobLockDuration or minIdleMs
+      local effectiveIdle
+      if jobLockDuration > 0 then
+        effectiveIdle = jobLockDuration
+      elseif workerLockDuration > 0 then
+        effectiveIdle = workerLockDuration
+      else
+        effectiveIdle = minIdleMs
+      end
       if lastActive and (timestamp - lastActive) < effectiveIdle then
         count = count + 1
       else
@@ -1525,6 +1551,8 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
   local timestamp = tonumber(args[3])
   if not minIdleMs or not timestamp then return 0 end
   local failedKey = args[4]
+  -- Worker-level lockDuration; per-entry threshold when opts.lockDuration unset. (#213)
+  local workerLockDuration = tonumber(args[5]) or 0
   local prefix = string.sub(streamKey, 1, #streamKey - 6)
   local listActiveKey = prefix .. 'list-active'
   local currentActive = tonumber(redis.call('GET', listActiveKey)) or 0
@@ -1547,7 +1575,14 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
         local lastActive = tonumber(vals[1])
         local isListSourced = vals[2] == '1' or (tonumber(vals[3]) or 0) > 0
         local jobLockDuration = extractLockDurationFromOpts(vals[4])
-        local effectiveIdle = (jobLockDuration > 0) and jobLockDuration or minIdleMs
+        local effectiveIdle
+        if jobLockDuration > 0 then
+          effectiveIdle = jobLockDuration
+        elseif workerLockDuration > 0 then
+          effectiveIdle = workerLockDuration
+        else
+          effectiveIdle = minIdleMs
+        end
         if isListSourced and lastActive and (timestamp - lastActive) >= effectiveIdle then
           local jobId = string.sub(jk, #prefix + 5)
           local shouldDecr = false
@@ -1559,8 +1594,7 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
             end
           end
           if shouldDecr then
-            local la = tonumber(redis.call('GET', listActiveKey)) or 0
-            if la > 0 then redis.call('DECR', listActiveKey) end
+            decrListActive(listActiveKey)
           end
           count = count + 1
         end
@@ -2226,13 +2260,7 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   -- List-sourced jobs (entryId='') were counted in list-active; DECR to stay balanced.
-  -- Guard > 0: healListActive does not correct negative drift.
-  if entryId == '' and listActiveKey ~= '' then
-    local la = tonumber(redis.call('GET', listActiveKey)) or 0
-    if la > 0 then
-      redis.call('DECR', listActiveKey)
-    end
-  end
+  if entryId == '' then decrListActive(listActiveKey) end
   if exists == 0 then
     return 0
   end
@@ -2596,7 +2624,7 @@ redis.register_function('glidemq_removeJob', function(keys, args)
     local jobPriority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
     if jobLifo == '1' or jobPriority > 0 then
       local prefix_r = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-      redis.call('DECR', prefix_r .. 'list-active')
+      decrListActive(prefix_r .. 'list-active')
     end
   end
   redis.call('ZREM', scheduledKey, jobId)
@@ -2961,7 +2989,7 @@ redis.register_function('glidemq_moveActiveToDelayed', function(keys, args)
   else
     redis.call('HSET', jobKey, 'state', 'delayed', 'delay', tostring(delay))
   end
-  if entryId == '' then redis.call('DECR', string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
+  if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
   -- Only release group slot if this is NOT an ordering-key step-job.
   -- Ordering-key jobs hold the slot until full completion to preserve per-key order.
   local jobOrdSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
@@ -3009,12 +3037,12 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
       redis.call('HSET', jobKey, 'state', 'waiting')
       xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
       emitEvent(eventsKey, 'active', jobId, nil)
-      if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
+      if entryId == '' then decrListActive(prefix .. 'list-active') end
       return 'completed'
     end
   end
 
-  if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
+  if entryId == '' then decrListActive(prefix .. 'list-active') end
   emitEvent(eventsKey, 'waiting-children', jobId, nil)
   return 'ok'
 end)
@@ -3046,7 +3074,7 @@ redis.register_function('glidemq_rateLimitGroup', function(keys, args)
 
   if entryId ~= '' then pcall(redis.call, 'XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
-  if entryId == '' then redis.call('DECR', prefix .. 'list-active') end
+  if entryId == '' then decrListActive(prefix .. 'list-active') end
 
   local active = tonumber(redis.call('HGET', groupHashKey, 'active')) or 0
   if active > 0 then redis.call('HSET', groupHashKey, 'active', tostring(active - 1)) end
@@ -3363,6 +3391,60 @@ redis.register_function('glidemq_healListActive', function(keys, args)
   return drift
 end)
 
+-- List active list-sourced jobIds (state='active' AND (lifo='1' OR priority>0)) via bounded SCAN.
+-- Stream-backed active jobs are in the consumer group PEL (XPENDING) and listed separately.
+-- All prefix:job:* keys share the {queueName} hash tag, so SCAN runs on a single
+-- cluster slot and observes the full set on its local node.
+-- KEYS: [idKey]
+-- ARGS: [start, end] (inclusive 0-indexed bounds; end < 0 means unbounded)
+-- Returns: array of jobId strings.
+redis.register_function('glidemq_getActiveListJobIds', function(keys, args)
+  local idKey = keys[1]
+  local prefix = string.sub(idKey, 1, #idKey - 2)
+  local startIdx = tonumber(args[1]) or 0
+  local endIdx = tonumber(args[2])
+  if endIdx == nil then endIdx = -1 end
+  local pattern = prefix .. 'job:*'
+  local cursor = '0'
+  local maxIter = 1000
+  local iter = 0
+  local ids = {}
+  repeat
+    iter = iter + 1
+    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 500)
+    cursor = sr[1]
+    local scanned = sr[2]
+    for i = 1, #scanned do
+      local jk = scanned[i]
+      local state = redis.call('HGET', jk, 'state')
+      if state == 'active' then
+        local vals = redis.call('HMGET', jk, 'lifo', 'priority')
+        if vals[1] == '1' or (tonumber(vals[2]) or 0) > 0 then
+          ids[#ids + 1] = string.sub(jk, #prefix + 5)
+        end
+      end
+    end
+  until cursor == '0' or iter >= maxIter
+  if endIdx >= 0 then
+    local lastIdx = endIdx + 1
+    if lastIdx > #ids then lastIdx = #ids end
+    if startIdx + 1 > lastIdx then return {} end
+    local sliced = {}
+    for i = startIdx + 1, lastIdx do
+      sliced[#sliced + 1] = ids[i]
+    end
+    return sliced
+  end
+  if startIdx > 0 then
+    local sliced = {}
+    for i = startIdx + 1, #ids do
+      sliced[#sliced + 1] = ids[i]
+    end
+    return sliced
+  end
+  return ids
+end)
+
 redis.register_function('glidemq_popLists', function(keys, args)
   local priorityKey = keys[1]
   local lifoKey = keys[2]
@@ -3423,7 +3505,7 @@ redis.register_function('glidemq_suspend', function(keys, args)
 
   if entryId == '' then
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-    redis.call('DECR', prefix .. 'list-active')
+    decrListActive(prefix .. 'list-active')
   end
 
   emitEvent(eventsKey, 'suspended', jobId, nil)
@@ -4054,6 +4136,7 @@ export async function reclaimStalled(
   timestamp: number,
   group: string = CONSUMER_GROUP,
   broadcastMode?: boolean,
+  workerLockDuration: number = 0,
 ): Promise<number> {
   const result = await client.fcall(
     'glidemq_reclaimStalled',
@@ -4065,7 +4148,8 @@ export async function reclaimStalled(
       maxStalledCount.toString(),
       timestamp.toString(),
       k.failed,
-      ...(broadcastMode ? ['1'] : []),
+      broadcastMode ? '1' : '0',
+      workerLockDuration.toString(),
     ],
   );
   return result as number;
@@ -4081,11 +4165,12 @@ export async function reclaimStalledListJobs(
   minIdleMs: number,
   maxStalledCount: number,
   timestamp: number,
+  workerLockDuration: number = 0,
 ): Promise<number> {
   const result = await client.fcall(
     'glidemq_reclaimStalledListJobs',
     [k.stream, k.events],
-    [minIdleMs.toString(), maxStalledCount.toString(), timestamp.toString(), k.failed],
+    [minIdleMs.toString(), maxStalledCount.toString(), timestamp.toString(), k.failed, workerLockDuration.toString()],
   );
   return result as number;
 }
@@ -4659,6 +4744,23 @@ export async function registerParent(
 export async function healListActive(client: Client, keys: QueueKeys): Promise<number> {
   const result = await client.fcall('glidemq_healListActive', [keys.id], []);
   return Number(result) || 0;
+}
+
+/**
+ * Return active list-sourced jobIds (priority or LIFO) via bounded SCAN.
+ * Pagination follows the same convention as Queue.getJobs: inclusive 0-indexed
+ * bounds; end < 0 means unbounded.
+ * Used by Queue.getJobs('active') to merge list-active jobs with the stream PEL.
+ */
+export async function getActiveListJobIds(
+  client: Client,
+  keys: QueueKeys,
+  start: number,
+  end: number,
+): Promise<string[]> {
+  const result = await client.fcall('glidemq_getActiveListJobIds', [keys.id], [start.toString(), end.toString()]);
+  if (!Array.isArray(result)) return [];
+  return result.map((v) => String(v));
 }
 
 /**
