@@ -41,17 +41,25 @@ jobs:
         run: npx tsc
 
       - name: Set version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
           else
-            VERSION="${{ github.event.inputs.version }}"
+            VERSION="$INPUT_VERSION"
           fi
+
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version: $VERSION" >&2
+            exit 1
+          fi
+
           CURRENT=$(node -p "require('./package.json').version")
           if [ "$CURRENT" != "$VERSION" ]; then
-            npm version $VERSION --no-git-tag-version
+            npm version "$VERSION" --no-git-tag-version
           fi
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Publish
         if: github.event_name == 'push' || github.event.inputs.publish == 'true'
