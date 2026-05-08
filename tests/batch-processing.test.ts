@@ -464,6 +464,62 @@ describeEachMode('Worker batch processing', (CONNECTION) => {
     }, 20000);
   }
 
+  // Defense-in-depth: with concurrency > 1, prefetch defaults to
+  // concurrency * batchSize, so a single popLists can return more than
+  // batchSize jobs. tryPopFromLists must chunk so each batch the user sees
+  // respects opts.batch.size.
+  it('list-popped batches respect batch.size cap (concurrency > 1)', async () => {
+    const qName = Q + '-prio-cap';
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const batchSizes: number[] = [];
+
+    const concurrency = 3;
+    const size = 4;
+    const total = concurrency * size; // 12 - one full pop, multiple chunks
+
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('timeout waiting for capped batches')), 15000);
+      let processed = 0;
+
+      const worker = new Worker(
+        qName,
+        async (jobs: any[]) => {
+          batchSizes.push(jobs.length);
+          processed += jobs.length;
+          if (processed >= total) {
+            clearTimeout(timeout);
+            setTimeout(() => worker.close(true).then(resolve), 200);
+          }
+          return jobs.map(() => 'ok');
+        },
+        {
+          connection: CONNECTION,
+          concurrency,
+          blockTimeout: 500,
+          batch: { size, timeout: 100 },
+        },
+      );
+      worker.on('error', () => {});
+    });
+
+    await new Promise((r) => setTimeout(r, 500));
+
+    for (let i = 0; i < total; i++) {
+      await queue.add('prio', { i }, { priority: 5 });
+    }
+
+    await done;
+
+    expect(batchSizes.reduce((a, b) => a + b, 0)).toBe(total);
+    for (const s of batchSizes) {
+      expect(s).toBeGreaterThan(0);
+      expect(s).toBeLessThanOrEqual(size);
+    }
+
+    await queue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 20000);
+
   it('processes mixed priority + non-priority jobs in batch mode', async () => {
     const qName = Q + '-mixed-prio';
     const queue = new Queue(qName, { connection: CONNECTION });
