@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.15.2] - 2026-05-08
+
+### Fixed
+
+- **Priority/LIFO jobs in batch-mode workers** (#212, #216): `Worker.tryPopFromLists` dispatched list-popped jobs through the single-job processor, which is a throwing sentinel in batch mode (`Single-job processor called in batch mode`). Any job enqueued with `priority` (or `lifo: true`) to a batch worker would fail. List-popped jobs are now routed through `activateAndProcessBatch`, chunked by `batch.size` so concurrency > 1 doesn't overflow the user's contract.
+
+- **`list-active` counter underflow on duplicate complete/fail/reclaim races** (#217, #218): 10 unguarded `DECR list-active` sites in the Lua FCALL library would underflow the per-queue counter on any path that produced two DECRs for one INCR (duplicate `complete`/`fail`, reclaim race, suspend-then-fail). Once underflowed, `getJobCounts()` returned negative `active` and `glidemq_healListActive` couldn't recover (its `<= 0` early-out is intentional - it only repairs positive drift). All 12 DECR sites now route through a single `decrListActive(listActiveKey)` Lua helper that guards on `> 0`. Note: counters that already underflowed under v0.15.1 are not auto-repaired; drain the queue or manually `SET <prefix>:list-active 0`. `LIBRARY_VERSION` bumped to `82`.
+
+- **Priority/LIFO active jobs invisible in dashboard, list-backed jobs reclaimed despite worker `lockDuration`** (#213, #219): two related bugs.
+  - `Queue.getJobs('active')` only read the stream consumer-group PEL, so priority/LIFO active jobs were invisible (the count and the listing disagreed by exactly the list-backed count). Added `glidemq_getActiveListJobIds` Lua FCALL (bounded SCAN, cluster-safe via `{queueName}` hash tag) and merged into `getJobs('active')`. Pre-existing batched-xrange shape mismatch in `resolveActiveJobIds` also fixed - stream-PEL → jobId resolution had been silently returning empty since speedkey changed format.
+  - The scheduler conflated `stalledInterval` (cadence) with the stall threshold; both reclaim FCALLs received `stalledInterval` as `minIdleMs`. With `{ lockDuration: 300_000, stalledInterval: 30_000 }`, jobs were reclaimed after 30s despite the 5min lock. The contract is now restored: `lockDuration` is the threshold, `stalledInterval` is the cadence. `glidemq_reclaimStalled` and `glidemq_reclaimStalledListJobs` accept a new `workerLockDuration` arg; per-entry threshold falls back to it before `minIdleMs`. Per-job `opts.lockDuration` overrides still win. `LIBRARY_VERSION` bumped to `84`.
+
+### Behavior change
+
+- Workers that previously relied on a short `stalledInterval` for fast stall recovery (without setting `lockDuration`) will see slower recovery. Default `lockDuration` is 30s, so the new threshold is 30s for those configurations. To preserve the old behavior, set `lockDuration` explicitly to match `stalledInterval`.
+
+---
+
 ## [0.15.1] - 2026-04-06
 
 ### Fixed
