@@ -42,7 +42,9 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 80: Budget v2: per-category token/cost tracking, weighted totals, per-category limits.
 // Version 81: Fix debounce + ordering nextSeq deadlock: advancePastSkips() helper, skip markers in all ordering gates.
 // Version 82: Guard every list-active DECR with > 0 check via decrListActive() helper - prevents counter underflow on duplicate complete/fail/suspend, reclaim races, etc. (#217).
-export const LIBRARY_VERSION = '82';
+// Version 83: glidemq_getActiveListJobIds - bounded SCAN that returns active list-sourced jobIds for getJobs('active') visibility (#213).
+// Version 84: glidemq_reclaimStalled / glidemq_reclaimStalledListJobs accept workerLockDuration arg - per-entry threshold falls back to it before minIdleMs, so per-job opts.lockDuration overrides still fire under XAUTOCLAIM gating (#213).
+export const LIBRARY_VERSION = '84';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1477,6 +1479,10 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   local timestamp = tonumber(args[5])
   local failedKey = args[6]
   local broadcastMode = args[7] or '0'
+  -- Worker-level lockDuration. Used as the per-entry stall threshold when the
+  -- job has no opts.lockDuration of its own. Falls back to minIdleMs (the
+  -- stalledInterval cadence) when neither is set, matching old behavior. (#213)
+  local workerLockDuration = tonumber(args[8]) or 0
   local result = redis.call('XAUTOCLAIM', streamKey, group, consumer, minIdleMs, '0-0')
   local entries = result[2]
   if not entries or #entries == 0 then
@@ -1507,7 +1513,14 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       local vals = redis.call('HMGET', jobKey, 'lastActive', 'opts')
       local lastActive = tonumber(vals[1])
       local jobLockDuration = extractLockDurationFromOpts(vals[2])
-      local effectiveIdle = (jobLockDuration > 0) and jobLockDuration or minIdleMs
+      local effectiveIdle
+      if jobLockDuration > 0 then
+        effectiveIdle = jobLockDuration
+      elseif workerLockDuration > 0 then
+        effectiveIdle = workerLockDuration
+      else
+        effectiveIdle = minIdleMs
+      end
       if lastActive and (timestamp - lastActive) < effectiveIdle then
         count = count + 1
       else
@@ -1538,6 +1551,8 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
   local timestamp = tonumber(args[3])
   if not minIdleMs or not timestamp then return 0 end
   local failedKey = args[4]
+  -- Worker-level lockDuration; per-entry threshold when opts.lockDuration unset. (#213)
+  local workerLockDuration = tonumber(args[5]) or 0
   local prefix = string.sub(streamKey, 1, #streamKey - 6)
   local listActiveKey = prefix .. 'list-active'
   local currentActive = tonumber(redis.call('GET', listActiveKey)) or 0
@@ -1560,7 +1575,14 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
         local lastActive = tonumber(vals[1])
         local isListSourced = vals[2] == '1' or (tonumber(vals[3]) or 0) > 0
         local jobLockDuration = extractLockDurationFromOpts(vals[4])
-        local effectiveIdle = (jobLockDuration > 0) and jobLockDuration or minIdleMs
+        local effectiveIdle
+        if jobLockDuration > 0 then
+          effectiveIdle = jobLockDuration
+        elseif workerLockDuration > 0 then
+          effectiveIdle = workerLockDuration
+        else
+          effectiveIdle = minIdleMs
+        end
         if isListSourced and lastActive and (timestamp - lastActive) >= effectiveIdle then
           local jobId = string.sub(jk, #prefix + 5)
           local shouldDecr = false
@@ -3369,6 +3391,60 @@ redis.register_function('glidemq_healListActive', function(keys, args)
   return drift
 end)
 
+-- List active list-sourced jobIds (state='active' AND (lifo='1' OR priority>0)) via bounded SCAN.
+-- Stream-backed active jobs are in the consumer group PEL (XPENDING) and listed separately.
+-- All prefix:job:* keys share the {queueName} hash tag, so SCAN runs on a single
+-- cluster slot and observes the full set on its local node.
+-- KEYS: [idKey]
+-- ARGS: [start, end] (inclusive 0-indexed bounds; end < 0 means unbounded)
+-- Returns: array of jobId strings.
+redis.register_function('glidemq_getActiveListJobIds', function(keys, args)
+  local idKey = keys[1]
+  local prefix = string.sub(idKey, 1, #idKey - 2)
+  local startIdx = tonumber(args[1]) or 0
+  local endIdx = tonumber(args[2])
+  if endIdx == nil then endIdx = -1 end
+  local pattern = prefix .. 'job:*'
+  local cursor = '0'
+  local maxIter = 1000
+  local iter = 0
+  local ids = {}
+  repeat
+    iter = iter + 1
+    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 500)
+    cursor = sr[1]
+    local scanned = sr[2]
+    for i = 1, #scanned do
+      local jk = scanned[i]
+      local state = redis.call('HGET', jk, 'state')
+      if state == 'active' then
+        local vals = redis.call('HMGET', jk, 'lifo', 'priority')
+        if vals[1] == '1' or (tonumber(vals[2]) or 0) > 0 then
+          ids[#ids + 1] = string.sub(jk, #prefix + 5)
+        end
+      end
+    end
+  until cursor == '0' or iter >= maxIter
+  if endIdx >= 0 then
+    local lastIdx = endIdx + 1
+    if lastIdx > #ids then lastIdx = #ids end
+    if startIdx + 1 > lastIdx then return {} end
+    local sliced = {}
+    for i = startIdx + 1, lastIdx do
+      sliced[#sliced + 1] = ids[i]
+    end
+    return sliced
+  end
+  if startIdx > 0 then
+    local sliced = {}
+    for i = startIdx + 1, #ids do
+      sliced[#sliced + 1] = ids[i]
+    end
+    return sliced
+  end
+  return ids
+end)
+
 redis.register_function('glidemq_popLists', function(keys, args)
   local priorityKey = keys[1]
   local lifoKey = keys[2]
@@ -4060,6 +4136,7 @@ export async function reclaimStalled(
   timestamp: number,
   group: string = CONSUMER_GROUP,
   broadcastMode?: boolean,
+  workerLockDuration: number = 0,
 ): Promise<number> {
   const result = await client.fcall(
     'glidemq_reclaimStalled',
@@ -4071,7 +4148,8 @@ export async function reclaimStalled(
       maxStalledCount.toString(),
       timestamp.toString(),
       k.failed,
-      ...(broadcastMode ? ['1'] : []),
+      broadcastMode ? '1' : '0',
+      workerLockDuration.toString(),
     ],
   );
   return result as number;
@@ -4087,11 +4165,12 @@ export async function reclaimStalledListJobs(
   minIdleMs: number,
   maxStalledCount: number,
   timestamp: number,
+  workerLockDuration: number = 0,
 ): Promise<number> {
   const result = await client.fcall(
     'glidemq_reclaimStalledListJobs',
     [k.stream, k.events],
-    [minIdleMs.toString(), maxStalledCount.toString(), timestamp.toString(), k.failed],
+    [minIdleMs.toString(), maxStalledCount.toString(), timestamp.toString(), k.failed, workerLockDuration.toString()],
   );
   return result as number;
 }
@@ -4665,6 +4744,23 @@ export async function registerParent(
 export async function healListActive(client: Client, keys: QueueKeys): Promise<number> {
   const result = await client.fcall('glidemq_healListActive', [keys.id], []);
   return Number(result) || 0;
+}
+
+/**
+ * Return active list-sourced jobIds (priority or LIFO) via bounded SCAN.
+ * Pagination follows the same convention as Queue.getJobs: inclusive 0-indexed
+ * bounds; end < 0 means unbounded.
+ * Used by Queue.getJobs('active') to merge list-active jobs with the stream PEL.
+ */
+export async function getActiveListJobIds(
+  client: Client,
+  keys: QueueKeys,
+  start: number,
+  end: number,
+): Promise<string[]> {
+  const result = await client.fcall('glidemq_getActiveListJobIds', [keys.id], [start.toString(), end.toString()]);
+  if (!Array.isArray(result)) return [];
+  return result.map((v) => String(v));
 }
 
 /**

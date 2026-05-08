@@ -437,6 +437,7 @@ describeEachMode('Bull compat: Stalled job recovery', (CONNECTION) => {
       connection: CONNECTION,
       concurrency: 1,
       blockTimeout: 500,
+      lockDuration: 1000,
       stalledInterval: 1000,
       maxStalledCount: 1,
     });
