@@ -975,10 +975,12 @@ describe('Scheduler', () => {
       [
         CONSUMER_GROUP,
         'test-consumer',
-        '1000', // minIdleMs = max(lockDuration, stalledInterval)
+        '1000', // minIdleMs = stalledInterval (XAUTOCLAIM cadence)
         '1', // maxStalledCount default
         expect.any(String), // timestamp
         queueKeys.failed,
+        '0', // broadcastMode
+        '1000', // workerLockDuration = lockDuration
       ],
     );
 
@@ -1108,16 +1110,15 @@ describe('Scheduler', () => {
     expect(mockClient.fcall).toHaveBeenCalledWith(
       'glidemq_reclaimStalled',
       [queueKeys.stream, queueKeys.events],
-      [CONSUMER_GROUP, 'my-consumer', '15000', '3', now.toString(), queueKeys.failed],
+      [CONSUMER_GROUP, 'my-consumer', '15000', '3', now.toString(), queueKeys.failed, '0', '15000'],
     );
   });
 
-  it('reclaimStalledJobs uses max(lockDuration, stalledInterval) as effective stall threshold', async () => {
+  it('reclaimStalledJobs passes worker lockDuration as a separate arg', async () => {
     const now = 1700000000000;
     vi.setSystemTime(now);
     mockClient.fcall = vi.fn().mockResolvedValue(0);
 
-    // lockDuration > stalledInterval -> threshold should be lockDuration
     const scheduler = new Scheduler(mockClient as any, queueKeys, {
       stalledInterval: 5000,
       lockDuration: 60000,
@@ -1130,7 +1131,8 @@ describe('Scheduler', () => {
     expect(mockClient.fcall).toHaveBeenCalledWith(
       'glidemq_reclaimStalled',
       [queueKeys.stream, queueKeys.events],
-      [CONSUMER_GROUP, 'long-lock', '60000', '1', now.toString(), queueKeys.failed],
+      // minIdleMs=stalledInterval (XAUTOCLAIM cadence), workerLockDuration=lockDuration (per-entry threshold)
+      [CONSUMER_GROUP, 'long-lock', '5000', '1', now.toString(), queueKeys.failed, '0', '60000'],
     );
   });
 });

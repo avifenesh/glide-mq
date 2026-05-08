@@ -273,17 +273,6 @@ export class Scheduler {
   }
 
   /**
-   * Effective stall threshold: lockDuration is the contract ("how long the worker
-   * holds the job before it's considered stalled"); stalledInterval is the
-   * cadence at which checks fire. The threshold cannot reasonably be smaller
-   * than the cadence, so we take the max. Per-job opts.lockDuration overrides
-   * this in Lua when set on the job hash.
-   */
-  private effectiveStallThreshold(): number {
-    return Math.max(this.lockDuration, this.stalledInterval);
-  }
-
-  /**
    * Reclaim stalled jobs whose consumers haven't ACKed within the stall threshold.
    * Calls FCALL glidemq_reclaimStalled via XAUTOCLAIM semantics in Lua.
    */
@@ -292,11 +281,12 @@ export class Scheduler {
       this.client,
       this.queueKeys,
       this.consumerId,
-      this.effectiveStallThreshold(),
+      this.stalledInterval,
       this.maxStalledCount,
       Date.now(),
       this.consumerGroup,
       this.broadcastMode,
+      this.lockDuration,
     );
   }
 
@@ -308,9 +298,10 @@ export class Scheduler {
     return reclaimStalledListJobsCmd(
       this.client,
       this.queueKeys,
-      this.effectiveStallThreshold(),
+      this.stalledInterval,
       this.maxStalledCount,
       Date.now(),
+      this.lockDuration,
     );
   }
 
