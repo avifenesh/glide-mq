@@ -230,7 +230,7 @@ describeEachMode('list-active counter underflow (issue #217)', (CONNECTION) => {
       call: async (k, jobId) => {
         await cleanupClient.fcall(
           'glidemq_removeJob',
-          [k.job(jobId), k.stream, k.scheduled, k.completed, k.failed, k.events, `glide:{${'rmq'}}:log:${jobId}`],
+          [k.job(jobId), k.stream, k.scheduled, k.completed, k.failed, k.events, k.log(jobId)],
           [jobId],
         );
       },
