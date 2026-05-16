@@ -3554,6 +3554,8 @@ end)
 redis.register_function('glidemq_sweepSuspended', function(keys, args)
   local suspendedKey = keys[1]
   local eventsKey = keys[2]
+  local failedKey = keys[3]
+  local metricsKey = keys[4]
   local now = tonumber(args[1]) or 0
   local keyPrefix = args[2] or ''
 
@@ -3566,8 +3568,26 @@ redis.register_function('glidemq_sweepSuspended', function(keys, args)
     local jobKey = keyPrefix .. 'job:' .. id
     local jState = redis.call('HGET', jobKey, 'state')
     if jState == 'suspended' then
-      redis.call('HSET', jobKey, 'state', 'failed', 'failedReason', 'Suspend timeout exceeded')
+      local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or now
+      local ordKey = redis.call('HGET', jobKey, 'orderingKey')
+      local ordSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+      local grpKey = redis.call('HGET', jobKey, 'groupKey')
+      redis.call('ZADD', failedKey, now, id)
+      redis.call('HSET', jobKey,
+        'state', 'failed',
+        'failedReason', 'Suspend timeout exceeded',
+        'finishedOn', tostring(now),
+        'processedOn', tostring(now)
+      )
+      markOrderingDone(jobKey, id, ordKey, ordSeq)
+      -- Only release the group slot for ordered jobs. Non-ordered jobs already
+      -- released their slot in glidemq_suspend; releasing again would double-
+      -- decrement the group's active counter.
+      if ordSeq > 0 then
+        releaseGroupSlotAndPromote(jobKey, id, now, grpKey)
+      end
       emitEvent(eventsKey, 'failed', id, {'failedReason', 'Suspend timeout exceeded'})
+      recordMetrics(metricsKey, now, now - processedOn)
       count = count + 1
     end
     redis.call('ZREM', suspendedKey, id)
@@ -4823,7 +4843,7 @@ export async function sweepSuspended(
 ): Promise<number> {
   const result = await client.fcall(
     'glidemq_sweepSuspended',
-    [k.suspended, k.events],
+    [k.suspended, k.events, k.failed, k.metricsFailed],
     [timestamp.toString(), keyPrefix],
   );
   return Number(result) || 0;
