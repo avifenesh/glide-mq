@@ -143,7 +143,6 @@ describe('Worker', () => {
     await worker.close(true);
   });
 
-
   it('should cap batch-mode xreadgroup count to batch size when prefetch is larger', async () => {
     const processor = vi.fn().mockResolvedValue([]);
 
