@@ -673,7 +673,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
       }
 
       if (opts?.lockDuration != null) {
-        if (!Number.isFinite(opts.lockDuration) || opts.lockDuration <= 0 || opts.lockDuration > MAX_JOB_LOCK_DURATION_MS) {
+        if (
+          !Number.isFinite(opts.lockDuration) ||
+          opts.lockDuration <= 0 ||
+          opts.lockDuration > MAX_JOB_LOCK_DURATION_MS
+        ) {
           throw new Error(`lockDuration must be a positive finite number <= ${MAX_JOB_LOCK_DURATION_MS}`);
         }
       }
