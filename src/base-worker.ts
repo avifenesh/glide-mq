@@ -861,7 +861,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       // Already handled server-side by checkExpired in Lua.
       // For list-backed jobs (entryId=''), release the reserved list-active slot.
       if (entryId === '') {
-        await this.commandClient.decrBy(this.queueKeys.listActive, 1);
+        await this.releaseListActiveSlot();
       }
       return true;
     }
@@ -875,11 +875,27 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       // Job was parked/rejected before entering processor execution.
       // For list-backed jobs (entryId=''), release the reserved list-active slot.
       if (entryId === '') {
-        await this.commandClient.decrBy(this.queueKeys.listActive, 1);
+        await this.releaseListActiveSlot();
       }
       return true;
     }
     return false;
+  }
+
+  /**
+   * Release a reserved list-active slot. Used for list-backed jobs that exit
+   * before processor execution (e.g. EXPIRED, GROUP_FULL, GROUP_RATE_LIMITED,
+   * GROUP_TOKEN_LIMITED, GROUP_ORDERED, ERR:COST_EXCEEDS_CAPACITY).
+   * Errors are emitted rather than thrown so a transient DECR failure does not
+   * abort the caller's loop and leak more slots.
+   */
+  protected async releaseListActiveSlot(): Promise<void> {
+    if (!this.commandClient) return;
+    try {
+      await this.commandClient.decrBy(this.queueKeys.listActive, 1);
+    } catch (err) {
+      this.emit('error', new Error('list-active release failed', { cause: err }));
+    }
   }
 
   /**
