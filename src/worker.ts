@@ -24,6 +24,9 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
     }
 
     let fetchCount = available;
+    if (this.batchMode) {
+      fetchCount = Math.min(fetchCount, this.batchSize);
+    }
 
     // Only check global concurrency if configured. Skipping this FCALL entirely
     // saves one Valkey round trip per poll cycle (~0.2ms).
