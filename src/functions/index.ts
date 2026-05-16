@@ -3480,6 +3480,9 @@ redis.register_function('glidemq_sweepSuspended', function(keys, args)
     local jState = redis.call('HGET', jobKey, 'state')
     if jState == 'suspended' then
       local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or now
+      local ordKey = redis.call('HGET', jobKey, 'orderingKey')
+      local ordSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+      local grpKey = redis.call('HGET', jobKey, 'groupKey')
       redis.call('ZADD', failedKey, now, id)
       redis.call('HSET', jobKey,
         'state', 'failed',
@@ -3487,8 +3490,13 @@ redis.register_function('glidemq_sweepSuspended', function(keys, args)
         'finishedOn', tostring(now),
         'processedOn', tostring(now)
       )
-      markOrderingDone(jobKey, id)
-      releaseGroupSlotAndPromote(jobKey, id, now)
+      markOrderingDone(jobKey, id, ordKey, ordSeq)
+      -- Only release the group slot for ordered jobs. Non-ordered jobs already
+      -- released their slot in glidemq_suspend; releasing again would double-
+      -- decrement the group's active counter.
+      if ordSeq > 0 then
+        releaseGroupSlotAndPromote(jobKey, id, now, grpKey)
+      end
       emitEvent(eventsKey, 'failed', id, {'failedReason', 'Suspend timeout exceeded'})
       recordMetrics(metricsKey, now, now - processedOn)
       count = count + 1
