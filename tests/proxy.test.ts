@@ -1232,6 +1232,33 @@ describe('HTTP Proxy - Queue Allowlist', () => {
     expect(res.status).toBe(403);
   });
 
+  it('rejects opts.parent on add endpoint', async () => {
+    const res = await fetch(`${baseUrl}/queues/${allowedQueue}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'child',
+        opts: { parent: { queue: blockedQueue, id: 'parent-1' } },
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('opts.parent is not allowed');
+  });
+
+  it('rejects opts.parent on bulk add endpoint', async () => {
+    const res = await fetch(`${baseUrl}/queues/${allowedQueue}/jobs/bulk`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jobs: [{ name: 'child', opts: { parent: { queue: blockedQueue, id: 'parent-2' } } }],
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain('jobs[0]: opts.parent is not allowed');
+  });
+
   it('health endpoint is not blocked by allowlist', async () => {
     const res = await fetch(`${baseUrl}/health`);
     expect(res.status).toBe(200);
