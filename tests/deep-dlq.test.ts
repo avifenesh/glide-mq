@@ -675,4 +675,64 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
     const dlqData = dlqJobs[0].data as any;
     expect(dlqData.originalQueue).toBe(queueName);
   });
+
+  it('shared DLQ methods scope jobs to the owning queue', async () => {
+    const sharedDlqName = `${uid()}-shared`;
+    const allowedQueueName = uid();
+    const blockedQueueName = uid();
+    const allowedQueue = new Queue(allowedQueueName, {
+      connection: CONNECTION,
+      deadLetterQueue: { name: sharedDlqName },
+    });
+    const blockedQueue = new Queue(blockedQueueName, {
+      connection: CONNECTION,
+      deadLetterQueue: { name: sharedDlqName },
+    });
+    const allowedWorker = new Worker(
+      allowedQueueName,
+      async () => {
+        throw new Error('allowed failure');
+      },
+      { connection: CONNECTION, deadLetterQueue: { name: sharedDlqName }, stalledInterval: 60000 },
+    );
+    const blockedWorker = new Worker(
+      blockedQueueName,
+      async () => {
+        throw new Error('blocked failure');
+      },
+      { connection: CONNECTION, deadLetterQueue: { name: sharedDlqName }, stalledInterval: 60000 },
+    );
+
+    try {
+      await allowedWorker.waitUntilReady();
+      await blockedWorker.waitUntilReady();
+
+      await allowedQueue.add('allowed-job', { ok: true }, { attempts: 1 });
+      await blockedQueue.add('blocked-job', { secret: true }, { attempts: 1 });
+
+      await waitFor(async () => {
+        const allowed = await allowedQueue.getDeadLetterJobs();
+        const blocked = await blockedQueue.getDeadLetterJobs();
+        return allowed.length === 1 && blocked.length === 1;
+      });
+
+      const allowedJobs = await allowedQueue.getDeadLetterJobs();
+      expect(allowedJobs).toHaveLength(1);
+      const blockedJobs = await blockedQueue.getDeadLetterJobs();
+      expect(blockedJobs).toHaveLength(1);
+
+      const blockedDlqId = blockedJobs[0].id;
+      expect(await allowedQueue.getDeadLetterJob(blockedDlqId)).toBeNull();
+      expect(await allowedQueue.removeDeadLetterJob(blockedDlqId)).toBe(false);
+      expect(await allowedQueue.replayDeadLetterJob(blockedDlqId)).toBeNull();
+    } finally {
+      await blockedWorker.close(true).catch(() => undefined);
+      await allowedWorker.close(true).catch(() => undefined);
+      await blockedQueue.close();
+      await allowedQueue.close();
+      await flushQueue(cleanupClient, allowedQueueName);
+      await flushQueue(cleanupClient, blockedQueueName);
+      await flushQueue(cleanupClient, sharedDlqName);
+    }
+  });
 });

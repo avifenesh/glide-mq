@@ -2401,20 +2401,30 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
       for (let offset = 0; offset < candidateJobIds.length; offset += PIPELINE_CHUNK_SIZE) {
         const chunkJobIds = candidateJobIds.slice(offset, offset + PIPELINE_CHUNK_SIZE);
+        // Always load data internally so the ownership envelope is available, then
+        // strip data on the way out when the caller asked for excludeData.
         const chunkJobs = await this.loadJobsByIdsForKeys(client, dlqKeys, chunkJobIds, {
-          excludeData: opts?.excludeData,
+          excludeData: false,
           serializer: undefined,
         });
+        const scopedChunkJobs = chunkJobs.filter((job) => this.isDeadLetterJobOwnedByQueue(job));
 
-        if (seenExisting + chunkJobs.length <= start) {
-          seenExisting += chunkJobs.length;
+        if (seenExisting + scopedChunkJobs.length <= start) {
+          seenExisting += scopedChunkJobs.length;
           continue;
         }
 
         const sliceStart = Math.max(0, start - seenExisting);
         const remaining = Number.isFinite(targetCount) ? targetCount - selected.length : undefined;
-        selected.push(...chunkJobs.slice(sliceStart, remaining != null ? sliceStart + remaining : undefined));
-        seenExisting += chunkJobs.length;
+        const pageSlice = scopedChunkJobs.slice(sliceStart, remaining != null ? sliceStart + remaining : undefined);
+        if (opts?.excludeData) {
+          for (const job of pageSlice) {
+            (job as { data: unknown }).data = undefined;
+            (job as { returnvalue: unknown }).returnvalue = undefined;
+          }
+        }
+        selected.push(...pageSlice);
+        seenExisting += scopedChunkJobs.length;
 
         if (Number.isFinite(targetCount) && selected.length >= targetCount) {
           break;
@@ -2453,11 +2463,19 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const dlqName = await this.resolveDeadLetterQueueName(client);
     if (!dlqName) return null;
     const dlqKeys = buildKeys(dlqName, this.opts.prefix);
+    // Always load data internally so the ownership envelope is available; strip it
+    // afterwards when the caller asked for excludeData.
     const jobs = await this.loadJobsByIdsForKeys(client, dlqKeys, [jobId], {
-      excludeData: opts?.excludeData,
+      excludeData: false,
       serializer: undefined,
     });
-    return jobs[0] ?? null;
+    const job = jobs[0] ?? null;
+    if (!job || !this.isDeadLetterJobOwnedByQueue(job)) return null;
+    if (opts?.excludeData) {
+      (job as { data: unknown }).data = undefined;
+      (job as { returnvalue: unknown }).returnvalue = undefined;
+    }
+    return job;
   }
 
   /**
@@ -2469,6 +2487,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const dlqName = await this.resolveDeadLetterQueueName(client);
     if (!dlqName) return false;
     const dlqKeys = buildKeys(dlqName, this.opts.prefix);
+    // Ownership check requires the envelope (originalQueue lives in data); excludeData
+    // is honoured inside getDeadLetterJob, which still loads the envelope internally.
     const existing = await this.getDeadLetterJob(jobId, { excludeData: true });
     if (!existing) return false;
     await removeJob(client, dlqKeys, jobId);
@@ -2483,23 +2503,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const dlqJob = await this.getDeadLetterJob(jobId);
     if (!dlqJob) return null;
 
-    const envelope = dlqJob.data as
-      | {
-          attemptsMade?: number;
-          data?: unknown;
-          failedReason?: string;
-          originalJobId?: string;
-          originalQueue?: string;
-        }
-      | undefined;
-
-    if (!envelope?.originalQueue || typeof envelope.originalQueue !== 'string') {
+    const originalQueueName = this.getDeadLetterOriginalQueue(dlqJob);
+    if (!originalQueueName) {
       throw new GlideMQError('DLQ entry is missing originalQueue metadata');
     }
-    validateQueueName(envelope.originalQueue);
+    validateQueueName(originalQueueName);
 
     const client = await this.getClient();
-    const originalQueue = new Queue<any, any>(envelope.originalQueue, {
+    const originalQueue = new Queue<any, any>(originalQueueName, {
       client,
       compression: this.opts.compression,
       connection: this.opts.connection,
@@ -2508,10 +2519,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
     });
 
     try {
-      let replayData = envelope.data;
+      const envelope = dlqJob.data as { originalJobId?: string; data?: unknown } | undefined;
+      let replayData = envelope?.data;
       let replayOpts: JobOptions | undefined;
-
-      if (envelope.originalJobId) {
+      if (envelope?.originalJobId) {
         const originalJob = await originalQueue.getJob(envelope.originalJobId);
         if (originalJob) {
           replayData = originalJob.data;
@@ -2536,6 +2547,15 @@ export class Queue<D = any, R = any> extends EventEmitter {
     } finally {
       await originalQueue.close().catch(() => undefined);
     }
+  }
+
+  private getDeadLetterOriginalQueue(job: Job<any, any>): string | null {
+    const data = job.data as { originalQueue?: unknown } | undefined;
+    return typeof data?.originalQueue === 'string' ? data.originalQueue : null;
+  }
+
+  private isDeadLetterJobOwnedByQueue(job: Job<any, any>): boolean {
+    return this.getDeadLetterOriginalQueue(job) === this.name;
   }
 
   /**
