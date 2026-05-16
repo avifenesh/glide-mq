@@ -909,11 +909,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     const ac = new AbortController();
     this.activeAbortControllers.set(jobId, ac);
     job.abortSignal = ac.signal;
-    // Force periodic heartbeat when a pre-processor wait could exceed stalledInterval.
-    // Without this, default 30s/30s configs skip the periodic heartbeat (see startHeartbeat
-    // guard) and a long TPM/rate limiter wait can be reclaimed as stalled.
-    const willWait = Boolean(this.opts.limiter || this.globalRateLimitEnabled || this.opts.tokenLimiter);
-    this.startHeartbeat(jobId, job.opts.lockDuration, willWait);
+    this.startHeartbeat(jobId, job.opts.lockDuration);
 
     if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
     if (this.opts.tokenLimiter) await this.waitForTokenLimit();
@@ -1559,18 +1555,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     return false;
   }
 
-  protected startHeartbeat(jobId: string, jobLockDuration?: number, force = false): void {
+  protected startHeartbeat(jobId: string, jobLockDuration?: number): void {
     if (!this.commandClient) return;
     // Use per-job lockDuration when specified, otherwise fall back to worker-level.
     const effectiveLock = jobLockDuration ?? this.lockDuration;
-    // Only start periodic heartbeat for long lockDurations where stall detection matters.
-    // moveToActive already writes the initial lastActive - protects against immediate stall reclaim.
-    // For the default 30s lockDuration with 30s stalledInterval, the heartbeat fires at 15s.
-    // Skip entirely if lockDuration >= stalledInterval (initial write is sufficient for one cycle).
-    // `force=true` bypasses this guard when a pre-processor wait (rate/token limiter) is possible
-    // and the job could otherwise be reclaimed as stalled while sleeping.
-    if (!force && effectiveLock >= this.stalledInterval) return;
     const interval = effectiveLock / 2;
+    if (interval <= 0) return;
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
     const timer = setInterval(() => {
