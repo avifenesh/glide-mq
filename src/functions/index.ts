@@ -47,7 +47,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 85: extractLockDurationFromOpts clamps to >=1000ms (1s) to prevent tight-heartbeat DoS via per-job lockDuration; sub-second values fall back to worker lockDuration / minIdleMs (#225).
 // Version 86: glidemq_reclaimStalledListJobs refreshes lastActive on detection to dedupe stalled-recovery across concurrent worker schedulers - same stale list job counted at most once per interval (#228).
 // Version 87: releaseGroupSlotAndPromote caps maxConcurrency promotion budget at 1000 to prevent unbounded Lua loop on large maxConcurrency settings (#236).
-export const LIBRARY_VERSION = '87';
+// Version 88: glidemq_promote counts expired scheduled jobs toward MAX_PROMOTIONS budget - prevents unbounded scans when many expired jobs sit in scheduled set (#235).
+export const LIBRARY_VERSION = '88';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -755,6 +756,7 @@ redis.register_function('glidemq_promote', function(keys, args)
       local prefix = string.sub(scheduledKey, 1, #scheduledKey - 9)
       local jobKey = prefix .. 'job:' .. jobId
       redis.call('ZREM', scheduledKey, member)
+      count = count + 1
       if not checkExpired(jobKey, jobId, prefix, now) then
         local jobLifo = redis.call('HGET', jobKey, 'lifo')
         if jobLifo == '1' then
@@ -775,8 +777,8 @@ redis.register_function('glidemq_promote', function(keys, args)
         end
         redis.call('HSET', jobKey, 'state', 'waiting')
         emitEvent(eventsKey, 'promoted', jobId, nil)
-        count = count + 1
       end
+      if count >= MAX_PROMOTIONS then break end
     end
     cursorMin = (priority + 1) * PRIORITY_SHIFT
   end
