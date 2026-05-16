@@ -261,6 +261,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   readonly name: string;
   private opts: QueueOptions;
   private client: Client | null = null;
+  private clientInitPromise: Promise<Client> | null = null;
   private clientOwned = true;
   private queueMetaConfigSynced = false;
   private _clusterMode: boolean | undefined;
@@ -511,40 +512,53 @@ export class Queue<D = any, R = any> extends EventEmitter {
       throw new GlideMQError('Queue is closing');
     }
     if (!this.client) {
-      if (this.opts.client) {
-        const injected = this.opts.client;
-        try {
-          await ensureFunctionLibraryOnce(
-            injected,
-            LIBRARY_SOURCE,
-            this.opts.connection?.clusterMode ?? isClusterClient(injected),
-          );
-        } catch (err) {
-          this.emit('error', err);
-          throw err;
-        }
-        this.client = injected;
-        this.clientOwned = false;
-      } else {
-        let client: Client;
-        try {
-          client = await createClient(this.opts.connection!);
-          await ensureFunctionLibrary(client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
-        } catch (err) {
-          // Don't cache a failed client - next getClient() call will retry
-          this.emit('error', err);
-          throw err;
-        }
-        this.client = client;
-        this.clientOwned = true;
+      if (!this.clientInitPromise) {
+        this.clientInitPromise = (async () => {
+          if (this.opts.client) {
+            const injected = this.opts.client;
+            try {
+              await ensureFunctionLibraryOnce(
+                injected,
+                LIBRARY_SOURCE,
+                this.opts.connection?.clusterMode ?? isClusterClient(injected),
+              );
+            } catch (err) {
+              this.emit('error', err);
+              throw err;
+            }
+            this.client = injected;
+            this.clientOwned = false;
+            return injected;
+          }
+
+          let client: Client;
+          try {
+            client = await createClient(this.opts.connection!);
+            await ensureFunctionLibrary(client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
+          } catch (err) {
+            // Don't cache a failed client - next getClient() call will retry
+            this.emit('error', err);
+            throw err;
+          }
+          this.client = client;
+          this.clientOwned = true;
+          return client;
+        })().finally(() => {
+          this.clientInitPromise = null;
+        });
       }
+      await this.clientInitPromise;
+    }
+    const client = this.client;
+    if (!client) {
+      throw new GlideMQError('Queue client initialization failed');
     }
     if (!this.queueMetaConfigSynced) {
-      await this.syncQueueMetaConfig(this.client);
+      await this.syncQueueMetaConfig(client);
       this.queueMetaConfigSynced = true;
     }
-    this.ensureSuspendSweepLoop(this.client);
-    return this.client;
+    this.ensureSuspendSweepLoop(client);
+    return client;
   }
 
   private async syncQueueMetaConfig(client: Client): Promise<void> {
