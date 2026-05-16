@@ -2381,16 +2381,17 @@ export class Queue<D = any, R = any> extends EventEmitter {
           excludeData: opts?.excludeData,
           serializer: undefined,
         });
+        const scopedChunkJobs = chunkJobs.filter((job) => this.isDeadLetterJobOwnedByQueue(job));
 
-        if (seenExisting + chunkJobs.length <= start) {
-          seenExisting += chunkJobs.length;
+        if (seenExisting + scopedChunkJobs.length <= start) {
+          seenExisting += scopedChunkJobs.length;
           continue;
         }
 
         const sliceStart = Math.max(0, start - seenExisting);
         const remaining = Number.isFinite(targetCount) ? targetCount - selected.length : undefined;
-        selected.push(...chunkJobs.slice(sliceStart, remaining != null ? sliceStart + remaining : undefined));
-        seenExisting += chunkJobs.length;
+        selected.push(...scopedChunkJobs.slice(sliceStart, remaining != null ? sliceStart + remaining : undefined));
+        seenExisting += scopedChunkJobs.length;
 
         if (Number.isFinite(targetCount) && selected.length >= targetCount) {
           break;
@@ -2433,7 +2434,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
       excludeData: opts?.excludeData,
       serializer: undefined,
     });
-    return jobs[0] ?? null;
+    const job = jobs[0] ?? null;
+    if (!job || !this.isDeadLetterJobOwnedByQueue(job)) return null;
+    return job;
   }
 
   /**
@@ -2459,23 +2462,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const dlqJob = await this.getDeadLetterJob(jobId);
     if (!dlqJob) return null;
 
-    const envelope = dlqJob.data as
-      | {
-          attemptsMade?: number;
-          data?: unknown;
-          failedReason?: string;
-          originalJobId?: string;
-          originalQueue?: string;
-        }
-      | undefined;
-
-    if (!envelope?.originalQueue || typeof envelope.originalQueue !== 'string') {
+    const originalQueueName = this.getDeadLetterOriginalQueue(dlqJob);
+    if (!originalQueueName) {
       throw new GlideMQError('DLQ entry is missing originalQueue metadata');
     }
-    validateQueueName(envelope.originalQueue);
+    validateQueueName(originalQueueName);
 
     const client = await this.getClient();
-    const originalQueue = new Queue<any, any>(envelope.originalQueue, {
+    const originalQueue = new Queue<any, any>(originalQueueName, {
       client,
       compression: this.opts.compression,
       connection: this.opts.connection,
@@ -2484,10 +2478,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
     });
 
     try {
-      let replayData = envelope.data;
+      const envelope = dlqJob.data as { originalJobId?: string; data?: unknown } | undefined;
+      let replayData = envelope?.data;
       let replayOpts: JobOptions | undefined;
-
-      if (envelope.originalJobId) {
+      if (envelope?.originalJobId) {
         const originalJob = await originalQueue.getJob(envelope.originalJobId);
         if (originalJob) {
           replayData = originalJob.data;
@@ -2512,6 +2506,15 @@ export class Queue<D = any, R = any> extends EventEmitter {
     } finally {
       await originalQueue.close().catch(() => undefined);
     }
+  }
+
+  private getDeadLetterOriginalQueue(job: Job<any, any>): string | null {
+    const data = job.data as { originalQueue?: unknown } | undefined;
+    return typeof data?.originalQueue === 'string' ? data.originalQueue : null;
+  }
+
+  private isDeadLetterJobOwnedByQueue(job: Job<any, any>): boolean {
+    return this.getDeadLetterOriginalQueue(job) === this.name;
   }
 
   /**
