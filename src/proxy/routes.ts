@@ -413,6 +413,27 @@ function validateJobOpts(
   options?: { allowWaitTimeout?: boolean },
 ): string | null {
   if (!optsIn) return null;
+  const allowedKeys = new Set([
+    'jobId',
+    'delay',
+    'priority',
+    'attempts',
+    'backoff',
+    'timeout',
+    'removeOnComplete',
+    'removeOnFail',
+    'deduplication',
+    'ttl',
+    'ordering',
+    'cost',
+    'lifo',
+    ...(options?.allowWaitTimeout ? (['waitTimeout'] as const) : []),
+  ]);
+  for (const key of Object.keys(optsIn)) {
+    if (!allowedKeys.has(key)) {
+      return `${prefix}opts.${key} is not allowed`;
+    }
+  }
 
   if (optsIn.jobId !== undefined) {
     if (typeof optsIn.jobId !== 'string' || optsIn.jobId === '') {
