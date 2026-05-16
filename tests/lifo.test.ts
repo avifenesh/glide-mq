@@ -864,6 +864,46 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
     await flushQueue(cleanupClient, Q);
   });
 
+  it('reclaimStalledListJobs de-duplicates list stall accounting for the same timestamp', async () => {
+    const Q = `stall-lifo-dedupe-${Date.now()}`;
+    const k = buildKeys(Q);
+    const jobId = 'stalled-lifo-dedupe-1';
+    const staleTime = Date.now() - 60000;
+    const now = Date.now();
+
+    await cleanupClient.hset(k.job(jobId), {
+      name: 'stalled-task',
+      data: '{}',
+      opts: '{}',
+      state: 'active',
+      lifo: '1',
+      processedOn: staleTime.toString(),
+      lastActive: staleTime.toString(),
+      stalledCount: '0',
+      attemptsMade: '0',
+    });
+    await cleanupClient.set(k.listActive, '1');
+
+    const count1 = await cleanupClient.fcall(
+      'glidemq_reclaimStalledListJobs',
+      [k.stream, k.events],
+      ['5000', '1', now.toString(), k.failed],
+    );
+    const count2 = await cleanupClient.fcall(
+      'glidemq_reclaimStalledListJobs',
+      [k.stream, k.events],
+      ['5000', '1', now.toString(), k.failed],
+    );
+
+    expect(Number(count1)).toBe(1);
+    expect(Number(count2)).toBe(0);
+    expect(await cleanupClient.hget(k.job(jobId), 'state')).toBe('active');
+    expect(await cleanupClient.hget(k.job(jobId), 'stalledCount')).toBe('1');
+    expect(await cleanupClient.get(k.listActive)).toBe('1');
+
+    await flushQueue(cleanupClient, Q);
+  });
+
   it('deferActive DECRs list-active when entryId is empty (list-sourced job)', async () => {
     const Q = `defer-active-decr-${Date.now()}`;
     const k = buildKeys(Q);

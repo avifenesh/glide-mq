@@ -1591,6 +1591,10 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
           effectiveIdle = minIdleMs
         end
         if isListSourced and lastActive and (timestamp - lastActive) >= effectiveIdle then
+          -- Claim this stalled check by refreshing lastActive. This preserves
+          -- XAUTOCLAIM-like de-duplication semantics across worker schedulers
+          -- so the same stale list job is counted at most once per interval.
+          redis.call('HSET', jk, 'lastActive', tostring(timestamp))
           local jobId = string.sub(jk, #prefix + 5)
           local shouldDecr = false
           if checkExpired(jk, jobId, prefix, timestamp) then
