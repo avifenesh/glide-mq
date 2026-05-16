@@ -44,12 +44,20 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
     // Check priority list first (priority > LIFO > FIFO), then LIFO, before blocking on stream
     if (await this.tryPopFromLists(fetchCount)) return;
 
-    // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
-    // STREAMS {streamKey} >
-    const result = await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
-      count: fetchCount,
-      block: this.blockTimeout,
-    });
+    // First drain this consumer's pending entries (e.g. reclaimed via XAUTOCLAIM),
+    // then block for never-delivered entries.
+    const pendingResult = await this.blockingClient.xreadgroup(
+      CONSUMER_GROUP,
+      this.consumerId,
+      { [this.queueKeys.stream]: '0' },
+      { count: fetchCount },
+    );
+    const result =
+      pendingResult ??
+      (await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
+        count: fetchCount,
+        block: this.blockTimeout,
+      }));
 
     if (!result) {
       // Stream empty - check priority and LIFO lists for jobs added while we were blocking
