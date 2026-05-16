@@ -779,11 +779,13 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
     const la1 = await cleanupClient.get(k.listActive);
     expect(la1).toBe('1');
 
-    // Second call: stalledCount goes from 1 to 2 (> maxStalledCount), job moves to failed
+    // Second call: stalledCount goes from 1 to 2 (> maxStalledCount), job moves to failed.
+    // Advance timestamp past minIdleMs (5000) so the dedup refresh from the first call no
+    // longer suppresses detection in this fresh recovery window.
     const count2 = await cleanupClient.fcall(
       'glidemq_reclaimStalledListJobs',
       [k.stream, k.events],
-      ['5000', '1', (now + 1).toString(), k.failed],
+      ['5000', '1', (now + 6000).toString(), k.failed],
     );
     expect(Number(count2)).toBe(1);
     const state2 = await cleanupClient.hget(k.job(jobId), 'state');
@@ -841,11 +843,13 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
     const la1 = await cleanupClient.get(k.listActive);
     expect(la1).toBe('1');
 
-    // Second call: stalledCount 1 -> 2 (> maxStalledCount), job moves to failed
+    // Second call: stalledCount 1 -> 2 (> maxStalledCount), job moves to failed.
+    // Advance timestamp past minIdleMs (5000) so the dedup refresh from the first call no
+    // longer suppresses detection in this fresh recovery window.
     const count2 = await cleanupClient.fcall(
       'glidemq_reclaimStalledListJobs',
       [k.stream, k.events],
-      ['5000', '1', (now + 1).toString(), k.failed],
+      ['5000', '1', (now + 6000).toString(), k.failed],
     );
     expect(Number(count2)).toBe(1);
     const state2 = await cleanupClient.hget(k.job(jobId), 'state');

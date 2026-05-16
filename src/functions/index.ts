@@ -45,7 +45,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 83: glidemq_getActiveListJobIds - bounded SCAN that returns active list-sourced jobIds for getJobs('active') visibility (#213).
 // Version 84: glidemq_reclaimStalled / glidemq_reclaimStalledListJobs accept workerLockDuration arg - per-entry threshold falls back to it before minIdleMs, so per-job opts.lockDuration overrides still fire under XAUTOCLAIM gating (#213).
 // Version 85: extractLockDurationFromOpts clamps to >=1000ms (1s) to prevent tight-heartbeat DoS via per-job lockDuration; sub-second values fall back to worker lockDuration / minIdleMs (#225).
-export const LIBRARY_VERSION = '85';
+// Version 86: glidemq_reclaimStalledListJobs refreshes lastActive on detection to dedupe stalled-recovery across concurrent worker schedulers - same stale list job counted at most once per interval (#228).
+export const LIBRARY_VERSION = '86';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
