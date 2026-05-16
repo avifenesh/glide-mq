@@ -742,10 +742,18 @@ redis.register_function('glidemq_promote', function(keys, args)
       remaining
     )
     for i = 1, #members do
-      local jobId = members[i]
+      local member = members[i]
+      local sepStart, sepEnd = string.find(member, '||', 1, true)
+      local jobId = member
+      local retryGroup = nil
+      if sepStart then
+        jobId = string.sub(member, 1, sepStart - 1)
+        retryGroup = string.sub(member, sepEnd + 1)
+        if retryGroup == '' then retryGroup = nil end
+      end
       local prefix = string.sub(scheduledKey, 1, #scheduledKey - 9)
       local jobKey = prefix .. 'job:' .. jobId
-      redis.call('ZREM', scheduledKey, jobId)
+      redis.call('ZREM', scheduledKey, member)
       if not checkExpired(jobKey, jobId, prefix, now) then
         local jobLifo = redis.call('HGET', jobKey, 'lifo')
         if jobLifo == '1' then
@@ -757,7 +765,12 @@ redis.register_function('glidemq_promote', function(keys, args)
           local priorityKey = prefix .. 'priority'
           redis.call('LPUSH', priorityKey, jobId)
         else
-          xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
+          local jobName = redis.call('HGET', jobKey, 'name')
+          if retryGroup then
+            redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name', jobName or '', 'retryGroup', retryGroup)
+          else
+            xaddJob(streamKey, jobId, jobName)
+          end
         end
         redis.call('HSET', jobKey, 'state', 'waiting')
         emitEvent(eventsKey, 'promoted', jobId, nil)
@@ -1415,7 +1428,11 @@ redis.register_function('glidemq_fail', function(keys, args)
     local retryAt = timestamp + backoffDelay
     local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
     local score = priority * PRIORITY_SHIFT + retryAt
-    redis.call('ZADD', scheduledKey, score, jobId)
+    local member = jobId
+    if broadcastMode == '1' then
+      member = jobId .. '||' .. group
+    end
+    redis.call('ZADD', scheduledKey, score, member)
     redis.call('HSET', jobKey,
       'state', 'delayed',
       'failedReason', failedReason,

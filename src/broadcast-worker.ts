@@ -81,15 +81,21 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
         // Parse the stream entry fields to extract jobId and name
         let jobId: string | null = null;
         let jobName: string | null = null;
+        let retryGroup: string | null = null;
         for (let i = 0; i < fieldPairs.length; i++) {
           const field = String(fieldPairs[i][0]);
           const value = String(fieldPairs[i][1]);
           if (field === 'jobId') jobId = value;
           else if (field === 'name') jobName = value;
-          if (jobId && jobName) break;
+          else if (field === 'retryGroup') retryGroup = value;
         }
 
         if (!jobId) continue;
+
+        if (retryGroup && retryGroup !== this.consumerGroup) {
+          await this.commandClient!.xack(this.queueKeys.stream, this.consumerGroup, [entryId]);
+          continue;
+        }
 
         // Subject filtering: auto-ACK and skip non-matching messages
         if (this.subjectMatcher && (!jobName || !this.subjectMatcher(jobName))) {
@@ -135,14 +141,19 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
 
         let jobId: string | null = null;
         let jobName: string | null = null;
+        let retryGroup: string | null = null;
         for (let i = 0; i < fieldPairs.length; i++) {
           const field = String(fieldPairs[i][0]);
           const value = String(fieldPairs[i][1]);
           if (field === 'jobId') jobId = value;
           else if (field === 'name') jobName = value;
-          if (jobId && jobName) break;
+          else if (field === 'retryGroup') retryGroup = value;
         }
         if (!jobId) continue;
+        if (retryGroup && retryGroup !== this.consumerGroup) {
+          await this.commandClient!.xack(this.queueKeys.stream, this.consumerGroup, [entryId]);
+          continue;
+        }
         // Subject filtering: auto-ACK and skip non-matching messages
         if (this.subjectMatcher && (!jobName || !this.subjectMatcher(jobName))) {
           await this.commandClient!.xack(this.queueKeys.stream, this.consumerGroup, [entryId]);
@@ -179,14 +190,19 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
             if (!fieldPairs) continue;
             let jobId: string | null = null;
             let jobName: string | null = null;
+            let retryGroup: string | null = null;
             for (let i = 0; i < fieldPairs.length; i++) {
               const field = String(fieldPairs[i][0]);
               const value = String(fieldPairs[i][1]);
               if (field === 'jobId') jobId = value;
               else if (field === 'name') jobName = value;
-              if (jobId && jobName) break;
+              else if (field === 'retryGroup') retryGroup = value;
             }
             if (!jobId) continue;
+            if (retryGroup && retryGroup !== this.consumerGroup) {
+              await this.commandClient!.xack(this.queueKeys.stream, this.consumerGroup, [entryId]);
+              continue;
+            }
             if (this.subjectMatcher && (!jobName || !this.subjectMatcher(jobName))) {
               await this.commandClient!.xack(this.queueKeys.stream, this.consumerGroup, [entryId]);
               continue;
