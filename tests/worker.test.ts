@@ -164,11 +164,12 @@ describe('Worker', () => {
 
     await vi.advanceTimersByTimeAsync(10);
 
-    expect(mockBlockingClient.xreadgroup).toHaveBeenCalledWith(
+    expect(mockBlockingClient.xreadgroup).toHaveBeenNthCalledWith(
+      1,
       CONSUMER_GROUP,
       expect.any(String),
-      { [keys.stream]: '>' },
-      { count: 4, block: 2000 },
+      { [keys.stream]: '0' },
+      { count: 4 },
     );
 
     resolveXRead!(null);
