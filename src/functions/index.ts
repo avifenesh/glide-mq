@@ -44,7 +44,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 82: Guard every list-active DECR with > 0 check via decrListActive() helper - prevents counter underflow on duplicate complete/fail/suspend, reclaim races, etc. (#217).
 // Version 83: glidemq_getActiveListJobIds - bounded SCAN that returns active list-sourced jobIds for getJobs('active') visibility (#213).
 // Version 84: glidemq_reclaimStalled / glidemq_reclaimStalledListJobs accept workerLockDuration arg - per-entry threshold falls back to it before minIdleMs, so per-job opts.lockDuration overrides still fire under XAUTOCLAIM gating (#213).
-export const LIBRARY_VERSION = '84';
+// Version 85: extractLockDurationFromOpts clamps to >=1000ms (1s) to prevent tight-heartbeat DoS via per-job lockDuration; sub-second values fall back to worker lockDuration / minIdleMs (#225).
+export const LIBRARY_VERSION = '85';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -481,7 +482,13 @@ local function extractLockDurationFromOpts(optsJson)
   if not optsJson or optsJson == '' then return 0 end
   local ok, decoded = pcall(cjson.decode, optsJson)
   if not ok or type(decoded) ~= 'table' then return 0 end
-  return tonumber(decoded['lockDuration']) or 0
+  local lockDuration = tonumber(decoded['lockDuration']) or 0
+  -- Bounds must mirror MIN/MAX_JOB_LOCK_DURATION_MS in src/queue.ts and
+  -- MIN/MAX_JOB_OPTS_LOCK_DURATION_MS in src/proxy/routes.ts. Out-of-range
+  -- values are treated as unset so server-side reclaim falls back to the
+  -- worker lockDuration / minIdleMs.
+  if lockDuration < 1000 or lockDuration > 86400000 then return 0 end
+  return lockDuration
 end
 
 -- Apply stall logic to a job: increment stalledCount, fail if over max, else emit stalled event.

@@ -98,6 +98,8 @@ const SUSPEND_SWEEP_LOCK_TTL_MS = 5000;
 const SUSPEND_NO_TIMEOUT_SCORE = 9_999_999_999_999;
 const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
 const MAX_USAGE_SUMMARY_KEY_READS = 100_000;
+const MIN_JOB_LOCK_DURATION_MS = 1000;
+const MAX_JOB_LOCK_DURATION_MS = 86_400_000;
 const USAGE_MODEL_FIELD_PREFIX = 'models:';
 const USAGE_TOKEN_FIELD_PREFIX = 'tokens:';
 const USAGE_COST_FIELD_PREFIX = 'costs:';
@@ -685,6 +687,18 @@ export class Queue<D = any, R = any> extends EventEmitter {
         if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
       }
 
+      if (opts?.lockDuration != null) {
+        if (
+          !Number.isFinite(opts.lockDuration) ||
+          opts.lockDuration < MIN_JOB_LOCK_DURATION_MS ||
+          opts.lockDuration > MAX_JOB_LOCK_DURATION_MS
+        ) {
+          throw new Error(
+            `lockDuration must be a finite number between ${MIN_JOB_LOCK_DURATION_MS} and ${MAX_JOB_LOCK_DURATION_MS}`,
+          );
+        }
+      }
+
       // Payload size validation - prevent DoS via oversized jobs
       let serialized = this.serializer.serialize(data);
       // UTF-8 worst case: 4 bytes per char. Skip Buffer.byteLength for small strings.
@@ -910,6 +924,17 @@ export class Queue<D = any, R = any> extends EventEmitter {
       }
       if (opts.ttl != null) {
         if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
+      }
+      if (opts.lockDuration != null) {
+        if (
+          !Number.isFinite(opts.lockDuration) ||
+          opts.lockDuration < MIN_JOB_LOCK_DURATION_MS ||
+          opts.lockDuration > MAX_JOB_LOCK_DURATION_MS
+        ) {
+          throw new Error(
+            `lockDuration must be a finite number between ${MIN_JOB_LOCK_DURATION_MS} and ${MAX_JOB_LOCK_DURATION_MS}`,
+          );
+        }
       }
       const deduplication = opts.deduplication;
       const customJobId = opts.jobId ?? '';
