@@ -481,7 +481,9 @@ local function extractLockDurationFromOpts(optsJson)
   if not optsJson or optsJson == '' then return 0 end
   local ok, decoded = pcall(cjson.decode, optsJson)
   if not ok or type(decoded) ~= 'table' then return 0 end
-  return tonumber(decoded['lockDuration']) or 0
+  local lockDuration = tonumber(decoded['lockDuration']) or 0
+  if lockDuration <= 0 or lockDuration > 86400000 then return 0 end
+  return lockDuration
 end
 
 -- Apply stall logic to a job: increment stalledCount, fail if over max, else emit stalled event.
