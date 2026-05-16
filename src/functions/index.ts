@@ -295,7 +295,7 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   -- Calculate how many slots are available for promotion
   local available = 1
   if maxConc > 0 then
-    available = maxConc - newActive
+    available = math.min(maxConc - newActive, 1000)
   else
     available = math.min(waitLen, 1000)
   end
