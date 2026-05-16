@@ -45,19 +45,23 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
     if (await this.tryPopFromLists(fetchCount)) return;
 
     // First drain this consumer's pending entries (e.g. reclaimed via XAUTOCLAIM),
-    // then block for never-delivered entries.
+    // then block for never-delivered entries. With id '0', XREADGROUP returns the
+    // consumer's PEL even when empty (an empty entries array), so check entry count
+    // before deciding whether to fall through to the blocking call.
     const pendingResult = await this.blockingClient.xreadgroup(
       CONSUMER_GROUP,
       this.consumerId,
       { [this.queueKeys.stream]: '0' },
       { count: fetchCount },
     );
-    const result =
-      pendingResult ??
-      (await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
-        count: fetchCount,
-        block: this.blockTimeout,
-      }));
+    const pendingHasEntries =
+      pendingResult != null && pendingResult.some((stream) => Object.keys(stream.value).length > 0);
+    const result = pendingHasEntries
+      ? pendingResult
+      : await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
+          count: fetchCount,
+          block: this.blockTimeout,
+        });
 
     if (!result) {
       // Stream empty - check priority and LIFO lists for jobs added while we were blocking
