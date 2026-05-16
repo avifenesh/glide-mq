@@ -711,8 +711,9 @@ describeEachMode('Dead Letter Queue', (CONNECTION) => {
       await blockedQueue.add('blocked-job', { secret: true }, { attempts: 1 });
 
       await waitFor(async () => {
-        const jobs = await allowedQueue.getDeadLetterJobs();
-        return jobs.length === 1;
+        const allowed = await allowedQueue.getDeadLetterJobs();
+        const blocked = await blockedQueue.getDeadLetterJobs();
+        return allowed.length === 1 && blocked.length === 1;
       });
 
       const allowedJobs = await allowedQueue.getDeadLetterJobs();

@@ -2377,8 +2377,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
       for (let offset = 0; offset < candidateJobIds.length; offset += PIPELINE_CHUNK_SIZE) {
         const chunkJobIds = candidateJobIds.slice(offset, offset + PIPELINE_CHUNK_SIZE);
+        // Always load data internally so the ownership envelope is available, then
+        // strip data on the way out when the caller asked for excludeData.
         const chunkJobs = await this.loadJobsByIdsForKeys(client, dlqKeys, chunkJobIds, {
-          excludeData: opts?.excludeData,
+          excludeData: false,
           serializer: undefined,
         });
         const scopedChunkJobs = chunkJobs.filter((job) => this.isDeadLetterJobOwnedByQueue(job));
@@ -2390,7 +2392,14 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
         const sliceStart = Math.max(0, start - seenExisting);
         const remaining = Number.isFinite(targetCount) ? targetCount - selected.length : undefined;
-        selected.push(...scopedChunkJobs.slice(sliceStart, remaining != null ? sliceStart + remaining : undefined));
+        const pageSlice = scopedChunkJobs.slice(sliceStart, remaining != null ? sliceStart + remaining : undefined);
+        if (opts?.excludeData) {
+          for (const job of pageSlice) {
+            (job as { data: unknown }).data = undefined;
+            (job as { returnvalue: unknown }).returnvalue = undefined;
+          }
+        }
+        selected.push(...pageSlice);
         seenExisting += scopedChunkJobs.length;
 
         if (Number.isFinite(targetCount) && selected.length >= targetCount) {
@@ -2430,12 +2439,18 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const dlqName = await this.resolveDeadLetterQueueName(client);
     if (!dlqName) return null;
     const dlqKeys = buildKeys(dlqName, this.opts.prefix);
+    // Always load data internally so the ownership envelope is available; strip it
+    // afterwards when the caller asked for excludeData.
     const jobs = await this.loadJobsByIdsForKeys(client, dlqKeys, [jobId], {
-      excludeData: opts?.excludeData,
+      excludeData: false,
       serializer: undefined,
     });
     const job = jobs[0] ?? null;
     if (!job || !this.isDeadLetterJobOwnedByQueue(job)) return null;
+    if (opts?.excludeData) {
+      (job as { data: unknown }).data = undefined;
+      (job as { returnvalue: unknown }).returnvalue = undefined;
+    }
     return job;
   }
 
@@ -2448,6 +2463,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const dlqName = await this.resolveDeadLetterQueueName(client);
     if (!dlqName) return false;
     const dlqKeys = buildKeys(dlqName, this.opts.prefix);
+    // Ownership check requires the envelope (originalQueue lives in data); excludeData
+    // is honoured inside getDeadLetterJob, which still loads the envelope internally.
     const existing = await this.getDeadLetterJob(jobId, { excludeData: true });
     if (!existing) return false;
     await removeJob(client, dlqKeys, jobId);
