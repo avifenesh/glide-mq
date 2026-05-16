@@ -41,9 +41,9 @@ export class ServerlessPool {
     if (this.closing) {
       throw new Error('ServerlessPool is closing');
     }
-    // Custom serializers or injected clients bypass the cache intentionally -
-    // serializer instances may hold state and must not be shared across callers.
-    if (opts.client || opts.serializer) {
+    // Custom serializers, injected clients, or explicit credentials bypass the cache
+    // intentionally to avoid state and authentication-context collisions.
+    if (opts.client || opts.serializer || opts.connection?.credentials) {
       return new Producer(name, opts);
     }
 

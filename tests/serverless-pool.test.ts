@@ -54,6 +54,20 @@ describeEachMode('ServerlessPool - caching', (CONNECTION) => {
     pool.getProducer(Q1, { connection: CONNECTION });
     expect(pool.size).toBe(2);
   });
+
+  it('does not cache producers when credentials are provided', () => {
+    const connWithCreds = {
+      ...CONNECTION,
+      credentials: {
+        username: 'user-a',
+        password: 'secret-a',
+      },
+    };
+    const p1 = pool.getProducer(Q1, { connection: connWithCreds });
+    const p2 = pool.getProducer(Q1, { connection: connWithCreds });
+    expect(p1).not.toBe(p2);
+    expect(pool.size).toBe(0);
+  });
 });
 
 describeEachMode('ServerlessPool - closeAll', (CONNECTION) => {
