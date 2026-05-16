@@ -143,6 +143,39 @@ describe('Worker', () => {
     await worker.close(true);
   });
 
+
+  it('should cap batch-mode xreadgroup count to batch size when prefetch is larger', async () => {
+    const processor = vi.fn().mockResolvedValue([]);
+
+    let resolveXRead: ((value: any) => void) | null = null;
+    mockBlockingClient.xreadgroup = vi.fn().mockImplementation(() => {
+      return new Promise((resolve) => {
+        resolveXRead = resolve;
+      });
+    });
+
+    const worker = new Worker('test-queue', processor, {
+      ...defaultWorkerOpts,
+      concurrency: 3,
+      prefetch: 12,
+      batch: { size: 4 },
+      blockTimeout: 2000,
+    });
+    await worker.waitUntilReady();
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(mockBlockingClient.xreadgroup).toHaveBeenCalledWith(
+      CONSUMER_GROUP,
+      expect.any(String),
+      { [keys.stream]: '>' },
+      { count: 4, block: 2000 },
+    );
+
+    resolveXRead!(null);
+    await worker.close(true);
+  });
+
   it('should call xreadgroup with correct parameters', async () => {
     const processor = vi.fn().mockResolvedValue('done');
 
