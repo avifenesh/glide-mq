@@ -12,6 +12,7 @@ import { buildKeys, compileSubjectMatcher, hashDataToRecord, validateJobId, vali
 import type { AddJobRequest, AddJobResponse, AddJobSkippedResponse, ProxyOptions } from './types';
 
 const MAX_BULK_SIZE = 1000;
+const MIN_JOB_OPTS_LOCK_DURATION_MS = 1000;
 const MAX_JOB_OPTS_LOCK_DURATION_MS = 86_400_000;
 const SSE_BLOCK_MS = 5000;
 const SSE_KEEPALIVE_MS = 15000;
@@ -475,10 +476,10 @@ function validateJobOpts(
     optsIn.lockDuration !== undefined &&
     (typeof optsIn.lockDuration !== 'number' ||
       !Number.isFinite(optsIn.lockDuration) ||
-      optsIn.lockDuration <= 0 ||
+      optsIn.lockDuration < MIN_JOB_OPTS_LOCK_DURATION_MS ||
       optsIn.lockDuration > MAX_JOB_OPTS_LOCK_DURATION_MS)
   ) {
-    return `${prefix}opts.lockDuration must be a positive finite number <= ${MAX_JOB_OPTS_LOCK_DURATION_MS}`;
+    return `${prefix}opts.lockDuration must be a finite number between ${MIN_JOB_OPTS_LOCK_DURATION_MS} and ${MAX_JOB_OPTS_LOCK_DURATION_MS}`;
   }
 
   if (
