@@ -1538,14 +1538,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (!this.commandClient) return;
     // Use per-job lockDuration when specified, otherwise fall back to worker-level.
     const effectiveLock = jobLockDuration ?? this.lockDuration;
-    // Only start periodic heartbeat for long lockDurations where stall detection matters.
-    // moveToActive already writes the initial lastActive - protects against immediate stall reclaim.
-    // For the default 30s lockDuration with 30s stalledInterval, the heartbeat fires at 15s.
-    // Skip entirely if lockDuration >= stalledInterval (initial write is sufficient for one cycle).
-    // `force=true` bypasses this guard when a pre-processor wait (rate/token limiter) is possible
-    // and the job could otherwise be reclaimed as stalled while sleeping.
-    if (!force && effectiveLock >= this.stalledInterval) return;
     const interval = effectiveLock / 2;
+    if (interval <= 0) return;
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
     const timer = setInterval(() => {
