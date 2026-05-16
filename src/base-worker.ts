@@ -880,13 +880,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     job: Job<D, R>,
     jobId: string,
   ): Promise<{ result?: R; error?: Error; aborted: boolean }> {
-    if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
-    if (this.opts.tokenLimiter) await this.waitForTokenLimit();
-
     const ac = new AbortController();
     this.activeAbortControllers.set(jobId, ac);
     job.abortSignal = ac.signal;
     this.startHeartbeat(jobId, job.opts.lockDuration);
+
+    if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
+    if (this.opts.tokenLimiter) await this.waitForTokenLimit();
 
     let result: R | undefined;
     let error: Error | undefined;
