@@ -738,7 +738,7 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
     cleanupClient.close();
   });
 
-  it('reclaimStalledListJobs detects stalled LIFO job and moves to failed with list-active DECR', async () => {
+  it('reclaimStalledListJobs detects stalled LIFO job, redispatches under threshold, fails past threshold', async () => {
     const Q = `stall-lifo-reclaim-${Date.now()}`;
     const k = buildKeys(Q);
 
@@ -760,8 +760,8 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
     // Set list-active to 1 (simulating the INCR from rpopAndReserve)
     await cleanupClient.set(k.listActive, '1');
 
-    // Call reclaimStalledListJobs directly via FCALL
-    // minIdleMs=5000, maxStalledCount=1, timestamp=now
+    // Call reclaimStalledListJobs directly via FCALL.
+    // minIdleMs=5000, maxStalledCount=1, timestamp=now.
     const now = Date.now();
     const count = await cleanupClient.fcall(
       'glidemq_reclaimStalledListJobs',
@@ -769,19 +769,30 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
       ['5000', '1', now.toString(), k.failed],
     );
 
-    // First call: stalledCount goes from 0 to 1 (== maxStalledCount), job stays active (stalled event)
+    // First call: stalledCount 0 -> 1 (== maxStalledCount, under threshold).
+    // Reclaim path redispatches by RPUSHing the job back onto the lifo list,
+    // so state transitions to 'waiting' and list-active DECRs (job is no
+    // longer checked out). The lifo list now contains the redispatched id.
     expect(Number(count)).toBe(1);
     const state1 = await cleanupClient.hget(k.job(jobId), 'state');
-    expect(state1).toBe('active');
+    expect(state1).toBe('waiting');
     const sc1 = await cleanupClient.hget(k.job(jobId), 'stalledCount');
     expect(sc1).toBe('1');
-    // list-active should NOT be decremented yet (job is re-activated, not failed)
     const la1 = await cleanupClient.get(k.listActive);
-    expect(la1).toBe('1');
+    expect(Number(la1)).toBe(0);
+    const lifoLen = await cleanupClient.llen(k.lifo);
+    expect(Number(lifoLen)).toBe(1);
 
-    // Second call: stalledCount goes from 1 to 2 (> maxStalledCount), job moves to failed.
-    // Advance timestamp past minIdleMs (5000) so the dedup refresh from the first call no
-    // longer suppresses detection in this fresh recovery window.
+    // Simulate the next worker re-claiming the job: HSET state=active and
+    // INCR list-active, mimicking rpopAndReserve. Then drive a stale
+    // lastActive again so the second reclaim cycle fires.
+    await cleanupClient.hset(k.job(jobId), {
+      state: 'active',
+      lastActive: staleTime.toString(),
+    });
+    await cleanupClient.set(k.listActive, '1');
+
+    // Second call: stalledCount 1 -> 2 (> maxStalledCount), job moves to failed.
     const count2 = await cleanupClient.fcall(
       'glidemq_reclaimStalledListJobs',
       [k.stream, k.events],
@@ -804,7 +815,7 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
     await flushQueue(cleanupClient, Q);
   });
 
-  it('reclaimStalledListJobs detects stalled priority-sourced job and moves to failed with list-active DECR', async () => {
+  it('reclaimStalledListJobs detects stalled priority-sourced job, redispatches under threshold, fails past threshold', async () => {
     const Q = `stall-priority-reclaim-${Date.now()}`;
     const k = buildKeys(Q);
 
@@ -828,7 +839,9 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
 
     const now = Date.now();
 
-    // First call: stalledCount 0 -> 1 (== maxStalledCount), job stays active (stalled event)
+    // First call: stalledCount 0 -> 1 (== maxStalledCount, under threshold).
+    // Reclaim path redispatches by LPUSHing the job onto the priority list,
+    // so state transitions to 'waiting' and list-active DECRs.
     const count1 = await cleanupClient.fcall(
       'glidemq_reclaimStalledListJobs',
       [k.stream, k.events],
@@ -836,16 +849,23 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
     );
     expect(Number(count1)).toBe(1);
     const state1 = await cleanupClient.hget(k.job(jobId), 'state');
-    expect(state1).toBe('active');
+    expect(state1).toBe('waiting');
     const sc1 = await cleanupClient.hget(k.job(jobId), 'stalledCount');
     expect(sc1).toBe('1');
-    // list-active should NOT be decremented yet
     const la1 = await cleanupClient.get(k.listActive);
-    expect(la1).toBe('1');
+    expect(Number(la1)).toBe(0);
+    // priority list should now contain the redispatched job
+    const priLen = await cleanupClient.llen(k.priority);
+    expect(Number(priLen)).toBe(1);
+
+    // Simulate the next worker re-claiming via rpopAndReserve.
+    await cleanupClient.hset(k.job(jobId), {
+      state: 'active',
+      lastActive: staleTime.toString(),
+    });
+    await cleanupClient.set(k.listActive, '1');
 
     // Second call: stalledCount 1 -> 2 (> maxStalledCount), job moves to failed.
-    // Advance timestamp past minIdleMs (5000) so the dedup refresh from the first call no
-    // longer suppresses detection in this fresh recovery window.
     const count2 = await cleanupClient.fcall(
       'glidemq_reclaimStalledListJobs',
       [k.stream, k.events],
@@ -899,11 +919,16 @@ describeEachMode('LIFO: Stalled list-sourced job recovery', (CONNECTION) => {
       ['5000', '1', now.toString(), k.failed],
     );
 
+    // First call: detected and redispatched (count=1, state=waiting,
+    // list-active decremented). Second call at the same timestamp: the
+    // dedup refresh from call 1 means lastActive is fresh, so the entry
+    // is no longer "idle past minIdleMs" and the loop's outer guard skips
+    // it (count=0). stalledCount stays 1 - no double-counting.
     expect(Number(count1)).toBe(1);
     expect(Number(count2)).toBe(0);
-    expect(await cleanupClient.hget(k.job(jobId), 'state')).toBe('active');
+    expect(await cleanupClient.hget(k.job(jobId), 'state')).toBe('waiting');
     expect(await cleanupClient.hget(k.job(jobId), 'stalledCount')).toBe('1');
-    expect(await cleanupClient.get(k.listActive)).toBe('1');
+    expect(Number(await cleanupClient.get(k.listActive))).toBe(0);
 
     await flushQueue(cleanupClient, Q);
   });

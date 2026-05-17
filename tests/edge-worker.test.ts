@@ -452,53 +452,39 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
       const queue = new Queue(Q, { connection: CONNECTION });
       const k = buildKeys(Q);
 
-      let w1Started = false;
-      const worker1 = new Worker(
-        Q,
-        async () => {
-          w1Started = true;
-          await new Promise((r) => setTimeout(r, 60000));
-          return 'w1-done';
-        },
-        { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
-      );
-      worker1.on('error', () => {});
-      await worker1.waitUntilReady();
-
       const job = await queue.add('stall-test', { recover: true });
-      while (!w1Started) {
-        await new Promise((r) => setTimeout(r, 50));
+
+      // Simulate a chronically broken job: every worker that picks it up
+      // crashes (force-close stops the heartbeat). Each crash + reclaim
+      // cycle bumps stalledCount; once it exceeds maxStalledCount, the
+      // reclaim path fails the job instead of redispatching.
+      let cycles = 0;
+      let finalState: string | null = null;
+      while (cycles < 6 && finalState !== 'failed') {
+        const w = new Worker(
+          Q,
+          async () => {
+            await new Promise(() => {}); // hang
+            return 'never';
+          },
+          {
+            connection: CONNECTION,
+            concurrency: 1,
+            blockTimeout: 500,
+            lockDuration: 500,
+            stalledInterval: 500,
+            maxStalledCount: 1,
+          },
+        );
+        w.on('error', () => {});
+        await new Promise((r) => setTimeout(r, 700));
+        await w.close(true);
+        await new Promise((r) => setTimeout(r, 800));
+        finalState = (await cleanupClient.hget(k.job(job.id), 'state'))?.toString() ?? null;
+        cycles++;
       }
 
-      await worker1.close(true);
-
-      const pending = (await cleanupClient.customCommand(['XPENDING', k.stream, CONSUMER_GROUP])) as any[];
-      expect(Number(pending[0])).toBeGreaterThanOrEqual(1);
-
-      const worker2 = new Worker(
-        Q,
-        async () => {
-          return 'w2-done';
-        },
-        {
-          connection: CONNECTION,
-          concurrency: 1,
-          blockTimeout: 500,
-          lockDuration: 1000,
-          stalledInterval: 1000,
-          maxStalledCount: 1,
-        },
-      );
-      worker2.on('error', () => {});
-      worker2.on('stalled', (_jobId: string) => {});
-      await worker2.waitUntilReady();
-
-      await new Promise((r) => setTimeout(r, 3500));
-
-      await worker2.close(true);
-
-      const state = String(await cleanupClient.hget(k.job(job.id), 'state'));
-      expect(state).toBe('failed');
+      expect(finalState).toBe('failed');
       const failedReason = String(await cleanupClient.hget(k.job(job.id), 'failedReason'));
       expect(failedReason).toContain('stalled');
 
@@ -506,7 +492,7 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
       expect(failedScore).not.toBeNull();
 
       await queue.close();
-    }, 20000);
+    }, 25000);
 
     it('increments stalledCount on the job hash during reclaim', async () => {
       const Q2 = `ew-stalled-count-${TS}`;
@@ -532,10 +518,14 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
       }
       await worker1.close(true);
 
+      // Worker 2 also hangs - we want to observe the stalledCount increment
+      // from the reclaim cycle. A healthy worker would complete the
+      // redispatched job and the test would race against the assertion.
       const worker2 = new Worker(
         Q2,
         async () => {
-          return 'w2';
+          await new Promise(() => {}); // hang
+          return 'never';
         },
         {
           connection: CONNECTION,
@@ -556,6 +546,8 @@ describeEachMode('Edge: Worker', (CONNECTION) => {
       const stalledCount = await cleanupClient.hget(k.job(job.id), 'stalledCount');
       expect(Number(stalledCount)).toBeGreaterThanOrEqual(1);
 
+      // After the reclaim + redispatch cycle, worker2 picked up and is
+      // hanging on the redispatched stream entry, so the job is active again.
       const state = String(await cleanupClient.hget(k.job(job.id), 'state'));
       expect(state).toBe('active');
 

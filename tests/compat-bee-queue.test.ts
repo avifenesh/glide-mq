@@ -816,58 +816,45 @@ describeEachMode('node-resque: Stalled worker heartbeat', (CONNECTION) => {
     const Q = `bee-heartbeat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     localQueues.push(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
-    const _k = buildKeys(Q);
 
     const job = await queue.add('heartbeat-task', { v: 1 });
 
-    // Worker 1: picks up the job but "dies" without completing.
-    const stalledWorker = new Worker(
-      Q,
-      async () => {
-        await new Promise(() => {}); // Never completes
-      },
-      {
-        connection: CONNECTION,
-        concurrency: 1,
-        blockTimeout: 500,
-        lockDuration: 500,
-        stalledInterval: 500,
-        maxStalledCount: 1,
-      },
-    );
-    stalledWorker.on('error', () => {});
+    // Spawn a chain of crashing workers. Each picks up the redispatched
+    // entry, hangs, then dies (force-close stops the heartbeat). Each cycle
+    // adds a stall; once stalledCount > maxStalledCount the reclaim path
+    // moves the job to failed instead of redispatching again. This is the
+    // no-infinite-loop guard for chronically broken processors.
+    let cycles = 0;
+    let finalState: string | null = null;
+    while (cycles < 6 && finalState !== 'failed') {
+      const w = new Worker(
+        Q,
+        async () => {
+          await new Promise(() => {}); // hang
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 500,
+          lockDuration: 500,
+          stalledInterval: 500,
+          maxStalledCount: 1,
+        },
+      );
+      w.on('error', () => {});
+      await w.waitUntilReady();
+      await new Promise((r) => setTimeout(r, 700));
+      await w.close(true);
+      await new Promise((r) => setTimeout(r, 800));
 
-    await stalledWorker.waitUntilReady();
-    // Let it pick up the job so it enters the PEL
-    await new Promise((r) => setTimeout(r, 1500));
-    // Force-close without waiting for active jobs
-    await stalledWorker.close(true);
+      const fetched = await queue.getJob(job!.id);
+      finalState = fetched ? await fetched.getState() : null;
+      cycles++;
+    }
 
-    // Wait for the PEL entry to become idle long enough for XAUTOCLAIM
-    await new Promise((r) => setTimeout(r, 1000));
-
-    // Worker 2: its scheduler will detect the stalled entry via XAUTOCLAIM.
-    const recoveryWorker = new Worker(Q, async () => 'ok', {
-      connection: CONNECTION,
-      concurrency: 1,
-      blockTimeout: 500,
-      lockDuration: 500,
-      stalledInterval: 500,
-      maxStalledCount: 1,
-    });
-    recoveryWorker.on('error', () => {});
-
-    // Wait for enough stall detection cycles to run
-    await new Promise((r) => setTimeout(r, 3000));
-
-    await recoveryWorker.close();
-
-    // The stalled job should have been failed after exceeding maxStalledCount
     const fetched = await queue.getJob(job!.id);
     expect(fetched).not.toBeNull();
-    const state = await fetched!.getState();
-    // Job should be in failed state (stalled more than maxStalledCount)
-    expect(state).toBe('failed');
+    expect(await fetched!.getState()).toBe('failed');
     expect(fetched!.failedReason).toBe('job stalled more than maxStalledCount');
 
     await queue.close();

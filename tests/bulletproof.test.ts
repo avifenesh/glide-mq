@@ -990,15 +990,14 @@ describeEachMode('Sidekiq BRPOP loss: job not lost when worker crashes mid-proce
     cleanupClient.close();
   });
 
-  it('job transitions to failed via stalled recovery after worker crash - not lost', async () => {
+  it('job recovers via redispatch when a single worker crashes mid-processing', async () => {
     const queue = new Queue(Q, { connection: CONNECTION });
-    const MAX_STALLED = 1;
     const STALL_INTERVAL = 1000;
 
     // Add a job before starting any worker
     const job = await queue.add('crash-test', { important: true });
 
-    // Worker 1: starts processing but we force-close it mid-processing
+    // Worker 1: starts processing but we force-close it mid-processing.
     let jobPicked = false;
     const crashWorker = new Worker(
       Q,
@@ -1017,61 +1016,52 @@ describeEachMode('Sidekiq BRPOP loss: job not lost when worker crashes mid-proce
     );
     crashWorker.on('error', () => {});
 
-    // Wait for job to be picked up
-    await new Promise<void>((resolve) => {
-      const check = setInterval(() => {
-        if (jobPicked) {
-          clearInterval(check);
-          resolve();
-        }
-      }, 50);
-      setTimeout(() => {
-        clearInterval(check);
-        resolve();
-      }, 5000);
-    });
+    await waitFor(() => jobPicked, 5000);
     expect(jobPicked).toBe(true);
 
-    // Force-close worker 1 (simulates crash - no graceful ACK)
+    // Force-close worker 1 (simulates crash - no graceful ACK, heartbeat stops)
     await crashWorker.close(true);
 
-    // Wait for PEL entry to age past the stalled interval
+    // Let the PEL entry age past the stalled interval so the next
+    // scheduler classifies it stalled on its first reclaim cycle.
     await new Promise((r) => setTimeout(r, STALL_INTERVAL + 500));
 
-    // Recovery worker: its scheduler will reclaim the stalled entry via XAUTOCLAIM.
-    // After maxStalledCount cycles, the job moves to failed.
-    const recoveryWorker = new Worker(Q, async () => 'should-not-process', {
-      connection: CONNECTION,
-      concurrency: 1,
-      blockTimeout: 500,
-      stalledInterval: STALL_INTERVAL,
-      maxStalledCount: MAX_STALLED,
-      lockDuration: 200,
-    });
+    // Recovery worker is healthy: the reclaim path will redispatch the job
+    // to the stream, and this worker will pick it up and complete it. This
+    // is the at-least-once-with-retry contract documented in
+    // docs/DURABILITY.md (Worker Crash Behavior).
+    let recoveryProcessed = false;
+    const recoveryWorker = new Worker(
+      Q,
+      async () => {
+        recoveryProcessed = true;
+        return 'recovered';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: STALL_INTERVAL,
+        maxStalledCount: 1,
+        lockDuration: 200,
+      },
+    );
     recoveryWorker.on('error', () => {});
 
-    // Wait for enough stalled recovery cycles to exceed maxStalledCount
-    // stalledCount increments once per cycle, need > MAX_STALLED cycles
-    await new Promise((r) => setTimeout(r, STALL_INTERVAL * (MAX_STALLED + 2) + 1000));
-
+    await waitFor(() => recoveryProcessed, 15000);
     await recoveryWorker.close(true);
 
-    // The job must NOT be lost - it should be in 'failed' state
+    // The job must reach a terminal state - completed via redispatch.
     const k = buildKeys(Q);
     const state = await cleanupClient.hget(k.job(job!.id), 'state');
-    expect(String(state)).toBe('failed');
+    expect(String(state)).toBe('completed');
+    const completedScore = await cleanupClient.zscore(k.completed, job!.id);
+    expect(completedScore).not.toBeNull();
 
-    // Verify the failed reason references stalling
-    const reason = await cleanupClient.hget(k.job(job!.id), 'failedReason');
-    expect(String(reason)).toContain('stalled');
-
-    // Verify stalledCount was tracked
+    // stalledCount was tracked - the single reclaim cycle that triggered
+    // the redispatch counts as one stall attempt.
     const stalledCount = await cleanupClient.hget(k.job(job!.id), 'stalledCount');
-    expect(Number(stalledCount)).toBeGreaterThan(MAX_STALLED);
-
-    // The job is in the failed ZSet (not lost in limbo)
-    const failedScore = await cleanupClient.zscore(k.failed, job!.id);
-    expect(failedScore).not.toBeNull();
+    expect(Number(stalledCount)).toBeGreaterThanOrEqual(1);
 
     await queue.close();
   }, 25000);
@@ -1322,66 +1312,47 @@ describeEachMode('Bee-Queue #106: repeated stalling moves job to failed, not inf
     // Add a job
     const job = await queue.add('stall-forever', { doomed: true });
 
-    // Worker picks up job, then crashes (force close)
-    let jobPicked = false;
-    const crashWorker = new Worker(
-      Q,
-      async () => {
-        jobPicked = true;
-        await new Promise(() => {}); // hang forever
-        return 'never';
-      },
-      {
-        connection: CONNECTION,
-        concurrency: 2,
-        blockTimeout: 500,
-        stalledInterval: 60000,
-        lockDuration: 200,
-      },
-    );
-    crashWorker.on('error', () => {});
-
-    await new Promise<void>((resolve) => {
-      const check = setInterval(() => {
-        if (jobPicked) {
-          clearInterval(check);
-          resolve();
-        }
-      }, 50);
-      setTimeout(() => {
-        clearInterval(check);
-        resolve();
-      }, 5000);
-    });
-
-    // Force-close to leave PEL entry orphaned
-    await crashWorker.close(true);
-
-    // Wait for entry to age past the stalled interval
-    await new Promise((r) => setTimeout(r, STALL_INTERVAL + 500));
-
-    // Recovery worker: scheduler reclaims the stalled entry via XAUTOCLAIM.
-    // Each cycle increments stalledCount. After exceeding maxStalledCount,
-    // the job is moved to failed - NOT looped infinitely.
-    const recoveryWorker = new Worker(Q, async () => 'should-not-process', {
-      connection: CONNECTION,
-      concurrency: 1,
-      blockTimeout: 500,
-      stalledInterval: STALL_INTERVAL,
-      maxStalledCount: MAX_STALLED,
-      lockDuration: 200,
-    });
-    recoveryWorker.on('error', () => {});
-
-    // Wait for enough stalled recovery cycles
-    await new Promise((r) => setTimeout(r, STALL_INTERVAL * (MAX_STALLED + 2) + 1000));
-
-    await recoveryWorker.close(true);
-
-    // Job must be in failed state - NOT stuck in active forever (Bee-Queue #106 bug)
+    // Simulate a chronically broken pipeline where every worker that picks up
+    // the job dies before completing. Each crash + reclaim cycle increments
+    // stalledCount; once stalledCount > maxStalledCount the reclaim path
+    // stops redispatching and moves the job to failed. This is the
+    // no-infinite-loop guard Bee-Queue #106 was about.
+    //
+    // We can't reuse a single hanging worker like the original test, because
+    // PR #238's heartbeat keeps a live (hanging) worker's lastActive fresh -
+    // the entry never re-stalls while the worker is up. We need actual deaths.
     const k = buildKeys(Q);
-    const state = await cleanupClient.hget(k.job(job!.id), 'state');
-    expect(String(state)).toBe('failed');
+    let cycles = 0;
+    let finalState: string | null = null;
+    while (cycles < 6 && finalState !== 'failed') {
+      const w = new Worker(
+        Q,
+        async () => {
+          await new Promise(() => {}); // hang
+          return 'never';
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 500,
+          stalledInterval: STALL_INTERVAL,
+          maxStalledCount: MAX_STALLED,
+          lockDuration: 200,
+        },
+      );
+      w.on('error', () => {});
+      // Let the worker pick up the entry, then force-close so its heartbeat
+      // dies and the entry can age past lockDuration in the next cycle.
+      await new Promise((r) => setTimeout(r, 700));
+      await w.close(true);
+      // Wait past stallInterval so the next worker's scheduler can reclaim.
+      await new Promise((r) => setTimeout(r, STALL_INTERVAL + 200));
+      finalState = (await cleanupClient.hget(k.job(job!.id), 'state'))?.toString() ?? null;
+      cycles++;
+    }
+
+    // After enough crash cycles, reclaim path moved the job to failed.
+    expect(finalState).toBe('failed');
 
     // Verify stalledCount exceeds the limit
     const stalledCount = await cleanupClient.hget(k.job(job!.id), 'stalledCount');
@@ -1392,7 +1363,7 @@ describeEachMode('Bee-Queue #106: repeated stalling moves job to failed, not inf
     expect(String(reason)).toContain('stalled');
 
     await queue.close();
-  }, 25000);
+  }, 30000);
 });
 
 // ---------------------------------------------------------------------------
@@ -1672,36 +1643,45 @@ describeEachMode('Bee-Queue #120: bulk stalled job recovery reclaims all jobs', 
     // Wait for entries to age past the stalled interval
     await new Promise((r) => setTimeout(r, STALL_INTERVAL + 500));
 
-    // Recovery worker: its scheduler will reclaim all stalled entries
-    const recoveryWorker = new Worker(Q, async () => 'should-not-process', {
-      connection: CONNECTION,
-      concurrency: 1,
-      blockTimeout: 500,
-      stalledInterval: STALL_INTERVAL,
-      maxStalledCount: MAX_STALLED,
-      lockDuration: 200,
-    });
-    recoveryWorker.on('error', () => {});
-
-    // Poll until all jobs have transitioned to failed state.
-    // The scheduler needs MAX_STALLED + 1 reclaim cycles per job, but CI timing varies.
+    // Spawn a chain of crashing recovery workers. Each cycle: workers grab
+    // entries, hang, then we force-close them so heartbeats stop and the
+    // entries can re-stall. After enough cycles every job exceeds
+    // maxStalledCount and is moved to failed (no infinite loop guard at
+    // scale, which is what Bee-Queue #120 was about).
     const k = buildKeys(Q);
-    await waitFor(
-      async () => {
-        let failed = 0;
-        for (const id of jobIds) {
-          const state = await cleanupClient.hget(k.job(id), 'state');
-          if (String(state) === 'failed') failed++;
-        }
-        return failed >= TOTAL;
-      },
-      15000,
-      500,
-    );
+    let cycles = 0;
+    let allFailed = false;
+    while (cycles < 8 && !allFailed) {
+      const w = new Worker(
+        Q,
+        async () => {
+          await new Promise(() => {}); // hang
+          return 'never';
+        },
+        {
+          connection: CONNECTION,
+          concurrency: TOTAL,
+          blockTimeout: 500,
+          stalledInterval: STALL_INTERVAL,
+          maxStalledCount: MAX_STALLED,
+          lockDuration: 200,
+        },
+      );
+      w.on('error', () => {});
+      await new Promise((r) => setTimeout(r, 800));
+      await w.close(true);
+      await new Promise((r) => setTimeout(r, STALL_INTERVAL + 300));
 
-    await recoveryWorker.close(true);
+      let failed = 0;
+      for (const id of jobIds) {
+        const state = await cleanupClient.hget(k.job(id), 'state');
+        if (String(state) === 'failed') failed++;
+      }
+      allFailed = failed >= TOTAL;
+      cycles++;
+    }
 
-    // All 20 jobs must be in failed state - NOT stuck in active (Bee-Queue #120 bug)
+    // All 20 jobs must reach failed state - NOT stuck in active (Bee-Queue #120 bug)
     let failedCount = 0;
     for (const id of jobIds) {
       const state = await cleanupClient.hget(k.job(id), 'state');
@@ -1715,7 +1695,7 @@ describeEachMode('Bee-Queue #120: bulk stalled job recovery reclaims all jobs', 
     expect(failedZsetCount).toBeGreaterThanOrEqual(TOTAL);
 
     await queue.close();
-  }, 30000);
+  }, 60000);
 });
 
 // ===========================================================================
@@ -1796,36 +1776,39 @@ describeEachMode('Sidekiq BRPOP immunity: job in PEL survives worker crash and i
     // Wait for PEL entry to age past stall interval
     await new Promise((r) => setTimeout(r, STALL_INTERVAL + 500));
 
-    // Worker 2: recovery worker's scheduler reclaims the stalled entry
-    const recoveryWorker = new Worker(Q, async () => 'should-not-process', {
-      connection: CONNECTION,
-      concurrency: 1,
-      blockTimeout: 500,
-      stalledInterval: STALL_INTERVAL,
-      maxStalledCount: MAX_STALLED,
-      lockDuration: 200,
-    });
+    // Worker 2 is healthy: the reclaim path will redispatch the stalled
+    // entry to the stream, and this worker will process it. Contract is
+    // "reclaimed and not lost" - the new at-least-once-with-retry path
+    // satisfies it by completing the job rather than failing it.
+    let recoveryProcessed = false;
+    const recoveryWorker = new Worker(
+      Q,
+      async () => {
+        recoveryProcessed = true;
+        return 'recovered';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: STALL_INTERVAL,
+        maxStalledCount: MAX_STALLED,
+        lockDuration: 200,
+      },
+    );
     recoveryWorker.on('error', () => {});
 
-    // Wait for enough stalled recovery cycles to exceed maxStalledCount
-    await new Promise((r) => setTimeout(r, STALL_INTERVAL * (MAX_STALLED + 2) + 1000));
-
+    await waitFor(() => recoveryProcessed, 15000);
     await recoveryWorker.close(true);
 
-    // The job must NOT be lost - stalled recovery moved it to failed
+    // The job must reach a terminal state via recovery - not lost in limbo.
     const finalState = await cleanupClient.hget(k.job(job!.id), 'state');
-    expect(String(finalState)).toBe('failed');
-
-    // Verify stalled reason
-    const reason = await cleanupClient.hget(k.job(job!.id), 'failedReason');
-    expect(String(reason)).toContain('stalled');
-
-    // Job is in the failed ZSet (not lost in limbo)
-    const failedScore = await cleanupClient.zscore(k.failed, job!.id);
-    expect(failedScore).not.toBeNull();
+    expect(String(finalState)).toBe('completed');
+    const completedScore = await cleanupClient.zscore(k.completed, job!.id);
+    expect(completedScore).not.toBeNull();
 
     await queue.close();
-  }, 25000);
+  }, 30000);
 });
 
 // ---------------------------------------------------------------------------
@@ -2419,6 +2402,86 @@ describeEachMode('Sidekiq large payload: 500KB job data roundtrips without corru
 
     await queue.close();
   }, 25000);
+});
+
+// ---------------------------------------------------------------------------
+// AI workload contract: stalled-recovery redispatches under-threshold jobs.
+// The "Sidekiq BRPOP loss" + "Sidekiq BRPOP immunity" tests above already
+// cover the single-crash recovery path; this test pins the explicit contract
+// that stalledCount is incremented even on the redispatch branch (so a
+// chronically failing job still hits the maxStalledCount fail guard).
+// ---------------------------------------------------------------------------
+
+describeEachMode('Reclaim contract: redispatch increments stalledCount', (CONNECTION) => {
+  const Q = 'bp-reclaim-counter-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('a single crash + recovery leaves stalledCount = 1 on the completed job', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const job = await queue.add('counter-test', { v: 1 });
+
+    let picked = false;
+    const w1 = new Worker(
+      Q,
+      async () => {
+        picked = true;
+        await new Promise(() => {});
+        return 'never';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: 60000,
+        lockDuration: 200,
+      },
+    );
+    w1.on('error', () => {});
+    await waitFor(() => picked, 5000);
+    await w1.close(true);
+
+    await new Promise((r) => setTimeout(r, 1500));
+
+    let recovered = false;
+    const w2 = new Worker(
+      Q,
+      async () => {
+        recovered = true;
+        return 'recovered';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: 1000,
+        maxStalledCount: 1,
+        lockDuration: 200,
+      },
+    );
+    w2.on('error', () => {});
+    await waitFor(() => recovered, 15000);
+    await w2.close(true);
+
+    const k = buildKeys(Q);
+    const state = await cleanupClient.hget(k.job(job!.id), 'state');
+    expect(String(state)).toBe('completed');
+
+    // The reclaim that triggered the redispatch must have bumped the counter.
+    // This is what guarantees that chronic failures still hit maxStalledCount.
+    const stalledCount = await cleanupClient.hget(k.job(job!.id), 'stalledCount');
+    expect(Number(stalledCount)).toBe(1);
+
+    await queue.close();
+  }, 30000);
 });
 
 // ---------------------------------------------------------------------------

@@ -103,7 +103,13 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
     expect(stalled.length).toBe(0);
   }, 15000);
 
-  // 2. Job without heartbeat gets stalledCount incremented and eventually fails
+  // 2. Job without heartbeat gets stalledCount incremented and eventually fails.
+  // Each direct reclaimStalled() call either redispatches (under threshold,
+  // ACK+DEL old PEL entry, XADD a fresh stream entry) or fails the job once
+  // stalledCount > maxStalledCount. To exercise both states without a live
+  // worker loop, we manually re-claim the freshly-XADDed entry into the test
+  // consumer's PEL between cycles so the next reclaim call has something to
+  // age past minIdleMs.
   it('job without heartbeat gets stalledCount incremented by reclaimStalled', async () => {
     const Q = uniqueName('no-hb');
     const queue = new Queue(Q, { connection: CONNECTION });
@@ -139,16 +145,31 @@ describeEachMode('Deep heartbeat / lock renewal', (CONNECTION) => {
 
     const reclaimClient = await createCleanupClient(CONNECTION);
     try {
+      // Helper: claim the redispatched stream entry into the test consumer's
+      // PEL so the next reclaimStalled() call can find + age it.
+      const claimToTest = async () => {
+        await reclaimClient.xreadgroup(CONSUMER_GROUP, 'test-consumer', { [k.stream]: '>' }, { count: 10 });
+      };
+
+      // Cycle 1: stalledCount 0 -> 1, redispatched.
       await reclaimStalled(reclaimClient, k, 'test-consumer', 500, 2, Date.now(), CONSUMER_GROUP);
       const sc1 = await cleanupClient.hget(k.job(jobId), 'stalledCount');
       expect(Number(sc1)).toBe(1);
 
+      await claimToTest();
+      await cleanupClient.hdel(k.job(jobId), ['lastActive']);
       await new Promise((r) => setTimeout(r, 600));
+
+      // Cycle 2: stalledCount 1 -> 2, redispatched.
       await reclaimStalled(reclaimClient, k, 'test-consumer', 500, 2, Date.now(), CONSUMER_GROUP);
       const sc2 = await cleanupClient.hget(k.job(jobId), 'stalledCount');
       expect(Number(sc2)).toBe(2);
 
+      await claimToTest();
+      await cleanupClient.hdel(k.job(jobId), ['lastActive']);
       await new Promise((r) => setTimeout(r, 600));
+
+      // Cycle 3: stalledCount 3 > maxStalledCount(2) -> fail.
       await reclaimStalled(reclaimClient, k, 'test-consumer', 500, 2, Date.now(), CONSUMER_GROUP);
 
       const state = await cleanupClient.hget(k.job(jobId), 'state');

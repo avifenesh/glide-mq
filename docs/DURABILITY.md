@@ -104,8 +104,12 @@ If a worker crashes mid-processing:
 
 1. the job has already been claimed into the consumer group's pending entries list
 2. it is **not** removed from Valkey just because the worker died
-3. another worker's scheduler can reclaim the stalled entry via `XAUTOCLAIM`
-4. after enough stalled-recovery cycles, glide-mq moves the job to `failed` instead of leaving it in limbo
+3. another worker's scheduler reclaims the stalled entry via `XAUTOCLAIM`
+4. the reclaim path increments `stalledCount` and:
+   - **redispatches** the job back to the queue so a healthy worker can pick it up again, when `stalledCount <= maxStalledCount` (default `1`)
+   - **fails** the job (state = `failed`, reason = `job stalled more than maxStalledCount`) once `stalledCount` exceeds the limit, instead of leaving it in limbo
+
+This means a single crash gets a retry; chronic crashing produces a clean terminal failure. AI-style workloads that take minutes-to-hours per job benefit from the retry: a transient worker death does not cost the whole run, and processors that store progress via `job.moveToDelayed(timestamp, nextStep)` resume from the most recent checkpoint.
 
 This is an important difference from older queue designs that rely on destructive pops and app-side lock bookkeeping.
 

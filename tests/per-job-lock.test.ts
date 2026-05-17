@@ -112,32 +112,41 @@ describeEachMode('Per-job lockDuration', (CONNECTION) => {
     // Force-close worker1 to simulate crash (no heartbeat)
     await worker1.close(true);
 
-    // Worker 2: with short stalledInterval to run reclaim cycles
+    // Worker 2: healthy, will pick up the redispatched job and complete it.
+    // The reclaim path detects the stale entry (using the per-job 2s
+    // lockDuration as the threshold) and redispatches it to the stream.
+    let recovered = false;
     const stalledIds: string[] = [];
-    const worker2 = new Worker(Q, async () => 'recovered', {
-      connection: CONNECTION,
-      concurrency: 1,
-      blockTimeout: 500,
-      stalledInterval: 1000, // frequent reclaim checks
-      maxStalledCount: 1,
-    });
+    const worker2 = new Worker(
+      Q,
+      async () => {
+        recovered = true;
+        return 'recovered';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: 1000, // frequent reclaim checks
+        maxStalledCount: 1,
+      },
+    );
     worker2.on('error', () => {});
     worker2.on('stalled', (jobId: string) => stalledIds.push(jobId));
     await worker2.waitUntilReady();
 
-    // Wait for stalled recovery to detect the job (per-job lockDuration: 2s)
-    await waitFor(async () => {
-      const state = await cleanupClient.hget(k.job(job!.id), 'state');
-      return String(state) === 'failed';
-    }, 8000);
-
+    // Wait for the reclaim cycle to fire and worker2 to pick up the
+    // redispatched job. The per-job 2s lockDuration is the threshold;
+    // the entry must idle past it before reclaim triggers.
+    await waitFor(() => recovered, 12000);
     await worker2.close(true);
 
-    // Job should be failed via stalled recovery
     const state = String(await cleanupClient.hget(k.job(job!.id), 'state'));
-    expect(state).toBe('failed');
-    const failedReason = String(await cleanupClient.hget(k.job(job!.id), 'failedReason'));
-    expect(failedReason).toContain('stalled');
+    expect(state).toBe('completed');
+    // The reclaim cycle that triggered the redispatch should have bumped
+    // the counter, proving per-job lockDuration was honored as the threshold.
+    const stalledCount = await cleanupClient.hget(k.job(job!.id), 'stalledCount');
+    expect(Number(stalledCount)).toBeGreaterThanOrEqual(1);
 
     await queue.close();
   }, 20000);

@@ -12,7 +12,7 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const TS = Date.now();
 
@@ -431,29 +431,37 @@ describeEachMode('Bull compat: Stalled job recovery', (CONNECTION) => {
     }
     await worker1.close(true);
 
-    // Worker 2: with short stalled interval to detect and recover the job
+    // Worker 2: healthy worker, picks up the redispatched job and finishes it.
+    // The reclaim path now redispatches under-threshold stalled jobs back to
+    // the stream (the test name "re-enqueued" describes exactly this contract).
+    let recovered = false;
     const stalledIds: string[] = [];
-    const worker2 = new Worker(Q, async () => 'recovered', {
-      connection: CONNECTION,
-      concurrency: 1,
-      blockTimeout: 500,
-      lockDuration: 1000,
-      stalledInterval: 1000,
-      maxStalledCount: 1,
-    });
+    const worker2 = new Worker(
+      Q,
+      async () => {
+        recovered = true;
+        return 'recovered';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        lockDuration: 1000,
+        stalledInterval: 1000,
+        maxStalledCount: 1,
+      },
+    );
     worker2.on('error', () => {});
     worker2.on('stalled', (jobId: string) => stalledIds.push(jobId));
     await worker2.waitUntilReady();
 
-    // Wait for stalled recovery cycle to detect and move to failed
-    await new Promise((r) => setTimeout(r, 3500));
+    // Wait for the reclaim cycle to redispatch the job and worker2 to process it.
+    await waitFor(() => recovered, 15000);
     await worker2.close(true);
 
-    // Verify the job was handled by stalled recovery (moved to failed after maxStalledCount=1)
+    // Verify the job was re-enqueued by stalled recovery and ran to completion.
     const state = String(await cleanupClient.hget(k.job(job!.id), 'state'));
-    expect(state).toBe('failed');
-    const failedReason = String(await cleanupClient.hget(k.job(job!.id), 'failedReason'));
-    expect(failedReason).toContain('stalled');
+    expect(state).toBe('completed');
 
     await queue.close();
   }, 20000);

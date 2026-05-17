@@ -50,7 +50,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 88: glidemq_promote counts expired scheduled jobs toward MAX_PROMOTIONS budget - prevents unbounded scans when many expired jobs sit in scheduled set (#235).
 // Version 89: Bound skip-marker advancement work per FCALL via MAX_SKIP_ADVANCE_STEPS=128 to prevent long-running ordered-group loops (#222).
 // Version 90: glidemq_addFlow rechecks EXISTS for custom child IDs and skips auto-INCR'd parent/child IDs that collide with existing custom-ID jobs - mirrors the addJob auto-ID collision guard so flows survive shared idKey state (#234).
-export const LIBRARY_VERSION = '90';
+// Version 91: Stalled-recovery redispatches under-threshold jobs back to the stream / lifo / priority list so a healthy worker can pick them up; jobs only fail once stalledCount > maxStalledCount. Aligns with the at-least-once redelivery promise in DURABILITY.md and matches BullMQ semantics (#239).
+export const LIBRARY_VERSION = '91';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1563,8 +1564,23 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       if failed then
         if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
         if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
-      else
+      elseif broadcastMode == '1' then
+        -- Broadcast mode keeps the original entry visible to all subscribers,
+        -- so we can't redispatch via XADD. Leave state active for the next
+        -- reclaim cycle; if it stalls again, applyStalledLogic will fail it.
         redis.call('HSET', jobKey, 'state', 'active')
+      else
+        -- Under maxStalledCount threshold: redispatch the job to the stream
+        -- so a healthy worker picks it up. The original PEL entry now belongs
+        -- to the scheduler's consumer (XAUTOCLAIM moved it there) and would
+        -- otherwise sit unprocessed forever; ACK+DEL it and re-queue a fresh
+        -- stream entry. processedOn is cleared so metrics record the new run.
+        if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+        if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
+        local jobName = redis.call('HGET', jobKey, 'name') or ''
+        redis.call('HSET', jobKey, 'state', 'waiting')
+        redis.call('HDEL', jobKey, 'processedOn', 'lastActive')
+        xaddJob(streamKey, jobId, jobName)
       end
       count = count + 1
       end
@@ -1629,6 +1645,27 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
             shouldDecr = true
           else
             if applyStalledLogic(jk, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp) then
+              shouldDecr = true
+            else
+              -- Under threshold: re-queue the job onto its source list so a
+              -- healthy worker picks it up. LIFO -> RPUSH lifo, priority ->
+              -- LPUSH priority (RPOP returns highest priority first). Decrement
+              -- the list-active counter because the job is no longer active.
+              local isLifo = vals[2] == '1'
+              local pri = tonumber(vals[3]) or 0
+              redis.call('HSET', jk, 'state', 'waiting')
+              redis.call('HDEL', jk, 'processedOn', 'lastActive')
+              if isLifo then
+                redis.call('RPUSH', prefix .. 'lifo', jobId)
+              elseif pri > 0 then
+                redis.call('LPUSH', prefix .. 'priority', jobId)
+              else
+                -- Stream-sourced fallback (shouldn't normally hit this branch
+                -- because XAUTOCLAIM handles stream entries, but redispatch
+                -- safely if someone misclassifies).
+                redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name',
+                  redis.call('HGET', jk, 'name') or '')
+              end
               shouldDecr = true
             end
           end
