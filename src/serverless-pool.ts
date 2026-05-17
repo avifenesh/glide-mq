@@ -4,8 +4,39 @@
  * Caches Producer instances by queue name + connection fingerprint so that
  * warm invocations reuse existing connections instead of creating new ones.
  */
+import { createHash } from 'crypto';
 import { Producer } from './producer';
 import type { ProducerOptions } from './producer';
+import type { ConnectionOptions } from './types';
+
+/**
+ * Hash credentials into the fingerprint so different identities do not collide
+ * on the same cache entry, while still allowing the same identity to share a
+ * cached producer. Plaintext secrets are never embedded in the cache key.
+ */
+function credentialsFingerprint(creds: ConnectionOptions['credentials']): string {
+  if (!creds) return 'none';
+  const h = createHash('sha256');
+  if ('type' in creds && creds.type === 'iam') {
+    h.update('iam');
+    h.update('\0');
+    h.update(creds.serviceType);
+    h.update('\0');
+    h.update(creds.region);
+    h.update('\0');
+    h.update(creds.userId);
+    h.update('\0');
+    h.update(creds.clusterName);
+  } else {
+    const pwd = creds as { username?: string; password: string };
+    h.update('password');
+    h.update('\0');
+    h.update(pwd.username ?? '');
+    h.update('\0');
+    h.update(pwd.password);
+  }
+  return h.digest('hex');
+}
 
 function fingerprint(name: string, opts: ProducerOptions): string {
   const addresses = opts.connection?.addresses ?? [];
@@ -23,6 +54,7 @@ function fingerprint(name: string, opts: ProducerOptions): string {
     compression: opts.compression ?? 'none',
     serializer: serializerKey,
     useTLS: opts.connection?.useTLS ?? false,
+    credentials: credentialsFingerprint(opts.connection?.credentials),
   });
 }
 
@@ -41,9 +73,12 @@ export class ServerlessPool {
     if (this.closing) {
       throw new Error('ServerlessPool is closing');
     }
-    // Custom serializers, injected clients, or explicit credentials bypass the cache
-    // intentionally to avoid state and authentication-context collisions.
-    if (opts.client || opts.serializer || opts.connection?.credentials) {
+    // Custom serializers or injected clients bypass the cache intentionally -
+    // serializer instances may hold state and must not be shared across callers.
+    // Credentials are folded into the fingerprint (hashed) so different identities
+    // do not collide on the same cache entry while still allowing reuse for the
+    // same identity.
+    if (opts.client || opts.serializer) {
       return new Producer(name, opts);
     }
 
