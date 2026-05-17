@@ -437,9 +437,10 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
       },
       { connection: CONNECTION, concurrency: 2 },
     );
+    await worker.waitUntilReady();
 
     try {
-      // A -> B, A -> C, B -> D, C -> D (D has two parents)
+      // Diamond: A runs first (no deps), B/C wait for A, D waits for both.
       const jobs = await flow.addDAG({
         nodes: [
           { name: 'A', queueName: qName, data: { step: 'A' } },
@@ -451,11 +452,15 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
 
       const k = buildKeys(qName);
 
-      // Wait for A (root) to complete
+      // Wait for D (terminal node) to complete - last to run.
+      // Cluster mode runs slower under CI load: 4-node DAG submission costs
+      // ~10 round trips (addFlow x3, addJob x1, registerParent x3, hset x2)
+      // vs the pre-fix code's ~5-6. Locally this finishes in <100ms; CI can
+      // be 30x slower.
       await waitFor(async () => {
-        const state = await cleanupClient.hget(k.job(jobs.get('A')!.id), 'state');
+        const state = await cleanupClient.hget(k.job(jobs.get('D')!.id), 'state');
         return String(state) === 'completed';
-      }, 30000);
+      }, 40000);
 
       // Verify all completed
       for (const [, job] of jobs) {
@@ -463,12 +468,17 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
         expect(String(state)).toBe('completed');
       }
 
-      // D should have been processed exactly once
+      // D should have been processed exactly once (no double-dispatch even
+      // though it has two upstream deps notifying it).
       const dCount = processedNames.filter((n) => n === 'D').length;
       expect(dCount).toBe(1);
 
-      // D must have been processed before B and C, and B/C before A
-      expect(processedNames.indexOf('D')).toBeLessThan(processedNames.indexOf('A'));
+      // A runs before B/C, B/C run before D.
+      expect(processedNames.indexOf('A')).toBeLessThan(processedNames.indexOf('D'));
+      expect(processedNames.indexOf('A')).toBeLessThan(processedNames.indexOf('B'));
+      expect(processedNames.indexOf('A')).toBeLessThan(processedNames.indexOf('C'));
+      expect(processedNames.indexOf('B')).toBeLessThan(processedNames.indexOf('D'));
+      expect(processedNames.indexOf('C')).toBeLessThan(processedNames.indexOf('D'));
     } finally {
       await worker.close();
       await flow.close();

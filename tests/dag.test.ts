@@ -41,42 +41,42 @@ describeEachMode('DAG flows', (CONNECTION) => {
 
       const k = buildKeys(Q);
 
-      // A should be in waiting-children (B and C depend on it)
+      // A has no deps - it runs immediately. state=waiting.
       const stateA = await cleanupClient.hget(k.job(jobs.get('A')!.id), 'state');
-      expect(String(stateA)).toBe('waiting-children');
+      expect(String(stateA)).toBe('waiting');
 
-      // B should be in waiting-children (D depends on it)
+      // B waits for A (B.deps=[A]). state=waiting-children.
       const stateB = await cleanupClient.hget(k.job(jobs.get('B')!.id), 'state');
       expect(String(stateB)).toBe('waiting-children');
 
-      // C should be in waiting-children (D depends on it)
+      // C waits for A. state=waiting-children.
       const stateC = await cleanupClient.hget(k.job(jobs.get('C')!.id), 'state');
       expect(String(stateC)).toBe('waiting-children');
 
-      // D should be waiting (it's the terminal node with deps - it has parentId set
-      // and is registered as child of B and C)
-      // D is a non-parent node with deps, so it's a regular job added via addJob
-      // with parent=B's id. Its state depends on whether it has delay/priority.
+      // D waits for B and C. state=waiting-children.
       const stateD = await cleanupClient.hget(k.job(jobs.get('D')!.id), 'state');
-      expect(String(stateD)).toBe('waiting');
+      expect(String(stateD)).toBe('waiting-children');
 
-      // Verify A's deps contain B and C
+      // A has no deps to wait for - its Valkey deps SET is empty.
       const depsA = await cleanupClient.smembers(k.deps(jobs.get('A')!.id));
-      expect(depsA.size).toBe(2);
+      expect(depsA.size).toBe(0);
 
-      // Verify B's deps contain D
+      // B waits for A.
       const depsB = await cleanupClient.smembers(k.deps(jobs.get('B')!.id));
       expect(depsB.size).toBe(1);
 
-      // Verify C's deps contain D
+      // C waits for A.
       const depsC = await cleanupClient.smembers(k.deps(jobs.get('C')!.id));
       expect(depsC.size).toBe(1);
 
-      // Verify D has a parents SET with B and C
-      const parentsD = await cleanupClient.smembers(k.parents(jobs.get('D')!.id));
-      // Parents SET only created for 2nd+ parents via registerParent
-      // The first parent is handled via the traditional parentId/parentDepsKey path
-      expect(parentsD.size).toBe(1); // Only the 2nd parent (C) registered via registerParent
+      // D waits for B and C.
+      const depsD = await cleanupClient.smembers(k.deps(jobs.get('D')!.id));
+      expect(depsD.size).toBe(2);
+
+      // A has B and C as dependents. A's parents SET has the 2nd dependent
+      // (C); the 1st is captured via parentId on the job hash.
+      const parentsA = await cleanupClient.smembers(k.parents(jobs.get('A')!.id));
+      expect(parentsA.size).toBe(1);
     } finally {
       await flow.close();
     }
@@ -95,6 +95,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
       },
       { connection: CONNECTION, concurrency: 1 },
     );
+    await worker.waitUntilReady();
 
     try {
       const jobs = await flow.addDAG({
@@ -106,13 +107,14 @@ describeEachMode('DAG flows', (CONNECTION) => {
         ],
       });
 
-      // Wait for ALL jobs to complete (A is the last to complete in the cascade)
-      // Flow: D processes first (child) -> notifies B and C -> B and C process -> notify A -> A processes
+      // Wait for D to complete (D is the terminal node - last to run).
+      // Flow: A runs (no deps) -> notifies B and C -> B and C run in parallel
+      // -> both notify D -> D runs last.
       const k = buildKeys(qName);
       await waitFor(async () => {
-        const stateA = await cleanupClient.hget(k.job(jobs.get('A')!.id), 'state');
-        return String(stateA) === 'completed';
-      }, 30000);
+        const stateD = await cleanupClient.hget(k.job(jobs.get('D')!.id), 'state');
+        return String(stateD) === 'completed';
+      }, 40000);
 
       // Verify all completed
       for (const [_name, job] of jobs) {
@@ -120,19 +122,19 @@ describeEachMode('DAG flows', (CONNECTION) => {
         expect(String(state)).toBe('completed');
       }
 
-      // D processes first (it's the leaf child in the stream), then B and C,
-      // then finally A (root parent)
-      expect(processed).toContain('D');
-      expect(processed).toContain('A');
-      expect(processed.indexOf('D')).toBeLessThan(processed.indexOf('A'));
+      // A runs first (no deps), then B/C in parallel, then D last.
+      expect(processed[0]).toBe('A');
+      expect(processed[3]).toBe('D');
+      expect(['B', 'C']).toContain(processed[1]);
+      expect(['B', 'C']).toContain(processed[2]);
     } finally {
       await worker.close();
       await flow.close();
       await flushQueue(cleanupClient, qName);
     }
-  });
+  }, 50000);
 
-  it('fan-in: 3 parents feeding into one child', async () => {
+  it('fan-in: 3 sources feeding into one aggregator', async () => {
     const flow = new FlowProducer({ connection: CONNECTION });
     const qName = Q + '-fanin';
 
@@ -150,28 +152,29 @@ describeEachMode('DAG flows', (CONNECTION) => {
 
       const k = buildKeys(qName);
 
-      // All parents should be in waiting-children
+      // P1/P2/P3 have no deps - they run immediately. state=waiting.
       for (const name of ['P1', 'P2', 'P3']) {
         const state = await cleanupClient.hget(k.job(jobs.get(name)!.id), 'state');
-        expect(String(state)).toBe('waiting-children');
+        expect(String(state)).toBe('waiting');
       }
 
-      // P1's deps should contain child
-      const depsP1 = await cleanupClient.smembers(k.deps(jobs.get('P1')!.id));
-      expect(depsP1.size).toBe(1);
+      // child waits for all three sources. state=waiting-children.
+      const stateChild = await cleanupClient.hget(k.job(jobs.get('child')!.id), 'state');
+      expect(String(stateChild)).toBe('waiting-children');
 
-      // P2's deps should contain child
-      const depsP2 = await cleanupClient.smembers(k.deps(jobs.get('P2')!.id));
-      expect(depsP2.size).toBe(1);
+      // child's deps SET contains P1, P2, P3.
+      const depsChild = await cleanupClient.smembers(k.deps(jobs.get('child')!.id));
+      expect(depsChild.size).toBe(3);
 
-      // P3's deps should contain child
-      const depsP3 = await cleanupClient.smembers(k.deps(jobs.get('P3')!.id));
-      expect(depsP3.size).toBe(1);
-
-      // child should have parentIds with all 3 parents
-      const parentIdsRaw = await cleanupClient.hget(k.job(jobs.get('child')!.id), 'parentIds');
-      const parentIds = JSON.parse(String(parentIdsRaw));
-      expect(parentIds).toHaveLength(3);
+      // P1/P2/P3 each have 'child' as their single dependent. With one
+      // dependent, the addJob primary-parent path stores parentId/parentQueue
+      // on the leaf and we don't set parentIds (parentIds is reserved for
+      // multi-dependent leaves where additional dependents are wired via
+      // registerParent into the parents SET).
+      for (const name of ['P1', 'P2', 'P3']) {
+        const parentId = await cleanupClient.hget(k.job(jobs.get(name)!.id), 'parentId');
+        expect(String(parentId)).toBe(jobs.get('child')!.id);
+      }
     } finally {
       await flow.close();
       await flushQueue(cleanupClient, qName);
@@ -256,17 +259,17 @@ describeEachMode('DAG flows', (CONNECTION) => {
       expect(jobs.size).toBe(3);
       const k = buildKeys(qName);
 
-      // A is parent of B -> waiting-children
+      // A has no deps -> runs immediately -> state=waiting
       const stateA = await cleanupClient.hget(k.job(jobs.get('A')!.id), 'state');
-      expect(String(stateA)).toBe('waiting-children');
+      expect(String(stateA)).toBe('waiting');
 
-      // B is parent of C -> waiting-children
+      // B waits for A -> state=waiting-children
       const stateB = await cleanupClient.hget(k.job(jobs.get('B')!.id), 'state');
       expect(String(stateB)).toBe('waiting-children');
 
-      // C is terminal -> waiting
+      // C waits for B -> state=waiting-children
       const stateC = await cleanupClient.hget(k.job(jobs.get('C')!.id), 'state');
-      expect(String(stateC)).toBe('waiting');
+      expect(String(stateC)).toBe('waiting-children');
     } finally {
       await flow.close();
       await flushQueue(cleanupClient, qName);
@@ -294,44 +297,44 @@ describeEachMode('DAG flows', (CONNECTION) => {
 
       const k1 = buildKeys(qName1);
 
-      // A should be in waiting-children (B and C depend on it)
+      // A has no deps -> runs immediately
       const stateA = await cleanupClient.hget(k1.job(jobs.get('A')!.id), 'state');
-      expect(String(stateA)).toBe('waiting-children');
+      expect(String(stateA)).toBe('waiting');
 
-      // B should be in waiting-children (D depends on it)
+      // B and C wait for A
       const stateB = await cleanupClient.hget(k1.job(jobs.get('B')!.id), 'state');
       expect(String(stateB)).toBe('waiting-children');
 
-      // C should be in waiting-children (D depends on it)
       const stateC = await cleanupClient.hget(k1.job(jobs.get('C')!.id), 'state');
       expect(String(stateC)).toBe('waiting-children');
 
-      // D should be waiting (terminal node)
+      // D waits for B and C
       const stateD = await cleanupClient.hget(k1.job(jobs.get('D')!.id), 'state');
-      expect(String(stateD)).toBe('waiting');
+      expect(String(stateD)).toBe('waiting-children');
 
-      // Verify A's deps contain both B and C
+      // A has no deps to wait for
       const depsA = await cleanupClient.smembers(k1.deps(jobs.get('A')!.id));
-      expect(depsA.size).toBe(2);
+      expect(depsA.size).toBe(0);
 
-      // Verify B's deps contain D
+      // B and C each wait for A
       const depsB = await cleanupClient.smembers(k1.deps(jobs.get('B')!.id));
       expect(depsB.size).toBe(1);
-
-      // Verify C's deps contain D
       const depsC = await cleanupClient.smembers(k1.deps(jobs.get('C')!.id));
       expect(depsC.size).toBe(1);
 
-      // Verify D has parentIds with both B and C
-      const parentIdsRaw = await cleanupClient.hget(k1.job(jobs.get('D')!.id), 'parentIds');
+      // D waits for both B and C
+      const depsD = await cleanupClient.smembers(k1.deps(jobs.get('D')!.id));
+      expect(depsD.size).toBe(2);
+
+      // A has dependents B and C - parentIds contains both
+      const parentIdsRaw = await cleanupClient.hget(k1.job(jobs.get('A')!.id), 'parentIds');
       const parentIds = JSON.parse(String(parentIdsRaw));
       expect(parentIds).toHaveLength(2);
 
-      // Verify D has parentQueues array
-      const parentQueuesRaw = await cleanupClient.hget(k1.job(jobs.get('D')!.id), 'parentQueues');
+      // parentQueues array contains the queues of A's dependents
+      const parentQueuesRaw = await cleanupClient.hget(k1.job(jobs.get('A')!.id), 'parentQueues');
       const parentQueues = JSON.parse(String(parentQueuesRaw));
       expect(parentQueues).toContain(qName1);
-      expect(parentQueues).toContain(qName2);
     } finally {
       await flow.close();
       await flushQueue(cleanupClient, qName1);
@@ -401,15 +404,15 @@ describeEachMode('DAG flows', (CONNECTION) => {
       },
       { connection: CONNECTION, concurrency: 2 },
     );
-    // Wait for the worker to be ready before submitting the DAG. Without this,
-    // the worker can still be opening its blocking client when D is added,
-    // and the test's first waitFor (30s for D to complete) starves on CI
-    // under load - the leaf has to wait for B/C/A to all run sequentially,
-    // which can exceed 30s if D's pickup is delayed.
+    // Wait for the worker to be ready before submitting the DAG. Without
+    // this, the worker can still be opening its blocking client when the
+    // DAG is added, and the cascading completions race the worker startup.
     await worker.waitUntilReady();
 
     try {
-      // Diamond: A->B, A->C, B->D, C->D
+      // Diamond: A runs first (no deps), B/C wait for A, D waits for B and C.
+      // D's depsCompleted increments as B and C complete; D runs once it
+      // reaches 2.
       const jobs = await flow.addDAG({
         nodes: [
           { name: 'A', queueName: qName, data: {} },
@@ -425,50 +428,49 @@ describeEachMode('DAG flows', (CONNECTION) => {
       const cId = jobs.get('C')!.id;
       const dId = jobs.get('D')!.id;
 
-      // Wait for D to complete (it processes first as the leaf)
+      // Wait for A to complete (runs first - no deps).
       await waitFor(async () => {
-        const state = await cleanupClient.hget(k.job(dId), 'state');
+        const state = await cleanupClient.hget(k.job(aId), 'state');
         return String(state) === 'completed';
-      }, 30000);
+      }, 15000);
 
-      // At this point, one of B or C should have completed (notifying A)
-      // Wait for at least one of them to complete
+      // After A completes, one of B or C should run.
       await waitFor(async () => {
         const stateB = await cleanupClient.hget(k.job(bId), 'state');
         const stateC = await cleanupClient.hget(k.job(cId), 'state');
         return String(stateB) === 'completed' || String(stateC) === 'completed';
-      }, 30000);
+      }, 15000);
 
-      // Check A's depsCompleted counter
-      let depsCompleted = await cleanupClient.hget(k.job(aId), 'depsCompleted');
+      // D's depsCompleted should be at least 1 (one of B/C notified D).
+      let depsCompleted = await cleanupClient.hget(k.job(dId), 'depsCompleted');
       const firstCount = Number(depsCompleted) || 0;
       expect(firstCount).toBeGreaterThanOrEqual(1);
 
-      // Wait for both B and C to complete
+      // Wait for both B and C to complete.
       await waitFor(async () => {
         const stateB = await cleanupClient.hget(k.job(bId), 'state');
         const stateC = await cleanupClient.hget(k.job(cId), 'state');
         return String(stateB) === 'completed' && String(stateC) === 'completed';
-      }, 30000);
+      }, 15000);
 
-      // After both complete, A's depsCompleted should be 2
-      depsCompleted = await cleanupClient.hget(k.job(aId), 'depsCompleted');
+      // Both notified D - depsCompleted should be exactly 2.
+      depsCompleted = await cleanupClient.hget(k.job(dId), 'depsCompleted');
       expect(Number(depsCompleted)).toBe(2);
 
-      // Wait for A to transition to waiting (and then complete)
+      // D should transition to waiting and run.
       await waitFor(async () => {
-        const state = await cleanupClient.hget(k.job(aId), 'state');
+        const state = await cleanupClient.hget(k.job(dId), 'state');
         return String(state) === 'completed';
-      }, 30000);
+      }, 15000);
 
-      const stateA = await cleanupClient.hget(k.job(aId), 'state');
-      expect(String(stateA)).toBe('completed');
+      const stateD = await cleanupClient.hget(k.job(dId), 'state');
+      expect(String(stateD)).toBe('completed');
     } finally {
       await worker.close();
       await flow.close();
       await flushQueue(cleanupClient, qName);
     }
-  });
+  }, 60000);
 
   it('verifies idempotency: duplicate parent registration', async () => {
     const qName = Q + '-idempotent';
