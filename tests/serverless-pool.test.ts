@@ -55,7 +55,7 @@ describeEachMode('ServerlessPool - caching', (CONNECTION) => {
     expect(pool.size).toBe(2);
   });
 
-  it('does not cache producers when credentials are provided', () => {
+  it('reuses cached producer for identical credentials', () => {
     const connWithCreds = {
       ...CONNECTION,
       credentials: {
@@ -65,8 +65,34 @@ describeEachMode('ServerlessPool - caching', (CONNECTION) => {
     };
     const p1 = pool.getProducer(Q1, { connection: connWithCreds });
     const p2 = pool.getProducer(Q1, { connection: connWithCreds });
-    expect(p1).not.toBe(p2);
-    expect(pool.size).toBe(0);
+    expect(p1).toBe(p2);
+    expect(pool.size).toBe(1);
+  });
+
+  it('returns separate cached producers for different credentials on the same queue', () => {
+    const connA = {
+      ...CONNECTION,
+      credentials: { username: 'user-a', password: 'secret-a' },
+    };
+    const connB = {
+      ...CONNECTION,
+      credentials: { username: 'user-b', password: 'secret-b' },
+    };
+    const pA = pool.getProducer(Q1, { connection: connA });
+    const pB = pool.getProducer(Q1, { connection: connB });
+    expect(pA).not.toBe(pB);
+    expect(pool.size).toBe(2);
+  });
+
+  it('does not collide credentialed and uncredentialed producers on the same queue', () => {
+    const connWithCreds = {
+      ...CONNECTION,
+      credentials: { username: 'user-a', password: 'secret-a' },
+    };
+    const pPlain = pool.getProducer(Q1, { connection: CONNECTION });
+    const pCreds = pool.getProducer(Q1, { connection: connWithCreds });
+    expect(pPlain).not.toBe(pCreds);
+    expect(pool.size).toBe(2);
   });
 });
 
