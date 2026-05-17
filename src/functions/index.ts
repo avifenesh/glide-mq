@@ -48,7 +48,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 86: glidemq_reclaimStalledListJobs refreshes lastActive on detection to dedupe stalled-recovery across concurrent worker schedulers - same stale list job counted at most once per interval (#228).
 // Version 87: releaseGroupSlotAndPromote caps maxConcurrency promotion budget at 1000 to prevent unbounded Lua loop on large maxConcurrency settings (#236).
 // Version 88: glidemq_promote counts expired scheduled jobs toward MAX_PROMOTIONS budget - prevents unbounded scans when many expired jobs sit in scheduled set (#235).
-export const LIBRARY_VERSION = '88';
+// Version 89: Bound skip-marker advancement work per FCALL via MAX_SKIP_ADVANCE_STEPS=128 to prevent long-running ordered-group loops (#222).
+export const LIBRARY_VERSION = '89';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -126,12 +127,17 @@ local function markOrderingDone(jobKey, jobId, hintOrderingKey, hintOrderingSeq)
   end
 end
 
+local MAX_SKIP_ADVANCE_STEPS = 128
+
 -- Advance nextSeq past any skip markers left by debounce on ordered jobs.
 -- Skip markers are hash fields 'skip:<seq>' set when debounce deletes an ordered job.
 -- Returns the advanced nextSeq. Cleans up markers via HDEL as it goes.
+-- Work is bounded per call to avoid long synchronous loops.
 local function advancePastSkips(groupHashKey, nextSeq)
-  while redis.call('HDEL', groupHashKey, 'skip:' .. tostring(nextSeq)) == 1 do
+  local steps = 0
+  while steps < MAX_SKIP_ADVANCE_STEPS and redis.call('HDEL', groupHashKey, 'skip:' .. tostring(nextSeq)) == 1 do
     nextSeq = nextSeq + 1
+    steps = steps + 1
   end
   return nextSeq
 end
