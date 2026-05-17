@@ -432,14 +432,14 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await waitFor(async () => {
         const state = await cleanupClient.hget(k.job(aId), 'state');
         return String(state) === 'completed';
-      }, 30000);
+      }, 15000);
 
       // After A completes, one of B or C should run.
       await waitFor(async () => {
         const stateB = await cleanupClient.hget(k.job(bId), 'state');
         const stateC = await cleanupClient.hget(k.job(cId), 'state');
         return String(stateB) === 'completed' || String(stateC) === 'completed';
-      }, 30000);
+      }, 15000);
 
       // D's depsCompleted should be at least 1 (one of B/C notified D).
       let depsCompleted = await cleanupClient.hget(k.job(dId), 'depsCompleted');
@@ -451,7 +451,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
         const stateB = await cleanupClient.hget(k.job(bId), 'state');
         const stateC = await cleanupClient.hget(k.job(cId), 'state');
         return String(stateB) === 'completed' && String(stateC) === 'completed';
-      }, 30000);
+      }, 15000);
 
       // Both notified D - depsCompleted should be exactly 2.
       depsCompleted = await cleanupClient.hget(k.job(dId), 'depsCompleted');
@@ -461,7 +461,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await waitFor(async () => {
         const state = await cleanupClient.hget(k.job(dId), 'state');
         return String(state) === 'completed';
-      }, 30000);
+      }, 15000);
 
       const stateD = await cleanupClient.hget(k.job(dId), 'state');
       expect(String(stateD)).toBe('completed');
@@ -470,7 +470,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await flow.close();
       await flushQueue(cleanupClient, qName);
     }
-  });
+  }, 60000);
 
   it('verifies idempotency: duplicate parent registration', async () => {
     const qName = Q + '-idempotent';
