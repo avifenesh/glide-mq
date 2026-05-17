@@ -333,27 +333,60 @@ function collectDagQueueNames(dag: DAGFlow): Set<string> {
   return names;
 }
 
-function buildFlowTreeNodes(flowId: string, roots: FlowJobRef[], nodes: FlowNodeSummary[]): FlowTreeNode[] {
+function buildFlowTreeNodes(
+  flowId: string,
+  kind: FlowKind,
+  roots: FlowJobRef[],
+  nodes: FlowNodeSummary[],
+): FlowTreeNode[] {
+  // Two flow shapes share this renderer:
+  //   - 'tree' flows from FlowProducer.add({children:[...]}): each child has
+  //     parentId pointing UP to its tree-parent. The user-tree edge points
+  //     parent -> child in the same direction as parentId points up. To walk
+  //     down, invert: childrenInTree[parent] += child for each child.
+  //   - 'dag' flows from FlowProducer.addDAG({deps}): under the corrected
+  //     semantic, deps means "must complete before me", and a node's
+  //     parentIds holds its DEPENDENTS (nodes waiting for it). The user-tree
+  //     edge goes from a node down to its dependents. So
+  //     childrenInTree[node] = node.parentIds directly.
+  //
+  // The walk and dedup are identical once childrenInTree is built.
   const nodeMap = new Map<string, FlowNodeSummary>();
-  const childrenByParent = new Map<string, FlowNodeSummary[]>();
+  const childrenInTree = new Map<string, FlowNodeSummary[]>();
 
   for (const node of nodes) {
     nodeMap.set(encodeFlowJobRef({ jobId: node.id, queueName: node.queueName }), node);
+  }
 
-    const parentRefs: FlowJobRef[] = [];
+  for (const node of nodes) {
+    const refs: FlowJobRef[] = [];
     if (node.parentIds && node.parentQueues && node.parentIds.length === node.parentQueues.length) {
       for (let i = 0; i < node.parentIds.length; i++) {
-        parentRefs.push({ jobId: node.parentIds[i], queueName: node.parentQueues[i] });
+        refs.push({ jobId: node.parentIds[i], queueName: node.parentQueues[i] });
       }
     } else if (node.parentId) {
-      parentRefs.push({ jobId: node.parentId, queueName: node.parentQueue ?? node.queueName });
+      refs.push({ jobId: node.parentId, queueName: node.parentQueue ?? node.queueName });
     }
 
-    for (const parentRef of parentRefs) {
-      const key = encodeFlowJobRef(parentRef);
-      const siblings = childrenByParent.get(key);
-      if (siblings) siblings.push(node);
-      else childrenByParent.set(key, [node]);
+    if (refs.length === 0) continue;
+    if (kind === 'dag') {
+      // refs are this node's DEPENDENTS (its user-tree children).
+      const myKey = encodeFlowJobRef({ jobId: node.id, queueName: node.queueName });
+      const list = childrenInTree.get(myKey) ?? [];
+      for (const dep of refs) {
+        const depNode = nodeMap.get(encodeFlowJobRef(dep));
+        if (depNode) list.push(depNode);
+      }
+      if (list.length > 0) childrenInTree.set(myKey, list);
+    } else {
+      // 'tree' kind: refs is the single parentId chain (BullMQ tree).
+      // The parent's user-tree children include this node.
+      for (const parentRef of refs) {
+        const key = encodeFlowJobRef(parentRef);
+        const siblings = childrenInTree.get(key);
+        if (siblings) siblings.push(node);
+        else childrenInTree.set(key, [node]);
+      }
     }
   }
 
@@ -385,8 +418,21 @@ function buildFlowTreeNodes(flowId: string, roots: FlowJobRef[], nodes: FlowNode
       };
     }
 
-    const children = (childrenByParent.get(key) ?? [])
-      .slice()
+    // Dedupe by child key - a diamond can list the same descendant under
+    // multiple parents (B and C both have D as a child). We render D once
+    // under the first parent in tree-walk order and skip duplicates so the
+    // tree stays acyclic and bounded.
+    const rawChildren = childrenInTree.get(key) ?? [];
+    const seenChildren = new Set<string>();
+    const dedupedChildren: FlowNodeSummary[] = [];
+    for (const child of rawChildren) {
+      const childKey = encodeFlowJobRef({ jobId: child.id, queueName: child.queueName });
+      if (seenChildren.has(childKey)) continue;
+      seenChildren.add(childKey);
+      dedupedChildren.push(child);
+    }
+
+    const children = dedupedChildren
       .sort((a, b) => a.timestamp - b.timestamp || a.queueName.localeCompare(b.queueName) || a.id.localeCompare(b.id))
       .map((child) => {
         const childKey = encodeFlowJobRef({ jobId: child.id, queueName: child.queueName });
@@ -725,7 +771,7 @@ export function createRoutes(
       roots: record.roots
         .slice()
         .sort((a, b) => a.queueName.localeCompare(b.queueName) || a.jobId.localeCompare(b.jobId)),
-      tree: buildFlowTreeNodes(flowId, record.roots, nodes),
+      tree: buildFlowTreeNodes(flowId, record.kind, record.roots, nodes),
       usage,
     };
   }

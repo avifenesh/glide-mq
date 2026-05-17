@@ -897,13 +897,17 @@ describe('HTTP Proxy', () => {
       const treeRes = await fetch(`${baseUrl}/flows/${flowId}/tree`);
       expect(treeRes.status).toBe(200);
       const treeBody = await treeRes.json();
-      // The tree endpoint roots at user-facing roots (nodes with no deps).
-      // Children are resolved from each node's parentId/parentIds. With the
-      // corrected deps semantic the leaf A holds its dependents (B, C) in
-      // parentIds, so traversing parentIds as "my parents in the tree map"
-      // means A's tree-children are empty - the tree is just the root list.
+      // User-facing tree: A is the root (no deps, runs first); B and C are
+      // its children (they wait for A); D appears under both B and C (D
+      // waits for both - this is the diamond bottom).
       expect(treeBody.tree).toHaveLength(1);
       expect(treeBody.tree[0].name).toBe('A');
+      const childNames = treeBody.tree[0].children.map((node: any) => node.name).sort();
+      expect(childNames).toEqual(['B', 'C']);
+      for (const child of treeBody.tree[0].children) {
+        expect(child.children).toHaveLength(1);
+        expect(child.children[0].name).toBe('D');
+      }
     } finally {
       if (flowId) {
         await fetch(`${baseUrl}/flows/${flowId}`, { method: 'DELETE' }).catch(() => undefined);
