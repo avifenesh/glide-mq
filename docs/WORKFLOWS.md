@@ -113,12 +113,11 @@ const flow = new FlowProducer({ connection });
 
 // Submit a DAG using the helper function
 const jobs = await dag(
-  'queueName',
   [
-    { name: 'A', data: { step: 1 } },
-    { name: 'B', data: { step: 2 }, deps: ['A'] },
-    { name: 'C', data: { step: 3 }, deps: ['A'] },
-    { name: 'D', data: { step: 4 }, deps: ['B', 'C'] },
+    { name: 'A', queueName: 'tasks', data: { step: 1 } },
+    { name: 'B', queueName: 'tasks', data: { step: 2 }, deps: ['A'] },
+    { name: 'C', queueName: 'tasks', data: { step: 3 }, deps: ['A'] },
+    { name: 'D', queueName: 'tasks', data: { step: 4 }, deps: ['B', 'C'] },
   ],
   connection,
 );
@@ -150,13 +149,13 @@ import { dag } from 'glide-mq';
 
 // Three parallel data fetches, then one merge job
 const jobs = await dag(
-  'data',
   [
-    { name: 'fetch-sales', data: { source: 'sales-db' } },
-    { name: 'fetch-inventory', data: { source: 'warehouse-db' } },
-    { name: 'fetch-returns', data: { source: 'returns-db' } },
+    { name: 'fetch-sales', queueName: 'data', data: { source: 'sales-db' } },
+    { name: 'fetch-inventory', queueName: 'data', data: { source: 'warehouse-db' } },
+    { name: 'fetch-returns', queueName: 'data', data: { source: 'returns-db' } },
     {
       name: 'merge-reports',
+      queueName: 'data',
       data: { reportId: 'Q1-2025' },
       deps: ['fetch-sales', 'fetch-inventory', 'fetch-returns'],
     },
@@ -181,12 +180,11 @@ import { dag } from 'glide-mq';
 //       D
 
 const jobs = await dag(
-  'tasks',
   [
-    { name: 'A', data: { step: 'root' } },
-    { name: 'B', data: { step: 'left' }, deps: ['A'] },
-    { name: 'C', data: { step: 'right' }, deps: ['A'] },
-    { name: 'D', data: { step: 'converge' }, deps: ['B', 'C'] },
+    { name: 'A', queueName: 'tasks', data: { step: 'root' } },
+    { name: 'B', queueName: 'tasks', data: { step: 'left' }, deps: ['A'] },
+    { name: 'C', queueName: 'tasks', data: { step: 'right' }, deps: ['A'] },
+    { name: 'D', queueName: 'tasks', data: { step: 'converge' }, deps: ['B', 'C'] },
   ],
   connection,
 );
@@ -197,7 +195,7 @@ const jobs = await dag(
 **Implementation notes:**
 
 - DAG validation runs automatically - cycles are detected and rejected with `CycleError`.
-- Jobs are submitted in topological order (leaves first, roots last).
+- Jobs are submitted level by level in topological order; all jobs within a level are pipelined in a single batch, so submission cost is O(levels) round trips rather than O(N).
 - If any parent fails or is dead-lettered, dependent jobs remain blocked indefinitely (manual cleanup required).
 - Cross-queue dependencies are supported - each node can specify its own `queueName`.
 
