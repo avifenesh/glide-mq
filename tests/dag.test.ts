@@ -401,6 +401,12 @@ describeEachMode('DAG flows', (CONNECTION) => {
       },
       { connection: CONNECTION, concurrency: 2 },
     );
+    // Wait for the worker to be ready before submitting the DAG. Without this,
+    // the worker can still be opening its blocking client when D is added,
+    // and the test's first waitFor (30s for D to complete) starves on CI
+    // under load - the leaf has to wait for B/C/A to all run sequentially,
+    // which can exceed 30s if D's pickup is delayed.
+    await worker.waitUntilReady();
 
     try {
       // Diamond: A->B, A->C, B->D, C->D

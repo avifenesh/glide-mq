@@ -319,14 +319,14 @@ redis.register_function('glidemq_complete', function(keys, args)
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   if removeMode == 'true' then
     redis.call('ZREM', completedKey, jobId)
-    redis.call('DEL', jobKey)
+    redis.call('UNLINK', jobKey)
   elseif removeMode == 'count' and removeCount > 0 then
     local total = redis.call('ZCARD', completedKey)
     if total > removeCount then
       local excess = redis.call('ZRANGE', completedKey, 0, total - removeCount - 1)
       for i = 1, #excess do
         local oldId = excess[i]
-        redis.call('DEL', prefix .. 'job:' .. oldId)
+        redis.call('UNLINK', prefix .. 'job:' .. oldId)
         redis.call('ZREM', completedKey, oldId)
       end
     end
@@ -336,7 +336,7 @@ redis.register_function('glidemq_complete', function(keys, args)
       local old = redis.call('ZRANGEBYSCORE', completedKey, '0', tostring(cutoff))
       for i = 1, #old do
         local oldId = old[i]
-        redis.call('DEL', prefix .. 'job:' .. oldId)
+        redis.call('UNLINK', prefix .. 'job:' .. oldId)
         redis.call('ZREM', completedKey, oldId)
       end
     end
@@ -346,7 +346,7 @@ redis.register_function('glidemq_complete', function(keys, args)
         local excess = redis.call('ZRANGE', completedKey, 0, total - removeCount - 1)
         for i = 1, #excess do
           local oldId = excess[i]
-          redis.call('DEL', prefix .. 'job:' .. oldId)
+          redis.call('UNLINK', prefix .. 'job:' .. oldId)
           redis.call('ZREM', completedKey, oldId)
         end
       end
@@ -456,14 +456,14 @@ redis.register_function('glidemq_fail', function(keys, args)
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     if removeMode == 'true' then
       redis.call('ZREM', failedKey, jobId)
-      redis.call('DEL', jobKey)
+      redis.call('UNLINK', jobKey)
     elseif removeMode == 'count' and removeCount > 0 then
       local total = redis.call('ZCARD', failedKey)
       if total > removeCount then
         local excess = redis.call('ZRANGE', failedKey, 0, total - removeCount - 1)
         for i = 1, #excess do
           local oldId = excess[i]
-          redis.call('DEL', prefix .. 'job:' .. oldId)
+          redis.call('UNLINK', prefix .. 'job:' .. oldId)
           redis.call('ZREM', failedKey, oldId)
         end
       end
@@ -473,7 +473,7 @@ redis.register_function('glidemq_fail', function(keys, args)
         local old = redis.call('ZRANGEBYSCORE', failedKey, '0', tostring(cutoff))
         for i = 1, #old do
           local oldId = old[i]
-          redis.call('DEL', prefix .. 'job:' .. oldId)
+          redis.call('UNLINK', prefix .. 'job:' .. oldId)
           redis.call('ZREM', failedKey, oldId)
         end
       end
@@ -483,7 +483,7 @@ redis.register_function('glidemq_fail', function(keys, args)
           local excess = redis.call('ZRANGE', failedKey, 0, total - removeCount - 1)
           for i = 1, #excess do
             local oldId = excess[i]
-            redis.call('DEL', prefix .. 'job:' .. oldId)
+            redis.call('UNLINK', prefix .. 'job:' .. oldId)
             redis.call('ZREM', failedKey, oldId)
           end
         end
@@ -719,7 +719,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
           -- Remove old job from scheduled ZSet and delete hash
           redis.call('ZREM', scheduledKey, existingJobId)
           markOrderingDone(jobKey, existingJobId)
-          redis.call('DEL', jobKey)
+          redis.call('UNLINK', jobKey)
           emitEvent(eventsKey, 'removed', existingJobId, nil)
         elseif state and state ~= 'completed' and state ~= 'failed' then
           -- Job is waiting or active - skip (can't debounce non-delayed)
@@ -1218,7 +1218,7 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   markOrderingDone(jobKey, jobId)
 
   -- Delete the job hash
-  redis.call('DEL', jobKey)
+  redis.call('UNLINK', jobKey)
 
   -- Emit event
   emitEvent(eventsKey, 'removed', jobId, nil)

@@ -50,8 +50,9 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 88: glidemq_promote counts expired scheduled jobs toward MAX_PROMOTIONS budget - prevents unbounded scans when many expired jobs sit in scheduled set (#235).
 // Version 89: Bound skip-marker advancement work per FCALL via MAX_SKIP_ADVANCE_STEPS=128 to prevent long-running ordered-group loops (#222).
 // Version 90: glidemq_addFlow rechecks EXISTS for custom child IDs and skips auto-INCR'd parent/child IDs that collide with existing custom-ID jobs - mirrors the addJob auto-ID collision guard so flows survive shared idKey state (#234).
-// Version 91: Stalled-recovery redispatches under-threshold jobs back to the stream / lifo / priority list so a healthy worker can pick them up; jobs only fail once stalledCount > maxStalledCount. Aligns with the at-least-once redelivery promise in DURABILITY.md and matches BullMQ semantics (#239).
-export const LIBRARY_VERSION = '91';
+// Version 91: Stalled-recovery redispatches under-threshold jobs back to the stream / lifo / priority list so a healthy worker can pick them up; jobs only fail once stalledCount > maxStalledCount. Aligns with the at-least-once redelivery promise in DURABILITY.md and matches BullMQ semantics (#242).
+// Version 92: Replace DEL with UNLINK on every multi-key / large-collection delete (job hashes, retention purge, glidemq_clean batches, glidemq_drain stream/zset/lifo/priority sweeps). UNLINK keeps in-script atomicity - the keyspace removal is still synchronous from the script's view - but defers memory reclamation to the bio thread, so obliterate / retention / drain stop blocking the server thread on MB-sized job hashes. Small-key DELs (lockKey) kept as DEL (#243).
+export const LIBRARY_VERSION = '92';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -529,10 +530,11 @@ local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, ma
 end
 
 -- Remove excess jobs from a sorted set in capped, stack-safe batches.
--- Deletes job hashes and removes from the set in chunks of 1000.
+-- UNLINKs job hashes (they can be MB-sized with data + opts) and removes
+-- from the set in chunks of 1000.
 local function removeExcessJobs(setKey, prefix, ids)
   for i = 1, #ids do
-    redis.call('DEL', prefix .. 'job:' .. ids[i])
+    redis.call('UNLINK', prefix .. 'job:' .. ids[i])
   end
   for i = 1, #ids, 1000 do
     redis.call('ZREM', setKey, unpack(ids, i, math.min(i + 999, #ids)))
@@ -889,7 +891,7 @@ redis.register_function('glidemq_complete', function(keys, args)
   if broadcastMode ~= '1' then
     if removeMode == 'true' then
       redis.call('ZREM', completedKey, jobId)
-      redis.call('DEL', jobKey)
+      redis.call('UNLINK', jobKey)
     elseif removeMode == 'count' and removeCount > 0 then
       local total = redis.call('ZCARD', completedKey)
       if total > removeCount then
@@ -1032,7 +1034,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   if broadcastMode ~= '1' then
     if removeMode == 'true' then
       redis.call('ZREM', completedKey, jobId)
-      redis.call('DEL', jobKey)
+      redis.call('UNLINK', jobKey)
     elseif removeMode == 'count' and removeCount > 0 then
       local total = redis.call('ZCARD', completedKey)
       if total > removeCount then
@@ -1478,7 +1480,7 @@ redis.register_function('glidemq_fail', function(keys, args)
     if broadcastMode ~= '1' then
       if removeMode == 'true' then
         redis.call('ZREM', failedKey, jobId)
-        redis.call('DEL', jobKey)
+        redis.call('UNLINK', jobKey)
       elseif removeMode == 'count' and removeCount > 0 then
         local total = redis.call('ZCARD', failedKey)
         if total > removeCount then
@@ -1765,7 +1767,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
             local groupHashKey = prefix .. 'group:' .. delGroupKey
             redis.call('HSET', groupHashKey, 'skip:' .. tostring(delOrderingSeq), '1')
           end
-          redis.call('DEL', jobKey)
+          redis.call('UNLINK', jobKey)
           if skipEvents ~= '1' then emitEvent(eventsKey, 'removed', existingJobId, nil) end
         elseif state and state ~= 'completed' and state ~= 'failed' then
           return 'skipped'
@@ -2729,18 +2731,16 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
   markOrderingDone(jobKey, jobId)
-  -- Clean up DAG parents SET, per-job streaming channel, and signals
+  -- Clean up DAG parents SET, per-job streaming channel, and signals.
+  -- Job hash + log can be MB-sized; parents/jstream/signals carry per-step
+  -- data. Use UNLINK so the server reclaims memory off the main thread.
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   local parentsKey = prefix .. 'parents:' .. jobId
   local jstreamKey = prefix .. 'jstream:' .. jobId
   local signalsKey = prefix .. 'signals:' .. jobId
   local suspendedKey = prefix .. 'suspended'
-  redis.call('DEL', parentsKey)
-  redis.call('DEL', jstreamKey)
-  redis.call('DEL', signalsKey)
+  redis.call('UNLINK', parentsKey, jstreamKey, signalsKey, jobKey, logKey)
   redis.call('ZREM', suspendedKey, jobId)
-  redis.call('DEL', jobKey)
-  redis.call('DEL', logKey)
   emitEvent(eventsKey, 'removed', jobId, nil)
   return 1
 end)
@@ -2758,7 +2758,7 @@ redis.register_function('glidemq_clean', function(keys, args)
     return {}
   end
   for i = 1, #ids do
-    redis.call('DEL', prefix .. 'job:' .. ids[i], prefix .. 'log:' .. ids[i], prefix .. 'deps:' .. ids[i], prefix .. 'parents:' .. ids[i], prefix .. 'jstream:' .. ids[i], prefix .. 'signals:' .. ids[i])
+    redis.call('UNLINK', prefix .. 'job:' .. ids[i], prefix .. 'log:' .. ids[i], prefix .. 'deps:' .. ids[i], prefix .. 'parents:' .. ids[i], prefix .. 'jstream:' .. ids[i], prefix .. 'signals:' .. ids[i])
   end
   for i = 1, #ids, 1000 do
     redis.call('ZREM', setKey, unpack(ids, i, math.min(i + 999, #ids)))
@@ -3335,7 +3335,7 @@ redis.register_function('glidemq_drain', function(keys, args)
         for j = 1, #fields, 2 do
           if fields[j] == 'jobId' and fields[j + 1] ~= '' then
             local jobId = fields[j + 1]
-            redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId, prefix .. 'signals:' .. jobId)
+            redis.call('UNLINK', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId, prefix .. 'signals:' .. jobId)
             removed = removed + 1
             break
           end
@@ -3370,11 +3370,11 @@ redis.register_function('glidemq_drain', function(keys, args)
         batch[#batch + 1] = prefix .. 'jstream:' .. jobId
         batch[#batch + 1] = prefix .. 'signals:' .. jobId
       end
-      redis.call('DEL', unpack(batch))
+      redis.call('UNLINK', unpack(batch))
       removed = removed + #scheduled
       offset = offset + 1000
     end
-    redis.call('DEL', scheduledKey)
+    redis.call('UNLINK', scheduledKey)
   end
 
   -- Drain LIFO list: get all waiting job IDs, delete their hashes, then delete the list
@@ -3382,10 +3382,10 @@ redis.register_function('glidemq_drain', function(keys, args)
     local lifoIds = redis.call('LRANGE', lifoKey, 0, -1)
     for i = 1, #lifoIds do
       local jobId = lifoIds[i]
-      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId, prefix .. 'signals:' .. jobId)
+      redis.call('UNLINK', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId, prefix .. 'signals:' .. jobId)
       removed = removed + 1
     end
-    redis.call('DEL', lifoKey)
+    redis.call('UNLINK', lifoKey)
   end
 
   -- Drain priority list: get all waiting job IDs, delete their hashes, then delete the list
@@ -3393,10 +3393,10 @@ redis.register_function('glidemq_drain', function(keys, args)
     local priorityIds = redis.call('LRANGE', priorityKey, 0, -1)
     for i = 1, #priorityIds do
       local jobId = priorityIds[i]
-      redis.call('DEL', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId, prefix .. 'signals:' .. jobId)
+      redis.call('UNLINK', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId, prefix .. 'signals:' .. jobId)
       removed = removed + 1
     end
-    redis.call('DEL', priorityKey)
+    redis.call('UNLINK', priorityKey)
   end
 
   if removed > 0 then

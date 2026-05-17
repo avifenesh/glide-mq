@@ -81,6 +81,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     zcard: vi.fn().mockResolvedValue(0),
     zrange: vi.fn().mockResolvedValue([]),
     del: vi.fn(),
+    unlink: vi.fn(),
     scan: vi.fn().mockResolvedValue(['0', []]),
     smembers: vi.fn().mockResolvedValue(new Set()),
     hmget: vi.fn().mockResolvedValue([null, null]),
@@ -216,7 +217,8 @@ describe('Queue.obliterate', () => {
     const queue = new Queue('obliterate-test', connOpts);
     await queue.obliterate({ force: true });
 
-    expect(mockClient.del).toHaveBeenCalledWith(
+    // obliterate now uses UNLINK to defer memory reclaim off the main thread.
+    expect(mockClient.unlink).toHaveBeenCalledWith(
       expect.arrayContaining([
         'glide:{obliterate-test}:id',
         'glide:{obliterate-test}:stream',
@@ -246,10 +248,10 @@ describe('Queue.obliterate', () => {
     const queue = new Queue('obliterate-test', connOpts);
     await queue.obliterate({ force: true });
 
-    // del called: once for static keys, once for job batch, once for deps batch
-    expect(mockClient.del).toHaveBeenCalledTimes(3);
-    expect(mockClient.del).toHaveBeenCalledWith(['glide:{obliterate-test}:job:1', 'glide:{obliterate-test}:job:2']);
-    expect(mockClient.del).toHaveBeenCalledWith(['glide:{obliterate-test}:deps:1']);
+    // unlink called: once for static keys, once for job batch, once for deps batch
+    expect(mockClient.unlink).toHaveBeenCalledTimes(3);
+    expect(mockClient.unlink).toHaveBeenCalledWith(['glide:{obliterate-test}:job:1', 'glide:{obliterate-test}:job:2']);
+    expect(mockClient.unlink).toHaveBeenCalledWith(['glide:{obliterate-test}:deps:1']);
 
     await queue.close();
   });
