@@ -1694,7 +1694,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
       this.keys.metricsFailed,
       this.keys.lifo,
     ];
-    await client.del(staticKeys);
+    // Static keys include the stream, completed/failed ZSets, and several
+    // hashes that can hold many entries on busy queues. UNLINK frees them
+    // on a background thread instead of blocking the server thread.
+    await client.unlink(staticKeys);
 
     // Scan and delete job hashes and deps sets
     // Use escaped prefix to prevent glob injection from queue names containing * ? [ ]
@@ -1750,6 +1753,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
   /**
    * Scan for keys matching a pattern and delete them in batches.
    * Deletes during iteration to avoid accumulating all keys in memory.
+   * Uses UNLINK so the server's background thread reclaims memory rather
+   * than blocking the event loop on potentially-large hashes/lists.
    * @internal
    */
   private async scanAndDelete(client: Client, pattern: string): Promise<void> {
@@ -1759,7 +1764,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       while (!cursor.isFinished()) {
         const [nextCursor, keys] = await clusterClient.scan(cursor, { match: pattern, count: 100 });
         cursor = nextCursor;
-        if (keys.length > 0) await client.del(keys);
+        if (keys.length > 0) await client.unlink(keys);
       }
     } else {
       let cursor = '0';
@@ -1767,7 +1772,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const result = await (client as GlideClient).scan(cursor, { match: pattern, count: 100 });
         cursor = result[0] as string;
         const keys = result[1];
-        if (keys.length > 0) await client.del(keys);
+        if (keys.length > 0) await client.unlink(keys);
       } while (cursor !== '0');
     }
   }

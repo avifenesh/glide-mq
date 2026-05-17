@@ -593,7 +593,9 @@ export function createRoutes(
       createdAt: Date.now().toString(),
       kind,
     });
-    await client.del([jobsKey, rootsKey]);
+    // Flow jobs/roots sets can hold many entries; UNLINK avoids blocking
+    // the server thread on memory reclaim during large flow rewrites.
+    await client.unlink([jobsKey, rootsKey]);
     if (jobs.length > 0) {
       const sortedJobs = jobs
         .slice()
@@ -645,7 +647,8 @@ export function createRoutes(
 
   async function deleteFlowRecord(flowId: string): Promise<void> {
     const client = await getSharedClient();
-    await client.del([
+    // Same reasoning as upsertFlowRecord: jobs/roots sets can be large.
+    await client.unlink([
       flowMetaKey(flowId, flowPrefix),
       flowJobsKey(flowId, flowPrefix),
       flowRootsKey(flowId, flowPrefix),
