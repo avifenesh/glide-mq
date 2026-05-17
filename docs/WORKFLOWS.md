@@ -195,7 +195,7 @@ const jobs = await dag(
 **Implementation notes:**
 
 - DAG validation runs automatically - cycles are detected and rejected with `CycleError`.
-- Jobs are submitted level by level in topological order; all jobs within a level are pipelined in a single batch, so submission cost is O(levels) round trips rather than O(N).
+- Jobs are submitted level by level in reverse-topological order (dependents first, prerequisites last) so each node's BullMQ-parents already exist by the time we wire it; all jobs within a level are pipelined in a single batch, so submission cost is O(levels) round trips rather than O(N).
 - If any parent fails or is dead-lettered, dependent jobs remain blocked indefinitely (manual cleanup required).
 - Cross-queue dependencies are supported - each node can specify its own `queueName`.
 
