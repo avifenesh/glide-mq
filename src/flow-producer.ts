@@ -609,7 +609,9 @@ export class FlowProducer {
                   );
                 }
                 if (registerResult.startsWith('error:')) {
-                  throw new GlideMQError(`Failed to register dependent ${depName} for node ${node.name}: ${registerResult}`);
+                  throw new GlideMQError(
+                    `Failed to register dependent ${depName} for node ${node.name}: ${registerResult}`,
+                  );
                 }
               }
             }
@@ -675,7 +677,9 @@ export class FlowProducer {
               );
             }
             if (registerResult.startsWith('error:')) {
-              throw new GlideMQError(`Failed to register dependent ${depName} for node ${node.name}: ${registerResult}`);
+              throw new GlideMQError(
+                `Failed to register dependent ${depName} for node ${node.name}: ${registerResult}`,
+              );
             }
           }
         }
