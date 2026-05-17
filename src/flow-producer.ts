@@ -4,9 +4,10 @@ import { Job } from './job';
 import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE, validateJobId, validateQueueName } from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
-import { LIBRARY_SOURCE, addFlow, addJob, completeChild, registerParent } from './functions/index';
+import { LIBRARY_SOURCE, addFlow, addJob, addJobArgs, completeChild } from './functions/index';
 import { withSpan } from './telemetry';
 import { validateDAG, topoSort } from './dag-utils';
+import { Batch, ClusterBatch, type GlideClient, type GlideClusterClient } from '@glidemq/speedkey';
 
 export interface JobNode {
   job: Job;
@@ -392,6 +393,11 @@ export class FlowProducer {
    * bottom-up (leaves first). For nodes with multiple parents, registers each
    * parent dependency.
    *
+   * Submission is pipelined by topological level: within a level, all primary
+   * FCALLs are sent in one Batch (non-atomic pipeline), then a second Batch
+   * wires cross-level edges (registerParent) and persists parentIds metadata.
+   * RTT is O(levels) instead of O(N).
+   *
    * Returns a map of node name to Job instance.
    */
   async addDAG(dag: DAGFlow): Promise<Map<string, Job>> {
@@ -401,285 +407,327 @@ export class FlowProducer {
         'glide-mq.flow.nodeCount': dag.nodes.length,
       },
       async () => {
-        // Validate the DAG and get submission order (leaves first)
+        // Validate the DAG and get topo order (no-deps first)
         validateDAG(dag.nodes);
         const sorted = topoSort(dag.nodes);
 
         const client = await this.getClient();
         const prefix = this.opts.prefix ?? 'glide';
+        const isCluster = isClusterClient(client);
         const result = new Map<string, Job>();
+        const nodeByName = new Map<string, DAGNode>();
+        for (const node of dag.nodes) nodeByName.set(node.name, node);
 
         // Semantic: DAGNode.deps means "nodes that must complete before this
         // node runs". Mapping to BullMQ flow primitives:
         //   - A node WITH deps is a state=waiting-children PARENT that
-        //     aggregates its deps as CHILDREN. Children run first; when all
-        //     complete they notify the parent and the parent transitions to
-        //     runnable.
+        //     aggregates its deps as CHILDREN.
         //   - A node WITHOUT deps is a leaf-or-root that runs immediately.
         //
-        // Build a reverse-deps map: dependents[X] = nodes whose deps contain X.
-        // Those are X's BullMQ-parents (they wait for X). A leaf node uses its
-        // first dependent as its addJob parentId so it can notify on completion;
-        // additional dependents are wired via registerParent.
+        // dependents[X] = nodes whose deps contain X (= X's BullMQ-parents).
         const dependents = new Map<string, string[]>();
-        for (const node of dag.nodes) {
-          dependents.set(node.name, []);
-        }
+        for (const node of dag.nodes) dependents.set(node.name, []);
         for (const node of dag.nodes) {
           if (node.deps) {
-            for (const dep of node.deps) {
-              dependents.get(dep)!.push(node.name);
-            }
+            for (const dep of node.deps) dependents.get(dep)!.push(node.name);
           }
         }
 
-        // Submit in REVERSE topological order so each node's BullMQ-parents
-        // (its dependents in user terms) already exist by the time we wire the
-        // notification edge via registerParent. topoSort returns deps-first
-        // (in-degree 0 first); reversing gives most-deps first.
-        for (const node of [...sorted].reverse()) {
-          validateQueueName(node.queueName);
-          const queueKeys = buildKeys(node.queueName, prefix);
-          const opts = node.opts ?? {};
-          const timestamp = Date.now();
-          const serializedData = this.serializer.serialize(node.data);
-          const dataByteLen = Buffer.byteLength(serializedData, 'utf8');
-          if (dataByteLen > MAX_JOB_DATA_SIZE) {
-            throw new Error(
-              `Job data exceeds maximum size (${dataByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
-            );
-          }
-
-          const customJobId = opts.jobId ?? '';
-          if (customJobId !== '') {
-            if (customJobId.length > 256) throw new Error('jobId must be at most 256 characters');
-            if (/[\x00-\x1f\x7f{}:]/.test(customJobId)) {
-              throw new Error('jobId must not contain control characters, curly braces, or colons');
+        // Level = longest dep chain depth. Nodes share a level iff there is no
+        // edge between them, so all FCALLs within a level can be pipelined.
+        // We process levels from highest (no dependents at higher level) down
+        // to 0 so each node's dependents already exist when we wire it.
+        const levels = new Map<string, number>();
+        let maxLevel = 0;
+        for (const node of sorted) {
+          let lvl = 0;
+          if (node.deps) {
+            for (const dep of node.deps) {
+              lvl = Math.max(lvl, (levels.get(dep) ?? 0) + 1);
             }
           }
+          levels.set(node.name, lvl);
+          if (lvl > maxLevel) maxLevel = lvl;
+        }
+        const byLevel = new Map<number, DAGNode[]>();
+        for (const node of sorted) {
+          const lvl = levels.get(node.name)!;
+          if (!byLevel.has(lvl)) byLevel.set(lvl, []);
+          byLevel.get(lvl)!.push(node);
+        }
 
-          const deps = node.deps ?? [];
+        type Submit = {
+          node: DAGNode;
+          kind: 'addFlow' | 'addJob';
+          timestamp: number;
+          opts: Record<string, unknown>;
+          firstParentJobId?: string;
+          firstParentQueue?: string;
+        };
 
-          if (opts.lifo && opts.ordering?.key) {
-            throw new GlideMQError('lifo and ordering.key cannot be combined in a DAG node');
-          }
+        for (let lvl = maxLevel; lvl >= 0; lvl--) {
+          const levelNodes = byLevel.get(lvl) ?? [];
+          if (levelNodes.length === 0) continue;
 
-          // Validate ordering.key if present (reserved chars: {, }, :)
-          const orderingKey = opts.ordering?.key;
-          if (orderingKey) {
-            validateQueueName(orderingKey);
-            if (orderingKey === '__') {
-              throw new GlideMQError("Ordering key '__' is reserved as an internal sentinel.");
+          // Phase A: pipeline primary submissions (addFlow or addJob per node).
+          const batchA = isCluster ? new ClusterBatch(false) : new Batch(false);
+          const submits: Submit[] = [];
+
+          for (const node of levelNodes) {
+            validateQueueName(node.queueName);
+            const queueKeys = buildKeys(node.queueName, prefix);
+            const opts = node.opts ?? {};
+            const timestamp = Date.now();
+            const serializedData = this.serializer.serialize(node.data);
+            const dataByteLen = Buffer.byteLength(serializedData, 'utf8');
+            if (dataByteLen > MAX_JOB_DATA_SIZE) {
+              throw new Error(
+                `Job data exceeds maximum size (${dataByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
+              );
             }
-          }
 
-          // Extract rate-limit and token bucket params
-          let groupConcurrency = opts.ordering?.concurrency ?? 0;
-          if (opts.ordering?.key && groupConcurrency < 1) {
-            groupConcurrency = 1;
-          }
-          const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
-          const groupRateDuration = opts.ordering?.rateLimit?.duration ?? 0;
-          const tbCapacity = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.capacity * 1000) : 0;
-          const tbRefillRate = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.refillRate * 1000) : 0;
-          const jobCost = opts.cost != null ? Math.round(opts.cost * 1000) : 0;
-
-          const myDependents = dependents.get(node.name) ?? [];
-
-          if (deps.length > 0) {
-            // Node has deps -> it's a waiting-children PARENT that aggregates
-            // its deps as children. addFlow with 0 children sets
-            // state=waiting-children; deps register themselves as children when
-            // they're submitted later in this loop (they come AFTER us in the
-            // reversed topo order).
-            const ids = await addFlow(
-              client,
-              queueKeys,
-              node.name,
-              serializedData,
-              JSON.stringify(opts),
-              timestamp,
-              opts.delay ?? 0,
-              opts.priority ?? 0,
-              opts.attempts ?? 0,
-              [],
-              [],
-              customJobId,
-            );
-            if (ids[0] === 'duplicate') throw new Error('Duplicate job ID in DAG');
-            if (ids[0] === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
-            const jobId = ids[0];
-            const job = new Job(client, queueKeys, jobId, node.name, node.data, opts, this.serializer);
-            job.timestamp = timestamp;
-            result.set(node.name, job);
-
-            // If this node is itself someone else's dep, those dependents
-            // already exist (reverse-topo). Register us as a child of each
-            // dependent so when we complete we notify them.
-            if (myDependents.length > 0) {
-              await wireDependents(node, jobId, myDependents);
-              // Set parentIds metadata so completeAndFetchNext knows to read
-              // the parents SET (it short-circuits the SMEMBERS when this is
-              // empty, and addFlow doesn't set parentId/parentIds itself).
-              const pIds = myDependents.map((d) => result.get(d)!.id);
-              const pQueues = myDependents.map((d) => dag.nodes.find((n) => n.name === d)!.queueName);
-              job.parentIds = pIds;
-              job.parentQueues = pQueues;
-              await client.hset(queueKeys.job(jobId), {
-                parentIds: JSON.stringify(pIds),
-                parentQueues: JSON.stringify(pQueues),
-              });
-            }
-          } else if (myDependents.length > 0) {
-            // Leaf in user terms (no deps -> runs immediately) but other
-            // nodes wait for it. Use the first dependent as the addJob
-            // parentId so completion notifies it; registerParent for the rest.
-            const firstDepName = myDependents[0];
-            const firstParentJob = result.get(firstDepName)!;
-            const firstParentNode = dag.nodes.find((n) => n.name === firstDepName)!;
-            const firstParentKeys = buildKeys(firstParentNode.queueName, prefix);
-            const queuePrefix = keyPrefix(prefix, node.queueName);
-
-            const jobId = await addJob(
-              client,
-              queueKeys,
-              node.name,
-              serializedData,
-              JSON.stringify(opts),
-              timestamp,
-              opts.delay ?? 0,
-              opts.priority ?? 0,
-              firstParentJob.id,
-              opts.attempts ?? 0,
-              orderingKey ?? '',
-              groupConcurrency,
-              groupRateMax,
-              groupRateDuration,
-              tbCapacity,
-              tbRefillRate,
-              jobCost,
-              opts.ttl ?? 0,
-              customJobId,
-              opts.lifo ? 1 : 0,
-              firstParentNode.queueName,
-              firstParentKeys.deps(firstParentJob.id),
-              '',
-            );
-            if (String(jobId) === 'duplicate') throw new Error('Duplicate job ID in DAG');
-            if (String(jobId) === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
-            const jid = String(jobId);
-            const job = new Job(client, queueKeys, jid, node.name, node.data, opts, this.serializer);
-            job.timestamp = timestamp;
-            job.parentId = firstParentJob.id;
-            job.parentQueue = firstParentNode.queueName;
-            result.set(node.name, job);
-
-            // Wire any additional dependents (2nd+) and persist parent metadata.
-            if (myDependents.length > 1) {
-              const pIds = myDependents.map((d) => result.get(d)!.id);
-              const pQueues = myDependents.map((d) => dag.nodes.find((n) => n.name === d)!.queueName);
-              job.parentIds = pIds;
-              job.parentQueues = pQueues;
-              await client.hset(queueKeys.job(jid), {
-                parentIds: JSON.stringify(pIds),
-                parentQueues: JSON.stringify(pQueues),
-              });
-
-              for (let p = 1; p < myDependents.length; p++) {
-                const depName = myDependents[p];
-                const parentJob = result.get(depName)!;
-                const parentNode = dag.nodes.find((n) => n.name === depName)!;
-                const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
-                const depsMember = `${queuePrefix}:${jid}`;
-                let registerResult: string;
-                try {
-                  registerResult = await registerParent(
-                    client,
-                    queueKeys,
-                    jid,
-                    parentJob.id,
-                    keyPrefix(prefix, parentNode.queueName),
-                    parentQueueKeys,
-                    depsMember,
-                  );
-                } catch (regErr) {
-                  const msg = regErr instanceof Error ? regErr.message : String(regErr);
-                  throw new GlideMQError(
-                    `DAG partially submitted: registerParent failed for ${node.name}->${depName}: ${msg}. Graph may be in inconsistent state.`,
-                  );
-                }
-                if (registerResult.startsWith('error:')) {
-                  throw new GlideMQError(
-                    `Failed to register dependent ${depName} for node ${node.name}: ${registerResult}`,
-                  );
-                }
+            const customJobId = opts.jobId ?? '';
+            if (customJobId !== '') {
+              if (customJobId.length > 256) throw new Error('jobId must be at most 256 characters');
+              if (/[\x00-\x1f\x7f{}:]/.test(customJobId)) {
+                throw new Error('jobId must not contain control characters, curly braces, or colons');
               }
             }
-          } else {
-            // Standalone node: no deps, no dependents - simple addJob.
-            const jobId = await addJob(
-              client,
-              queueKeys,
-              node.name,
-              serializedData,
-              JSON.stringify(opts),
-              timestamp,
-              opts.delay ?? 0,
-              opts.priority ?? 0,
-              '',
-              opts.attempts ?? 0,
-              orderingKey ?? '',
-              groupConcurrency,
-              groupRateMax,
-              groupRateDuration,
-              tbCapacity,
-              tbRefillRate,
-              jobCost,
-              opts.ttl ?? 0,
-              customJobId,
-              opts.lifo ? 1 : 0,
-              '',
-              '',
-              '',
-            );
-            if (String(jobId) === 'duplicate') throw new Error('Duplicate job ID in DAG');
-            if (String(jobId) === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
-            const job = new Job(client, queueKeys, String(jobId), node.name, node.data, opts, this.serializer);
-            job.timestamp = timestamp;
-            result.set(node.name, job);
-          }
-        }
 
-        async function wireDependents(node: DAGNode, jobId: string, myDependents: string[]) {
-          if (myDependents.length === 0) return;
-          const queueKeys = buildKeys(node.queueName, prefix);
-          const queuePrefix = keyPrefix(prefix, node.queueName);
-          for (const depName of myDependents) {
-            const parentJob = result.get(depName)!;
-            const parentNode = dag.nodes.find((n) => n.name === depName)!;
-            const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
-            const depsMember = `${queuePrefix}:${jobId}`;
-            let registerResult: string;
-            try {
-              registerResult = await registerParent(
-                client,
-                queueKeys,
-                jobId,
-                parentJob.id,
-                keyPrefix(prefix, parentNode.queueName),
-                parentQueueKeys,
-                depsMember,
+            if (opts.lifo && opts.ordering?.key) {
+              throw new GlideMQError('lifo and ordering.key cannot be combined in a DAG node');
+            }
+
+            const orderingKey = opts.ordering?.key;
+            if (orderingKey) {
+              validateQueueName(orderingKey);
+              if (orderingKey === '__') {
+                throw new GlideMQError("Ordering key '__' is reserved as an internal sentinel.");
+              }
+            }
+
+            let groupConcurrency = opts.ordering?.concurrency ?? 0;
+            if (opts.ordering?.key && groupConcurrency < 1) groupConcurrency = 1;
+            const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
+            const groupRateDuration = opts.ordering?.rateLimit?.duration ?? 0;
+            const tbCapacity = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.capacity * 1000) : 0;
+            const tbRefillRate = opts.ordering?.tokenBucket
+              ? Math.round(opts.ordering.tokenBucket.refillRate * 1000)
+              : 0;
+            const jobCost = opts.cost != null ? Math.round(opts.cost * 1000) : 0;
+
+            const deps = node.deps ?? [];
+            const myDependents = dependents.get(node.name) ?? [];
+
+            if (deps.length > 0) {
+              // Waiting-children parent: addFlow with 0 children, 0 extraDeps.
+              const flowArgs: string[] = [
+                node.name,
+                serializedData,
+                JSON.stringify(opts),
+                timestamp.toString(),
+                String(opts.delay ?? 0),
+                String(opts.priority ?? 0),
+                String(opts.attempts ?? 0),
+                '0',
+                customJobId,
+                '0',
+              ];
+              batchA.fcall(
+                'glidemq_addFlow',
+                [queueKeys.id, queueKeys.stream, queueKeys.scheduled, queueKeys.events],
+                flowArgs,
               );
+              submits.push({ node, kind: 'addFlow', timestamp, opts });
+            } else if (myDependents.length > 0) {
+              // Leaf with dependents: first dependent piggybacks via addJob's
+              // parentId/parentDepsKey so the leaf atomically registers as
+              // child of that dependent. The rest are wired in Phase B.
+              const firstDepName = myDependents[0];
+              const firstParentJob = result.get(firstDepName)!;
+              const firstParentNode = nodeByName.get(firstDepName)!;
+              const firstParentKeys = buildKeys(firstParentNode.queueName, prefix);
+              const { keys, args } = addJobArgs(
+                queueKeys,
+                node.name,
+                serializedData,
+                JSON.stringify(opts),
+                timestamp,
+                opts.delay ?? 0,
+                opts.priority ?? 0,
+                firstParentJob.id,
+                opts.attempts ?? 0,
+                orderingKey ?? '',
+                groupConcurrency,
+                groupRateMax,
+                groupRateDuration,
+                tbCapacity,
+                tbRefillRate,
+                jobCost,
+                opts.ttl ?? 0,
+                customJobId,
+                opts.lifo ? 1 : 0,
+                firstParentNode.queueName,
+                firstParentKeys.deps(firstParentJob.id),
+                '',
+              );
+              batchA.fcall('glidemq_addJob', keys, args);
+              submits.push({
+                node,
+                kind: 'addJob',
+                timestamp,
+                opts,
+                firstParentJobId: firstParentJob.id,
+                firstParentQueue: firstParentNode.queueName,
+              });
+            } else {
+              // Standalone node: no deps, no dependents.
+              const { keys, args } = addJobArgs(
+                queueKeys,
+                node.name,
+                serializedData,
+                JSON.stringify(opts),
+                timestamp,
+                opts.delay ?? 0,
+                opts.priority ?? 0,
+                '',
+                opts.attempts ?? 0,
+                orderingKey ?? '',
+                groupConcurrency,
+                groupRateMax,
+                groupRateDuration,
+                tbCapacity,
+                tbRefillRate,
+                jobCost,
+                opts.ttl ?? 0,
+                customJobId,
+                opts.lifo ? 1 : 0,
+                '',
+                '',
+                '',
+              );
+              batchA.fcall('glidemq_addJob', keys, args);
+              submits.push({ node, kind: 'addJob', timestamp, opts });
+            }
+          }
+
+          const rawA = isCluster
+            ? await (client as GlideClusterClient).exec(batchA as ClusterBatch, true)
+            : await (client as GlideClient).exec(batchA as Batch, true);
+          if (!rawA || !Array.isArray(rawA) || rawA.length !== submits.length) {
+            throw new GlideMQError('addDAG batch returned unexpected result length');
+          }
+
+          for (let i = 0; i < submits.length; i++) {
+            const sub = submits[i];
+            const raw = rawA[i];
+            let jobId: string;
+            if (sub.kind === 'addFlow') {
+              const ids = JSON.parse(String(raw)) as string[];
+              if (ids[0] === 'duplicate') throw new Error('Duplicate job ID in DAG');
+              if (ids[0] === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
+              jobId = ids[0];
+            } else {
+              const r = String(raw);
+              if (r === 'duplicate') throw new Error('Duplicate job ID in DAG');
+              if (r === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
+              if (r === 'ERR:COST_EXCEEDS_CAPACITY') throw new Error('Job cost exceeds token bucket capacity');
+              jobId = r;
+            }
+            const qk = buildKeys(sub.node.queueName, prefix);
+            const job = new Job(client, qk, jobId, sub.node.name, sub.node.data, sub.opts, this.serializer);
+            job.timestamp = sub.timestamp;
+            if (sub.firstParentJobId) {
+              job.parentId = sub.firstParentJobId;
+              job.parentQueue = sub.firstParentQueue;
+            }
+            result.set(sub.node.name, job);
+          }
+
+          // Phase B: pipeline cross-level wiring (registerParent + parentIds hset).
+          const batchB = isCluster ? new ClusterBatch(false) : new Batch(false);
+          let phaseBCount = 0;
+          // Track each batched registerParent's edge so we can report failures.
+          const phaseBRegEdges: { node: string; dep: string }[] = [];
+
+          for (const sub of submits) {
+            const node = sub.node;
+            const job = result.get(node.name)!;
+            const jid = job.id;
+            const myDependents = dependents.get(node.name) ?? [];
+            const deps = node.deps ?? [];
+            const queueKeys = buildKeys(node.queueName, prefix);
+            const queuePrefix = keyPrefix(prefix, node.queueName);
+
+            // Determine which dependents still need registerParent. For the
+            // "addFlow" branch, all dependents need it (addFlow does not touch
+            // parent deps sets). For the "addJob with first parent" branch,
+            // dependents[1..] need it (the first was piggybacked).
+            let registerStart = -1;
+            if (deps.length > 0 && myDependents.length > 0) {
+              registerStart = 0;
+            } else if (deps.length === 0 && myDependents.length > 1) {
+              registerStart = 1;
+            }
+
+            if (registerStart >= 0) {
+              const pIds = myDependents.map((d) => result.get(d)!.id);
+              const pQueues = myDependents.map((d) => nodeByName.get(d)!.queueName);
+              job.parentIds = pIds;
+              job.parentQueues = pQueues;
+              batchB.hset(queueKeys.job(jid), {
+                parentIds: JSON.stringify(pIds),
+                parentQueues: JSON.stringify(pQueues),
+              });
+              phaseBCount++;
+              phaseBRegEdges.push({ node: '', dep: '' }); // placeholder for hset slot
+
+              for (let p = registerStart; p < myDependents.length; p++) {
+                const depName = myDependents[p];
+                const parentJob = result.get(depName)!;
+                const parentNode = nodeByName.get(depName)!;
+                const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
+                const depsMember = `${queuePrefix}:${jid}`;
+                batchB.fcall(
+                  'glidemq_registerParent',
+                  [
+                    queueKeys.job(jid),
+                    queueKeys.parents(jid),
+                    parentQueueKeys.deps(parentJob.id),
+                    parentQueueKeys.job(parentJob.id),
+                    parentQueueKeys.stream,
+                    parentQueueKeys.events,
+                  ],
+                  [jid, parentJob.id, keyPrefix(prefix, parentNode.queueName), depsMember],
+                );
+                phaseBCount++;
+                phaseBRegEdges.push({ node: node.name, dep: depName });
+              }
+            }
+          }
+
+          if (phaseBCount > 0) {
+            let rawB: unknown;
+            try {
+              rawB = isCluster
+                ? await (client as GlideClusterClient).exec(batchB as ClusterBatch, true)
+                : await (client as GlideClient).exec(batchB as Batch, true);
             } catch (regErr) {
               const msg = regErr instanceof Error ? regErr.message : String(regErr);
               throw new GlideMQError(
-                `DAG partially submitted: registerParent failed for ${node.name}->${depName}: ${msg}. Graph may be in inconsistent state.`,
+                `DAG partially submitted: cross-level wiring batch failed: ${msg}. Graph may be in inconsistent state.`,
               );
             }
-            if (registerResult.startsWith('error:')) {
-              throw new GlideMQError(
-                `Failed to register dependent ${depName} for node ${node.name}: ${registerResult}`,
-              );
+            if (!Array.isArray(rawB) || rawB.length !== phaseBCount) {
+              throw new GlideMQError('addDAG cross-level batch returned unexpected result length');
+            }
+            for (let i = 0; i < phaseBCount; i++) {
+              const edge = phaseBRegEdges[i];
+              if (edge.node === '') continue; // hset slot
+              const res = String(rawB[i]);
+              if (res.startsWith('error:')) {
+                throw new GlideMQError(`Failed to register dependent ${edge.dep} for node ${edge.node}: ${res}`);
+              }
             }
           }
         }
