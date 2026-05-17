@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
+## [0.15.3] - 2026-05-18
 
 ### Fixed
 
@@ -59,6 +59,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Security / dependencies
 
 - **CVE fixes via `npm audit fix`** (#240): resolved CVEs in transitive deps `langsmith` and `protobufjs`.
+
+### Examples
+
+- Added `ai-research-dag` to the [examples catalog](https://github.com/avifenesh/glidemq-examples/tree/main/examples/ai-research-dag) - a 6-stage AI research pipeline (`plan -> 3x search -> synthesize -> review`) that uses `flow.addDAG()`, `job.reportUsage()`, and per-stage cost aggregation. Mocked LLM calls, no API keys required.
 
 ---
 
