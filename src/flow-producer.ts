@@ -539,10 +539,11 @@ export class FlowProducer {
                 flowArgs,
               );
               submits.push({ node, kind: 'addFlow', timestamp, opts });
-            } else if (myDependents.length > 0) {
-              // Leaf with dependents: first dependent piggybacks via addJob's
+            } else if (myDependents.length === 1) {
+              // Leaf with a single dependent: piggyback on addJob's
               // parentId/parentDepsKey so the leaf atomically registers as
-              // child of that dependent. The rest are wired in Phase B.
+              // child of that dependent. No second dependent, so no race
+              // between addJob enqueueing and parents-SET wiring.
               const firstDepName = myDependents[0];
               const firstParentJob = result.get(firstDepName)!;
               const firstParentNode = nodeByName.get(firstDepName)!;
@@ -580,6 +581,47 @@ export class FlowProducer {
                 firstParentJobId: firstParentJob.id,
                 firstParentQueue: firstParentNode.queueName,
               });
+            } else if (myDependents.length > 1) {
+              // Leaf with multiple dependents: do NOT piggyback the first
+              // dependent on addJob. If we did, a worker could pick up this
+              // job between Phase A and Phase B, complete it, and notify only
+              // the first dependent via the explicit parentId path - while
+              // SMEMBERS parents would be skipped (hasParents is read from a
+              // pre-Phase-B job hash where parentIds is not yet set). The
+              // result is "partial notification": some dependents' deps SETs
+              // are decremented, others are not.
+              //
+              // Submitting with no parent fields makes the race all-or-nothing:
+              // either Phase B's registerParent runs before completion (so
+              // parents SET and deps SETs are populated and SMEMBERS notifies
+              // all dependents), or it runs after (so registerParent's
+              // already_completed path notifies each dependent it wires).
+              const { keys, args } = addJobArgs(
+                queueKeys,
+                node.name,
+                serializedData,
+                JSON.stringify(opts),
+                timestamp,
+                opts.delay ?? 0,
+                opts.priority ?? 0,
+                '',
+                opts.attempts ?? 0,
+                orderingKey ?? '',
+                groupConcurrency,
+                groupRateMax,
+                groupRateDuration,
+                tbCapacity,
+                tbRefillRate,
+                jobCost,
+                opts.ttl ?? 0,
+                customJobId,
+                opts.lifo ? 1 : 0,
+                '',
+                '',
+                '',
+              );
+              batchA.fcall('glidemq_addJob', keys, args);
+              submits.push({ node, kind: 'addJob', timestamp, opts });
             } else {
               // Standalone node: no deps, no dependents.
               const { keys, args } = addJobArgs(
@@ -659,15 +701,20 @@ export class FlowProducer {
             const queueKeys = buildKeys(node.queueName, prefix);
             const queuePrefix = keyPrefix(prefix, node.queueName);
 
-            // Determine which dependents still need registerParent. For the
-            // "addFlow" branch, all dependents need it (addFlow does not touch
-            // parent deps sets). For the "addJob with first parent" branch,
-            // dependents[1..] need it (the first was piggybacked).
+            // Determine which dependents still need registerParent.
+            //  - addFlow waiting-children parent: all dependents (addFlow does
+            //    not touch parent deps sets).
+            //  - addJob leaf with one dependent: skipped (addJob piggybacked
+            //    the single dependent atomically).
+            //  - addJob leaf with multiple dependents: all dependents (addJob
+            //    was submitted with no parent fields to avoid the partial-
+            //    notification race; registerParent wires every dependent here
+            //    and its already_completed path covers late wiring).
             let registerStart = -1;
             if (deps.length > 0 && myDependents.length > 0) {
               registerStart = 0;
             } else if (deps.length === 0 && myDependents.length > 1) {
-              registerStart = 1;
+              registerStart = 0;
             }
 
             if (registerStart >= 0) {
