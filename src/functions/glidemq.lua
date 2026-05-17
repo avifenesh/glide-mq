@@ -575,9 +575,24 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
         emitEvent(eventsKey, 'failed', jobId, {
           'failedReason', 'job stalled more than maxStalledCount'
         })
-      else
-        -- Reclaimed: emit stalled event, job stays in PEL for the new consumer
+      elseif broadcastMode == '1' then
+        -- Broadcast mode keeps the original entry visible to all subscribers,
+        -- so we can't redispatch via XADD. Leave state=active and re-emit the
+        -- stalled event; if it stalls again next cycle, the > threshold branch
+        -- will mark it failed.
         redis.call('HSET', jobKey, 'state', 'active')
+        emitEvent(eventsKey, 'stalled', jobId, nil)
+      else
+        -- Under threshold: ACK+DEL the original PEL entry (which is now in
+        -- the scheduler's consumer after XAUTOCLAIM) and re-queue a fresh
+        -- stream entry so a healthy worker picks the job up. processedOn
+        -- and lastActive are cleared so the new run records its own metrics.
+        redis.call('XACK', streamKey, group, entryId)
+        redis.call('XDEL', streamKey, entryId)
+        local jobName = redis.call('HGET', jobKey, 'name') or ''
+        redis.call('HSET', jobKey, 'state', 'waiting')
+        redis.call('HDEL', jobKey, 'processedOn', 'lastActive')
+        redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name', jobName)
         emitEvent(eventsKey, 'stalled', jobId, nil)
       end
 
