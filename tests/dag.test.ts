@@ -73,10 +73,18 @@ describeEachMode('DAG flows', (CONNECTION) => {
       const depsD = await cleanupClient.smembers(k.deps(jobs.get('D')!.id));
       expect(depsD.size).toBe(2);
 
-      // A has B and C as dependents. A's parents SET has the 2nd dependent
-      // (C); the 1st is captured via parentId on the job hash.
+      // A has B and C as dependents. With multiple dependents, none is
+      // piggybacked on addJob's parentId path - both are wired via
+      // registerParent into the parents SET so that completion notifies
+      // both via SMEMBERS atomically (avoids a race where the worker's
+      // snapshot of parentIds is stale).
       const parentsA = await cleanupClient.smembers(k.parents(jobs.get('A')!.id));
-      expect(parentsA.size).toBe(1);
+      expect(parentsA.size).toBe(2);
+      const parentIdA = await cleanupClient.hget(k.job(jobs.get('A')!.id), 'parentId');
+      expect(parentIdA == null || String(parentIdA) === '').toBe(true);
+      const parentIdsA = await cleanupClient.hget(k.job(jobs.get('A')!.id), 'parentIds');
+      const idsA = JSON.parse(String(parentIdsA));
+      expect(new Set(idsA)).toEqual(new Set([jobs.get('B')!.id, jobs.get('C')!.id]));
     } finally {
       await flow.close();
     }
