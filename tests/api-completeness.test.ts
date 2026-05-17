@@ -250,10 +250,7 @@ describe('Queue.obliterate', () => {
 
     // unlink called: once for static keys, once for job batch, once for deps batch
     expect(mockClient.unlink).toHaveBeenCalledTimes(3);
-    expect(mockClient.unlink).toHaveBeenCalledWith([
-      'glide:{obliterate-test}:job:1',
-      'glide:{obliterate-test}:job:2',
-    ]);
+    expect(mockClient.unlink).toHaveBeenCalledWith(['glide:{obliterate-test}:job:1', 'glide:{obliterate-test}:job:2']);
     expect(mockClient.unlink).toHaveBeenCalledWith(['glide:{obliterate-test}:deps:1']);
 
     await queue.close();
