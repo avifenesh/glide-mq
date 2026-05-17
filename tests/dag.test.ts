@@ -114,7 +114,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await waitFor(async () => {
         const stateD = await cleanupClient.hget(k.job(jobs.get('D')!.id), 'state');
         return String(stateD) === 'completed';
-      }, 30000);
+      }, 40000);
 
       // Verify all completed
       for (const [_name, job] of jobs) {
@@ -132,7 +132,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await flow.close();
       await flushQueue(cleanupClient, qName);
     }
-  });
+  }, 50000);
 
   it('fan-in: 3 sources feeding into one aggregator', async () => {
     const flow = new FlowProducer({ connection: CONNECTION });

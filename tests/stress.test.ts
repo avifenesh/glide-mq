@@ -453,10 +453,14 @@ describeEachMode('Stress: Flow Integrity', (CONNECTION) => {
       const k = buildKeys(qName);
 
       // Wait for D (terminal node) to complete - last to run.
+      // Cluster mode runs slower under CI load: 4-node DAG submission costs
+      // ~10 round trips (addFlow x3, addJob x1, registerParent x3, hset x2)
+      // vs the pre-fix code's ~5-6. Locally this finishes in <100ms; CI can
+      // be 30x slower.
       await waitFor(async () => {
         const state = await cleanupClient.hget(k.job(jobs.get('D')!.id), 'state');
         return String(state) === 'completed';
-      }, 30000);
+      }, 40000);
 
       // Verify all completed
       for (const [, job] of jobs) {
