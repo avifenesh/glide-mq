@@ -1,4 +1,4 @@
-import type { FlowProducerOptions, FlowJob, DAGFlow, Client, Serializer, BudgetOptions } from './types';
+import type { FlowProducerOptions, FlowJob, DAGFlow, DAGNode, Client, Serializer, BudgetOptions } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
 import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE, validateJobId, validateQueueName } from './utils';
@@ -409,22 +409,35 @@ export class FlowProducer {
         const prefix = this.opts.prefix ?? 'glide';
         const result = new Map<string, Job>();
 
-        // Track which nodes have dependents (children) - they become "parents" in waiting-children
-        const hasChildren = new Set<string>();
+        // Semantic: DAGNode.deps means "nodes that must complete before this
+        // node runs". Mapping to BullMQ flow primitives:
+        //   - A node WITH deps is a state=waiting-children PARENT that
+        //     aggregates its deps as CHILDREN. Children run first; when all
+        //     complete they notify the parent and the parent transitions to
+        //     runnable.
+        //   - A node WITHOUT deps is a leaf-or-root that runs immediately.
+        //
+        // Build a reverse-deps map: dependents[X] = nodes whose deps contain X.
+        // Those are X's BullMQ-parents (they wait for X). A leaf node uses its
+        // first dependent as its addJob parentId so it can notify on completion;
+        // additional dependents are wired via registerParent.
+        const dependents = new Map<string, string[]>();
+        for (const node of dag.nodes) {
+          dependents.set(node.name, []);
+        }
         for (const node of dag.nodes) {
           if (node.deps) {
             for (const dep of node.deps) {
-              hasChildren.add(dep);
+              dependents.get(dep)!.push(node.name);
             }
           }
         }
 
-        // Submit nodes in topological order (leaves first)
-        // Nodes with 0 deps: simple addJob
-        // Nodes with 1 dep: addJob with parent (traditional single-parent)
-        // Nodes with 2+ deps: addJob with first parent, then registerParent for rest
-        // Nodes that ARE parents (have children depending on them): created in waiting-children
-        for (const node of sorted) {
+        // Submit in REVERSE topological order so each node's BullMQ-parents
+        // (its dependents in user terms) already exist by the time we wire the
+        // notification edge via registerParent. topoSort returns deps-first
+        // (in-degree 0 first); reversing gives most-deps first.
+        for (const node of [...sorted].reverse()) {
           validateQueueName(node.queueName);
           const queueKeys = buildKeys(node.queueName, prefix);
           const opts = node.opts ?? {};
@@ -446,7 +459,6 @@ export class FlowProducer {
           }
 
           const deps = node.deps ?? [];
-          const isParent = hasChildren.has(node.name);
 
           if (opts.lifo && opts.ordering?.key) {
             throw new GlideMQError('lifo and ordering.key cannot be combined in a DAG node');
@@ -472,32 +484,14 @@ export class FlowProducer {
           const tbRefillRate = opts.ordering?.tokenBucket ? Math.round(opts.ordering.tokenBucket.refillRate * 1000) : 0;
           const jobCost = opts.cost != null ? Math.round(opts.cost * 1000) : 0;
 
-          if (isParent && deps.length === 0) {
-            // Node is a parent with no deps of its own - use addFlow with no children (empty flow)
-            // Actually, we create it as waiting-children and let children register later
-            // Use addFlow with 0 children to set state=waiting-children
-            const ids = await addFlow(
-              client,
-              queueKeys,
-              node.name,
-              serializedData,
-              JSON.stringify(opts),
-              timestamp,
-              opts.delay ?? 0,
-              opts.priority ?? 0,
-              opts.attempts ?? 0,
-              [],
-              [],
-              customJobId,
-            );
-            if (ids[0] === 'duplicate') throw new Error('Duplicate job ID in DAG');
-            if (ids[0] === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
-            const job = new Job(client, queueKeys, ids[0], node.name, node.data, opts, this.serializer);
-            job.timestamp = timestamp;
-            result.set(node.name, job);
-          } else if (isParent && deps.length > 0) {
-            // Node is both a child (has deps) and a parent (has dependents)
-            // Create as waiting-children via addFlow with 0 children
+          const myDependents = dependents.get(node.name) ?? [];
+
+          if (deps.length > 0) {
+            // Node has deps -> it's a waiting-children PARENT that aggregates
+            // its deps as children. addFlow with 0 children sets
+            // state=waiting-children; deps register themselves as children when
+            // they're submitted later in this loop (they come AFTER us in the
+            // reversed topo order).
             const ids = await addFlow(
               client,
               queueKeys,
@@ -519,58 +513,108 @@ export class FlowProducer {
             job.timestamp = timestamp;
             result.set(node.name, job);
 
-            // Register all parent dependencies
-            for (const depName of deps) {
-              const parentJob = result.get(depName)!;
-              const parentNode = dag.nodes.find((n) => n.name === depName)!;
-              const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
-              const depsMember = `${keyPrefix(prefix, node.queueName)}:${jobId}`;
-
-              let registerResult: string;
-              try {
-                registerResult = await registerParent(
-                  client,
-                  queueKeys,
-                  jobId,
-                  parentJob.id,
-                  keyPrefix(prefix, parentNode.queueName),
-                  parentQueueKeys,
-                  depsMember,
-                );
-              } catch (regErr) {
-                const msg = regErr instanceof Error ? regErr.message : String(regErr);
-                throw new GlideMQError(
-                  `DAG partially submitted: registerParent failed for ${depName}->${node.name}: ${msg}. Graph may be in inconsistent state.`,
-                );
-              }
-
-              if (registerResult.startsWith('error:')) {
-                throw new GlideMQError(`Failed to register parent ${depName} for node ${node.name}: ${registerResult}`);
-              }
-            }
-
-            // Store parent info on the job
-            const pIds = deps.map((d) => result.get(d)!.id);
-            const pQueues = deps.map((d) => dag.nodes.find((n) => n.name === d)!.queueName);
-            job.parentId = pIds[0];
-            job.parentQueue = pQueues[0];
-            if (deps.length > 1) {
+            // If this node is itself someone else's dep, those dependents
+            // already exist (reverse-topo). Register us as a child of each
+            // dependent so when we complete we notify them.
+            if (myDependents.length > 0) {
+              await wireDependents(node, jobId, myDependents);
+              // Set parentIds metadata so completeAndFetchNext knows to read
+              // the parents SET (it short-circuits the SMEMBERS when this is
+              // empty, and addFlow doesn't set parentId/parentIds itself).
+              const pIds = myDependents.map((d) => result.get(d)!.id);
+              const pQueues = myDependents.map((d) => dag.nodes.find((n) => n.name === d)!.queueName);
               job.parentIds = pIds;
               job.parentQueues = pQueues;
               await client.hset(queueKeys.job(jobId), {
-                parentId: pIds[0],
-                parentQueue: pQueues[0],
                 parentIds: JSON.stringify(pIds),
                 parentQueues: JSON.stringify(pQueues),
               });
-            } else {
-              await client.hset(queueKeys.job(jobId), {
-                parentId: pIds[0],
-                parentQueue: pQueues[0],
-              });
             }
-          } else if (deps.length === 0) {
-            // Leaf node with no deps and no children - simple addJob
+          } else if (myDependents.length > 0) {
+            // Leaf in user terms (no deps -> runs immediately) but other
+            // nodes wait for it. Use the first dependent as the addJob
+            // parentId so completion notifies it; registerParent for the rest.
+            const firstDepName = myDependents[0];
+            const firstParentJob = result.get(firstDepName)!;
+            const firstParentNode = dag.nodes.find((n) => n.name === firstDepName)!;
+            const firstParentKeys = buildKeys(firstParentNode.queueName, prefix);
+            const queuePrefix = keyPrefix(prefix, node.queueName);
+
+            const jobId = await addJob(
+              client,
+              queueKeys,
+              node.name,
+              serializedData,
+              JSON.stringify(opts),
+              timestamp,
+              opts.delay ?? 0,
+              opts.priority ?? 0,
+              firstParentJob.id,
+              opts.attempts ?? 0,
+              orderingKey ?? '',
+              groupConcurrency,
+              groupRateMax,
+              groupRateDuration,
+              tbCapacity,
+              tbRefillRate,
+              jobCost,
+              opts.ttl ?? 0,
+              customJobId,
+              opts.lifo ? 1 : 0,
+              firstParentNode.queueName,
+              firstParentKeys.deps(firstParentJob.id),
+              '',
+            );
+            if (String(jobId) === 'duplicate') throw new Error('Duplicate job ID in DAG');
+            if (String(jobId) === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
+            const jid = String(jobId);
+            const job = new Job(client, queueKeys, jid, node.name, node.data, opts, this.serializer);
+            job.timestamp = timestamp;
+            job.parentId = firstParentJob.id;
+            job.parentQueue = firstParentNode.queueName;
+            result.set(node.name, job);
+
+            // Wire any additional dependents (2nd+) and persist parent metadata.
+            if (myDependents.length > 1) {
+              const pIds = myDependents.map((d) => result.get(d)!.id);
+              const pQueues = myDependents.map((d) => dag.nodes.find((n) => n.name === d)!.queueName);
+              job.parentIds = pIds;
+              job.parentQueues = pQueues;
+              await client.hset(queueKeys.job(jid), {
+                parentIds: JSON.stringify(pIds),
+                parentQueues: JSON.stringify(pQueues),
+              });
+
+              for (let p = 1; p < myDependents.length; p++) {
+                const depName = myDependents[p];
+                const parentJob = result.get(depName)!;
+                const parentNode = dag.nodes.find((n) => n.name === depName)!;
+                const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
+                const depsMember = `${queuePrefix}:${jid}`;
+                let registerResult: string;
+                try {
+                  registerResult = await registerParent(
+                    client,
+                    queueKeys,
+                    jid,
+                    parentJob.id,
+                    keyPrefix(prefix, parentNode.queueName),
+                    parentQueueKeys,
+                    depsMember,
+                  );
+                } catch (regErr) {
+                  const msg = regErr instanceof Error ? regErr.message : String(regErr);
+                  throw new GlideMQError(
+                    `DAG partially submitted: registerParent failed for ${node.name}->${depName}: ${msg}. Graph may be in inconsistent state.`,
+                  );
+                }
+                if (registerResult.startsWith('error:')) {
+                  throw new GlideMQError(`Failed to register dependent ${depName} for node ${node.name}: ${registerResult}`);
+                }
+              }
+            }
+          } else {
+            // Standalone node: no deps, no dependents - simple addJob.
             const jobId = await addJob(
               client,
               queueKeys,
@@ -601,92 +645,37 @@ export class FlowProducer {
             const job = new Job(client, queueKeys, String(jobId), node.name, node.data, opts, this.serializer);
             job.timestamp = timestamp;
             result.set(node.name, job);
-          } else {
-            // Non-parent node with deps (terminal/sink node) - add as regular job
-            // Dependency semantics: deps are the PARENTS this child waits for.
-            // The child (current node) becomes a dependency of the parent via the deps SET.
-            // Use first dep as the primary parent for backward compatibility
-            const firstDepName = deps[0];
-            const firstParentJob = result.get(firstDepName)!;
-            const firstParentNode = dag.nodes.find((n) => n.name === firstDepName)!;
-            const firstParentKeys = buildKeys(firstParentNode.queueName, prefix);
-            const queuePrefix = keyPrefix(prefix, node.queueName);
+          }
+        }
 
-            const jobId = await addJob(
-              client,
-              queueKeys,
-              node.name,
-              serializedData,
-              JSON.stringify(opts),
-              timestamp,
-              opts.delay ?? 0,
-              opts.priority ?? 0,
-              firstParentJob.id,
-              opts.attempts ?? 0,
-              orderingKey ?? '',
-              groupConcurrency,
-              groupRateMax,
-              groupRateDuration,
-              tbCapacity,
-              tbRefillRate,
-              jobCost,
-              opts.ttl ?? 0,
-              customJobId,
-              0,
-              firstParentNode.queueName,
-              firstParentKeys.deps(firstParentJob.id),
-            );
-            if (String(jobId) === 'duplicate') throw new Error('Duplicate job ID in DAG');
-            if (String(jobId) === 'ERR:ID_EXHAUSTED') throw new Error('Failed to generate job ID');
-            const jid = String(jobId);
-            const job = new Job(client, queueKeys, jid, node.name, node.data, opts, this.serializer);
-            job.timestamp = timestamp;
-            job.parentId = firstParentJob.id;
-            job.parentQueue = firstParentNode.queueName;
-            result.set(node.name, job);
-
-            // Register additional parents (2nd, 3rd, etc.)
-            if (deps.length > 1) {
-              const pIds = deps.map((d) => result.get(d)!.id);
-              const pQueues = deps.map((d) => dag.nodes.find((n) => n.name === d)!.queueName);
-              job.parentIds = pIds;
-              job.parentQueues = pQueues;
-              await client.hset(queueKeys.job(jid), {
-                parentIds: JSON.stringify(pIds),
-                parentQueues: JSON.stringify(pQueues),
-              });
-
-              for (let p = 1; p < deps.length; p++) {
-                const depName = deps[p];
-                const parentJob = result.get(depName)!;
-                const parentNode = dag.nodes.find((n) => n.name === depName)!;
-                const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
-                const depsMember = `${queuePrefix}:${jid}`;
-
-                let registerResult: string;
-                try {
-                  registerResult = await registerParent(
-                    client,
-                    queueKeys,
-                    jid,
-                    parentJob.id,
-                    keyPrefix(prefix, parentNode.queueName),
-                    parentQueueKeys,
-                    depsMember,
-                  );
-                } catch (regErr) {
-                  const msg = regErr instanceof Error ? regErr.message : String(regErr);
-                  throw new GlideMQError(
-                    `DAG partially submitted: registerParent failed for ${depName}->${node.name}: ${msg}. Graph may be in inconsistent state.`,
-                  );
-                }
-
-                if (registerResult.startsWith('error:')) {
-                  throw new GlideMQError(
-                    `Failed to register parent ${depName} for node ${node.name}: ${registerResult}`,
-                  );
-                }
-              }
+        async function wireDependents(node: DAGNode, jobId: string, myDependents: string[]) {
+          if (myDependents.length === 0) return;
+          const queueKeys = buildKeys(node.queueName, prefix);
+          const queuePrefix = keyPrefix(prefix, node.queueName);
+          for (const depName of myDependents) {
+            const parentJob = result.get(depName)!;
+            const parentNode = dag.nodes.find((n) => n.name === depName)!;
+            const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
+            const depsMember = `${queuePrefix}:${jobId}`;
+            let registerResult: string;
+            try {
+              registerResult = await registerParent(
+                client,
+                queueKeys,
+                jobId,
+                parentJob.id,
+                keyPrefix(prefix, parentNode.queueName),
+                parentQueueKeys,
+                depsMember,
+              );
+            } catch (regErr) {
+              const msg = regErr instanceof Error ? regErr.message : String(regErr);
+              throw new GlideMQError(
+                `DAG partially submitted: registerParent failed for ${node.name}->${depName}: ${msg}. Graph may be in inconsistent state.`,
+              );
+            }
+            if (registerResult.startsWith('error:')) {
+              throw new GlideMQError(`Failed to register dependent ${depName} for node ${node.name}: ${registerResult}`);
             }
           }
         }

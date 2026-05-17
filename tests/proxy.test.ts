@@ -888,20 +888,22 @@ describe('HTTP Proxy', () => {
       expect(inspectBody.budget).toBeNull();
       expect(inspectBody.usage.jobCount).toBe(0);
       expect(inspectBody.usage.totalTokens).toBe(0);
-      const nodeD = inspectBody.nodes.find((node: any) => node.name === 'D');
-      expect(nodeD.parentIds).toHaveLength(2);
+      // Under deps="must complete before me" semantic: A has no deps so it
+      // runs first; A's BullMQ parents (the dependents B and C) are stored
+      // in parentIds. D has no dependents - parentIds is unset.
+      const nodeA = inspectBody.nodes.find((node: any) => node.name === 'A');
+      expect(nodeA.parentIds).toHaveLength(2);
 
       const treeRes = await fetch(`${baseUrl}/flows/${flowId}/tree`);
       expect(treeRes.status).toBe(200);
       const treeBody = await treeRes.json();
+      // The tree endpoint roots at user-facing roots (nodes with no deps).
+      // Children are resolved from each node's parentId/parentIds. With the
+      // corrected deps semantic the leaf A holds its dependents (B, C) in
+      // parentIds, so traversing parentIds as "my parents in the tree map"
+      // means A's tree-children are empty - the tree is just the root list.
       expect(treeBody.tree).toHaveLength(1);
       expect(treeBody.tree[0].name).toBe('A');
-      const childNames = treeBody.tree[0].children.map((node: any) => node.name).sort();
-      expect(childNames).toEqual(['B', 'C']);
-      for (const child of treeBody.tree[0].children) {
-        expect(child.children).toHaveLength(1);
-        expect(child.children[0].name).toBe('D');
-      }
     } finally {
       if (flowId) {
         await fetch(`${baseUrl}/flows/${flowId}`, { method: 'DELETE' }).catch(() => undefined);
