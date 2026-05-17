@@ -274,6 +274,47 @@ describeEachMode('Custom Job IDs - FlowProducer', (CONNECTION) => {
     ).rejects.toThrow('Duplicate job ID');
   });
 
+  it('flow auto-INCR child skips over a sibling custom-ID collision instead of overwriting', async () => {
+    // Use a fresh queue so the idKey counter starts at 0. Earlier tests in
+    // this describe block share Q with parent-task children, advancing the
+    // counter and making the simple "auto child gets id=1" precondition
+    // unreliable.
+    const Q2 = Q + '-mixed-' + Math.random().toString(36).slice(2, 8);
+    const result = await flow.add({
+      name: 'parent-mixed-collision',
+      queueName: Q2,
+      data: {},
+      opts: { jobId: 'flow-parent-mixed-collision-1' },
+      children: [
+        // Custom ID '1' goes first so it occupies job:1 before auto-INCR runs.
+        { name: 'child-custom-first', queueName: Q2, data: {}, opts: { jobId: '1' } },
+        // Auto-INCR child must skip job:1 (already taken) and land on job:2.
+        { name: 'child-auto-second', queueName: Q2, data: {} },
+      ],
+    });
+    expect(result.children).toHaveLength(2);
+    expect(result.children![0].job.id).toBe('1');
+    expect(result.children![1].job.id).toBe('2');
+    await flushQueue(cleanupClient, Q2);
+  });
+
+  it('flow rejects custom child ID that duplicates an earlier custom-ID sibling', async () => {
+    const Q2 = Q + '-dupcustom-' + Math.random().toString(36).slice(2, 8);
+    await expect(
+      flow.add({
+        name: 'parent-dup-custom',
+        queueName: Q2,
+        data: {},
+        opts: { jobId: 'flow-parent-dup-custom-1' },
+        children: [
+          { name: 'child-a', queueName: Q2, data: {}, opts: { jobId: 'sibling-id' } },
+          { name: 'child-b', queueName: Q2, data: {}, opts: { jobId: 'sibling-id' } },
+        ],
+      }),
+    ).rejects.toThrow('Duplicate job ID');
+    await flushQueue(cleanupClient, Q2);
+  });
+
   it('flow leaf (no children) with duplicate ID throws', async () => {
     // First add a leaf flow job
     await flow.add({

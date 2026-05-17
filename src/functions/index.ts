@@ -49,7 +49,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 87: releaseGroupSlotAndPromote caps maxConcurrency promotion budget at 1000 to prevent unbounded Lua loop on large maxConcurrency settings (#236).
 // Version 88: glidemq_promote counts expired scheduled jobs toward MAX_PROMOTIONS budget - prevents unbounded scans when many expired jobs sit in scheduled set (#235).
 // Version 89: Bound skip-marker advancement work per FCALL via MAX_SKIP_ADVANCE_STEPS=128 to prevent long-running ordered-group loops (#222).
-export const LIBRARY_VERSION = '89';
+// Version 90: glidemq_addFlow rechecks EXISTS for custom child IDs and skips auto-INCR'd parent/child IDs that collide with existing custom-ID jobs - mirrors the addJob auto-ID collision guard so flows survive shared idKey state (#234).
+export const LIBRARY_VERSION = '90';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -2335,6 +2336,15 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     local parentJobId = redis.call('INCR', parentIdKey)
     parentJobIdStr = tostring(parentJobId)
     parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
+    -- Skip auto-INCR'd IDs that collide with previously-created custom-ID jobs.
+    local retries = 0
+    while redis.call('EXISTS', parentJobKey) == 1 do
+      retries = retries + 1
+      if retries >= 1000 then return cjson.encode({'ERR:ID_EXHAUSTED'}) end
+      parentJobId = redis.call('INCR', parentIdKey)
+      parentJobIdStr = tostring(parentJobId)
+      parentJobKey = parentPrefix .. 'job:' .. parentJobIdStr
+    end
   end
   -- Pre-validate all children's custom IDs for duplicates before any writes
   local seenChildKeys = {}
@@ -2454,12 +2464,25 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     local childJobKey
     if childCustomId ~= '' then
       childJobKey = childPrefix .. 'job:' .. childCustomId
+      if redis.call('EXISTS', childJobKey) == 1 then
+        return cjson.encode({'duplicate'})
+      end
       childJobIdStr = childCustomId
       advanceIdCounter(childIdKey, childCustomId)
     else
       local childJobId = redis.call('INCR', childIdKey)
       childJobIdStr = tostring(childJobId)
       childJobKey = childPrefix .. 'job:' .. childJobIdStr
+      -- Skip over IDs that collide with custom-ID jobs (parent or sibling),
+      -- mirroring glidemq_addJob's auto-ID collision guard.
+      local retries = 0
+      while redis.call('EXISTS', childJobKey) == 1 do
+        retries = retries + 1
+        if retries >= 1000 then return cjson.encode({'ERR:ID_EXHAUSTED'}) end
+        childJobId = redis.call('INCR', childIdKey)
+        childJobIdStr = tostring(childJobId)
+        childJobKey = childPrefix .. 'job:' .. childJobIdStr
+      end
     end
     local childOrderingKey = extractOrderingKeyFromOpts(childOpts)
     local childLifo = extractLifoFromOpts(childOpts)

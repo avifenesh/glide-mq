@@ -1043,6 +1043,9 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     local childJobKey
     if childCustomId ~= '' then
       childJobKey = childPrefix .. 'job:' .. childCustomId
+      if redis.call('EXISTS', childJobKey) == 1 then
+        return cjson.encode({'duplicate'})
+      end
       childJobIdStr = childCustomId
     else
       local childJobId = redis.call('INCR', childIdKey)
