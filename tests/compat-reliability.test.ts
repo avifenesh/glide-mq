@@ -104,52 +104,39 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
 
     const job = await queue.add('stall-fail', { value: 'doomed' });
 
-    // Worker that stalls - picks up job then crashes
-    const worker1 = new Worker(
-      Q,
-      async () => {
-        await new Promise((r) => setTimeout(r, 60000));
-        return 'never';
-      },
-      {
-        connection: CONNECTION,
-        concurrency: 1,
-        blockTimeout: 500,
-        stalledInterval: 60000,
-      },
-    );
-    worker1.on('error', () => {});
-    await new Promise((r) => setTimeout(r, 2000));
-    await worker1.close(true);
-
-    // Recovery worker with maxStalledCount=1
-    const worker2 = new Worker(
-      Q,
-      async () => {
-        await new Promise((r) => setTimeout(r, 60000));
-        return 'never';
-      },
-      {
-        connection: CONNECTION,
-        concurrency: 1,
-        blockTimeout: 500,
-        lockDuration: 1000,
-        stalledInterval: 1000,
-        maxStalledCount: 1,
-        promotionInterval: 500,
-      },
-    );
-    worker2.on('error', () => {});
-
-    // Wait for 2+ stall detection cycles
-    await new Promise((r) => setTimeout(r, 5000));
-
-    await worker2.close(true);
+    // Simulate a chronically broken pipeline: every worker that picks up
+    // the job crashes (force-close stops the heartbeat). Each cycle bumps
+    // stalledCount; once it exceeds maxStalledCount, the reclaim path
+    // moves the job to failed instead of redispatching again.
+    let cycles = 0;
+    let finalState: string | null = null;
+    while (cycles < 6 && finalState !== 'failed') {
+      const w = new Worker(
+        Q,
+        async () => {
+          await new Promise(() => {}); // hang
+          return 'never';
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 500,
+          lockDuration: 500,
+          stalledInterval: 500,
+          maxStalledCount: 1,
+          promotionInterval: 500,
+        },
+      );
+      w.on('error', () => {});
+      await new Promise((r) => setTimeout(r, 700));
+      await w.close(true);
+      await new Promise((r) => setTimeout(r, 800));
+      finalState = (await cleanupClient.hget(k.job(job.id), 'state'))?.toString() ?? null;
+      cycles++;
+    }
     await queue.close();
 
-    // After exceeding maxStalledCount, job should be in failed state
-    const state = await cleanupClient.hget(k.job(job.id), 'state');
-    expect(String(state)).toBe('failed');
+    expect(finalState).toBe('failed');
 
     const failedReason = await cleanupClient.hget(k.job(job.id), 'failedReason');
     expect(String(failedReason)).toContain('stalled');
@@ -157,7 +144,7 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
     // Should be in the failed ZSet
     const failedScore = await cleanupClient.zscore(k.failed, job.id);
     expect(failedScore).not.toBeNull();
-  }, 15000);
+  }, 25000);
 
   it('stalled job detection interval is configurable', async () => {
     const Q = uniqueQueue('stall-interval');
@@ -184,17 +171,26 @@ describeEachMode('Stalled job recovery', (CONNECTION) => {
     await new Promise((r) => setTimeout(r, 2000));
     await worker1.close(true);
 
-    // Worker with 500ms stalled interval - should detect quickly
+    // Worker 2 ALSO hangs - we want to observe the stalled-count
+    // increment from the reclaim cycle, not have the redispatched job
+    // immediately complete and clear the counter.
     const stalledAt: number[] = [];
-    const worker2 = new Worker(Q, async () => 'recovered', {
-      connection: CONNECTION,
-      concurrency: 1,
-      blockTimeout: 500,
-      lockDuration: 500,
-      stalledInterval: 500,
-      maxStalledCount: 3,
-      promotionInterval: 500,
-    });
+    const worker2 = new Worker(
+      Q,
+      async () => {
+        await new Promise(() => {}); // hang too
+        return 'never';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        lockDuration: 500,
+        stalledInterval: 500,
+        maxStalledCount: 5,
+        promotionInterval: 500,
+      },
+    );
     worker2.on('error', () => {});
     worker2.on('stalled', () => stalledAt.push(Date.now()));
 
