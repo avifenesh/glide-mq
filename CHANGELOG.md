@@ -6,6 +6,62 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **DAG `deps` direction inverted** (#244): `DAGNode.deps` was documented as "nodes that must complete before me" but the implementation submitted in deps-first topo order with each dep using its first downstream node as the BullMQ `parentId`, which inverted the semantics. The fix submits in reverse-topological order, treats nodes with `deps` as `waiting-children` parents, and wires every dependent through the parents SET so `deps` now matches the documented direction. `LIBRARY_VERSION` bumped to `88`.
+
+- **Proxy `/flows/:id/tree` rendered DAG flows upside down** (#245): the tree builder used flow-tree semantics (children listed under their parent) for both `tree` and `dag` flow kinds. For DAGs that produces an inverted graph - leaves appear as roots. `buildFlowTreeNodes` now branches on `FlowKind`: for `dag` it uses each node's `parentIds` directly so prerequisites render under the dependent that waits for them.
+
+- **DAG multi-dependent leaf race in `addDAG`** (#246): when a leaf had >1 dependent, the previous wiring piggybacked the first dependent on `addJob`'s atomic `parentId`/`parentDepsKey` and wired the rest via `registerParent`. Workers fetching the leaf between Phase A and Phase B saw `parentIds=undefined` and `completeAndFetchNext` skipped `SMEMBERS A.parents`, leaving subsequent dependents stuck in `waiting-children`. Multi-dependent leaves now submit with no parent fields and wire every dependent through Phase B. Additionally, the `hasParents` arg to `glidemq_completeAndFetchNext` (which gated the `SMEMBERS` on a stale worker snapshot) was dropped - the SET is now always read at completion time. `LIBRARY_VERSION` bumped to `93`.
+
+- **Stalled-job redispatch under threshold** (#242): when a job stalled but its `stalledCount` was still under `maxStalledCount`, `glidemq_reclaimStalled` left the entry parked in the scheduler PEL instead of redispatching to a healthy worker. The redelivery contract in `DURABILITY.md` now holds: stalled entries are ACK+DEL'd and re-XADD'd back to the stream under threshold, only failing once `stalledCount > maxStalledCount`. Aligns with BullMQ semantics.
+
+- **`addFlow` ID-collision races** (#234): `glidemq_addFlow` re-checks `EXISTS` for custom child IDs and skips auto-`INCR`'d parent/child IDs that collide with existing custom-ID jobs - mirrors the same guard the `addJob` path already had, so flows survive shared `idKey` state.
+
+- **Ordering skip-marker advancement unbounded** (#222): debounce-induced skip markers were walked unboundedly per FCALL, which could OOM-trip Lua on large gaps. Skip-marker advancement is now bounded per call; the remaining markers are picked up on the next gate evaluation.
+
+- **Serverless pool credential cache key collisions** (#229, #241): the pool's cache previously bypassed the cache when credentials were present (#229), and then hashed credentials into the cache key so distinct credential sets get distinct entries instead of leaking across tenants (#241).
+
+- **Expired jobs not counted against promote budget** (#235): `glidemq_promoteGroupQ`'s loop budget was decremented only for promotions, so a queue full of expired entries would saturate the budget on expires without ever promoting real jobs. Expired jobs now consume budget too.
+
+- **Group promote loop could iterate unbounded under `maxConcurrency`** (#236): when a group was already at `maxConcurrency`, the promote loop kept popping the waitlist without making progress. Cap added so the loop terminates after one full pass.
+
+- **Long-running jobs marked stalled** (#238): workers now emit periodic heartbeats during job execution so `lockDuration` is honored against actual wall-clock activity, not the time since the worker last polled.
+
+- **Broadcast retries fanned out to healthy subscribers** (#231): a failing subscription's retry attempts re-delivered the message to every other subscriber. Retries are now isolated to the failing subscription via per-subscription PEL tracking.
+
+- **`list-active` counter leaks** (#230): non-processing outcomes of `moveToActive` (revoked, expired, ordering-deferred) failed to `DECR` the `list-active` counter they incremented on the way in.
+
+- **Batch-mode worker over-fetched stream entries** (#233): `XREADGROUP count` was uncapped, so `concurrency * batch.size` was claimed even when only `batch.size` could be processed. Count is now clamped.
+
+- **Heartbeat started after token-limiter wait** (#224): if the token bucket forced a wait before processing, the worker had no heartbeat during the wait and could trigger its own reclaim. Heartbeat now starts before the wait.
+
+- **Proxy accepted unsupported opts keys** (#232): job-add requests with unknown `opts` keys (typos, future fields) were silently accepted and ignored. The proxy now rejects them so client/server schema drift fails loud.
+
+- **Suspended-job cleanup on timeout** (#226): timed-out suspended jobs were missing some cleanup paths (groupq waitlist entry, ordering meta), leaving stale state. Cleanup is now exhaustive.
+
+- **Per-job `lockDuration` validation** (#225): `opts.lockDuration` was not validated; non-finite, negative, or extreme values would corrupt the stall threshold. Now validated and clamped.
+
+- **`Queue.getClient` initialization race** (#227): concurrent first-time access could initialize two clients. Now guarded by a single-flight promise.
+
+- **Cross-queue DLQ shared entries** (#223): DLQ entries were scoped only by job ID, so two queues using the same ID would see each other's DLQ rows. Now scoped to the owning queue.
+
+- **Duplicate stalled-list recovery across schedulers** (#228): with multiple schedulers running, list-backed stalled recovery could run concurrently and double-recover. Now deduped via a coordination key.
+
+### Performance
+
+- **`addDAG` round trips collapsed from O(N) to O(levels)** (#246): submissions are now grouped by topological level and pipelined within each level via non-atomic batch. Bench (5-run median, wide diamond, local Valkey/cluster): N=4 went from ~25 ms to ~0.5 ms (~50x); N=50 went from ~12-16 ms to ~3-4 ms (~4x). Each FCALL stays atomic individually; the race semantics are preserved by `registerParent`'s `already_completed` path.
+
+- **Large-collection deletes use UNLINK** (#243): job hashes, retention purge, `glidemq_clean` batches, and `glidemq_drain` stream/zset/lifo/priority sweeps now use `UNLINK` instead of `DEL`. UNLINK keeps in-script atomicity (the keyspace removal is still synchronous from the script's view) but defers memory reclamation to the bio thread, so obliterate / retention / drain stop blocking the server thread on MB-sized job hashes. Small-key DELs (lockKey) kept as DEL.
+
+### Security / dependencies
+
+- **CVE fixes via `npm audit fix`** (#240): resolved CVEs in transitive deps `langsmith` and `protobufjs`.
+
+---
+
 ## [0.15.2] - 2026-05-08
 
 ### Fixed
