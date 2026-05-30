@@ -1,6 +1,8 @@
 node_modules/
 dist/
 build/
+coverage/
+junit.xml
 *.tgz
 .env
 agent-knowledge/
