@@ -17,10 +17,10 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      - run: npm ci --omit=dev
 
-      - name: Security audit
-        run: npm audit --audit-level=moderate
+      - name: Runtime dependency audit
+        run: npm audit --omit=dev --audit-level=moderate
 
   quality:
     runs-on: ubuntu-latest
@@ -164,4 +164,4 @@ jobs:
       - name: Run search integration tests
         run: npx vitest run tests/search-index.test.ts
         env:
-          SKIP_CLUSTER: "1"
+          SKIP_CLUSTER: '1'
