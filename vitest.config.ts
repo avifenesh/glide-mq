@@ -17,5 +17,14 @@ export default defineConfig({
     minWorkers,
     fileParallelism,
     exclude: ['node_modules/**'],
+    reporters: process.env.CI ? ['default', 'github-actions', 'junit'] : ['default'],
+    outputFile: { junit: './junit.xml' },
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+      reportsDirectory: 'coverage',
+      include: ['src/**/*.ts'],
+      exclude: ['src/**/*.d.ts', 'tests/**'],
+    },
   },
 });

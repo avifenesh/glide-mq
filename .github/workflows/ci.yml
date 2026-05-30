@@ -59,7 +59,7 @@ jobs:
 
       - name: Run unit tests (no Valkey needed)
         run: >-
-          npx vitest run
+          npx vitest run --coverage
           tests/api-completeness.test.ts
           tests/az-affinity.test.ts
           tests/connection.test.ts
@@ -71,6 +71,22 @@ jobs:
           tests/testing-mode.test.ts
           tests/worker-saturation.test.ts
           tests/worker.test.ts
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          flags: unit
+          fail_ci_if_error: false
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./junit.xml
+          flags: unit
 
   test-integration:
     needs: quality
@@ -125,7 +141,7 @@ jobs:
 
       - name: Run integration tests (standalone + cluster)
         run: >-
-          npx vitest run
+          npx vitest run --coverage
           --exclude 'tests/api-completeness.test.ts'
           --exclude 'tests/az-affinity.test.ts'
           --exclude 'tests/connection.test.ts'
@@ -138,6 +154,22 @@ jobs:
           --exclude 'tests/worker-saturation.test.ts'
           --exclude 'tests/worker.test.ts'
           --exclude 'tests/search-index.test.ts'
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          flags: integration-node${{ matrix.node-version }}
+          fail_ci_if_error: false
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./junit.xml
+          flags: integration-node${{ matrix.node-version }}
 
   test-search:
     needs: quality
@@ -162,6 +194,22 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: Run search integration tests
-        run: npx vitest run tests/search-index.test.ts
+        run: npx vitest run --coverage tests/search-index.test.ts
         env:
           SKIP_CLUSTER: "1"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info
+          flags: search
+          fail_ci_if_error: false
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./junit.xml
+          flags: search
