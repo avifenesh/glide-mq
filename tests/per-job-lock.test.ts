@@ -309,4 +309,31 @@ describeEachMode('Per-job lockDuration', (CONNECTION) => {
 
     await queue.close();
   }, 25000);
+
+  it('rejects out-of-range per-job lockDuration on add() and addBulk()', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    // Below the 1000ms floor.
+    await expect(queue.add('ld-low', { i: 1 }, { lockDuration: 500 })).rejects.toThrow(
+      /lockDuration must be a finite number between 1000 and 86400000/,
+    );
+    // Above the 24h ceiling.
+    await expect(queue.add('ld-high', { i: 1 }, { lockDuration: 86_400_001 })).rejects.toThrow(
+      /lockDuration must be/,
+    );
+    // Non-finite.
+    await expect(queue.add('ld-nan', { i: 1 }, { lockDuration: Number.NaN })).rejects.toThrow(
+      /lockDuration must be/,
+    );
+    // A valid boundary value is accepted.
+    const ok = await queue.add('ld-ok', { i: 1 }, { lockDuration: 1000 });
+    expect(ok).not.toBeNull();
+
+    // addBulk applies the same validation.
+    await expect(
+      queue.addBulk([{ name: 'b1', data: { i: 1 }, opts: { lockDuration: 999 } }]),
+    ).rejects.toThrow(/lockDuration must be/);
+
+    await queue.close();
+  }, 15000);
 });
