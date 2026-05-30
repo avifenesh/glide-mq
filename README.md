@@ -3,6 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/glide-mq)](https://www.npmjs.com/package/glide-mq)
 [![license](https://img.shields.io/npm/l/glide-mq)](https://github.com/avifenesh/glide-mq/blob/main/LICENSE)
 [![CI](https://github.com/avifenesh/glide-mq/actions/workflows/ci.yml/badge.svg)](https://github.com/avifenesh/glide-mq/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/avifenesh/glide-mq/branch/main/graph/badge.svg)](https://codecov.io/gh/avifenesh/glide-mq)
 
 High-performance message queue for Node.js with first-class AI orchestration. Built on Valkey/Redis Streams with a Rust NAPI core.
 
