@@ -3,7 +3,7 @@
 ## Current State
 
 - **Branch**: main
-- **Version**: 0.15.4 released on npm.
+- **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
 - **CI**: green on main; local 0.15.4 release gates passed on 2026-06-04.
 - **Local branches**: no release-blocking local branches.
 
