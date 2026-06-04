@@ -29,7 +29,7 @@ See CHANGELOG.md `[Unreleased]` for the full list. Highlights:
 
 - **0.15.3 release**: ~21 PRs sit in `[Unreleased]`. Worth a release when the next user-visible change lands or when the DAG fixes need to ship.
 - **Bun/Deno NAPI compatibility testing**: still pending from 0.14.0 handover.
-- **valkey-bundle stable**: cluster CI is on `valkey-bundle:9.1.0-rc1`; switch to GA when 9.1.0 releases.
+- **Valkey CI images**: CI is off release candidates. Standalone and cluster coverage use stable `valkey/valkey:9.1.0`; search coverage uses stable `valkey/valkey-bundle:9.1.0`, which carries Valkey Search 1.2.x and keeps the Search 1.1+ option tests active.
 
 ## API Design Decisions (locked)
 

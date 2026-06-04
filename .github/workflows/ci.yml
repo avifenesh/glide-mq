@@ -82,7 +82,7 @@ jobs:
       fail-fast: false
     services:
       valkey:
-        image: valkey/valkey-bundle:9.1.0-rc1
+        image: valkey/valkey:9.1.0
         options: >-
           --health-cmd "valkey-cli ping"
           --health-interval 10s
@@ -113,7 +113,7 @@ jobs:
 
       - name: Install Valkey binaries for cluster
         run: |
-          id=$(docker create valkey/valkey:8.0)
+          id=$(docker create valkey/valkey:9.1.0)
           sudo docker cp "$id:/usr/local/bin/valkey-server" /usr/local/bin/valkey-server
           sudo docker cp "$id:/usr/local/bin/valkey-cli" /usr/local/bin/valkey-cli
           docker rm "$id"
@@ -145,7 +145,7 @@ jobs:
     timeout-minutes: 15
     services:
       valkey:
-        image: valkey/valkey-bundle:9.1.0-rc1
+        image: valkey/valkey-bundle:9.1.0
         options: >-
           --health-cmd "valkey-cli ping"
           --health-interval 10s
