@@ -3,9 +3,9 @@
 ## Current State
 
 - **Branch**: main
-- **Version**: 0.15.2 released on npm; an `[Unreleased]` series of fixes and perf work has landed on main and awaits a 0.15.3 cut.
-- **CI**: green on main
-- **Local branches**: `perf/addDAG-batched-fcall` merged to main as #246; safe to delete.
+- **Version**: 0.15.4 released on npm.
+- **CI**: green on main; local 0.15.4 release gates passed on 2026-06-04.
+- **Local branches**: no release-blocking local branches.
 
 ## What Was Done (0.15.x series since 0.14.0)
 
@@ -14,21 +14,19 @@
 - **0.15.0** (#192, #205): HTTP proxy parity expansion (queue events SSE, per-job lifecycle SSE, `jobs/wait`, workers, metrics, scheduler CRUD, rolling usage summary, broadcast publish/SSE, DLQ inspection/replay, suspended-job inspection, revoke, queue global rate-limit HTTP management). Flow HTTP API: `POST /flows`, `GET /flows/:id`, `GET /flows/:id/tree`, `DELETE /flows/:id` for tree flows and DAGs. `queue.getUsageSummary()` plus `/usage/summary`.
 - **0.15.1** (#206): debounce + ordering.key deadlock fix via lightweight skip markers. `LIBRARY_VERSION` 81.
 - **0.15.2** (#212, #213, #216-219): priority/LIFO in batch-mode workers, `list-active` underflow guards (12 sites through one `decrListActive` helper), priority/LIFO active visibility via `glidemq_getActiveListJobIds`, lockDuration-aware stall reclaim (`stalledInterval` no longer conflated with threshold). `LIBRARY_VERSION` 84. **Behavior change**: workers that relied on short `stalledInterval` without setting `lockDuration` now see slower stall recovery; set `lockDuration` explicitly to match if needed.
+- **0.15.3** (#222-#246): DAG dependency direction/tree rendering/multi-dependent leaf fixes, `addDAG` level batching, stalled-job redispatch semantics, large-key `UNLINK` cleanup, bounded ordering skip-marker advancement, serverless credential cache scoping, flow ID-collision guards, proxy strict opts validation, long-running job heartbeats, broadcast retry isolation, queue client single-flight, and dependency CVE fixes. `LIBRARY_VERSION` 93.
+- **0.15.4**: interval scheduler anchoring prevents late worker ticks from accumulating drift, `npm test` now runs the intended non-fuzzer suite, and CI/local compose coverage use stable Valkey 9.1.0 images.
 
-### Unreleased (on main, awaiting 0.15.3 cut)
+### 0.15.4 Release Notes
 
-See CHANGELOG.md `[Unreleased]` for the full list. Highlights:
+See CHANGELOG.md `0.15.4` for the full list. Highlights:
 
-- **DAG correctness pass** (#244, #245, #246): `DAGNode.deps` direction now matches the documented "must complete before me" semantic; the proxy `/flows/:id/tree` renders DAGs in the user-facing direction (prerequisites under their dependents); `addDAG` pipelines submissions by topological level for ~4-50x speedup on local Valkey (cluster gains depend on RTT). Hidden race in multi-dependent leaf wiring fixed - completion now always SMEMBERS the parents SET instead of trusting a worker snapshot of `parentIds`. `LIBRARY_VERSION` bumped 88 -> 93.
-- **Reclaim semantics** (#242): under-threshold stalled jobs are now redispatched back to the stream/lifo/priority list so a healthy worker can pick them up; jobs only fail once `stalledCount > maxStalledCount`. Aligns with at-least-once redelivery promise.
 - **Scheduler interval anchoring**: `every` schedulers advance from the previous due slot instead of the late worker tick timestamp, preventing CI/event-loop jitter from accumulating drift while still skipping missed slots.
-- **Perf: UNLINK for large deletes** (#243): job hashes, retention purge, `glidemq_clean` batches, drain sweeps now use `UNLINK` instead of `DEL`. Atomicity preserved (UNLINK is synchronous from script's view); memory reclamation deferred to bio thread.
-- **Other fixes** (#222, #223, #224, #225, #226, #227, #228, #229, #230, #231, #232, #233, #234, #235, #236, #238, #241): `addFlow` ID-collision races, ordering skip-marker bounded advancement, serverless pool credential cache key collisions, expired-jobs promote budget, group promote cap, long-running job heartbeat, broadcast retry isolation, list-active leak on non-processing moveToActive outcomes, batch XREADGROUP count cap, heartbeat-before-token-wait, proxy strict opts validation, suspended-job cleanup on timeout, per-job lockDuration clamp, getClient single-flight, cross-queue DLQ scoping, dedup of list stalled recovery across schedulers.
-- **Deps** (#240): npm audit fix for langsmith / protobufjs CVEs.
+- **Release gate correctness**: `npm test` now passes the fuzzer exclusion as a single Vitest argument, so it covers the intended 2,414-test non-fuzzer suite.
+- **Valkey CI images**: standalone, cluster, and search coverage now use stable Valkey 9.1.0 images instead of release-candidate images.
 
 ## Open Threads
 
-- **0.15.3 release**: ~21 PRs sit in `[Unreleased]`. Worth a release when the next user-visible change lands or when the DAG fixes need to ship.
 - **Bun/Deno NAPI compatibility testing**: still pending from 0.14.0 handover.
 - **Valkey CI images**: CI is off release candidates. Standalone and cluster coverage use stable `valkey/valkey:9.1.0`; search coverage uses stable `valkey/valkey-bundle:9.1.0`, which carries Valkey Search 1.2.x and keeps the Search 1.1+ option tests active.
 
