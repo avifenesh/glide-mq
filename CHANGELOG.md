@@ -12,6 +12,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Interval scheduler drift accumulation**: `every` schedulers now advance from the previous due slot instead of the late worker tick timestamp, so CI/event-loop jitter does not accumulate drift over repeated firings. Missed slots are skipped rather than replayed.
 
+### Changed
+
+- **Valkey CI images**: CI and local compose coverage now use stable Valkey 9.1.0 images instead of release-candidate images.
+
 ---
 
 ## [0.15.3] - 2026-05-18
