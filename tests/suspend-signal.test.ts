@@ -290,6 +290,20 @@ describeEachMode('Suspend/Signal', (CONNECTION) => {
   const queuesToFlush: string[] = [];
   let cleanupClient: any;
 
+  function waitForWorkerCompleted(worker: any, timeoutMs = 10000, message = 'Timeout'): Promise<any> {
+    return new Promise<any>((resolve, reject) => {
+      const onCompleted = (_job: any, result: any) => {
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const timer = setTimeout(() => {
+        worker.off('completed', onCompleted);
+        reject(new Error(message));
+      }, timeoutMs);
+      worker.once('completed', onCompleted);
+    });
+  }
+
   beforeAll(async () => {
     cleanupClient = await createCleanupClient(CONNECTION);
   });
@@ -335,16 +349,10 @@ describeEachMode('Suspend/Signal', (CONNECTION) => {
     expect(info).not.toBeNull();
     expect(info!.reason).toBe('waiting');
 
+    const completedPromise = waitForWorkerCompleted(worker, 10000, 'Timeout waiting for completion');
     const resumed = await queue.signal(added!.id, 'go', { approved: true });
     expect(resumed).toBe(true);
-
-    const completed = await new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Timeout waiting for completion')), 10000);
-      worker.on('completed', (_job: any, result: any) => {
-        clearTimeout(timer);
-        resolve(result);
-      });
-    });
+    const completed = await completedPromise;
 
     expect(completed.resumed).toBe(true);
 
@@ -378,15 +386,9 @@ describeEachMode('Suspend/Signal', (CONNECTION) => {
       return info !== null;
     }, 8000);
 
+    const completedPromise = waitForWorkerCompleted(worker);
     await queue.signal(added!.id, 'resume', { data: 'hello' });
-
-    const completed = await new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Timeout')), 10000);
-      worker.on('completed', (_job: any, result: any) => {
-        clearTimeout(timer);
-        resolve(result);
-      });
-    });
+    const completed = await completedPromise;
 
     expect(completed.signalCount).toBe(1);
     expect(invocations.length).toBe(2);
@@ -540,16 +542,10 @@ describeEachMode('Suspend/Signal', (CONNECTION) => {
 
     await new Promise((r) => setTimeout(r, 2000));
 
+    const completedPromise = waitForWorkerCompleted(worker);
     const resumed = await queue.signal(added!.id, 'wake', { msg: 'hello' });
     expect(resumed).toBe(true);
-
-    const completed = await new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Timeout')), 10000);
-      worker.on('completed', (_job: any, result: any) => {
-        clearTimeout(timer);
-        resolve(result);
-      });
-    });
+    const completed = await completedPromise;
 
     expect(completed.signalCount).toBe(1);
 
@@ -663,15 +659,9 @@ describeEachMode('Suspend/Signal', (CONNECTION) => {
       return info !== null;
     }, 8000);
 
+    const completedPromise = waitForWorkerCompleted(worker);
     await queue.signal(added!.id, 'continue', { data: 'test' });
-
-    const completed = await new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Timeout')), 10000);
-      worker.on('completed', (_job: any, result: any) => {
-        clearTimeout(timer);
-        resolve(result);
-      });
-    });
+    const completed = await completedPromise;
 
     expect(onResumeCalled).toBe(true);
     expect(completed.fromCallback).toBe(true);
@@ -751,16 +741,10 @@ describeEachMode('Suspend/Signal', (CONNECTION) => {
     }, 8000);
 
     const largeData = { items: Array.from({ length: 1000 }, (_, i) => ({ id: i, value: 'x'.repeat(40) })) };
+    const completedPromise = waitForWorkerCompleted(worker);
     const resumed = await queue.signal(added!.id, 'large', largeData);
     expect(resumed).toBe(true);
-
-    const completed = await new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Timeout')), 10000);
-      worker.on('completed', (_job: any, result: any) => {
-        clearTimeout(timer);
-        resolve(result);
-      });
-    });
+    const completed = await completedPromise;
 
     expect(completed.payloadLength).toBeGreaterThan(1000);
 
