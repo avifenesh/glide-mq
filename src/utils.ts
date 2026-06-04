@@ -590,7 +590,8 @@ export function computeInitialSchedulerNextRun(
 }
 
 export function computeFollowingSchedulerNextRun(
-  schedule: Pick<SchedulerEntry, 'pattern' | 'every' | 'repeatAfterComplete' | 'tz' | 'endDate'>,
+  schedule: Pick<SchedulerEntry, 'pattern' | 'every' | 'repeatAfterComplete' | 'tz' | 'endDate'> &
+    Partial<Pick<SchedulerEntry, 'nextRun'>>,
   afterMs: number,
 ): number | null {
   if (
@@ -606,7 +607,12 @@ export function computeFollowingSchedulerNextRun(
   } else if (schedule.pattern) {
     nextRun = nextCronOccurrence(schedule.pattern, afterMs, schedule.tz);
   } else if (schedule.every) {
-    nextRun = afterMs + schedule.every;
+    if (schedule.nextRun != null && schedule.nextRun <= afterMs) {
+      const missedIntervals = Math.floor((afterMs - schedule.nextRun) / schedule.every) + 1;
+      nextRun = schedule.nextRun + missedIntervals * schedule.every;
+    } else {
+      nextRun = schedule.nextRun ?? afterMs + schedule.every;
+    }
   } else {
     return null;
   }

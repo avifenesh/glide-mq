@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Interval scheduler drift accumulation**: `every` schedulers now advance from the previous due slot instead of the late worker tick timestamp, so CI/event-loop jitter does not accumulate drift over repeated firings. Missed slots are skipped rather than replayed.
+
+---
+
 ## [0.15.3] - 2026-05-18
 
 ### Fixed

@@ -151,6 +151,19 @@ describe('nextCronOccurrence', () => {
     const next = computeInitialSchedulerNextRun({ every: 250, startDate, endDate: 1_500 }, now);
     expect(next).toBe(1_500);
   });
+
+  it('keeps interval scheduler nextRun anchored when scheduler ticks late', async () => {
+    const { computeFollowingSchedulerNextRun } = await import('../src/utils');
+    const every = 1_000;
+
+    const secondRun = computeFollowingSchedulerNextRun({ every, nextRun: 1_000 }, 1_001);
+    const thirdRun = computeFollowingSchedulerNextRun({ every, nextRun: secondRun! }, 2_001);
+    const fourthRun = computeFollowingSchedulerNextRun({ every, nextRun: thirdRun! }, 3_001);
+    const afterPause = computeFollowingSchedulerNextRun({ every, nextRun: 1_000 }, 4_501);
+
+    expect([secondRun, thirdRun, fourthRun]).toEqual([2_000, 3_000, 4_000]);
+    expect(afterPause).toBe(5_000);
+  });
 });
 
 describe('validateTimezone', () => {
