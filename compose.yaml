@@ -1,6 +1,6 @@
 services:
   valkey:
-    image: valkey/valkey-bundle:9.1.0-rc1
+    image: valkey/valkey-bundle:9.1.0
     ports:
       - '6379:6379'
     command: valkey-server --save "" --appendonly no --maxmemory-policy noeviction
@@ -11,7 +11,7 @@ services:
       retries: 5
 
   valkey-cluster:
-    image: valkey/valkey-bundle:9.1.0-rc1
+    image: valkey/valkey-bundle:9.1.0
     ports:
       - '7000-7005:7000-7005'
       - '17000-17005:17000-17005'
