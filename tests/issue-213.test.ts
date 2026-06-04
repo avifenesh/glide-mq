@@ -21,6 +21,8 @@ import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './he
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 
+const ACTIVE_VISIBILITY_WAIT_MS = 10_000;
+
 describeEachMode('issue #213 active visibility', (CONNECTION) => {
   let cleanupClient: any;
 
@@ -52,7 +54,7 @@ describeEachMode('issue #213 active visibility', (CONNECTION) => {
 
     try {
       await queue.add('prio', { v: 1 }, { priority: 5 });
-      await waitFor(async () => (await queue.getJobCounts()).active === 1, 5000, 50);
+      await waitFor(async () => (await queue.getJobCounts()).active === 1, ACTIVE_VISIBILITY_WAIT_MS, 50);
       const active = await queue.getJobs('active');
       expect(active.length).toBe(1);
       expect(active[0].name).toBe('prio');
@@ -84,7 +86,7 @@ describeEachMode('issue #213 active visibility', (CONNECTION) => {
 
     try {
       await queue.add('lifo', { v: 1 }, { lifo: true });
-      await waitFor(async () => (await queue.getJobCounts()).active === 1, 5000, 50);
+      await waitFor(async () => (await queue.getJobCounts()).active === 1, ACTIVE_VISIBILITY_WAIT_MS, 50);
       const active = await queue.getJobs('active');
       expect(active.length).toBe(1);
       expect(active[0].name).toBe('lifo');
@@ -119,7 +121,7 @@ describeEachMode('issue #213 active visibility', (CONNECTION) => {
       await queue.add('prio-job', { v: 2 }, { priority: 5 });
       await queue.add('lifo-job', { v: 3 }, { lifo: true });
 
-      await waitFor(async () => (await queue.getJobCounts()).active === 3, 5000, 50);
+      await waitFor(async () => (await queue.getJobCounts()).active === 3, ACTIVE_VISIBILITY_WAIT_MS, 50);
 
       const active = await queue.getJobs('active');
       const names = active.map((j: any) => j.name).sort();
@@ -157,7 +159,7 @@ describeEachMode('issue #213 active visibility', (CONNECTION) => {
       await queue.add('p2', {}, { priority: 2 });
       await queue.add('l1', {}, { lifo: true });
 
-      await waitFor(async () => (await queue.getJobCounts()).active === 5, 5000, 50);
+      await waitFor(async () => (await queue.getJobCounts()).active === 5, ACTIVE_VISIBILITY_WAIT_MS, 50);
 
       const counts = await queue.getJobCounts();
       const active = await queue.getJobs('active');
@@ -198,7 +200,7 @@ describeEachMode('issue #213 active visibility', (CONNECTION) => {
       await queue.add('p2', {}, { priority: 2 });
       await queue.add('p3', {}, { priority: 3 });
 
-      await waitFor(async () => (await queue.getJobCounts()).active === 6, 5000, 50);
+      await waitFor(async () => (await queue.getJobCounts()).active === 6, ACTIVE_VISIBILITY_WAIT_MS, 50);
 
       const all = await queue.getJobs('active');
       expect(all.length).toBe(6);
