@@ -6,6 +6,8 @@
 - **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
 - **CI**: green on main; local 0.15.4 release gates passed on 2026-06-04.
 - **Local branches**: no release-blocking local branches.
+- **Review gate**: automatic Claude review is retired; the Revuto GitHub App check reviews pull requests.
+- **Dependency security**: the lockfile carries protobufjs 7.6.5, brace-expansion 5.0.9, PostCSS 8.5.25, and body-parser 2.3.0.
 
 ## What Was Done (0.15.x series since 0.14.0)
 
