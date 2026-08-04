@@ -11,7 +11,7 @@ const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 const { promote, changeDelay } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 describeEachMode('Delayed jobs', (CONNECTION) => {
   const Q = 'test-delayed-' + Date.now();
@@ -225,14 +225,15 @@ describeEachMode('Delayed jobs', (CONNECTION) => {
     const first = await localQueue.add('first', { step: 'send' }, { ordering: { key: 'tenant-a' } });
     const second = await localQueue.add('second', { step: 'only' }, { ordering: { key: 'tenant-a' } });
 
-    const delayedDeadline = Date.now() + 5000;
-    while (Date.now() < delayedDeadline) {
-      const firstState = String(await cleanupClient.hget(k.job(first.id), 'state'));
-      if (firstState === 'delayed') {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    await waitFor(
+      async () => {
+        const firstState = String(await cleanupClient.hget(k.job(first.id), 'state'));
+        const groupedCount = Number(await cleanupClient.zcard(`glide:{${qName}}:groupq:tenant-a`));
+        return firstState === 'delayed' && groupedCount === 1;
+      },
+      5000,
+      25,
+    );
 
     expect(String(await cleanupClient.hget(k.job(first.id), 'state'))).toBe('delayed');
     // second is in groupq because the ordering-key step-job holds the group slot
