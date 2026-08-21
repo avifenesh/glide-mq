@@ -20,7 +20,7 @@ async function dump() {
       String(raw)
         .split(',')
         .filter(Boolean)
-        .map((n) => Number(n)),
+        .map(Number),
     );
     writeLcov(executable, hitSet, LCOV);
     console.log(`[OK] Lua coverage ${hitSet.size}/${executable.length} -> ${LCOV}`);

@@ -7,26 +7,31 @@ const SRC = join(__dirname, '..', 'src', 'functions', 'glidemq.lua');
 const DIST = join(__dirname, '..', 'dist', 'functions', 'glidemq.lua');
 const EXECUTABLE = join(__dirname, '..', 'coverage', 'lua-executable.json');
 
+const OPEN = new Set(['(', '{', '[']);
+const CLOSE = new Set([')', '}', ']']);
+
+function skipQuoted(line, start, quote) {
+  for (let i = start; i < line.length; i++) {
+    if (line[i] === '\\') {
+      i++;
+      continue;
+    }
+    if (line[i] === quote) return i;
+  }
+  return line.length;
+}
+
 function netDepth(line) {
   let depth = 0;
-  let quote = null;
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
-    if (quote) {
-      if (c === '\\') {
-        i++;
-        continue;
-      }
-      if (c === quote) quote = null;
-      continue;
-    }
     if (c === '-' && line[i + 1] === '-') break;
     if (c === "'" || c === '"') {
-      quote = c;
+      i = skipQuoted(line, i + 1, c);
       continue;
     }
-    if (c === '(' || c === '{' || c === '[') depth++;
-    else if (c === ')' || c === '}' || c === ']') depth--;
+    if (OPEN.has(c)) depth++;
+    if (CLOSE.has(c)) depth--;
   }
   return depth;
 }
@@ -62,15 +67,17 @@ function instrument(source) {
   let depth = 0;
   let incomplete = false;
 
-  out.push(lines[0] ?? '');
-  out.push('local __cov = {}');
-  out.push('local function __reg(name, fn)');
-  out.push('  redis.register_function(name, function(keys, args)');
-  out.push('    local ok, res = pcall(fn, keys, args)');
-  out.push('    if not ok then error(res) end');
-  out.push('    return res');
-  out.push('  end)');
-  out.push('end');
+  out.push(
+    lines[0] ?? '',
+    'local __cov = {}',
+    'local function __reg(name, fn)',
+    '  redis.register_function(name, function(keys, args)',
+    '    local ok, res = pcall(fn, keys, args)',
+    '    if not ok then error(res) end',
+    '    return res',
+    '  end)',
+    'end',
+  );
 
   for (let i = 1; i < lines.length; i++) {
     const lineNo = i + 1;
@@ -90,12 +97,14 @@ function instrument(source) {
     out.push(`${indent}__cov[${lineNo}]=1; ${line.slice(indent.length)}`);
   }
 
-  out.push("__reg('glidemq_dumpCoverage', function(keys, args)");
-  out.push('  local hits = {}');
-  out.push("  for n, _ in pairs(__cov) do hits[#hits + 1] = tostring(n) end");
-  out.push('  table.sort(hits, function(a, b) return tonumber(a) < tonumber(b) end)');
-  out.push("  return table.concat(hits, ',')");
-  out.push('end)');
+  out.push(
+    "__reg('glidemq_dumpCoverage', function(keys, args)",
+    '  local hits = {}',
+    "  for n, _ in pairs(__cov) do hits[#hits + 1] = tostring(n) end",
+    '  table.sort(hits, function(a, b) return tonumber(a) < tonumber(b) end)',
+    "  return table.concat(hits, ',')",
+    'end)',
+  );
 
   return { lua: out.join('\n'), executable };
 }
@@ -108,9 +117,7 @@ function writeLcov(executable, hitSet, dest) {
     if (hit) lh++;
     lines.push(`DA:${n},${hit}`);
   }
-  lines.push(`LF:${executable.length}`);
-  lines.push(`LH:${lh}`);
-  lines.push('end_of_record');
+  lines.push(`LF:${executable.length}`, `LH:${lh}`, 'end_of_record');
   mkdirSync(dirname(dest), { recursive: true });
   writeFileSync(dest, `${lines.join('\n')}\n`);
 }

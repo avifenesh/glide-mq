@@ -198,6 +198,7 @@ jobs:
           --exclude 'tests/search-index.test.ts'
           --exclude 'tests/fuzzer/**'
           --exclude 'tests/lua-instrument.test.ts'
+          --exclude 'tests/library-source.test.ts'
           --exclude 'tests/producer-unit.test.ts'
         env:
           SKIP_CLUSTER: '1'

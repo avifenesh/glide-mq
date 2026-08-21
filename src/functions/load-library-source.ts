@@ -16,15 +16,19 @@ function readLua(path: string): string | undefined {
  * Fall back to the generated embed so bundlers (Lambda/ncc/esbuild) still work
  * when they emit JS without copying glidemq.lua.
  *
- * When GLIDEMQ_LUA_COVERAGE=1, prefer the instrumented dist copy so src-imported
- * Queue/Worker clients load the same library as dist clients and do not REPLACE it.
+ * When GLIDEMQ_LUA_COVERAGE=1, src/functions/glidemq.lua is uninstrumented.
+ * Load the dist copy instead so src-imported clients do not REPLACE the probed library.
  */
 export function loadLibraryFile(dir: string = __dirname): string {
-  if (process.env.GLIDEMQ_LUA_COVERAGE === '1') {
+  const sibling = readLua(join(dir, 'glidemq.lua'));
+  if (process.env.GLIDEMQ_LUA_COVERAGE === '1' && sibling !== undefined) {
     const instrumented = readLua(join(process.cwd(), 'dist/functions/glidemq.lua'));
-    if (instrumented !== undefined) return instrumented;
+    const srcLua = readLua(join(process.cwd(), 'src/functions/glidemq.lua'));
+    if (instrumented !== undefined && srcLua !== undefined && sibling === srcLua) {
+      return instrumented;
+    }
   }
-  return readLua(join(dir, 'glidemq.lua')) ?? EMBEDDED_LIBRARY_FILE;
+  return sibling ?? EMBEDDED_LIBRARY_FILE;
 }
 
 export function librarySourceFrom(file: string, version: string): string {
