@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { instrument, isSkippable, netDepth, stampCoverageVersion } from '../scripts/instrument-lua.cjs';
+import { instrument, isSkippable, netDepth } from '../scripts/instrument-lua.cjs';
 
 describe('Lua coverage instrumenter', () => {
   it('skips comments, blanks, and closers', () => {
@@ -48,9 +48,10 @@ describe('Lua coverage instrumenter', () => {
     expect(executable).toEqual([2]);
   });
 
-  it('stamps a distinct library version into dist when coverage is enabled', () => {
-    const js = "exports.LIBRARY_VERSION = '93';\nexports.LIBRARY_SOURCE = 'x';\n";
-    expect(stampCoverageVersion(js)).toContain("exports.LIBRARY_VERSION = '93-cov'");
+  it('selects a distinct library version when Lua coverage is enabled', () => {
+    expect(readFileSync('src/functions/index.ts', 'utf8')).toContain(
+      "process.env.GLIDEMQ_LUA_COVERAGE === '1' ? '93-cov' : '93'",
+    );
   });
 
   it('instruments the real library without breaking shebang or version placeholder', () => {

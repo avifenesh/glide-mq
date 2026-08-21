@@ -135,8 +135,8 @@ export async function ensureFunctionLibrary(
   }
 
   // Standalone: check version first to avoid unnecessary reload.
-  // Coverage builds stamp LIBRARY_VERSION as `${n}-cov` so an uninstrumented
-  // library is replaced once, then later clients skip and keep __cov hits.
+  // Coverage builds set LIBRARY_VERSION to `${n}-cov` so src and dist clients
+  // agree, skip REPLACE, and keep __cov hits.
   try {
     const result = await client.fcall('glidemq_version', [], []);
     if (String(result) === LIBRARY_VERSION) return;
