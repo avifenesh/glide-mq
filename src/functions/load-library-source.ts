@@ -21,6 +21,7 @@ function readLua(path: string): string | undefined {
  */
 export function loadLibraryFile(dir: string = __dirname): string {
   const sibling = readLua(join(dir, 'glidemq.lua'));
+  /* v8 ignore start -- only taken when GLIDEMQ_LUA_COVERAGE=1 */
   if (process.env.GLIDEMQ_LUA_COVERAGE === '1' && sibling !== undefined) {
     const instrumented = readLua(join(process.cwd(), 'dist/functions/glidemq.lua'));
     const srcLua = readLua(join(process.cwd(), 'src/functions/glidemq.lua'));
@@ -28,6 +29,7 @@ export function loadLibraryFile(dir: string = __dirname): string {
       return instrumented;
     }
   }
+  /* v8 ignore stop -- @preserve */
   return sibling ?? EMBEDDED_LIBRARY_FILE;
 }
 
