@@ -11,27 +11,31 @@ const OPEN = new Set(['(', '{', '[']);
 const CLOSE = new Set([')', '}', ']']);
 
 function skipQuoted(line, start, quote) {
-  for (let i = start; i < line.length; i++) {
+  let i = start;
+  while (i < line.length) {
     if (line[i] === '\\') {
-      i++;
+      i += 2;
       continue;
     }
     if (line[i] === quote) return i;
+    i += 1;
   }
   return line.length;
 }
 
 function netDepth(line) {
   let depth = 0;
-  for (let i = 0; i < line.length; i++) {
+  let i = 0;
+  while (i < line.length) {
     const c = line[i];
     if (c === '-' && line[i + 1] === '-') break;
     if (c === "'" || c === '"') {
-      i = skipQuoted(line, i + 1, c);
+      i = skipQuoted(line, i + 1, c) + 1;
       continue;
     }
     if (OPEN.has(c)) depth++;
     if (CLOSE.has(c)) depth--;
+    i += 1;
   }
   return depth;
 }
