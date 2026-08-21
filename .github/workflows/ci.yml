@@ -71,6 +71,7 @@ jobs:
           tests/testing-mode.test.ts
           tests/worker-saturation.test.ts
           tests/worker.test.ts
+          tests/library-source.test.ts
 
   test-integration:
     needs: quality

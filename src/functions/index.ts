@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import type { GlideReturnType } from '@glidemq/speedkey';
 import type { Client } from '../types';
+import { librarySourceFrom, loadLibraryFile } from './load-library-source';
 
 export const LIBRARY_NAME = 'glidemq';
 // Version 44: Added metrics recording (time-series data for getMetrics).
@@ -61,11 +60,10 @@ export const LIBRARY_VERSION = '93';
 export const CONSUMER_GROUP = 'workers';
 
 // Lua library source loaded via FUNCTION LOAD.
-// Runtime source of truth is src/functions/glidemq.lua (copied to dist/ on build).
-export const LIBRARY_SOURCE = readFileSync(join(__dirname, 'glidemq.lua'), 'utf8').replaceAll(
-  '__LIBRARY_VERSION__',
-  LIBRARY_VERSION,
-);
+// Source of truth is src/functions/glidemq.lua (copied to dist/ on build).
+// loadLibraryFile reads that sibling when present; bundlers that omit the
+// .lua file fall back to the committed glidemq.embedded.json snapshot.
+export const LIBRARY_SOURCE = librarySourceFrom(loadLibraryFile(), LIBRARY_VERSION);
 
 // ---- Key set type ----
 
