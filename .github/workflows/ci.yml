@@ -71,6 +71,7 @@ jobs:
           tests/worker-saturation.test.ts
           tests/worker.test.ts
           tests/library-source.test.ts
+          tests/lua-instrument.test.ts
 
   test-integration:
     needs: quality
@@ -141,6 +142,7 @@ jobs:
           --exclude 'tests/worker-saturation.test.ts'
           --exclude 'tests/worker.test.ts'
           --exclude 'tests/search-index.test.ts'
+          --exclude 'tests/lua-instrument.test.ts'
           ${{ matrix.node-version == '22' && '--exclude tests/fuzzer/**' || '' }}
 
       - name: Upload coverage
@@ -149,6 +151,64 @@ jobs:
         with:
           files: coverage/lcov.info
           flags: integration
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  test-lua-coverage:
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    services:
+      valkey:
+        image: valkey/valkey:9.1.0
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+        env:
+          GLIDEMQ_LUA_COVERAGE: '1'
+
+      - name: Run standalone integration with Lua coverage
+        run: >-
+          npx vitest run
+          --exclude 'tests/api-completeness.test.ts'
+          --exclude 'tests/az-affinity.test.ts'
+          --exclude 'tests/connection.test.ts'
+          --exclude 'tests/job.test.ts'
+          --exclude 'tests/queue.test.ts'
+          --exclude 'tests/recovery.test.ts'
+          --exclude 'tests/shutdown.test.ts'
+          --exclude 'tests/telemetry.test.ts'
+          --exclude 'tests/testing-mode.test.ts'
+          --exclude 'tests/worker-saturation.test.ts'
+          --exclude 'tests/worker.test.ts'
+          --exclude 'tests/search-index.test.ts'
+          --exclude 'tests/fuzzer/**'
+          --exclude 'tests/lua-instrument.test.ts'
+        env:
+          SKIP_CLUSTER: '1'
+          GLIDEMQ_LUA_COVERAGE: '1'
+
+      - name: Upload Lua coverage
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          files: coverage/lua.info
+          flags: lua
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 

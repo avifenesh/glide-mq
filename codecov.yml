@@ -11,9 +11,9 @@ flag_management:
   default_rules:
     carryforward: true
   individual_flags:
-    - name: integration
+    - name: lua
       paths:
-        - src/
+        - src/functions/glidemq.lua
       carryforward: true
 
 comment:

@@ -13,7 +13,7 @@
  * Each describe block runs twice: once with standalone (:6379), once with cluster (:7000).
  */
 
-import { describe } from 'vitest';
+import { afterAll, describe } from 'vitest';
 
 const { GlideClient, GlideClusterClient, ClusterScanCursor } =
   require('@glidemq/speedkey') as typeof import('@glidemq/speedkey');
@@ -156,4 +156,11 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
       }
     } catch {}
   }
+}
+
+if (process.env.GLIDEMQ_LUA_COVERAGE === '1') {
+  afterAll(async () => {
+    const { dumpLuaCoverage } = await import('./lua-coverage');
+    await dumpLuaCoverage();
+  }, 30_000);
 }
