@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { coverageConfigDefaults, defineConfig } from 'vitest/config';
 
 const isWindows = process.platform === 'win32';
 const maxWorkers = process.env.VITEST_MAX_WORKERS ?? (isWindows ? 1 : 2);
@@ -17,5 +17,16 @@ export default defineConfig({
     minWorkers,
     fileParallelism,
     exclude: ['node_modules/**'],
+    coverage: {
+      provider: 'v8',
+      // Integration tests require() dist/*.js. Include those files so V8 can
+      // collect hits, then excludeAfterRemap maps them back to src/**/*.ts.
+      include: ['src/**/*.ts', 'dist/**/*.js'],
+      exclude: coverageConfigDefaults.exclude.filter((p) => p !== 'dist/**' && p !== '**/dist/**'),
+      excludeAfterRemap: true,
+      reporter: ['text', 'lcov'],
+      reportsDirectory: 'coverage',
+      reportOnFailure: true,
+    },
   },
 });

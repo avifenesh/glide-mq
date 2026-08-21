@@ -76,7 +76,7 @@ jobs:
   test-integration:
     needs: quality
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       matrix:
         node-version: [20, 22]
@@ -127,6 +127,7 @@ jobs:
       - name: Run integration tests (standalone + cluster)
         run: >-
           npx vitest run
+          ${{ matrix.node-version == '22' && '--coverage' || '' }}
           --exclude 'tests/api-completeness.test.ts'
           --exclude 'tests/az-affinity.test.ts'
           --exclude 'tests/connection.test.ts'
@@ -139,6 +140,16 @@ jobs:
           --exclude 'tests/worker-saturation.test.ts'
           --exclude 'tests/worker.test.ts'
           --exclude 'tests/search-index.test.ts'
+          --exclude 'tests/fuzzer/**'
+
+      - name: Upload coverage
+        if: matrix.node-version == '22'
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage/lcov.info
+          flags: integration
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   test-search:
     needs: quality
