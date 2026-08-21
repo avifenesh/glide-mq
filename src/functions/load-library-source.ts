@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import EMBEDDED_LIBRARY_FILE from './glidemq.embedded.json';
 
+/* v8 ignore start -- unit-tested; integration coverage loads dist and remaps past this helper */
 function readLua(path: string): string | undefined {
   try {
     return readFileSync(path, 'utf8');
@@ -10,6 +11,7 @@ function readLua(path: string): string | undefined {
     throw err;
   }
 }
+/* v8 ignore stop -- @preserve */
 
 /**
  * Prefer the sibling .lua file (npm package + Lua coverage instrumentation).
