@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -50,19 +50,22 @@ describe('library source loading', () => {
     expect(LIBRARY_SOURCE).not.toContain('__LIBRARY_VERSION__');
   });
 
-  it('still exports LIBRARY_SOURCE if dist/functions/glidemq.lua is absent', () => {
-    const lua = 'dist/functions/glidemq.lua';
-    const bak = `${lua}.bak`;
-    renameSync(lua, bak);
-    try {
-      const { loadLibraryFile: loadFromDist } =
-        require('../dist/functions/load-library-source') as typeof import('../src/functions/load-library-source');
-      const distDir = join(__dirname, '../dist/functions');
-      const file = loadFromDist(distDir);
-      expect(file).toBe(EMBEDDED_LIBRARY_FILE);
-      expect(librarySourceFrom(file, LIBRARY_VERSION)).toContain(`'${LIBRARY_VERSION}'`);
-    } finally {
-      renameSync(bak, lua);
-    }
-  });
+  it.skipIf(!existsSync('dist/functions/load-library-source.js'))(
+    'still exports LIBRARY_SOURCE if dist/functions/glidemq.lua is absent',
+    () => {
+      const lua = 'dist/functions/glidemq.lua';
+      const bak = `${lua}.bak`;
+      renameSync(lua, bak);
+      try {
+        const { loadLibraryFile: loadFromDist } =
+          require('../dist/functions/load-library-source') as typeof import('../src/functions/load-library-source');
+        const distDir = join(__dirname, '../dist/functions');
+        const file = loadFromDist(distDir);
+        expect(file).toBe(EMBEDDED_LIBRARY_FILE);
+        expect(librarySourceFrom(file, LIBRARY_VERSION)).toContain(`'${LIBRARY_VERSION}'`);
+      } finally {
+        renameSync(bak, lua);
+      }
+    },
+  );
 });
