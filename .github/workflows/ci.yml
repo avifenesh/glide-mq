@@ -77,6 +77,8 @@ jobs:
     needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    permissions:
+      contents: read
     strategy:
       matrix:
         node-version: [20, 22]
@@ -143,7 +145,7 @@ jobs:
           --exclude 'tests/fuzzer/**'
 
       - name: Upload coverage
-        if: matrix.node-version == '22'
+        if: ${{ !cancelled() && matrix.node-version == '22' }}
         uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           files: coverage/lcov.info
