@@ -20,7 +20,7 @@
   },
   "type": "commonjs",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"require('node:fs').copyFileSync('src/functions/glidemq.lua', 'dist/functions/glidemq.lua')\"",
     "test": "vitest run \"--exclude=tests/fuzzer/**\"",
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
