@@ -141,7 +141,7 @@ jobs:
           --exclude 'tests/worker-saturation.test.ts'
           --exclude 'tests/worker.test.ts'
           --exclude 'tests/search-index.test.ts'
-          --exclude 'tests/fuzzer/**'
+          ${{ matrix.node-version == '22' && '--exclude tests/fuzzer/**' || '' }}
 
       - name: Upload coverage
         if: ${{ !cancelled() && matrix.node-version == '22' }}
