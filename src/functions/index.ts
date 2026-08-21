@@ -62,7 +62,7 @@ export const CONSUMER_GROUP = 'workers';
 // Lua library source loaded via FUNCTION LOAD.
 // Source of truth is src/functions/glidemq.lua (copied to dist/ on build).
 // loadLibraryFile reads that sibling when present; bundlers that omit the
-// .lua file fall back to the committed glidemq.embedded.json snapshot.
+// .lua file fall back to the generated glidemq.embedded.json snapshot.
 export const LIBRARY_SOURCE = librarySourceFrom(loadLibraryFile(), LIBRARY_VERSION);
 
 // ---- Key set type ----

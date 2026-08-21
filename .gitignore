@@ -1,6 +1,7 @@
 node_modules/
 dist/
 build/
+src/functions/glidemq.embedded.json
 *.tgz
 .env
 agent-knowledge/

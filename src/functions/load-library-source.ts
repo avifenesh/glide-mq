@@ -4,7 +4,7 @@ import EMBEDDED_LIBRARY_FILE from './glidemq.embedded.json';
 
 /**
  * Prefer the sibling .lua file (npm package + Lua coverage instrumentation).
- * Fall back to the build-time embed so bundlers (Lambda/ncc/esbuild) still work
+ * Fall back to the generated embed so bundlers (Lambda/ncc/esbuild) still work
  * when they emit JS without copying glidemq.lua.
  */
 export function loadLibraryFile(dir: string = __dirname): string {

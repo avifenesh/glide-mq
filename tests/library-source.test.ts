@@ -9,7 +9,7 @@ import { librarySourceFrom, loadLibraryFile } from '../src/functions/load-librar
 const LUA_SRC = 'src/functions/glidemq.lua';
 
 describe('library source loading', () => {
-  it('keeps the embedded snapshot identical to glidemq.lua', () => {
+  it('generates an embedded snapshot identical to glidemq.lua', () => {
     expect(EMBEDDED_LIBRARY_FILE).toBe(readFileSync(LUA_SRC, 'utf8'));
   });
 

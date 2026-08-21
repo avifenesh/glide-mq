@@ -113,7 +113,7 @@ Use Valkey Functions (FUNCTION LOAD / FCALL) instead of EVAL/EVALSHA scripts.
 1. On Queue/Worker creation, check if library exists: `FUNCTION LIST LIBRARYNAME glidemq`
 2. If missing, load via `FUNCTION LOAD` with the full library source
 3. If version mismatch (we track a version field in the library via `LIBRARY_VERSION` in `src/functions/index.ts`), reload with `FUNCTION LOAD REPLACE`
-4. Library source lives in `src/functions/glidemq.lua`, is copied into `dist/functions/` on build, and is also embedded as `glidemq.embedded.json` so serverless bundlers that omit the `.lua` file still have the source. Runtime prefers the sibling `.lua` (coverage instrumentation) and falls back to the embed.
+4. Library source lives in `src/functions/glidemq.lua` and is copied into `dist/functions/` on build. `scripts/embed-lua.cjs` also generates `glidemq.embedded.json` (gitignored) so serverless bundlers that omit the `.lua` file still have the source. Runtime prefers the sibling `.lua` (coverage instrumentation) and falls back to the embed.
 5. In cluster mode, `FUNCTION LOAD` must be sent to all nodes (use route: "allNodes")
 
 ### Function Library: `glidemq`
