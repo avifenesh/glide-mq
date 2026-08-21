@@ -31,7 +31,7 @@ See CHANGELOG.md `0.15.4` for the full list. Highlights:
 
 - **Bun/Deno NAPI compatibility testing**: still pending from 0.14.0 handover.
 - **Valkey CI images**: CI is off release candidates. Standalone and cluster coverage use stable `valkey/valkey:9.1.0`; search coverage uses stable `valkey/valkey-bundle:9.1.0`, which carries Valkey Search 1.2.x and keeps the Search 1.1+ option tests active.
-- **Coverage**: stacked fork PRs. Extract Lua (`refactor/extract-lua-library`) -> TS V8 coverage (`ci/ts-coverage`) -> Lua line probes (`ci/lua-coverage`). Codecov project status is informational; patch target 80%. Integration and lua are separate flags.
+- **Coverage**: stacked fork PRs. Extract Lua (`refactor/extract-lua-library`) -> TS V8 coverage (`ci/ts-coverage`) -> Lua line probes (`ci/lua-coverage`). Codecov project status is informational; patch target 80%. Integration and lua are separate flags. Lua dump runs once in Vitest `globalTeardown` (not per-file `afterAll`) so speedkey mocks cannot break `glidemq_dumpCoverage`.
 
 ## API Design Decisions (locked)
 

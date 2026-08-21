@@ -199,6 +199,7 @@ jobs:
           --exclude 'tests/search-index.test.ts'
           --exclude 'tests/fuzzer/**'
           --exclude 'tests/lua-instrument.test.ts'
+          --exclude 'tests/producer-unit.test.ts'
         env:
           SKIP_CLUSTER: '1'
           GLIDEMQ_LUA_COVERAGE: '1'

@@ -17,6 +17,7 @@ export default defineConfig({
     minWorkers,
     fileParallelism,
     exclude: ['node_modules/**'],
+    globalTeardown: './tests/helpers/lua-coverage-teardown.ts',
     coverage: {
       provider: 'v8',
       // Integration tests require() dist/*.js. Include those files so V8 can
