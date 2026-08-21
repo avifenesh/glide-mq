@@ -204,6 +204,13 @@ jobs:
           SKIP_CLUSTER: '1'
           GLIDEMQ_LUA_COVERAGE: '1'
 
+      - name: Dump Lua coverage
+        if: ${{ !cancelled() }}
+        run: node scripts/dump-lua-coverage.cjs
+
+      - name: Require Lua LCOV
+        run: test -s coverage/lua.info
+
       - name: Upload Lua coverage
         if: ${{ !cancelled() }}
         uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
