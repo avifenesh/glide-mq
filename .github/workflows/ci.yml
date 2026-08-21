@@ -176,7 +176,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run build
         env:
           GLIDEMQ_LUA_COVERAGE: '1'

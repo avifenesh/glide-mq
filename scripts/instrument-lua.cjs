@@ -5,7 +5,9 @@ const { dirname, join } = require('node:path');
 
 const SRC = join(__dirname, '..', 'src', 'functions', 'glidemq.lua');
 const DIST = join(__dirname, '..', 'dist', 'functions', 'glidemq.lua');
+const DIST_INDEX = join(__dirname, '..', 'dist', 'functions', 'index.js');
 const EXECUTABLE = join(__dirname, '..', 'coverage', 'lua-executable.json');
+const VERSION_EXPORT = /exports\.LIBRARY_VERSION = '(\d+)'/;
 
 function netDepth(line) {
   let depth = 0;
@@ -100,6 +102,14 @@ function instrument(source) {
   return { lua: out.join('\n'), executable };
 }
 
+function stampCoverageVersion(js) {
+  const next = js.replace(VERSION_EXPORT, (_, version) => `exports.LIBRARY_VERSION = '${version}-cov'`);
+  if (next === js) {
+    throw new Error('could not stamp coverage LIBRARY_VERSION in dist/functions/index.js');
+  }
+  return next;
+}
+
 function writeLcov(executable, hitSet, dest) {
   const lines = ['TN:', 'SF:src/functions/glidemq.lua'];
   let lh = 0;
@@ -123,8 +133,9 @@ function main() {
   writeFileSync(DIST, lua);
   mkdirSync(dirname(EXECUTABLE), { recursive: true });
   writeFileSync(EXECUTABLE, JSON.stringify(executable));
+  writeFileSync(DIST_INDEX, stampCoverageVersion(readFileSync(DIST_INDEX, 'utf8')));
 }
 
 if (require.main === module) main();
 
-module.exports = { instrument, isSkippable, isContinuation, netDepth, writeLcov, EXECUTABLE };
+module.exports = { instrument, isSkippable, isContinuation, netDepth, writeLcov, stampCoverageVersion, EXECUTABLE };
