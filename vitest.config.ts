@@ -17,6 +17,7 @@ export default defineConfig({
     minWorkers,
     fileParallelism,
     exclude: ['node_modules/**'],
+    globalSetup: './tests/helpers/lua-coverage-setup.ts',
     globalTeardown: './tests/helpers/lua-coverage-teardown.ts',
     coverage: {
       provider: 'v8',

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { instrument, isSkippable, netDepth } from '../scripts/instrument-lua.cjs';
 
@@ -47,6 +47,17 @@ describe('Lua coverage instrumenter', () => {
     expect(lua).not.toContain('__cov[3]=1;');
     expect(lua).not.toContain('__cov[4]=1;');
     expect(executable).toEqual([2]);
+  });
+
+  it('stamps a distinct library version when coverage is enabled', async () => {
+    vi.stubEnv('GLIDEMQ_LUA_COVERAGE', '1');
+    try {
+      vi.resetModules();
+      const { LIBRARY_VERSION } = await import('../src/functions/index');
+      expect(LIBRARY_VERSION).toBe('93-cov');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('instruments the real library without breaking shebang or version placeholder', () => {

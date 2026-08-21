@@ -134,14 +134,9 @@ export async function ensureFunctionLibrary(
     return;
   }
 
-  // Instrumented libraries share LIBRARY_VERSION with production. Force REPLACE
-  // so a previously loaded uninstrumented copy cannot skip the coverage build.
-  if (process.env.GLIDEMQ_LUA_COVERAGE === '1') {
-    await (client as GlideClient).functionLoad(librarySource, { replace: true });
-    return;
-  }
-
-  // Standalone: check version first to avoid unnecessary reload
+  // Standalone: check version first to avoid unnecessary reload.
+  // Coverage builds stamp LIBRARY_VERSION as `${n}-cov` so an uninstrumented
+  // library is replaced once, then later clients skip and keep __cov hits.
   try {
     const result = await client.fcall('glidemq_version', [], []);
     if (String(result) === LIBRARY_VERSION) return;
