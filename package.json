@@ -20,19 +20,12 @@
   },
   "type": "commonjs",
   "scripts": {
-<<<<<<< HEAD
     "embed-lua": "node scripts/embed-lua.cjs",
     "typecheck": "node scripts/embed-lua.cjs && tsc --noEmit",
     "build": "node scripts/embed-lua.cjs && tsc && node -e \"require('node:fs').copyFileSync('src/functions/glidemq.lua', 'dist/functions/glidemq.lua')\"",
     "test": "node scripts/embed-lua.cjs && vitest run \"--exclude=tests/fuzzer/**\"",
     "test:coverage": "node scripts/embed-lua.cjs && vitest run --coverage \"--exclude=tests/fuzzer/**\"",
     "test:watch": "node scripts/embed-lua.cjs && vitest",
-=======
-    "build": "tsc",
-    "test": "vitest run \"--exclude=tests/fuzzer/**\"",
-    "test:coverage": "vitest run --coverage \"--exclude=tests/fuzzer/**\"",
-    "test:watch": "vitest",
->>>>>>> 53fbf42 (ci: collect V8 coverage from integration tests and upload to Codecov)
     "lint": "eslint src/ tests/",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
