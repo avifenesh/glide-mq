@@ -1,7 +1,8 @@
 'use strict';
 
 // Writes src/functions/glidemq.embedded.json (gitignored) for bundlers that
-// omit the sibling glidemq.lua file. Run via npm run embed-lua / typecheck / build / test.
+// omit the sibling glidemq.lua file. npm prepare runs this after install so
+// clones can `npx tsc --noEmit` / raw vitest without a prior build.
 
 const { readFileSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
