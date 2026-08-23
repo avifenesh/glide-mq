@@ -4,7 +4,7 @@
 
 - **Branch**: `ci/lua-coverage`, top of the coverage stack.
 - **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
-- **CI**: the six fork/upstream stack PRs were green before the 2026-08-22 packaging update; fresh runs are pending.
+- **CI**: green across all six fork/upstream stack PRs after the 2026-08-22 packaging update.
 - **Local branches**: `refactor/extract-lua-library` -> `ci/ts-coverage` -> `ci/lua-coverage`.
 - **Review gate**: automatic Claude review is retired; the Revuto GitHub App check reviews pull requests.
 - **Dependency security**: the lockfile carries protobufjs 7.6.5, brace-expansion 5.0.9, PostCSS 8.5.25, and body-parser 2.3.0.
