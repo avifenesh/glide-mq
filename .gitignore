@@ -1,6 +1,9 @@
 node_modules/
 dist/
 build/
+src/functions/glidemq.embedded.json
+coverage/
+*.lcov
 *.tgz
 .env
 agent-knowledge/

@@ -11,7 +11,7 @@ glide-mq uses a single Valkey Server Function library (`glidemq`) loaded via `FU
 From the Node.js side, `Queue` and `Worker` constructors handle this automatically. For non-Node producers you have two options:
 
 - **Option A**: Start a Node.js process once to initialize the library, then use FCALL from any language.
-- **Option B**: Extract the Lua source from `src/functions/index.ts` (the `LIBRARY_SOURCE` constant) and issue `FUNCTION LOAD` yourself.
+- **Option B**: `FUNCTION LOAD` the contents of `src/functions/glidemq.lua` (substitute `__LIBRARY_VERSION__` with the current library version) yourself.
 
 In cluster mode, `FUNCTION LOAD` must be sent to all primary nodes.
 
