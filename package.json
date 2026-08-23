@@ -21,6 +21,7 @@
   "type": "commonjs",
   "scripts": {
     "embed-lua": "node scripts/embed-lua.cjs",
+    "prepare": "node scripts/embed-lua.cjs",
     "typecheck": "node scripts/embed-lua.cjs && tsc --noEmit",
     "build": "node scripts/embed-lua.cjs && tsc && node -e \"require('node:fs').copyFileSync('src/functions/glidemq.lua', 'dist/functions/glidemq.lua')\"",
     "test": "node scripts/embed-lua.cjs && vitest run \"--exclude=tests/fuzzer/**\"",
