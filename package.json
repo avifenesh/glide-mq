@@ -23,7 +23,7 @@
     "embed-lua": "node scripts/embed-lua.cjs",
     "prepare": "node scripts/embed-lua.cjs",
     "typecheck": "node scripts/embed-lua.cjs && tsc --noEmit",
-    "build": "node scripts/embed-lua.cjs && tsc && node -e \"require('node:fs').copyFileSync('src/functions/glidemq.lua', 'dist/functions/glidemq.lua')\"",
+    "build": "node scripts/embed-lua.cjs && tsc && node -e \"const fs=require('node:fs'); fs.copyFileSync('src/functions/glidemq.lua', 'dist/functions/glidemq.lua'); fs.copyFileSync('src/functions/glidemq.embedded.json', 'dist/functions/glidemq.embedded.json')\"",
     "test": "node scripts/embed-lua.cjs && vitest run \"--exclude=tests/fuzzer/**\"",
     "test:coverage": "node scripts/embed-lua.cjs && vitest run --coverage \"--exclude=tests/fuzzer/**\"",
     "test:watch": "node scripts/embed-lua.cjs && vitest",

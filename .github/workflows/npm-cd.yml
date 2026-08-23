@@ -40,6 +40,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify built package loads
+        run: node -e "require('./dist')"
+
       - name: Set version
         env:
           INPUT_VERSION: ${{ github.event.inputs.version }}

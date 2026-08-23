@@ -53,6 +53,7 @@ describe('library source loading', () => {
   it.skipIf(!existsSync('dist/functions/load-library-source.js'))(
     'still exports LIBRARY_SOURCE if dist/functions/glidemq.lua is absent',
     () => {
+      expect(existsSync('dist/functions/glidemq.embedded.json')).toBe(true);
       const lua = 'dist/functions/glidemq.lua';
       const bak = `${lua}.bak`;
       const hadLua = existsSync(lua);
