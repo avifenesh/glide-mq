@@ -1,11 +1,20 @@
 'use strict';
 
+// Line-prefixing instrumenter for src/functions/glidemq.lua. Invoked only by
+// `npm run build:lua-cov` so a normal publish build cannot emit probed Lua.
+//
+// `__reg` wraps each redis.register_function with pcall. On string errors,
+// Lua's `error(res)` prepends position info, so instrumented failure text is
+// not byte-identical to the uninstrumented library.
+
 const { mkdirSync, readFileSync, writeFileSync } = require('node:fs');
 const { dirname, join } = require('node:path');
 
 const SRC = join(__dirname, '..', 'src', 'functions', 'glidemq.lua');
 const DIST = join(__dirname, '..', 'dist', 'functions', 'glidemq.lua');
+const DIST_INDEX = join(__dirname, '..', 'dist', 'functions', 'index.js');
 const EXECUTABLE = join(__dirname, '..', 'coverage', 'lua-executable.json');
+const VERSION_EXPORT = /exports\.LIBRARY_VERSION = '(\d+)'/;
 
 const OPEN = new Set(['(', '{', '[']);
 const CLOSE = new Set([')', '}', ']']);
@@ -113,6 +122,14 @@ function instrument(source) {
   return { lua: out.join('\n'), executable };
 }
 
+function stampCoverageVersion(js) {
+  const next = js.replace(VERSION_EXPORT, (_, version) => `exports.LIBRARY_VERSION = '${version}-cov'`);
+  if (next === js) {
+    throw new Error('could not stamp coverage LIBRARY_VERSION in dist/functions/index.js');
+  }
+  return next;
+}
+
 function writeLcov(executable, hitSet, dest) {
   const lines = ['TN:', 'SF:src/functions/glidemq.lua'];
   let lh = 0;
@@ -127,15 +144,23 @@ function writeLcov(executable, hitSet, dest) {
 }
 
 function main() {
-  if (process.env.GLIDEMQ_LUA_COVERAGE !== '1') return;
   const source = readFileSync(SRC, 'utf8');
   const { lua, executable } = instrument(source);
   mkdirSync(dirname(DIST), { recursive: true });
   writeFileSync(DIST, lua);
   mkdirSync(dirname(EXECUTABLE), { recursive: true });
   writeFileSync(EXECUTABLE, JSON.stringify(executable));
+  writeFileSync(DIST_INDEX, stampCoverageVersion(readFileSync(DIST_INDEX, 'utf8')));
 }
 
 if (require.main === module) main();
 
-module.exports = { instrument, isSkippable, isContinuation, netDepth, writeLcov, EXECUTABLE };
+module.exports = {
+  instrument,
+  isSkippable,
+  isContinuation,
+  netDepth,
+  writeLcov,
+  stampCoverageVersion,
+  EXECUTABLE,
+};

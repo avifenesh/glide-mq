@@ -177,9 +177,7 @@ jobs:
           cache: npm
 
       - run: npm ci --ignore-scripts
-      - run: npm run build
-        env:
-          GLIDEMQ_LUA_COVERAGE: '1'
+      - run: npm run build:lua-cov
 
       - name: Run standalone integration with Lua coverage
         run: >-

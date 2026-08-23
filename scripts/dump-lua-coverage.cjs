@@ -8,10 +8,17 @@ const { EXECUTABLE, writeLcov } = require('./instrument-lua.cjs');
 const LCOV = join(dirname(EXECUTABLE), 'lua.info');
 const DUMP_KEY = '{glidemq}:_';
 
+function dumpAddress() {
+  return {
+    host: process.env.VALKEY_HOST ?? 'localhost',
+    port: Number(process.env.VALKEY_PORT ?? 6379),
+  };
+}
+
 async function dump() {
   const executable = JSON.parse(readFileSync(EXECUTABLE, 'utf8'));
   const client = await GlideClient.createClient({
-    addresses: [{ host: 'localhost', port: 6379 }],
+    addresses: [dumpAddress()],
     requestTimeout: 5000,
   });
   try {
@@ -29,7 +36,7 @@ async function dump() {
   }
 }
 
-module.exports = { dump, LCOV };
+module.exports = { dump, LCOV, dumpAddress };
 
 if (require.main === module) {
   dump().catch((err) => {

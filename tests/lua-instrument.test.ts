@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
-import { instrument, isSkippable, netDepth } from '../scripts/instrument-lua.cjs';
+import { instrument, isSkippable, netDepth, stampCoverageVersion } from '../scripts/instrument-lua.cjs';
+import { dumpAddress } from '../scripts/dump-lua-coverage.cjs';
 
 describe('Lua coverage instrumenter', () => {
   it('skips comments, blanks, and closers', () => {
@@ -48,9 +49,14 @@ describe('Lua coverage instrumenter', () => {
     expect(executable).toEqual([2]);
   });
 
-  it('selects a distinct library version when Lua coverage is enabled', () => {
-    expect(readFileSync('src/functions/index.ts', 'utf8')).toContain(
-      "process.env.GLIDEMQ_LUA_COVERAGE === '1' ? '93-cov' : '93'",
+  it('stamps a distinct library version into dist when coverage is enabled', () => {
+    const js = "exports.LIBRARY_VERSION = '93';\nexports.LIBRARY_SOURCE = 'x';\n";
+    expect(stampCoverageVersion(js)).toContain("exports.LIBRARY_VERSION = '93-cov'");
+  });
+
+  it('fails loudly if the dist version export cannot be stamped', () => {
+    expect(() => stampCoverageVersion("exports.LIBRARY_NAME = 'glidemq';\n")).toThrow(
+      /could not stamp coverage LIBRARY_VERSION/,
     );
   });
 
@@ -63,5 +69,29 @@ describe('Lua coverage instrumenter', () => {
     expect(lua).not.toContain("redis.register_function('glidemq_");
     expect(lua).not.toContain('__cov[1108]=1;');
     expect(executable.length).toBeGreaterThan(500);
+  });
+
+  it('keeps instrumentation off the publish build', () => {
+    const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> };
+    expect(pkg.scripts.build).not.toContain('instrument-lua');
+    expect(pkg.scripts['build:lua-cov']).toContain('instrument-lua.cjs');
+  });
+
+  it('reads dump host and port from VALKEY_HOST / VALKEY_PORT', () => {
+    const prevHost = process.env.VALKEY_HOST;
+    const prevPort = process.env.VALKEY_PORT;
+    delete process.env.VALKEY_HOST;
+    delete process.env.VALKEY_PORT;
+    try {
+      expect(dumpAddress()).toEqual({ host: 'localhost', port: 6379 });
+      process.env.VALKEY_HOST = 'valkey.internal';
+      process.env.VALKEY_PORT = '6380';
+      expect(dumpAddress()).toEqual({ host: 'valkey.internal', port: 6380 });
+    } finally {
+      if (prevHost === undefined) delete process.env.VALKEY_HOST;
+      else process.env.VALKEY_HOST = prevHost;
+      if (prevPort === undefined) delete process.env.VALKEY_PORT;
+      else process.env.VALKEY_PORT = prevPort;
+    }
   });
 });

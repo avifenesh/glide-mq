@@ -32,25 +32,6 @@ describe('library source loading', () => {
     }
   });
 
-  it('loads dist lua in place of src/functions/glidemq.lua when coverage is enabled', () => {
-    const prev = process.env.GLIDEMQ_LUA_COVERAGE;
-    const distDir = 'dist/functions';
-    const distLua = join(distDir, 'glidemq.lua');
-    const existed = existsSync(distLua);
-    const bak = existed ? readFileSync(distLua, 'utf8') : null;
-    mkdirSync(distDir, { recursive: true });
-    writeFileSync(distLua, '#!lua name=instrumented\n');
-    process.env.GLIDEMQ_LUA_COVERAGE = '1';
-    try {
-      expect(loadLibraryFile(join(process.cwd(), 'src/functions'))).toBe('#!lua name=instrumented\n');
-    } finally {
-      if (prev === undefined) delete process.env.GLIDEMQ_LUA_COVERAGE;
-      else process.env.GLIDEMQ_LUA_COVERAGE = prev;
-      if (bak === null) rmSync(distLua, { force: true });
-      else writeFileSync(distLua, bak);
-    }
-  });
-
   it('rethrows non-ENOENT fs errors', () => {
     const dir = mkdtempSync(join(tmpdir(), 'glidemq-lua-'));
     const luaPath = join(dir, 'glidemq.lua');

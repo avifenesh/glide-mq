@@ -2,37 +2,20 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import EMBEDDED_LIBRARY_FILE from './glidemq.embedded.json';
 
-/* v8 ignore start -- unit-tested; integration coverage loads dist and remaps past this helper */
-function readLua(path: string): string | undefined {
-  try {
-    return readFileSync(path, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw err;
-  }
-}
-/* v8 ignore stop -- @preserve */
-
 /**
  * Prefer the sibling .lua file (npm package + Lua coverage instrumentation).
  * Fall back to the generated embed so bundlers (Lambda/ncc/esbuild) still work
  * when they emit JS without copying glidemq.lua.
- *
- * When GLIDEMQ_LUA_COVERAGE=1, src/functions/glidemq.lua is uninstrumented.
- * Load the dist copy instead so src-imported clients do not REPLACE the probed library.
  */
 export function loadLibraryFile(dir: string = __dirname): string {
-  const sibling = readLua(join(dir, 'glidemq.lua'));
-  /* v8 ignore start -- only taken when GLIDEMQ_LUA_COVERAGE=1 */
-  if (process.env.GLIDEMQ_LUA_COVERAGE === '1' && sibling !== undefined) {
-    const instrumented = readLua(join(process.cwd(), 'dist/functions/glidemq.lua'));
-    const srcLua = readLua(join(process.cwd(), 'src/functions/glidemq.lua'));
-    if (instrumented !== undefined && srcLua !== undefined && sibling === srcLua) {
-      return instrumented;
+  try {
+    return readFileSync(join(dir, 'glidemq.lua'), 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return EMBEDDED_LIBRARY_FILE;
     }
+    throw err;
   }
-  /* v8 ignore stop -- @preserve */
-  return sibling ?? EMBEDDED_LIBRARY_FILE;
 }
 
 export function librarySourceFrom(file: string, version: string): string {
