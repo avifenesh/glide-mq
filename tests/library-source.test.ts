@@ -55,7 +55,8 @@ describe('library source loading', () => {
     () => {
       const lua = 'dist/functions/glidemq.lua';
       const bak = `${lua}.bak`;
-      renameSync(lua, bak);
+      const hadLua = existsSync(lua);
+      if (hadLua) renameSync(lua, bak);
       try {
         const { loadLibraryFile: loadFromDist } =
           require('../dist/functions/load-library-source') as typeof import('../src/functions/load-library-source');
@@ -64,7 +65,7 @@ describe('library source loading', () => {
         expect(file).toBe(EMBEDDED_LIBRARY_FILE);
         expect(librarySourceFrom(file, LIBRARY_VERSION)).toContain(`'${LIBRARY_VERSION}'`);
       } finally {
-        renameSync(bak, lua);
+        if (hadLua) renameSync(bak, lua);
       }
     },
   );
