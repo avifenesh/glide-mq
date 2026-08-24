@@ -11,6 +11,8 @@ const { FlowProducer } = require('../dist/flow-producer') as typeof import('../s
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Scheduler } = require('../dist/scheduler') as typeof import('../src/scheduler');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+const { completeJob, completeAndFetchNext, CONSUMER_GROUP } =
+  require('../dist/functions') as typeof import('../src/functions');
 
 describe('DAG wiring source invariants', () => {
   it('does not FCALL registerParent from the cross-queue Phase B batch', () => {
@@ -18,11 +20,12 @@ describe('DAG wiring source invariants', () => {
     expect(source).not.toMatch(/batchB\.fcall\(\s*['"]glidemq_registerParent/);
   });
 
-  it('guards completeChild against recreating deleted parent hashes', () => {
+  it('shares deleted-parent protection across every parent completion path', () => {
     const source = readFileSync('src/functions/glidemq.lua', 'utf8');
-    const start = source.indexOf("redis.register_function('glidemq_completeChild'");
-    const end = source.indexOf("redis.register_function('glidemq_registerParent'", start);
+    const start = source.indexOf('local function completeParentDependency');
+    const end = source.indexOf('local function groupqScore', start);
     expect(source.slice(start, end)).toMatch(/redis\.call\('EXISTS', parentJobKey\) == 0/);
+    expect(source.match(/HSETNX', parentJobKey, depMarker/g)).toHaveLength(1);
   });
 });
 
@@ -408,6 +411,69 @@ describeEachMode('FlowProducer', (CONNECTION) => {
       await flushQueue(cleanupClient, parentQ);
     }
   });
+
+  it.each(['complete', 'completeAndFetchNext'] as const)(
+    '%s does not recreate a removed inline parent hash',
+    async (completion) => {
+      const queueName = `${Q}-removed-inline-parent-${completion}`;
+      const flow = new FlowProducer({ connection: CONNECTION });
+      const keys = buildKeys(queueName);
+      try {
+        const node = await flow.add({
+          name: 'parent',
+          queueName,
+          data: {},
+          children: [{ name: 'child', queueName, data: {} }],
+        });
+        const parentId = node.job.id;
+        const childId = node.children![0].job.id;
+        const parentInfo = {
+          depsMember: `${keys.name}:${childId}`,
+          parentId,
+          parentKeys: keys,
+        };
+
+        await node.job.remove();
+        expect(await cleanupClient.exists([keys.job(parentId)])).toBe(0);
+
+        if (completion === 'complete') {
+          await completeJob(
+            cleanupClient,
+            keys,
+            childId,
+            '',
+            'null',
+            Date.now(),
+            CONSUMER_GROUP,
+            undefined,
+            parentInfo,
+          );
+        } else {
+          // completeAndFetchNext requires a consumer group even when no next
+          // entry exists. Remove the child's queued entry before creating it.
+          await cleanupClient.del([keys.stream]);
+          await cleanupClient.xgroupCreate(keys.stream, CONSUMER_GROUP, '0', { mkStream: true });
+          await completeAndFetchNext(
+            cleanupClient,
+            keys,
+            childId,
+            '',
+            'null',
+            Date.now(),
+            CONSUMER_GROUP,
+            'inline-parent-test',
+            undefined,
+            parentInfo,
+          );
+        }
+
+        expect(await cleanupClient.exists([keys.job(parentId)])).toBe(0);
+      } finally {
+        await flow.close();
+        await flushQueue(cleanupClient, queueName);
+      }
+    },
+  );
 
   it('reconciles a removed nested cross-queue child', async () => {
     const parentQ = Q + '-removed-parent';
