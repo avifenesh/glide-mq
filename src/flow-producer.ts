@@ -762,23 +762,16 @@ export class FlowProducer {
             //    was submitted with no parent fields to avoid the partial-
             //    notification race; registerParent wires every dependent here
             //    and its already_completed path covers late wiring).
-            let registerStart = -1;
-            if (deps.length > 0 && myDependents.length > 0) {
-              registerStart = 0;
-            } else if (deps.length === 0 && myDependents.length > 1) {
-              registerStart = 0;
-            } else if (
-              deps.length === 0 &&
-              myDependents.length === 1 &&
-              nodeByName.get(myDependents[0])!.queueName !== node.queueName
-            ) {
-              registerStart = 0;
-            }
+            const shouldRegister =
+              (deps.length > 0 && myDependents.length > 0) ||
+              (deps.length === 0 &&
+                (myDependents.length > 1 ||
+                  (myDependents.length === 1 && nodeByName.get(myDependents[0])!.queueName !== node.queueName)));
 
-            if (registerStart >= 0) {
+            if (shouldRegister) {
               if ((await client.exists([queueKeys.job(jid)])) === 0) {
                 const depsMember = `${queuePrefix}:${jid}`;
-                for (let p = registerStart; p < myDependents.length; p++) {
+                for (let p = 0; p < myDependents.length; p++) {
                   const depName = myDependents[p];
                   const parentJob = result.get(depName)!;
                   const parentNode = nodeByName.get(depName)!;
@@ -804,7 +797,7 @@ export class FlowProducer {
               phaseBSlots.push({ kind: 'hset', node: node.name });
               phaseBChildren.push({ node: node.name, jid });
 
-              for (let p = registerStart; p < myDependents.length; p++) {
+              for (let p = 0; p < myDependents.length; p++) {
                 const depName = myDependents[p];
                 const parentJob = result.get(depName)!;
                 const parentNode = nodeByName.get(depName)!;
