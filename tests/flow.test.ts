@@ -386,6 +386,46 @@ describeEachMode('FlowProducer', (CONNECTION) => {
     }
   }, 20000);
 
+  it('returns one eager notification when nested and DAG parent metadata overlap', async () => {
+    const parentQ = Q + '-dedupe-parent';
+    const childQ = Q + '-dedupe-child';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    try {
+      const node = await flow.add({
+        name: 'grandparent',
+        queueName: parentQ,
+        data: {},
+        children: [
+          {
+            name: 'middle',
+            queueName: childQ,
+            data: {},
+            children: [{ name: 'grandchild', queueName: childQ, data: {} }],
+          },
+        ],
+      });
+      const middle = node.children![0].job;
+      const childKeys = buildKeys(childQ);
+      expect((await cleanupClient.smembers(childKeys.parents(middle.id))).size).toBe(1);
+
+      const notifications = await completeJob(
+        cleanupClient,
+        childKeys,
+        middle.id,
+        '',
+        'null',
+        Date.now(),
+        CONSUMER_GROUP,
+      );
+
+      expect(notifications).toHaveLength(1);
+    } finally {
+      await flow.close();
+      await flushQueue(cleanupClient, parentQ);
+      await flushQueue(cleanupClient, childQ);
+    }
+  });
+
   it('completeChild does not recreate a removed parent hash', async () => {
     const parentQ = Q + '-removed-parent';
     const flow = new FlowProducer({ connection: CONNECTION });
