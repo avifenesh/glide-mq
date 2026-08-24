@@ -741,6 +741,8 @@ export class FlowProducer {
             parentQueue: string;
             dep: string;
           }[] = [];
+          const phaseBChildren: { node: string; jid: string }[] = [];
+          const removedPhaseBChildren = new Set<string>();
 
           for (const sub of submits) {
             const node = sub.node;
@@ -800,6 +802,7 @@ export class FlowProducer {
                 parentQueues: JSON.stringify(pQueues),
               });
               phaseBSlots.push({ kind: 'hset', node: node.name });
+              phaseBChildren.push({ node: node.name, jid });
 
               for (let p = registerStart; p < myDependents.length; p++) {
                 const depName = myDependents[p];
@@ -851,7 +854,28 @@ export class FlowProducer {
             }
           }
 
+          // A child can be deleted after the Phase-A EXISTS check but before
+          // the Phase-B HSET. HSET would recreate a hash without state, and a
+          // same-queue registerParent would then incorrectly return ok. Remove
+          // that ghost and reconcile every dependent instead.
+          for (const child of phaseBChildren) {
+            const node = nodeByName.get(child.node)!;
+            const childKeys = buildKeys(node.queueName, prefix);
+            const childState = await client.hget(childKeys.job(child.jid), 'state');
+            if (childState != null) continue;
+            removedPhaseBChildren.add(child.node);
+            await client.del([childKeys.job(child.jid), childKeys.parents(child.jid)]);
+            const depsMember = `${keyPrefix(prefix, node.queueName)}:${child.jid}`;
+            for (const depName of dependents.get(child.node) ?? []) {
+              const parentJob = result.get(depName)!;
+              const parentKeys = buildKeys(nodeByName.get(depName)!.queueName, prefix);
+              await client.sadd(parentKeys.deps(parentJob.id), [depsMember]);
+              await completeChild(client, parentKeys, parentJob.id, depsMember);
+            }
+          }
+
           for (const edge of sameQueueEdges) {
+            if (removedPhaseBChildren.has(edge.node)) continue;
             const node = nodeByName.get(edge.node)!;
             const parentNode = nodeByName.get(edge.dep)!;
             const parentJob = result.get(edge.dep)!;
@@ -885,6 +909,7 @@ export class FlowProducer {
           }
 
           for (const edge of crossQueueEdges) {
+            if (removedPhaseBChildren.has(edge.node)) continue;
             const node = nodeByName.get(edge.node)!;
             const childKeys = buildKeys(node.queueName, prefix);
             const state = await client.hget(childKeys.job(edge.jid), 'state');
