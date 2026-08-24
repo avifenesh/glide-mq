@@ -549,6 +549,70 @@ describeEachMode('Per-key ordering', (CONNECTION) => {
     expect(done).toBe(2);
   }, 20000);
 
+  it('keeps an over-cost back returner parked until its token bucket refills', async () => {
+    const Q2 = 'test-order-rlg-back-token-bucket-' + Date.now();
+    const q = new Queue(Q2, { connection: CONNECTION });
+    const k = buildKeys(Q2);
+    const groupKey = 'rlg-back-token-bucket';
+    const now = Date.now();
+
+    const returning = await q.add(
+      'returning',
+      { seq: 1 },
+      {
+        ordering: { key: groupKey, concurrency: 1, tokenBucket: { capacity: 5, refillRate: 1 } },
+        cost: 4.5,
+      },
+    );
+    const successor = await q.add(
+      'successor',
+      { seq: 2 },
+      {
+        ordering: { key: groupKey, concurrency: 1, tokenBucket: { capacity: 5, refillRate: 1 } },
+        cost: 0.1,
+      },
+    );
+    expect(returning).not.toBeNull();
+    expect(successor).not.toBeNull();
+
+    await cleanupClient.hset(k.job(returning!.id), { state: 'active', processedOn: String(now) });
+    await cleanupClient.hset(k.job(successor!.id), { state: 'group-waiting' });
+    await cleanupClient.zadd(k.groupq(groupKey), [{ element: successor!.id, score: 2 }]);
+    await cleanupClient.hset(k.group(groupKey), {
+      active: '1',
+      nextSeq: '2',
+      tbCapacity: '5000',
+      tbTokens: '500',
+      tbRefillRate: '1000',
+      tbLastRefill: String(now),
+      tbRefillRemainder: '0',
+    });
+
+    await cleanupClient.fcall(
+      'glidemq_rateLimitGroup',
+      [k.job(returning!.id), k.stream],
+      [returning!.id, '', 'workers', '1000', String(now), '0', 'requeue', 'back', 'max'],
+    );
+    const resumeAt = now + 1000;
+    await cleanupClient.fcall('glidemq_promoteRateLimited', [k.ratelimited, k.stream], [String(resumeAt)]);
+
+    // This is how the worker will activate a returner only after promotion.
+    if (String(await cleanupClient.hget(k.job(returning!.id), 'state')) === 'waiting') {
+      await cleanupClient.fcall(
+        'glidemq_moveToActive',
+        [k.job(returning!.id), k.stream],
+        [String(resumeAt), '', 'workers', returning!.id],
+      );
+    }
+
+    expect(Number(await cleanupClient.hget(k.group(groupKey), 'tbTokens'))).toBeGreaterThanOrEqual(0);
+    expect(String(await cleanupClient.hget(k.job(returning!.id), 'state'))).toBe('group-waiting');
+    expect(Number(await cleanupClient.zscore(k.ratelimited, groupKey))).toBeGreaterThan(resumeAt);
+
+    await q.close();
+    await flushQueue(cleanupClient, Q2);
+  }, 10000);
+
   it('rateLimitGroup back resumes a returning job beyond the promotion scan window', async () => {
     const Q2 = 'test-order-rlg-back-deep-' + Date.now();
     const q = new Queue(Q2, { connection: CONNECTION });
