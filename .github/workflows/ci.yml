@@ -79,6 +79,7 @@ jobs:
     timeout-minutes: 40
     permissions:
       contents: read
+      id-token: write
     strategy:
       matrix:
         node-version: [20, 22]
@@ -142,7 +143,7 @@ jobs:
           --exclude 'tests/worker-saturation.test.ts'
           --exclude 'tests/worker.test.ts'
           --exclude 'tests/search-index.test.ts'
-          ${{ matrix.node-version == '22' && '--exclude tests/fuzzer/**' || '' }}
+          ${{ matrix.node-version == '22' && '--exclude "tests/fuzzer/**"' || '' }}
 
       - name: Upload coverage
         if: ${{ !cancelled() && matrix.node-version == '22' }}
@@ -151,7 +152,7 @@ jobs:
           files: coverage/lcov.info
           flags: integration
           fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
 
   test-lua-coverage:
     needs: quality
@@ -159,6 +160,7 @@ jobs:
     timeout-minutes: 40
     permissions:
       contents: read
+      id-token: write
     services:
       valkey:
         image: valkey/valkey:9.1.0
@@ -216,7 +218,7 @@ jobs:
           files: coverage/lua.info
           flags: lua
           fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
 
   test-search:
     needs: quality

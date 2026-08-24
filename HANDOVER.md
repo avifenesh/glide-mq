@@ -2,6 +2,7 @@
 
 ## Current State
 
+- **In flight**: coverage CI quotes the fuzzer exclusion and uses Codecov OIDC (`id-token: write`, `use_oidc: true`) for integration and Lua uploads.
 - **Branch**: `ci/lua-coverage`, top of the coverage stack.
 - **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
 - **CI**: green across all six fork/upstream stack PRs after the 2026-08-22 packaging update.
