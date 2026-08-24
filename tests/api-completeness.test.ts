@@ -79,6 +79,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     rpopCount: vi.fn().mockResolvedValue(null),
     zadd: vi.fn(),
     zcard: vi.fn().mockResolvedValue(0),
+    zcount: vi.fn().mockResolvedValue(0),
     zrange: vi.fn().mockResolvedValue([]),
     del: vi.fn(),
     unlink: vi.fn(),
@@ -199,6 +200,32 @@ describe('Job state check methods', () => {
     job.entryId = '1-0';
     await expect(job.moveToDelayed(Date.now() + 100, 'next')).rejects.toThrow('plain-object job data');
     expect(job.moveToDelayedRequest).toBeUndefined();
+  });
+});
+
+// ---- Queue.pause suspended timeout sweep ----
+
+describe('Queue.pause suspended timeout sweep', () => {
+  let mockClient: ReturnType<typeof makeMockClient>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockClient = makeMockClient();
+    mockClient.zcount.mockResolvedValue(1);
+    vi.mocked(GlideClient.createClient).mockResolvedValue(mockClient as any);
+  });
+
+  it('sweeps expired suspended jobs when pausing locally', async () => {
+    mockClient.fcall.mockImplementation(async (name: string) => (name === 'glidemq_tryLock' ? 1 : 0));
+    const queue = new Queue('pause-sweep-test', connOpts);
+
+    await queue.pause();
+
+    expect(mockClient.fcall).toHaveBeenCalledWith('glidemq_pause', expect.any(Array), []);
+    expect(mockClient.fcall).toHaveBeenCalledWith('glidemq_sweepSuspended', expect.any(Array), expect.any(Array));
+    expect(mockClient.fcall).toHaveBeenCalledWith('glidemq_unlock', expect.any(Array), expect.any(Array));
+
+    await queue.close();
   });
 });
 
