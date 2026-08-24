@@ -93,6 +93,11 @@ export function keyPrefixPattern(prefix: string, queueName: string): string {
   return `${escapeGlob(prefix)}:{${escapeGlob(queueName)}}`;
 }
 
+/** Encode a retryable cross-queue parent notification without delimiter ambiguity. */
+export function encodeCrossQueueParentNotify(parentQueue: string, parentId: string, depsMember: string): string {
+  return JSON.stringify([parentQueue, parentId, depsMember]);
+}
+
 export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
   const p = keyPrefix(prefix, queueName);
   return {

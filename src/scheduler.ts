@@ -273,8 +273,18 @@ export class Scheduler {
     const prefix = brace >= 0 ? idKey.slice(0, brace) : 'glide';
     for (const raw of members) {
       const member = String(raw);
-      const parts = member.split('\t');
-      if (parts.length !== 3) continue;
+      let parts: string[] | undefined;
+      try {
+        const decoded: unknown = JSON.parse(member);
+        if (Array.isArray(decoded) && decoded.length === 3 && decoded.every((part) => typeof part === 'string')) {
+          parts = decoded as string[];
+        }
+      } catch {
+        // Support notifications written by version 101 during rolling upgrades.
+        const legacy = member.split('\t');
+        if (legacy.length === 3) parts = legacy;
+      }
+      if (!parts) continue;
       const [parentQueue, parentId, depsMember] = parts;
       try {
         await completeChild(this.client, buildKeys(parentQueue, prefix), parentId, depsMember);

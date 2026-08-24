@@ -295,13 +295,13 @@ end
 
 -- Persist a retryable cross-queue parent notification on this child's hash
 -- slot. The scheduler later calls completeChild using only the parent keys.
--- Member: parentQueueName TAB parentId TAB childQueuePrefix:childId
+-- Member: JSON array [parentQueueName, parentId, childQueuePrefix:childId]
 local function enqueueCrossQueueParentNotify(prefix, jobId, parentQueueName, parentId)
   if not parentQueueName or parentQueueName == '' or not parentId or parentId == '' then return end
   local childQueueName = string.match(prefix, '{([^}]+)}')
   if childQueueName and parentQueueName == childQueueName then return end
   local childQueuePrefix = string.sub(prefix, 1, #prefix - 1)
-  redis.call('SADD', prefix .. 'xq-pending', parentQueueName .. '\t' .. parentId .. '\t' .. childQueuePrefix .. ':' .. jobId)
+  redis.call('SADD', prefix .. 'xq-pending', cjson.encode({parentQueueName, parentId, childQueuePrefix .. ':' .. jobId}))
 end
 
 local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, hintOrderingSeq, hintGroupKey)

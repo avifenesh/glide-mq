@@ -18,6 +18,7 @@ import {
   calculateBackoff,
   computeFollowingSchedulerNextRun,
   computeWeightedTotal,
+  encodeCrossQueueParentNotify,
   keyPrefix,
   nextReconnectDelay,
   parseJsonRecord,
@@ -1169,7 +1170,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (parentInfo.parentKeys.stream === this.queueKeys.stream) return;
     await completeChild(this.commandClient, parentInfo.parentKeys, parentInfo.parentId, parentInfo.depsMember);
     await this.commandClient.srem(this.queueKeys.xqPending, [
-      `${parentInfo.parentKeys.name}\t${parentInfo.parentId}\t${parentInfo.depsMember}`,
+      encodeCrossQueueParentNotify(parentInfo.parentKeys.name, parentInfo.parentId, parentInfo.depsMember),
     ]);
   }
 
