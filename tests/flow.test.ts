@@ -588,13 +588,6 @@ describeEachMode('FlowProducer', (CONNECTION) => {
     const parentQ = Q + '-tab-parent\tqueue';
     const childQ = Q + '-tab-child\tqueue';
     const flow = new FlowProducer({ connection: CONNECTION });
-    const childWorker = new Worker(childQ, async () => ({ ok: true }), {
-      connection: CONNECTION,
-      blockTimeout: 200,
-      stalledInterval: 60000,
-    });
-    childWorker.on('error', () => {});
-    await childWorker.waitUntilReady();
 
     try {
       const node = await flow.add({
@@ -608,12 +601,11 @@ describeEachMode('FlowProducer', (CONNECTION) => {
       const pending = JSON.stringify([parentQ, node.job.id, `glide:{${childQ}}:${childId}`]);
       await cleanupClient.sadd(childKeys.xqPending, [pending]);
 
-      await (childWorker as any).scheduler.flushCrossQueueParentNotifies();
+      await new Scheduler(cleanupClient, childKeys).flushCrossQueueParentNotifies();
 
       expect(String(await cleanupClient.hget(buildKeys(parentQ).job(node.job.id), 'state'))).toBe('waiting');
       expect(await cleanupClient.sismember(childKeys.xqPending, pending)).toBe(false);
     } finally {
-      await childWorker.close(true);
       await flow.close();
       await flushQueue(cleanupClient, parentQ);
       await flushQueue(cleanupClient, childQ);
