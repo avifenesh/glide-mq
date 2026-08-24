@@ -235,6 +235,87 @@ describeEachMode('Per-key ordering', (CONNECTION) => {
     await flushQueue(cleanupClient, Q2);
   }, 20000);
 
+  it.each([
+    {
+      name: 'delayed retry',
+      transition: async (k: any, jobId: string, now: number) => {
+        await cleanupClient.fcall(
+          'glidemq_fail',
+          [k.stream, k.failed, k.scheduled, k.events, k.job(jobId), k.metricsFailed],
+          [jobId, '', 'retry', String(now), '3', '0', 'workers', '0', '0', '0', '0'],
+        );
+      },
+    },
+    {
+      name: 'suspended job',
+      transition: async (k: any, jobId: string, now: number) => {
+        await cleanupClient.fcall(
+          'glidemq_suspend',
+          [k.job(jobId), k.stream, k.events, k.suspended],
+          [jobId, '', 'workers', String(now), 'approval', '0', '0'],
+        );
+      },
+    },
+    {
+      name: 'waiting-children job',
+      transition: async (k: any, jobId: string, now: number) => {
+        await cleanupClient.fcall(
+          'glidemq_moveToWaitingChildren',
+          [k.job(jobId), k.stream, k.events],
+          [jobId, '', 'workers', String(now), '0'],
+        );
+      },
+    },
+  ])(
+    'removing an ordered $name releases its held group slot',
+    async ({ transition }) => {
+      const Q2 = `test-order-held-slot-remove-${Date.now()}`;
+      const q = new Queue(Q2, { connection: CONNECTION });
+      const k = buildKeys(Q2);
+      const groupKey = 'held-slot-remove';
+      const now = Date.now();
+
+      const held = await q.add('held', { seq: 1 }, { ordering: { key: groupKey, concurrency: 1 } });
+      const successor = await q.add('successor', { seq: 2 }, { ordering: { key: groupKey, concurrency: 1 } });
+      expect(held).not.toBeNull();
+      expect(successor).not.toBeNull();
+
+      await cleanupClient.hset(k.job(held!.id), {
+        state: 'active',
+        groupKey,
+        orderingKey: groupKey,
+        orderingSeq: '1',
+        processedOn: String(now),
+      });
+      await cleanupClient.hset(k.job(successor!.id), {
+        state: 'group-waiting',
+        groupKey,
+        orderingKey: groupKey,
+        orderingSeq: '2',
+      });
+      await cleanupClient.hset(k.group(groupKey), {
+        active: '1',
+        maxConcurrency: '1',
+        nextSeq: '2',
+      });
+      await cleanupClient.zadd(k.groupq(groupKey), [{ element: successor!.id, score: 2 }]);
+
+      await transition(k, held!.id, now);
+      await cleanupClient.fcall(
+        'glidemq_removeJob',
+        [k.job(held!.id), k.stream, k.scheduled, k.completed, k.failed, k.events, k.log(held!.id)],
+        [held!.id],
+      );
+
+      expect(String(await cleanupClient.hget(k.group(groupKey), 'active'))).toBe('0');
+      expect(String(await cleanupClient.hget(k.job(successor!.id), 'state'))).toBe('waiting');
+
+      await q.close();
+      await flushQueue(cleanupClient, Q2);
+    },
+    15000,
+  );
+
   it('TTL of an unrun ordered job wakes a successor parked in groupq', async () => {
     const Q2 = 'test-order-ttl-hole-' + Date.now();
     const q = new Queue(Q2, { connection: CONNECTION });
