@@ -155,7 +155,33 @@ local function groupqScore(jobKey, jobId)
 end
 
 local function returningSlotsKey(prefix, groupKey)
+  return prefix .. 'groupreturn:' .. groupKey
+end
+
+local function legacyReturningSlotsKey(prefix, groupKey)
   return prefix .. 'group:return:' .. groupKey
+end
+
+-- Version 115 stored retained-return slots under group:return:<key>. That
+-- namespace can now be a HASH for the valid user ordering key return:<key>,
+-- so migrate only a legacy ZSET and leave every other key type untouched.
+local function migrateLegacyReturningSlots(prefix, groupKey)
+  local legacyKey = legacyReturningSlotsKey(prefix, groupKey)
+  if redis.call('TYPE', legacyKey).ok ~= 'zset' then return end
+  local entries = redis.call('ZRANGE', legacyKey, 0, -1, 'WITHSCORES')
+  local currentKey = returningSlotsKey(prefix, groupKey)
+  for i = 1, #entries, 2 do
+    redis.call('ZADD', currentKey, entries[i + 1], entries[i])
+  end
+  redis.call('UNLINK', legacyKey)
+end
+
+local function groupHashKey(prefix, groupKey)
+  local key = prefix .. 'group:' .. groupKey
+  if string.sub(groupKey, 1, 7) == 'return:' and redis.call('TYPE', key).ok == 'zset' then
+    migrateLegacyReturningSlots(prefix, string.sub(groupKey, 8))
+  end
+  return key
 end
 
 -- Record a skip marker for an ordered job that will never run. A returning
@@ -166,7 +192,8 @@ local function closeOrderingHole(jobKey, jobId, now)
   local orderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
   if not gk or gk == '' or orderingSeq <= 0 then return end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-  local groupHashKey = prefix .. 'group:' .. gk
+  local groupHashKey = groupHashKey(prefix, gk)
+  migrateLegacyReturningSlots(prefix, gk)
   redis.call('HSET', groupHashKey, 'skip:' .. tostring(orderingSeq), '1')
   redis.call('ZREM', returningSlotsKey(prefix, gk), jobId)
   if redis.call('HDEL', jobKey, 'retainedSlot') == 1 then
@@ -182,7 +209,8 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey, keep
   end
   if not gk or gk == '' then return end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-  local groupHashKey = prefix .. 'group:' .. gk
+  local groupHashKey = groupHashKey(prefix, gk)
+  migrateLegacyReturningSlots(prefix, gk)
   -- Load all group fields in one call
   local gFields = redis.call('HGETALL', groupHashKey)
   local g = {}
@@ -588,7 +616,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   end
   if useGroupConcurrency then
     if groupConcurrency < 1 then groupConcurrency = 1 end
-    local groupHashKey = prefix .. 'group:' .. orderingKey
+    local groupHashKey = groupHashKey(prefix, orderingKey)
     local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
     if curMax ~= groupConcurrency then
       redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
@@ -1856,7 +1884,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   end
   if useGroupConcurrency then
     if groupConcurrency < 1 then groupConcurrency = 1 end
-    local groupHashKey = prefix .. 'group:' .. orderingKey
+    local groupHashKey = groupHashKey(prefix, orderingKey)
     local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
     if curMax ~= groupConcurrency then
       redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
@@ -2014,7 +2042,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
   for i = 1, #expired do
     local gk = expired[i]
     redis.call('ZREM', rateLimitedKey, gk)
-    local groupHashKey = prefix .. 'group:' .. gk
+    local groupHashKey = groupHashKey(prefix, gk)
     local waitListKey = prefix .. 'groupq:' .. gk
     -- Load all group fields in one call for rate limit + token bucket checks
     local prGrpFields = redis.call('HGETALL', groupHashKey)
@@ -2084,6 +2112,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
       end
       -- Each rate-limited ordered job retains its own slot. Track all of them
       -- in a per-group ZSET so concurrent requeues cannot overwrite one marker.
+      migrateLegacyReturningSlots(prefix, gk)
       local returningKey = returningSlotsKey(prefix, gk)
       local returningJobIds = redis.call('ZRANGE', returningKey, 0, 999)
       local readyReturners = {}
@@ -3319,7 +3348,8 @@ redis.register_function('glidemq_rateLimitGroup', function(keys, args)
   if not groupKey or groupKey == '' then return 'error:no_group' end
 
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-  local groupHashKey = prefix .. 'group:' .. groupKey
+  local groupHashKey = groupHashKey(prefix, groupKey)
+  migrateLegacyReturningSlots(prefix, groupKey)
   local waitListKey = prefix .. 'groupq:' .. groupKey
   local rateLimitedKey = prefix .. 'ratelimited'
   local eventsKey = prefix .. 'events'

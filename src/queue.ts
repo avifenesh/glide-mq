@@ -1706,6 +1706,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const logPattern = `${pfx}:log:*`;
     const depsPattern = `${pfx}:deps:*`;
     const groupPattern = `${pfx}:group:*`;
+    const returningSlotsPattern = `${pfx}:groupreturn:*`;
     const groupqPattern = `${pfx}:groupq:*`;
     const orderPendingPattern = `${pfx}:orderdone:pending:*`;
 
@@ -1716,6 +1717,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       logPattern,
       depsPattern,
       groupPattern,
+      returningSlotsPattern,
       groupqPattern,
       orderPendingPattern,
       workerPattern,
