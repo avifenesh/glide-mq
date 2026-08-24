@@ -133,6 +133,22 @@ describeEachMode('Queue.getJobs waiting sources', (CONNECTION) => {
     await flushQueue(cleanupClient, isolatedName);
   });
 
+  it('removes list-backed waiting jobs without scanning the FIFO stream', async () => {
+    const isolatedName = `${queueName}-remove-list-no-scan`;
+    const isolatedQueue = new Queue(isolatedName, { connection: CONNECTION });
+    try {
+      const listJob = await isolatedQueue.add('remove-list', {}, { lifo: true });
+      const keys = buildKeys(isolatedName);
+
+      // A FIFO scan would raise WRONGTYPE. A list-backed removal must not touch this key.
+      await cleanupClient.set(keys.stream, 'list-backed-sentinel');
+      await expect(listJob!.remove()).resolves.toBeUndefined();
+    } finally {
+      await isolatedQueue.close();
+      await flushQueue(cleanupClient, isolatedName);
+    }
+  });
+
   it('removes a waiting FIFO stream entry with the legacy seven-key call shape', async () => {
     const isolatedName = `${queueName}-stale-stream`;
     const isolatedQueue = new Queue(isolatedName, { connection: CONNECTION });
