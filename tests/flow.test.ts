@@ -2,12 +2,29 @@
  * Flow (parent-child job trees) integration tests.
  * Runs against both standalone (:6379) and cluster (:7000).
  */
-import { it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { readFileSync } from 'node:fs';
+import { it, expect, beforeAll, afterAll, describe } from 'vitest';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
+const { Queue } = require('../dist/queue') as typeof import('../src/queue');
+const { Scheduler } = require('../dist/scheduler') as typeof import('../src/scheduler');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+
+describe('DAG wiring source invariants', () => {
+  it('does not FCALL registerParent from the cross-queue Phase B batch', () => {
+    const source = readFileSync('src/flow-producer.ts', 'utf8');
+    expect(source).not.toMatch(/batchB\.fcall\(\s*['"]glidemq_registerParent/);
+  });
+
+  it('guards completeChild against recreating deleted parent hashes', () => {
+    const source = readFileSync('src/functions/glidemq.lua', 'utf8');
+    const start = source.indexOf("redis.register_function('glidemq_completeChild'");
+    const end = source.indexOf("redis.register_function('glidemq_registerParent'", start);
+    expect(source.slice(start, end)).toMatch(/redis\.call\('EXISTS', parentJobKey\) == 0/);
+  });
+});
 
 describeEachMode('FlowProducer', (CONNECTION) => {
   let cleanupClient: any;
@@ -244,6 +261,367 @@ describeEachMode('FlowProducer', (CONNECTION) => {
     await flow.close();
     await flushQueue(cleanupClient, qName);
   }, 60000);
+
+  it('nested cross-queue flow completes when workers are already running', async () => {
+    const parentQ = Q + '-xq-parent';
+    const childQ = Q + '-xq-child';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    let middleStarted = false;
+    let releaseMiddle = () => {};
+    const middleGate = new Promise<void>((resolve) => {
+      releaseMiddle = resolve;
+    });
+    const parentWorker = new Worker(parentQ, async () => ({ ok: true }), {
+      connection: CONNECTION,
+      concurrency: 4,
+      blockTimeout: 200,
+      stalledInterval: 60000,
+    });
+    const childWorker = new Worker(
+      childQ,
+      async (job: any) => {
+        if (job.data.level === 1) {
+          middleStarted = true;
+          await middleGate;
+        }
+        return { ok: true };
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 4,
+        blockTimeout: 200,
+        stalledInterval: 60000,
+      },
+    );
+    parentWorker.on('error', () => {});
+    childWorker.on('error', () => {});
+    await parentWorker.waitUntilReady();
+    await childWorker.waitUntilReady();
+
+    // Hold the recursive child flow after its middle job is active. The outer
+    // parent is then created and wired while that worker still has a stale job
+    // snapshot with no parentId/parentQueue fields.
+    const originalAddFlowRecursive = (flow as any).addFlowRecursive;
+    let nesting = 0;
+    (flow as any).addFlowRecursive = async function (...args: any[]) {
+      nesting++;
+      try {
+        const result = await originalAddFlowRecursive.apply(this, args);
+        if (nesting === 2) await waitFor(() => middleStarted, 5000);
+        return result;
+      } finally {
+        nesting--;
+      }
+    };
+
+    try {
+      const node = await flow.add({
+        name: 'grandparent',
+        queueName: parentQ,
+        data: { level: 0 },
+        children: [
+          {
+            name: 'parent-child',
+            queueName: childQ,
+            data: { level: 1 },
+            children: [{ name: 'grandchild', queueName: childQ, data: { level: 2 } }],
+          },
+        ],
+      });
+
+      releaseMiddle();
+      const parentKeys = buildKeys(parentQ);
+      await waitFor(
+        async () => String(await cleanupClient.hget(parentKeys.job(node.job.id), 'state')) === 'completed',
+        10000,
+      );
+    } finally {
+      releaseMiddle();
+      await parentWorker.close(true);
+      await childWorker.close(true);
+      await flow.close();
+      await flushQueue(cleanupClient, parentQ);
+      await flushQueue(cleanupClient, childQ);
+    }
+  }, 20000);
+
+  it('completeChild does not recreate a removed parent hash', async () => {
+    const parentQ = Q + '-removed-parent';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    try {
+      const node = await flow.add({
+        name: 'removed-parent',
+        queueName: parentQ,
+        data: {},
+        children: [{ name: 'child', queueName: parentQ, data: {} }],
+      });
+      const parentKeys = buildKeys(parentQ);
+      const parentJobKey = parentKeys.job(node.job.id);
+      await cleanupClient.del([parentJobKey]);
+
+      await cleanupClient.fcall(
+        'glidemq_completeChild',
+        [parentKeys.deps(node.job.id), parentJobKey, parentKeys.stream, parentKeys.events],
+        [`${parentKeys.name}:${node.children![0].job.id}`, node.job.id],
+      );
+
+      expect(await cleanupClient.exists([parentJobKey])).toBe(0);
+    } finally {
+      await flow.close();
+      await flushQueue(cleanupClient, parentQ);
+    }
+  });
+
+  it('reconciles a removed nested cross-queue child', async () => {
+    const parentQ = Q + '-removed-parent';
+    const childQ = Q + '-removed-child';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const parentWorker = new Worker(parentQ, async () => ({ ok: true }), {
+      connection: CONNECTION,
+      blockTimeout: 200,
+      stalledInterval: 60000,
+    });
+    parentWorker.on('error', () => {});
+    await parentWorker.waitUntilReady();
+
+    let nesting = 0;
+    const originalAddFlowRecursive = (flow as any).addFlowRecursive;
+    (flow as any).addFlowRecursive = async function (...args: any[]) {
+      nesting++;
+      try {
+        const result = await originalAddFlowRecursive.apply(this, args);
+        if (nesting === 2) {
+          const childKeys = buildKeys(args[1].queueName);
+          await cleanupClient.del([childKeys.job(result.job.id)]);
+        }
+        return result;
+      } finally {
+        nesting--;
+      }
+    };
+
+    try {
+      const node = await flow.add({
+        name: 'outer-parent',
+        queueName: parentQ,
+        data: {},
+        children: [
+          {
+            name: 'nested-parent',
+            queueName: childQ,
+            data: {},
+            children: [{ name: 'nested-child', queueName: childQ, data: {} }],
+          },
+        ],
+      });
+
+      const parentKeys = buildKeys(parentQ);
+      await waitFor(
+        async () => String(await cleanupClient.hget(parentKeys.job(node.job.id), 'state')) === 'completed',
+        10000,
+      );
+    } finally {
+      await parentWorker.close(true);
+      await flow.close();
+      await flushQueue(cleanupClient, parentQ);
+      await flushQueue(cleanupClient, childQ);
+    }
+  }, 20000);
+
+  it('reconciles a child deleted between the existence check and parent wiring', async () => {
+    const queueName = Q + '-toctou';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const worker = new Worker(queueName, async () => ({ ok: true }), {
+      connection: CONNECTION,
+      blockTimeout: 200,
+      stalledInterval: 60000,
+    });
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+
+    const client = await (flow as any).getClient();
+    const originalExists = client.exists.bind(client);
+    let deleted = false;
+    client.exists = async (keys: string[]) => {
+      const result = await originalExists(keys);
+      const key = String(keys[0] ?? '');
+      if (!deleted && result === 1 && key.includes(`{${queueName}}:job:`)) {
+        deleted = true;
+        await cleanupClient.del([key]);
+      }
+      return result;
+    };
+
+    try {
+      const node = await flow.add({
+        name: 'toctou-parent',
+        queueName,
+        data: {},
+        children: [
+          {
+            name: 'toctou-nested-parent',
+            queueName,
+            data: {},
+            children: [{ name: 'toctou-leaf', queueName, data: {} }],
+          },
+        ],
+      });
+
+      expect(deleted).toBe(true);
+      const nestedId = node.children![0].job.id;
+      const keys = buildKeys(queueName);
+      expect(await cleanupClient.exists([keys.job(nestedId)])).toBe(0);
+      expect(await cleanupClient.exists([keys.parents(nestedId)])).toBe(0);
+      await waitFor(
+        async () => String(await cleanupClient.hget(keys.job(node.job.id), 'state')) === 'completed',
+        10000,
+      );
+    } finally {
+      client.exists = originalExists;
+      await worker.close(true);
+      await flow.close();
+      await flushQueue(cleanupClient, queueName);
+    }
+  }, 20000);
+
+  it('reconciles a cross-queue child deleted between the existence check and parent wiring', async () => {
+    const parentQ = Q + '-toctou-parent';
+    const childQ = Q + '-toctou-child';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const client = await (flow as any).getClient();
+    const originalExists = client.exists.bind(client);
+    let deleted = false;
+    client.exists = async (keys: string[]) => {
+      const result = await originalExists(keys);
+      const key = String(keys[0] ?? '');
+      if (!deleted && result === 1 && key.includes(`{${childQ}}:job:`)) {
+        deleted = true;
+        await cleanupClient.del([key]);
+      }
+      return result;
+    };
+
+    let worker: any;
+    try {
+      const node = await flow.add({
+        name: 'cross-toctou-parent',
+        queueName: parentQ,
+        data: {},
+        children: [
+          {
+            name: 'cross-toctou-nested-parent',
+            queueName: childQ,
+            data: {},
+            children: [{ name: 'cross-toctou-leaf', queueName: childQ, data: {} }],
+          },
+        ],
+      });
+
+      expect(deleted).toBe(true);
+      const childKeys = buildKeys(childQ);
+      const nestedId = node.children![0].job.id;
+      expect(await cleanupClient.exists([childKeys.job(nestedId)])).toBe(0);
+      expect(await cleanupClient.exists([childKeys.parents(nestedId)])).toBe(0);
+
+      worker = new Worker(parentQ, async () => ({ ok: true }), {
+        connection: CONNECTION,
+        blockTimeout: 200,
+        stalledInterval: 60000,
+        promotionInterval: 100,
+      });
+      worker.on('error', () => {});
+      await worker.waitUntilReady();
+      const parentKeys = buildKeys(parentQ);
+      await waitFor(
+        async () => String(await cleanupClient.hget(parentKeys.job(node.job.id), 'state')) === 'completed',
+        10000,
+      );
+    } finally {
+      client.exists = originalExists;
+      await worker?.close(true);
+      await flow.close();
+      await flushQueue(cleanupClient, parentQ);
+      await flushQueue(cleanupClient, childQ);
+    }
+  }, 20000);
+
+  it('flushes JSON pending notifications for queue names containing tabs', async () => {
+    const parentQ = Q + '-tab-parent\tqueue';
+    const childQ = Q + '-tab-child\tqueue';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const childWorker = new Worker(childQ, async () => ({ ok: true }), {
+      connection: CONNECTION,
+      blockTimeout: 200,
+      stalledInterval: 60000,
+    });
+    childWorker.on('error', () => {});
+    await childWorker.waitUntilReady();
+
+    try {
+      const node = await flow.add({
+        name: 'tab-parent',
+        queueName: parentQ,
+        data: {},
+        children: [{ name: 'tab-child', queueName: childQ, data: {} }],
+      });
+      const childId = node.children![0].job.id;
+      const childKeys = buildKeys(childQ);
+      const pending = JSON.stringify([parentQ, node.job.id, `glide:{${childQ}}:${childId}`]);
+      await cleanupClient.sadd(childKeys.xqPending, [pending]);
+
+      await (childWorker as any).scheduler.flushCrossQueueParentNotifies();
+
+      expect(String(await cleanupClient.hget(buildKeys(parentQ).job(node.job.id), 'state'))).toBe('waiting');
+      expect(await cleanupClient.sismember(childKeys.xqPending, pending)).toBe(false);
+    } finally {
+      await childWorker.close(true);
+      await flow.close();
+      await flushQueue(cleanupClient, parentQ);
+      await flushQueue(cleanupClient, childQ);
+    }
+  }, 20000);
+
+  it('flushes pending notifications with a custom prefix containing braces', async () => {
+    const prefix = 'test-flow:{tenant}';
+    const parentQ = Q + '-prefix-parent';
+    const childQ = Q + '-prefix-child';
+    const flow = new FlowProducer({ connection: CONNECTION, prefix });
+
+    try {
+      const node = await flow.add({
+        name: 'prefix-parent',
+        queueName: parentQ,
+        data: {},
+        children: [{ name: 'prefix-child', queueName: childQ, data: {} }],
+      });
+      const childId = node.children![0].job.id;
+      const childKeys = buildKeys(childQ, prefix);
+      const pending = JSON.stringify([parentQ, node.job.id, `${prefix}:{${childQ}}:${childId}`]);
+      await cleanupClient.sadd(childKeys.xqPending, [pending]);
+
+      await new Scheduler(cleanupClient, childKeys).flushCrossQueueParentNotifies();
+
+      expect(String(await cleanupClient.hget(buildKeys(parentQ, prefix).job(node.job.id), 'state'))).toBe('waiting');
+      expect(await cleanupClient.sismember(childKeys.xqPending, pending)).toBe(false);
+    } finally {
+      await flow.close();
+      await flushQueue(cleanupClient, parentQ, prefix);
+      await flushQueue(cleanupClient, childQ, prefix);
+    }
+  });
+
+  it('obliterate removes cross-queue pending notifications', async () => {
+    const queueName = Q + '-obliterate-xq';
+    const queue = new Queue(queueName, { connection: CONNECTION });
+    const keys = buildKeys(queueName);
+    try {
+      await cleanupClient.sadd(keys.xqPending, ['pending']);
+      await queue.obliterate({ force: true });
+      expect(await cleanupClient.exists([keys.xqPending])).toBe(0);
+    } finally {
+      await queue.close();
+    }
+  });
 
   it('parent getChildrenValues returns all child results', async () => {
     const qName = Q + '-values';
