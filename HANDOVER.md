@@ -2,7 +2,7 @@
 
 ## Current State
 
-- **In flight**: `fix/revoke-timeout` is an independent branch from upstream `main`. Lua remains sourced from `src/functions/glidemq.lua`; version `97` rejects revoked completion and treats per-job batch failures as terminal. Batch abort controllers are per job, while a batch timeout aborts all signals and remains retryable.
+- **In flight**: `fix/revoke-timeout` is an independent branch from upstream `main`. Lua remains sourced from `src/functions/glidemq.lua`; version `97` rejects revoked completion and treats per-job batch failures as terminal. Batch abort controllers are per job and exist before limiter waits; resumed continuations are abortable; revocation polling is capped at 1 second. Batch timeouts abort all signals and remain retryable.
 - **Branch**: `fix/revoke-timeout`.
 - **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
 - **CI**: green across all six fork/upstream stack PRs after the 2026-08-22 packaging update.
