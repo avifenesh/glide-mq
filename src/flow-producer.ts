@@ -324,6 +324,12 @@ export class FlowProducer {
       const childKeys = buildKeys(child.queueName, prefix);
       const depsMember = `${keyPrefix(prefix, child.queueName)}:${subNode.job.id}`;
       if (child.queueName === parentQueueName) {
+        // Persist the edge before registerParent's completed-state check so a
+        // worker completing in this window can re-read parent metadata.
+        await client.hset(childKeys.job(subNode.job.id), {
+          parentId: parentId,
+          parentQueue: parentQueueName,
+        });
         await registerParent(
           client,
           childKeys,
@@ -333,10 +339,6 @@ export class FlowProducer {
           parentKeys,
           depsMember,
         );
-        await client.hset(childKeys.job(subNode.job.id), {
-          parentId: parentId,
-          parentQueue: parentQueueName,
-        });
       } else {
         await client.hset(childKeys.job(subNode.job.id), {
           parentId: parentId,
