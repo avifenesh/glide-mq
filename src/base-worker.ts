@@ -127,6 +127,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected globalConcurrencyEnabled = false;
   protected globalRateLimitEnabled = false;
   protected queuePaused = false;
+  protected pausedBroadcastEntries = new Set<string>();
   protected cachedRateLimitMax = 0;
   protected cachedRateLimitDuration = 0;
 
@@ -924,6 +925,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.broadcastMode ? true : undefined,
         true,
       );
+      if (this.broadcastMode && entry.entryId !== '') {
+        this.pausedBroadcastEntries.add(entry.entryId);
+      }
     } catch (err) {
       this.emit('error', err);
     }
@@ -1789,11 +1793,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.globalRateLimitEnabled = rlMax != null && Number(rlMax) > 0;
       this.cachedRateLimitMax = Number(rlMax) || 0;
       this.cachedRateLimitDuration = Number(rlDur) || 0;
-      const wasPaused = this.queuePaused;
       this.queuePaused = pausedVal === '1';
-      if (wasPaused && !this.queuePaused && this.broadcastMode) {
-        this.xreadStreams[this.queueKeys.stream] = '0';
-      }
     } catch {
       // Transient error - next tick will retry
     }

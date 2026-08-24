@@ -54,7 +54,7 @@ describe('pause worker internals', () => {
     );
   });
 
-  it('waits while paused and resets broadcast pending reads after resume', async () => {
+  it('waits while paused without rewinding broadcast pending reads after resume', async () => {
     const keys = buildKeys('pause-meta-flags');
     const pausedWorker = {
       queuePaused: true,
@@ -84,10 +84,10 @@ describe('pause worker internals', () => {
     };
     await (BaseWorker.prototype as any).refreshMetaFlags.call(resumedBroadcastWorker);
     expect(resumedBroadcastWorker.queuePaused).toBe(false);
-    expect(resumedBroadcastWorker.xreadStreams[keys.stream]).toBe('0');
+    expect(resumedBroadcastWorker.xreadStreams[keys.stream]).toBe('>');
   });
 
-  it('does not claim after a pause guard and returns broadcast pending reads to new-entry mode', async () => {
+  it('does not claim after a pause guard and keeps broadcast reads on new entries', async () => {
     const keys = buildKeys('pause-poll-guards');
     const tryPopFromLists = vi.fn();
     const worker = {
@@ -132,11 +132,12 @@ describe('pause worker internals', () => {
       activeCount: 0,
       globalConcurrencyEnabled: false,
       queueKeys: keys,
-      xreadStreams: { [keys.stream]: '0' },
+      xreadStreams: { [keys.stream]: '>' },
       consumerGroup: 'sub',
       consumerId: 'consumer',
       blockTimeout: 0,
       isDrained: true,
+      recoverPausedBroadcastEntries: vi.fn().mockResolvedValue(null),
     };
     await (BroadcastWorker.prototype as any).pollOnce.call(broadcastWorker);
     expect(xreadgroup).toHaveBeenCalledOnce();

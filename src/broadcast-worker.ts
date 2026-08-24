@@ -53,17 +53,18 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
       }
     }
 
+    const parkedResult = await this.recoverPausedBroadcastEntries(fetchCount);
+    if (parkedResult) {
+      await this.processReadResult(parkedResult);
+      return;
+    }
+
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
     // STREAMS {streamKey} >
-    const readingPending = this.xreadStreams[this.queueKeys.stream] === '0';
     const result = await this.blockingClient.xreadgroup(this.consumerGroup, this.consumerId, this.xreadStreams, {
       count: fetchCount,
       block: this.blockTimeout,
     });
-
-    if (readingPending) {
-      this.xreadStreams[this.queueKeys.stream] = '>';
-    }
 
     if (!result) {
       if (!this.isDrained && this.activeCount === 0) {
@@ -73,6 +74,39 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
       return;
     }
 
+    await this.processReadResult(result);
+  }
+
+  /**
+   * Recover only broadcast entries parked by this worker during a queue-pause
+   * activation race. XREADGROUP with `0` would redeliver all of this
+   * consumer's PEL, including live processing, so target known IDs with
+   * XCLAIM instead.
+   */
+  private async recoverPausedBroadcastEntries(
+    count: number,
+  ): Promise<NonNullable<Awaited<ReturnType<Client['xreadgroup']>>> | null> {
+    if (!this.commandClient || this.pausedBroadcastEntries.size === 0) return null;
+
+    const entryIds = [...this.pausedBroadcastEntries].slice(0, count);
+    try {
+      const entries = await this.commandClient.xclaim(
+        this.queueKeys.stream,
+        this.consumerGroup,
+        this.consumerId,
+        0,
+        entryIds,
+      );
+      for (const entryId of entryIds) this.pausedBroadcastEntries.delete(entryId);
+      if (Object.keys(entries).length === 0) return null;
+      return [{ key: this.queueKeys.stream, value: entries }] as NonNullable<Awaited<ReturnType<Client['xreadgroup']>>>;
+    } catch (err) {
+      this.emit('error', err);
+      return null;
+    }
+  }
+
+  private async processReadResult(result: NonNullable<Awaited<ReturnType<Client['xreadgroup']>>>): Promise<void> {
     // Batch mode: collect entries and process as a batch
     if (this.batchMode) {
       await this.collectAndProcessBatch(result);
