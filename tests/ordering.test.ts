@@ -7,7 +7,7 @@ import { it, expect, beforeAll, afterAll } from 'vitest';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+const { buildKeys, keyPrefix } = require('../dist/utils') as typeof import('../src/utils');
 
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
@@ -394,6 +394,62 @@ describeEachMode('Per-key ordering', (CONNECTION) => {
     await flushQueue(cleanupClient, Q2);
     expect(maxConcurrent).toBe(1);
   }, 20000);
+
+  it('keeps retained-return slots separate from user ordering-key hashes', async () => {
+    const Q2 = 'test-order-return-key-namespace-' + Date.now();
+    const q = new Queue(Q2, { connection: CONNECTION });
+    const k = buildKeys(Q2);
+    const now = Date.now();
+
+    try {
+      const conflicting = await q.add('conflicting', {}, { ordering: { key: 'return:X' } });
+      const returning = await q.add('returning', {}, { ordering: { key: 'X' } });
+      expect(conflicting).not.toBeNull();
+      expect(returning).not.toBeNull();
+
+      await cleanupClient.hset(k.job(returning!.id), { state: 'active', processedOn: String(now) });
+
+      await expect(
+        cleanupClient.fcall(
+          'glidemq_rateLimitGroup',
+          [k.job(returning!.id), k.stream],
+          [returning!.id, '', 'workers', '1000', String(now), '0', 'requeue', 'back', 'max'],
+        ),
+      ).resolves.toBe(String(now + 1000));
+      expect(await cleanupClient.hget(k.group('return:X'), 'maxConcurrency')).toBe('1');
+    } finally {
+      await q.close();
+      await flushQueue(cleanupClient, Q2);
+    }
+  }, 10000);
+
+  it('migrates and resumes a v115 retained-return slot', async () => {
+    const Q2 = 'test-order-return-key-legacy-' + Date.now();
+    const q = new Queue(Q2, { connection: CONNECTION });
+    const k = buildKeys(Q2);
+    const now = Date.now();
+    const groupKey = 'legacy-returner';
+    const legacyReturningKey = `${keyPrefix('glide', Q2)}:group:return:${groupKey}`;
+
+    try {
+      const returning = await q.add('returning', {}, { ordering: { key: groupKey } });
+      expect(returning).not.toBeNull();
+      await cleanupClient.hset(k.job(returning!.id), { state: 'group-waiting' });
+      await cleanupClient.zadd(k.groupq(groupKey), [{ element: returning!.id, score: 1 }]);
+      await cleanupClient.zadd(legacyReturningKey, [{ element: returning!.id, score: 1 }]);
+      await cleanupClient.hset(k.group(groupKey), { active: '1' });
+      await cleanupClient.zadd(k.ratelimited, [{ element: groupKey, score: now }]);
+
+      await expect(
+        cleanupClient.fcall('glidemq_promoteRateLimited', [k.ratelimited, k.stream], [String(now)]),
+      ).resolves.toBe(1);
+      expect(String(await cleanupClient.hget(k.job(returning!.id), 'state'))).toBe('waiting');
+      expect(await cleanupClient.type(legacyReturningKey)).toBe('none');
+    } finally {
+      await q.close();
+      await flushQueue(cleanupClient, Q2);
+    }
+  }, 10000);
 
   it('completeAndFetchNext parks a priority group job when the group rate window is full', async () => {
     const Q2 = 'test-caf-pri-rate-' + Date.now();

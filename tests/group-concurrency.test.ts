@@ -10,7 +10,7 @@ import { it, expect, beforeAll, afterAll } from 'vitest';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+const { buildKeys, keyPrefix } = require('../dist/utils') as typeof import('../src/utils');
 
 import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
 
@@ -450,6 +450,25 @@ describeEachMode('Group concurrency', (CONNECTION) => {
 
     await queue9.close();
   }, 15000);
+
+  it('obliterate cleans current and legacy retained-return slot keys', async () => {
+    const Q11 = Q + '-obl-return-slots';
+    const queue11 = new Queue(Q11, { connection: CONNECTION });
+    const pfx = keyPrefix('glide', Q11);
+    const currentReturningKey = `${pfx}:groupreturn:X`;
+    const legacyReturningKey = `${pfx}:group:return:X`;
+
+    try {
+      await cleanupClient.zadd(currentReturningKey, [{ element: 'job-1', score: 1 }]);
+      await cleanupClient.zadd(legacyReturningKey, [{ element: 'job-2', score: 2 }]);
+
+      await expect(queue11.obliterate({ force: true })).resolves.toBeUndefined();
+      expect(Number(await cleanupClient.exists([currentReturningKey, legacyReturningKey]))).toBe(0);
+    } finally {
+      await queue11.close();
+      await flushQueue(cleanupClient, Q11);
+    }
+  }, 10000);
 
   it('high concurrency value does not artificially limit', async () => {
     const Q10 = Q + '-high';
