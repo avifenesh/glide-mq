@@ -417,7 +417,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
       InfBoundary.NegativeInfinity;
 
     while (limit < 0 || jobIds.length < limit) {
-      const count = limit < 0 ? PIPELINE_CHUNK_SIZE : limit - jobIds.length;
+      // Read a full chunk even for limited pages so a run of PEL entries does
+      // not turn into one XRANGE/XPENDING round trip per in-flight job.
+      const count = PIPELINE_CHUNK_SIZE;
       const entries = await client.xrange(this.keys.stream, streamStart, InfBoundary.PositiveInfinity, { count });
       if (!entries) break;
 
@@ -432,7 +434,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
       for (const entryId of entryIds) {
         if (!pendingEntryIds.has(entryId)) waitingEntries[entryId] = entries[entryId]!;
       }
-      jobIds.push(...extractJobIdsFromStreamEntries(waitingEntries));
+      const waitingIds = extractJobIdsFromStreamEntries(waitingEntries);
+      jobIds.push(...(limit < 0 ? waitingIds : waitingIds.slice(0, limit - jobIds.length)));
 
       if (entryIds.length < count) break;
       streamStart = { value: lastEntryId, isInclusive: false };
