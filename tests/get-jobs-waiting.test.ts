@@ -125,4 +125,21 @@ describeEachMode('Queue.getJobs waiting sources', (CONNECTION) => {
     await isolatedQueue.close();
     await flushQueue(cleanupClient, isolatedName);
   });
+
+  it('paginates both the stream and PEL when the first 1000 entries are pending', async () => {
+    const isolatedName = `${queueName}-paged-pel`;
+    const isolatedQueue = new Queue(isolatedName, { connection: CONNECTION });
+    const keys = buildKeys(isolatedName);
+    const jobs = await isolatedQueue.addBulk(
+      Array.from({ length: 1001 }, (_, index) => ({ name: 'paged-fifo', data: { index } })),
+    );
+
+    await cleanupClient.xgroupCreate(keys.stream, CONSUMER_GROUP, '0');
+    await cleanupClient.xreadgroup(CONSUMER_GROUP, 'paged-pel-test', { [keys.stream]: '>' }, { count: 1000 });
+
+    expect((await isolatedQueue.getJobs('waiting')).map((job) => job.id)).toEqual([jobs[1000]!.id]);
+
+    await isolatedQueue.close();
+    await flushQueue(cleanupClient, isolatedName);
+  });
 });
