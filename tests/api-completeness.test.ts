@@ -304,7 +304,7 @@ describe('Queue.getJobs', () => {
     vi.mocked(GlideClient.createClient).mockResolvedValue(mockClient as any);
   });
 
-  it('passes list keys when removing or revoking waiting jobs', async () => {
+  it('keeps remove and revoke FCALL key signatures stable', async () => {
     const keys = buildKeys('getjobs-cleanup');
     mockClient.fcall.mockResolvedValueOnce(1).mockResolvedValueOnce('revoked');
 
@@ -312,17 +312,7 @@ describe('Queue.getJobs', () => {
     expect(mockClient.fcall).toHaveBeenNthCalledWith(
       1,
       'glidemq_removeJob',
-      [
-        keys.job('1'),
-        keys.stream,
-        keys.scheduled,
-        keys.completed,
-        keys.failed,
-        keys.events,
-        keys.log('1'),
-        keys.lifo,
-        keys.priority,
-      ],
+      [keys.job('1'), keys.stream, keys.scheduled, keys.completed, keys.failed, keys.events, keys.log('1')],
       ['1'],
     );
 
@@ -330,7 +320,7 @@ describe('Queue.getJobs', () => {
     expect(mockClient.fcall).toHaveBeenNthCalledWith(
       2,
       'glidemq_revoke',
-      [keys.job('2'), keys.stream, keys.scheduled, keys.failed, keys.events, keys.lifo, keys.priority],
+      [keys.job('2'), keys.stream, keys.scheduled, keys.failed, keys.events],
       ['2', '123', 'workers'],
     );
   });

@@ -98,4 +98,31 @@ describeEachMode('Queue.getJobs waiting sources', (CONNECTION) => {
     await isolatedQueue.close();
     await flushQueue(cleanupClient, isolatedName);
   });
+
+  it('removes a waiting FIFO stream entry with the legacy seven-key call shape', async () => {
+    const isolatedName = `${queueName}-stale-stream`;
+    const isolatedQueue = new Queue(isolatedName, { connection: CONNECTION });
+    const removed = await isolatedQueue.add('removed-fifo', {});
+    const waiting = await isolatedQueue.add('waiting-fifo', {});
+    const keys = buildKeys(isolatedName);
+
+    await cleanupClient.fcall(
+      'glidemq_removeJob',
+      [
+        keys.job(removed!.id),
+        keys.stream,
+        keys.scheduled,
+        keys.completed,
+        keys.failed,
+        keys.events,
+        keys.log(removed!.id),
+      ],
+      [removed!.id],
+    );
+
+    expect((await isolatedQueue.getJobs('waiting')).map((job) => job.id)).toEqual([waiting!.id]);
+
+    await isolatedQueue.close();
+    await flushQueue(cleanupClient, isolatedName);
+  });
 });
