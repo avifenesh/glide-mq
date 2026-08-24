@@ -57,7 +57,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 101: complete/CAF enqueue cross-queue parent notifies on a same-slot pending set so a later scheduler tick can retry if the worker dies between complete and completeChild.
 // Version 102: completeChild ignores stale notifications for deleted parent hashes.
 // Version 104: encode cross-queue notifications as JSON and reconcile deleted children without recreating hashes.
-export const LIBRARY_VERSION = '106';
+// Version 107: extract the final queue hash tag for cross-queue DAG notifications so custom prefixes may contain braces.
+export const LIBRARY_VERSION = '107';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';

@@ -293,12 +293,18 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   end
 end
 
+-- Extract the queue's hash tag from a queue prefix. The configured prefix may
+-- itself contain braces, so only the final tag is the queue name.
+local function extractQueueTag(queuePrefix)
+  return string.match(queuePrefix, '{([^{}]+)}$')
+end
+
 -- Persist a retryable cross-queue parent notification on this child's hash
 -- slot. The scheduler later calls completeChild using only the parent keys.
 -- Member: JSON array [parentQueueName, parentId, childQueuePrefix:childId]
 local function enqueueCrossQueueParentNotify(prefix, jobId, parentQueueName, parentId)
   if not parentQueueName or parentQueueName == '' or not parentId or parentId == '' then return end
-  local childQueueName = string.match(prefix, '{([^}]+)}')
+  local childQueueName = extractQueueTag(string.sub(prefix, 1, #prefix - 1))
   if childQueueName and parentQueueName == childQueueName then return end
   local childQueuePrefix = string.sub(prefix, 1, #prefix - 1)
   redis.call('SADD', prefix .. 'xq-pending', cjson.encode({parentQueueName, parentId, childQueuePrefix .. ':' .. jobId}))
@@ -922,7 +928,7 @@ redis.register_function('glidemq_complete', function(keys, args)
             end
           end
         else
-          local pTag = string.match(pQueue, '{([^}]+)}')
+          local pTag = extractQueueTag(pQueue)
           enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
         end
       end
@@ -1069,7 +1075,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
               end
             end
           else
-            local pTag = string.match(pQueue, '{([^}]+)}')
+            local pTag = extractQueueTag(pQueue)
             enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
           end
         end
