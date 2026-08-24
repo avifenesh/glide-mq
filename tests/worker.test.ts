@@ -45,6 +45,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     hget: vi.fn().mockResolvedValue(null),
     hmget: vi.fn().mockResolvedValue([null, null]),
     hset: vi.fn().mockResolvedValue(1),
+    smembers: vi.fn().mockResolvedValue(new Set()),
     close: vi.fn(),
     ...overrides,
   };
