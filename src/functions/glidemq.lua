@@ -2675,8 +2675,10 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('ZREM', scheduledKey, jobId)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
-  redis.call('LREM', lifoKey, 0, jobId)
-  redis.call('LREM', priorityKey, 0, jobId)
+  -- Keep accepting the pre-108 seven-key call shape during rolling upgrades.
+  -- Older workers do not pass the list-backed waiting keys.
+  if lifoKey then redis.call('LREM', lifoKey, 0, jobId) end
+  if priorityKey then redis.call('LREM', priorityKey, 0, jobId) end
   markOrderingDone(jobKey, jobId)
   -- Clean up DAG parents SET, per-job streaming channel, and signals.
   -- Job hash + log can be MB-sized; parents/jstream/signals carry per-step

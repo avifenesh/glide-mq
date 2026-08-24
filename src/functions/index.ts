@@ -55,7 +55,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 92: Replace DEL with UNLINK on every multi-key / large-collection delete (job hashes, retention purge, glidemq_clean batches, glidemq_drain stream/zset/lifo/priority sweeps). UNLINK keeps in-script atomicity - the keyspace removal is still synchronous from the script's view - but defers memory reclamation to the bio thread, so obliterate / retention / drain stop blocking the server thread on MB-sized job hashes. Small-key DELs (lockKey) kept as DEL (#243).
 // Version 93: glidemq_completeAndFetchNext always SMEMBERS the child parents SET. The previous hasParents gate sourced its truth from the worker's snapshot of the job hash, which is stale when DAG wiring (hset parentIds + registerParent) lands between the worker's job fetch and the completion FCALL. The SMEMBERS cost on an empty set is negligible; the dropped optimization was unsound (#246).
 // Version 108: revoke/remove delete list-backed waiting entries so getJobs pagination cannot expose or count stale jobs.
-export const LIBRARY_VERSION = '108';
+// Version 109: keep glidemq_removeJob compatible with pre-108 callers that pass seven keys.
+export const LIBRARY_VERSION = '109';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
