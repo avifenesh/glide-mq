@@ -512,7 +512,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       let calls = 0;
       const worker = new Worker(
         Q,
-        async (batch: any[]) => {
+        async (_batch: any[]) => {
           calls++;
           if (calls > 1) throw new Error('unexpected retry after revoked batch error');
           processorStarted();

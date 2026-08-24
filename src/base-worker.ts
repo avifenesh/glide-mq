@@ -742,9 +742,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         const result = i < batchResults.length ? batchResults[i] : new Error('No result in BatchError');
 
         if (result instanceof Error) {
-          const failure = (await this.isJobRevoked(entry.jobId))
-            ? new UnrecoverableError('revoked')
-            : result;
+          const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : result;
           await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
         } else {
           let returnvalue: string;
@@ -807,9 +805,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       // A timeout is retryable. Revocation is terminal only when completion or
       // an explicit state check positively identifies the revoked job.
       for (const entry of batch) {
-        const failure = (await this.isJobRevoked(entry.jobId))
-          ? new UnrecoverableError('revoked')
-          : thrownError;
+        const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : thrownError;
         await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
       }
     }
