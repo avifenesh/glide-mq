@@ -421,7 +421,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       await flushQueue(cleanupClient, Q + '-bc');
     });
 
-    it('restores priority and LIFO jobs to their lists instead of the FIFO stream', async () => {
+    it('restores priority and LIFO jobs to their lists and FIFO jobs to the stream', async () => {
       const k = buildKeys(Q);
       // Priority lists are consumed with RPOP, so priority 1 must return ahead
       // of an already-waiting priority 2 job after the pause-race restore.
@@ -463,6 +463,35 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       expect(Number(await cleanupClient.llen(k.lifo))).toBe(1);
       expect(Number(await cleanupClient.xlen(k.stream))).toBe(0);
       expect(String(await cleanupClient.hget(k.job('lifo-1'), 'state'))).toBe('waiting');
+
+      await cleanupClient.hset(k.job('fifo-1'), {
+        name: 'paused-fifo',
+        state: 'active',
+      });
+      await cleanupClient.set(k.listActive, '1');
+      await cleanupClient.fcall(
+        'glidemq_deferActive',
+        [k.stream, k.job('fifo-1'), k.listActive],
+        ['fifo-1', '', 'workers', '0', '1'],
+      );
+      expect(Number(await cleanupClient.get(k.listActive))).toBe(0);
+      expect(Number(await cleanupClient.xlen(k.stream))).toBe(1);
+      expect(String(await cleanupClient.hget(k.job('fifo-1'), 'state'))).toBe('waiting');
+
+      // A non-pause defer remains the normal FIFO fallback for list claims.
+      await cleanupClient.hset(k.job('default-fifo-1'), {
+        name: 'default-fifo',
+        state: 'active',
+      });
+      await cleanupClient.set(k.listActive, '1');
+      await cleanupClient.fcall(
+        'glidemq_deferActive',
+        [k.stream, k.job('default-fifo-1'), k.listActive],
+        ['default-fifo-1', '', 'workers', '0'],
+      );
+      expect(Number(await cleanupClient.get(k.listActive))).toBe(0);
+      expect(Number(await cleanupClient.xlen(k.stream))).toBe(2);
+      expect(String(await cleanupClient.hget(k.job('default-fifo-1'), 'state'))).toBe('waiting');
     });
 
     it('does not XADD a duplicate when a paused broadcast claim is deferred', async () => {

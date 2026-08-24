@@ -5,6 +5,7 @@
 - **Branch**: `fix/queue-pause`, rebased onto current `upstream/main`.
 - **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
 - **CI**: this branch is an independent pause behavior fix on current main. `LIBRARY_VERSION` 97 follows stalled-cursor 94 and atomic-list-pop 95; it preserves batch pause-race list order and suspends stalled reclaim while paused.
+- **Coverage**: CI-included internal pause-worker regressions cover worker/broadcast pause guards, pending-read reset, and batch-refill stops. Standalone TS coverage and focused Lua coverage were verified on an isolated Valkey instance; changed executable lines are hit.
 - **Review gate**: automatic Claude review is retired; the Revuto GitHub App check reviews pull requests.
 - **Dependency security**: the lockfile carries protobufjs 7.6.5, brace-expansion 5.0.9, PostCSS 8.5.25, and body-parser 2.3.0.
 
