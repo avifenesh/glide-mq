@@ -4,7 +4,7 @@ import { Job } from './job';
 import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE, validateJobId, validateQueueName } from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
-import { LIBRARY_SOURCE, addFlow, addJob, addJobArgs, completeChild } from './functions/index';
+import { LIBRARY_SOURCE, addFlow, addJob, addJobArgs, completeChild, registerParent } from './functions/index';
 import { withSpan } from './telemetry';
 import { validateDAG, topoSort } from './dag-utils';
 import { Batch, ClusterBatch, type GlideClient, type GlideClusterClient } from '@glidemq/speedkey';
@@ -13,19 +13,6 @@ export interface JobNode {
   job: Job;
   children?: JobNode[];
 }
-
-/**
- * Race-condition constants for late-parent reconciliation in addFlowRecursive.
- *
- * Children are created before the parent job exists. Between child creation and
- * parent creation, a worker may pick up and complete a child job. When that
- * happens, the child's completion Lua script cannot notify the parent (it does
- * not exist yet). The reconcile loop below polls the child state after parent
- * creation; if the child has already completed, it manually calls completeChild
- * so the parent's dependency counter is incremented and the parent can proceed.
- */
-const LATE_PARENT_RECONCILE_ATTEMPTS = 5;
-const LATE_PARENT_RECONCILE_DELAY_MS = 10;
 
 /**
  * Creates parent-child job flows and DAG workflows.
@@ -330,26 +317,36 @@ export class FlowProducer {
     }
     const parentId = ids[0];
 
-    // Set parentId and parentQueue on pre-existing sub-flow children
+    // Wire pre-existing sub-flow children to this parent. registerParent also
+    // notifies the parent if the child already completed during the race.
     for (const [i, subNode] of childNodeMap.entries()) {
       const child = flow.children[i];
       const childKeys = buildKeys(child.queueName, prefix);
       const depsMember = `${keyPrefix(prefix, child.queueName)}:${subNode.job.id}`;
-      await client.hset(childKeys.job(subNode.job.id), {
-        parentId: parentId,
-        parentQueue: parentQueueName,
-      });
-      let state = await client.hget(childKeys.job(subNode.job.id), 'state');
-      for (
-        let attempt = 0;
-        state && String(state) !== 'completed' && attempt < LATE_PARENT_RECONCILE_ATTEMPTS;
-        attempt++
-      ) {
-        await new Promise<void>((resolve) => setTimeout(resolve, LATE_PARENT_RECONCILE_DELAY_MS));
-        state = await client.hget(childKeys.job(subNode.job.id), 'state');
-      }
-      if (state && String(state) === 'completed') {
-        await completeChild(client, parentKeys, parentId, depsMember);
+      if (child.queueName === parentQueueName) {
+        await registerParent(
+          client,
+          childKeys,
+          subNode.job.id,
+          parentId,
+          keyPrefix(prefix, parentQueueName),
+          parentKeys,
+          depsMember,
+        );
+        await client.hset(childKeys.job(subNode.job.id), {
+          parentId: parentId,
+          parentQueue: parentQueueName,
+        });
+      } else {
+        await client.hset(childKeys.job(subNode.job.id), {
+          parentId: parentId,
+          parentQueue: parentQueueName,
+        });
+        await client.sadd(childKeys.parents(subNode.job.id), [`${keyPrefix(prefix, parentQueueName)}:${parentId}`]);
+        const state = await client.hget(childKeys.job(subNode.job.id), 'state');
+        if (state && String(state) === 'completed') {
+          await completeChild(client, parentKeys, parentId, depsMember);
+        }
       }
       subNode.job.parentId = parentId;
       subNode.job.parentQueue = parentQueueName;

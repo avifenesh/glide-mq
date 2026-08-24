@@ -122,6 +122,7 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     groupq: (key: string) => `${p}:groupq:${key}`,
     parents: (id: string) => `${p}:parents:${id}`,
     jstream: (id: string) => `${p}:jstream:${id}`,
+    xqPending: `${p}:xq-pending`,
     worker: (id: string) => `${p}:w:${id}`,
     suspended: `${p}:suspended`,
     signals: (id: string) => `${p}:signals:${id}`,

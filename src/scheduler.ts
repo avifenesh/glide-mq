@@ -13,11 +13,11 @@ import {
   tryLock,
   renewLock,
   unlock,
+  completeChild,
   healListActive,
   sweepSuspended,
 } from './functions/index';
-import type { buildKeys } from './utils';
-import { computeFollowingSchedulerNextRun, isValidSchedulerEvery, MAX_JOB_DATA_SIZE } from './utils';
+import { buildKeys, computeFollowingSchedulerNextRun, isValidSchedulerEvery, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
 export interface SchedulerOptions {
@@ -152,6 +152,7 @@ export class Scheduler {
     this.trackRun(
       this.promoteDelayed()
         .then(() => this.promoteRateLimitedGroups())
+        .then(() => this.flushCrossQueueParentNotifies())
         .then(() => this.runSchedulers())
         .then(() => {
           this.onPromotionTick?.();
@@ -256,6 +257,32 @@ export class Scheduler {
    */
   async promoteRateLimitedGroups(): Promise<number> {
     return promoteRateLimited(this.client, this.queueKeys, Date.now());
+  }
+
+  /**
+   * Retry cross-queue parent notifications recorded on this child's slot.
+   * The completion FCALL cannot include keys from multiple cluster slots, so
+   * the child records the parent edge and this scheduler completes it later.
+   */
+  async flushCrossQueueParentNotifies(): Promise<void> {
+    const members = await this.client.smembers(this.queueKeys.xqPending);
+    if (!members || members.size === 0) return;
+
+    const idKey = this.queueKeys.id;
+    const brace = idKey.indexOf(':{');
+    const prefix = brace >= 0 ? idKey.slice(0, brace) : 'glide';
+    for (const raw of members) {
+      const member = String(raw);
+      const parts = member.split('\t');
+      if (parts.length !== 3) continue;
+      const [parentQueue, parentId, depsMember] = parts;
+      try {
+        await completeChild(this.client, buildKeys(parentQueue, prefix), parentId, depsMember);
+        await this.client.srem(this.queueKeys.xqPending, [member]);
+      } catch (err) {
+        this.reportError(err);
+      }
+    }
   }
 
   /**

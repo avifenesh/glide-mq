@@ -293,6 +293,17 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   end
 end
 
+-- Persist a retryable cross-queue parent notification on this child's hash
+-- slot. The scheduler later calls completeChild using only the parent keys.
+-- Member: parentQueueName TAB parentId TAB childQueuePrefix:childId
+local function enqueueCrossQueueParentNotify(prefix, jobId, parentQueueName, parentId)
+  if not parentQueueName or parentQueueName == '' or not parentId or parentId == '' then return end
+  local childQueueName = string.match(prefix, '{([^}]+)}')
+  if childQueueName and parentQueueName == childQueueName then return end
+  local childQueuePrefix = string.sub(prefix, 1, #prefix - 1)
+  redis.call('SADD', prefix .. 'xq-pending', parentQueueName .. '\t' .. parentId .. '\t' .. childQueuePrefix .. ':' .. jobId)
+end
+
 local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, hintOrderingSeq, hintGroupKey)
   if curState == 'failed' then return true end
   local wasActive = (curState == 'active')
@@ -827,6 +838,7 @@ redis.register_function('glidemq_complete', function(keys, args)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   recordMetrics(metricsKey, timestamp, timestamp - processedOn)
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  enqueueCrossQueueParentNotify(prefix, jobId, redis.call('HGET', jobKey, 'parentQueue'), redis.call('HGET', jobKey, 'parentId'))
   if broadcastMode ~= '1' then
     if removeMode == 'true' then
       redis.call('ZREM', completedKey, jobId)
@@ -909,6 +921,9 @@ redis.register_function('glidemq_complete', function(keys, args)
               end
             end
           end
+        else
+          local pTag = string.match(pQueue, '{([^}]+)}')
+          enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
         end
       end
     end
@@ -967,6 +982,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
   if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  enqueueCrossQueueParentNotify(prefix, jobId, redis.call('HGET', jobKey, 'parentQueue'), redis.call('HGET', jobKey, 'parentId'))
   if entryId == '' then decrListActive(prefix .. 'list-active') end
 
   -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
@@ -1052,6 +1068,9 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
                 end
               end
             end
+          else
+            local pTag = string.match(pQueue, '{([^}]+)}')
+            enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
           end
         end
       end

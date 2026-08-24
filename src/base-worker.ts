@@ -45,6 +45,7 @@ import {
 import {
   completeJob,
   completeAndFetchNext,
+  completeChild,
   failJob,
   addJob,
   rateLimit as rateLimitFn,
@@ -709,9 +710,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           Date.now(),
           this.consumerGroup,
           entry.job.opts.removeOnComplete,
-          parentInfo,
+          this.inlineParentInfo(parentInfo),
           this.broadcastMode ? true : undefined,
         );
+        await this.notifyCrossQueueParent(parentInfo);
 
         entry.job.returnvalue = result;
         entry.job.finishedOn = Date.now();
@@ -770,9 +772,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             Date.now(),
             this.consumerGroup,
             entry.job.opts.removeOnComplete,
-            parentInfo,
+            this.inlineParentInfo(parentInfo),
             this.broadcastMode ? true : undefined,
           );
+          await this.notifyCrossQueueParent(parentInfo);
 
           entry.job.returnvalue = result as R;
           entry.job.finishedOn = Date.now();
@@ -1132,11 +1135,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     let parentId = job.parentId;
     let parentQueue = job.parentQueue;
 
-    // Fast path: no parent fields at all - skip the Valkey round trip
-    if (!parentId && !parentQueue) return undefined;
-
-    // One field missing: re-fetch from hash to handle partial data
-    if ((!parentId || !parentQueue) && this.commandClient) {
+    // Always re-read: nested flows patch parentId after the child is already
+    // in a worker, so the in-memory snapshot can still be empty at complete.
+    if (this.commandClient) {
       const [refreshedParentId, refreshedParentQueue] = await this.commandClient.hmget(this.queueKeys.job(jobId), [
         'parentId',
         'parentQueue',
@@ -1151,6 +1152,25 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       parentId,
       parentKeys: buildKeys(parentQueue, this.opts.prefix),
     };
+  }
+
+  /** Same-slot parent keys can be inlined in complete FCALLs; other queues must be notified separately. */
+  protected inlineParentInfo(
+    parentInfo: { depsMember: string; parentId: string; parentKeys: QueueKeys } | undefined,
+  ): { depsMember: string; parentId: string; parentKeys: QueueKeys } | undefined {
+    if (!parentInfo) return undefined;
+    return parentInfo.parentKeys.stream === this.queueKeys.stream ? parentInfo : undefined;
+  }
+
+  protected async notifyCrossQueueParent(
+    parentInfo: { depsMember: string; parentId: string; parentKeys: QueueKeys } | undefined,
+  ): Promise<void> {
+    if (!parentInfo || !this.commandClient) return;
+    if (parentInfo.parentKeys.stream === this.queueKeys.stream) return;
+    await completeChild(this.commandClient, parentInfo.parentKeys, parentInfo.parentId, parentInfo.depsMember);
+    await this.commandClient.srem(this.queueKeys.xqPending, [
+      `${parentInfo.parentKeys.name}\t${parentInfo.parentId}\t${parentInfo.depsMember}`,
+    ]);
   }
 
   protected orderingMetaField(job: Job<D, R>): string | null {
@@ -1428,8 +1448,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           return;
         }
       }
-      // Fast path: skip async buildParentInfo when no parent fields present
-      const parentInfo = job.parentId || job.parentQueue ? await this.buildParentInfo(job, currentJobId) : undefined;
+      const parentInfo = await this.buildParentInfo(job, currentJobId);
 
       const now = Date.now();
       const fetchResult = await completeAndFetchNext(
@@ -1442,7 +1461,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.consumerGroup,
         this.consumerId,
         job.opts.removeOnComplete,
-        parentInfo,
+        this.inlineParentInfo(parentInfo),
         completionHints,
         this.broadcastMode ? true : undefined,
         job.processedOn,
@@ -1451,6 +1470,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.skipMetrics,
       );
 
+      await this.notifyCrossQueueParent(parentInfo);
       job.returnvalue = processResult;
       job.finishedOn = now;
       if (this.hasCompletedListeners) this.emit('completed', job, processResult);
