@@ -37,4 +37,39 @@ describe('Scheduler internals', () => {
     expect(exec).not.toHaveBeenCalled();
     expect(errors.map((err) => err.message)).toContain('Lost scheduler tick lock while processing schedulers');
   });
+
+  it('continues a full stalled reclaim page without overlapping recovery', async () => {
+    vi.useFakeTimers();
+    let resolveFirstReclaim!: (count: number) => void;
+    let reclaimCalls = 0;
+    const client = {
+      fcall: vi.fn((name: string) => {
+        if (name === 'glidemq_reclaimStalled') {
+          reclaimCalls++;
+          if (reclaimCalls === 1) return new Promise<number>((resolve) => (resolveFirstReclaim = resolve));
+          return Promise.resolve(0);
+        }
+        if (name === 'glidemq_nextDue') return Promise.resolve(-1);
+        return Promise.resolve(0);
+      }),
+    } as any;
+    const scheduler = new Scheduler(client, buildKeys('scheduler-stalled-continuation'), {
+      promotionInterval: 60_000,
+      stalledInterval: 60_000,
+    });
+
+    try {
+      scheduler.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(reclaimCalls).toBe(1);
+
+      resolveFirstReclaim(100);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reclaimCalls).toBe(2);
+    } finally {
+      scheduler.stop();
+      await scheduler.waitForIdle();
+      vi.useRealTimers();
+    }
+  });
 });
