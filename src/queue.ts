@@ -1693,35 +1693,22 @@ export class Queue<D = any, R = any> extends EventEmitter {
       this.keys.metricsCompleted,
       this.keys.metricsFailed,
       this.keys.lifo,
+      this.keys.priority,
+      this.keys.listActive,
+      this.keys.suspended,
+      this.keys.tpm,
     ];
     // Static keys include the stream, completed/failed ZSets, and several
     // hashes that can hold many entries on busy queues. UNLINK frees them
     // on a background thread instead of blocking the server thread.
     await client.unlink(staticKeys);
+    await client.srem(this.keys.usageQueues, [this.name]);
 
-    // Scan and delete job hashes and deps sets
-    // Use escaped prefix to prevent glob injection from queue names containing * ? [ ]
+    // Scan the complete hash-tagged queue namespace. This includes dynamic
+    // job, group, worker, lock, usage, budget, parent, signal, and stream keys.
+    // The escaped prefix prevents glob injection from queue names containing * ? [ ].
     const pfx = keyPrefixPattern(this.opts.prefix ?? 'glide', this.name);
-    const jobPattern = `${pfx}:job:*`;
-    const logPattern = `${pfx}:log:*`;
-    const depsPattern = `${pfx}:deps:*`;
-    const groupPattern = `${pfx}:group:*`;
-    const groupqPattern = `${pfx}:groupq:*`;
-    const orderPendingPattern = `${pfx}:orderdone:pending:*`;
-
-    const workerPattern = `${pfx}:w:*`;
-
-    for (const pattern of [
-      jobPattern,
-      logPattern,
-      depsPattern,
-      groupPattern,
-      groupqPattern,
-      orderPendingPattern,
-      workerPattern,
-    ]) {
-      await this.scanAndDelete(client, pattern);
-    }
+    await this.scanAndDelete(client, `${pfx}:*`);
   }
 
   /**
