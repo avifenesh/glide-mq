@@ -60,7 +60,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 112: ordered terminal paths resolve group-key ordering metadata before waking successors.
 // Version 113: ordered rate-limit returns track every retained slot; terminal paths release retained slots; oversized-head cleanup is iterative and bounded.
 // Version 114: ordered retry, delay, suspend, and waiting-children transitions mark their retained group slot.
-export const LIBRARY_VERSION = '114';
+// Version 115: token-bucket gate each ordered rate-limit returner before it resumes.
+export const LIBRARY_VERSION = '115';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';

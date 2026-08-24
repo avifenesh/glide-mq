@@ -2025,9 +2025,10 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
     local active = tonumber(prGrp.active) or 0
     -- Token bucket pre-check: peek head job cost before promoting
     local prTbCap = tonumber(prGrp.tbCapacity) or 0
+    local prTbTokens = 0
     local tbCheckPassed = true
     if prTbCap > 0 then
-      local prTbTokens = tbRefill(groupHashKey, prGrp, now)
+      prTbTokens = tbRefill(groupHashKey, prGrp, now)
       local headMembers = redis.call('ZRANGE', waitListKey, 0, 0)
       local headJobId = headMembers[1]
       if headJobId then
@@ -2098,13 +2099,45 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
           redis.call('ZREM', returningKey, returningJobId)
         end
       end
-      local returningCount = #readyReturners
+      local promotableReturners = {}
+      local returnerResumeAt = nil
+      for rri = 1, #readyReturners do
+        local returningJobId = readyReturners[rri]
+        local returningJobKey = prefix .. 'job:' .. returningJobId
+        local returningCost = tonumber(redis.call('HGET', returningJobKey, 'cost')) or 1000
+        if prTbCap > 0 and returningCost > prTbCap then
+          redis.call('ZREM', waitListKey, returningJobId)
+          redis.call('ZADD', prefix .. 'failed', now, returningJobId)
+          markOrderingDone(returningJobKey, returningJobId, gk, tonumber(redis.call('HGET', returningJobKey, 'orderingSeq')) or 0)
+          redis.call('HSET', returningJobKey,
+            'state', 'failed',
+            'failedReason', 'cost exceeds token bucket capacity',
+            'finishedOn', tostring(now))
+          emitEvent(prefix .. 'events', 'failed', returningJobId, {'failedReason', 'cost exceeds token bucket capacity'})
+          closeOrderingHoleAndPromote(returningJobKey, returningJobId, now)
+        elseif prTbCap > 0 and prTbTokens < returningCost then
+          local prTbRate = math.max(tonumber(prGrp.tbRefillRate) or 0, 1)
+          local resumeAt = now + math.ceil((returningCost - prTbTokens) * 1000 / prTbRate)
+          if not returnerResumeAt or resumeAt < returnerResumeAt then
+            returnerResumeAt = resumeAt
+          end
+        else
+          promotableReturners[#promotableReturners + 1] = returningJobId
+          if prTbCap > 0 then
+            prTbTokens = prTbTokens - returningCost
+          end
+        end
+      end
+      if returnerResumeAt then
+        redis.call('ZADD', rateLimitedKey, returnerResumeAt, gk)
+      end
+      local returningCount = #promotableReturners
       -- Returning jobs already hold their slots, so they can resume even when
       -- active equals maxConcurrency. Leave ordinary successors parked until
       -- those retained slots are released by a terminal transition.
       if returningCount > 0 then
         canPromote = math.min(1000, canPromote + returningCount)
-      elseif canPromote == 0 and prNextSeq > 0 then
+      elseif canPromote == 0 and prNextSeq > 0 and not returnerResumeAt then
         local waitMembers = redis.call('ZRANGE', waitListKey, 0, 127)
         for wmi = 1, #waitMembers do
           local waitJobId = waitMembers[wmi]
@@ -2122,7 +2155,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
       local prIter = 0
       local prMaxIter = canPromote + 20
       for rri = 1, returningCount do
-        local returningJobId = readyReturners[rri]
+        local returningJobId = promotableReturners[rri]
         local returningJobKey = prefix .. 'job:' .. returningJobId
         redis.call('ZREM', waitListKey, returningJobId)
         xaddJob(streamKey, returningJobId, redis.call('HGET', returningJobKey, 'name'))
@@ -2138,7 +2171,10 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
         if not nextJobId then break end
         local nextJobKey = prefix .. 'job:' .. nextJobId
         local nextState = redis.call('HGET', nextJobKey, 'state')
-        if nextState ~= 'group-waiting' then
+        if returnerResumeAt and redis.call('ZSCORE', returningKey, nextJobId) then
+          redis.call('ZADD', waitListKey, groupqScore(nextJobKey, nextJobId), nextJobId)
+          break
+        elseif nextState ~= 'group-waiting' then
           -- Stale: skip
         elseif checkExpired(nextJobKey, nextJobId, prefix, now) then
           -- Expired: skip
