@@ -435,6 +435,16 @@ export class Queue<D = any, R = any> extends EventEmitter {
     return jobIds;
   }
 
+  /** @internal Read waiting jobs in worker dispatch order across all backing structures. */
+  private async getWaitingJobIds(client: Client, limit: number): Promise<string[]> {
+    const priorityJobIds = await this.getWaitingListJobIds(client, this.keys.priority, limit);
+    const lifoLimit = limit < 0 ? -1 : Math.max(0, limit - priorityJobIds.length);
+    const lifoJobIds = await this.getWaitingListJobIds(client, this.keys.lifo, lifoLimit);
+    const fifoLimit = limit < 0 ? -1 : Math.max(0, lifoLimit - lifoJobIds.length);
+    const fifoJobIds = await this.getWaitingStreamJobIds(client, fifoLimit);
+    return priorityJobIds.concat(lifoJobIds, fifoJobIds);
+  }
+
   private suspendSweepLockKey(): string {
     return `${this.keys.suspended}:lock:__sweep__`;
   }
@@ -1862,12 +1872,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         // Workers dispatch priority, then LIFO, then FIFO jobs. Read each source
         // only through the requested inclusive end index before applying start.
         const limit = end >= 0 ? end + 1 : -1;
-        const priorityJobIds = await this.getWaitingListJobIds(client, this.keys.priority, limit);
-        const lifoLimit = limit < 0 ? -1 : Math.max(0, limit - priorityJobIds.length);
-        const lifoJobIds = await this.getWaitingListJobIds(client, this.keys.lifo, lifoLimit);
-        const fifoLimit = limit < 0 ? -1 : Math.max(0, lifoLimit - lifoJobIds.length);
-        const fifoJobIds = await this.getWaitingStreamJobIds(client, fifoLimit);
-        jobIds = priorityJobIds.concat(lifoJobIds, fifoJobIds).slice(start, end >= 0 ? end + 1 : undefined);
+        jobIds = (await this.getWaitingJobIds(client, limit)).slice(start, end >= 0 ? end + 1 : undefined);
         break;
       }
       case 'active': {
@@ -1936,21 +1941,22 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const client = await this.getClient();
     const limit = opts.limit ?? 100;
     const pfx = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+    const hasDataFilter = opts.data && Object.keys(opts.data).length > 0;
+    const filterWaitingInJs = opts.state === 'waiting' && (Boolean(opts.name) || hasDataFilter);
 
     let jobIds: string[];
 
-    if (opts.state && opts.name) {
+    if (opts.state && opts.name && opts.state !== 'waiting') {
       // Use Lua function for name-based filtering within a state
       jobIds = await this.searchByNameInState(client, opts.state, opts.name, limit, pfx);
     } else if (opts.state) {
       // Get all IDs from the state, will filter by data below
-      jobIds = await this.getJobIdsForState(client, opts.state, limit);
+      jobIds = await this.getJobIdsForState(client, opts.state, filterWaitingInJs ? -1 : limit);
     } else {
       // No state: SCAN all job hashes
       jobIds = await this.scanJobIds(client, pfx, opts.name, limit);
     }
 
-    const hasDataFilter = opts.data && Object.keys(opts.data).length > 0;
     const excludeData = opts.excludeData === true && !hasDataFilter;
     const jobs: Job<D, R>[] = [];
     const CHUNK = 100;
@@ -1974,7 +1980,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const job = Job.fromHash<D, R>(client, this.keys, chunk[i], hash, this.serializer, excludeData);
 
         // Apply name filter if we used a non-Lua path
-        if (opts.name && !opts.state && job.name !== opts.name) continue;
+        if (opts.name && (!opts.state || opts.state === 'waiting') && job.name !== opts.name) continue;
 
         // Apply data filter (shallow key-value match)
         if (opts.data && !matchesData(job.data as Record<string, unknown>, opts.data)) continue;
@@ -2012,14 +2018,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   ): Promise<string[]> {
     switch (state) {
       case 'waiting': {
-        const entries = await client.xrange(
-          this.keys.stream,
-          InfBoundary.NegativeInfinity,
-          InfBoundary.PositiveInfinity,
-          { count: limit },
-        );
-        if (!entries) return [];
-        return extractJobIdsFromStreamEntries(entries);
+        return this.getWaitingJobIds(client, limit);
       }
       case 'active': {
         try {
@@ -2046,7 +2045,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   /** @internal Use Lua searchByName within a specific state. */
   private async searchByNameInState(
     client: Client,
-    state: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed',
+    state: 'active' | 'delayed' | 'completed' | 'failed',
     name: string,
     limit: number,
     pfx: string,
@@ -2062,10 +2061,6 @@ export class Queue<D = any, R = any> extends EventEmitter {
         if (String(names?.[i]) === name) matched.push(allIds[i]);
       }
       return matched;
-    }
-
-    if (state === 'waiting') {
-      return searchByName(client, this.keys.stream, 'stream', name, limit, pfx + ':');
     }
 
     return searchByName(client, this.zsetKeyForState(state), 'zset', name, limit, pfx + ':');
