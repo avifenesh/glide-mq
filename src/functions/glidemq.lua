@@ -2678,7 +2678,9 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('LREM', prefix .. 'lifo', 0, jobId)
   redis.call('LREM', prefix .. 'priority', 0, jobId)
   markOrderingDone(jobKey, jobId)
-  if state == 'waiting' then
+  local jobLifo = redis.call('HGET', jobKey, 'lifo')
+  local jobPriority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
+  if state == 'waiting' and jobLifo ~= '1' and jobPriority <= 0 then
     local cursor = '-'
     local found = false
     while not found do

@@ -56,7 +56,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 93: glidemq_completeAndFetchNext always SMEMBERS the child parents SET. The previous hasParents gate sourced its truth from the worker's snapshot of the job hash, which is stale when DAG wiring (hset parentIds + registerParent) lands between the worker's job fetch and the completion FCALL. The SMEMBERS cost on an empty set is negligible; the dropped optimization was unsound (#246).
 // Version 108: revoke/remove delete list-backed waiting entries so getJobs pagination cannot expose or count stale jobs.
 // Version 110: derive list keys in remove/revoke and remove waiting FIFO stream entries.
-export const LIBRARY_VERSION = '110';
+// Version 111: skip the FIFO stream scan when removing list-backed waiting jobs.
+export const LIBRARY_VERSION = '111';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
