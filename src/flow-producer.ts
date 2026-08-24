@@ -328,6 +328,9 @@ export class FlowProducer {
     if (ids[0] === 'ERR:ID_EXHAUSTED') {
       throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
     }
+    if (ids[0] === 'ERR:COST_EXCEEDS_CAPACITY') {
+      throw new Error('Job cost exceeds token bucket capacity');
+    }
     const parentId = ids[0];
 
     // Set parentId and parentQueue on pre-existing sub-flow children
