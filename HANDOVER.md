@@ -3,7 +3,7 @@
 ## Current State
 
 - **Branch**: `fix/atomic-list-pop`, based directly on `upstream/main`.
-- **Version**: package `0.15.4`; this branch bumps the server-function library identity to `94`.
+- **Version**: package `0.15.4`; this branch bumps the server-function library identity to `98`.
 - **Validation**: regression coverage is green on standalone Valkey; full validation is pending.
 - **Review gate**: automatic Claude review is retired; the Revuto GitHub App check reviews pull requests.
 - **Dependency security**: the lockfile carries protobufjs 7.6.5, brace-expansion 5.0.9, PostCSS 8.5.25, and body-parser 2.3.0.
@@ -17,7 +17,7 @@
 - **0.15.2** (#212, #213, #216-219): priority/LIFO in batch-mode workers, `list-active` underflow guards (12 sites through one `decrListActive` helper), priority/LIFO active visibility via `glidemq_getActiveListJobIds`, lockDuration-aware stall reclaim (`stalledInterval` no longer conflated with threshold). `LIBRARY_VERSION` 84. **Behavior change**: workers that relied on short `stalledInterval` without setting `lockDuration` now see slower stall recovery; set `lockDuration` explicitly to match if needed.
 - **0.15.3** (#222-#246): DAG dependency direction/tree rendering/multi-dependent leaf fixes, `addDAG` level batching, stalled-job redispatch semantics, large-key `UNLINK` cleanup, bounded ordering skip-marker advancement, serverless credential cache scoping, flow ID-collision guards, proxy strict opts validation, long-running job heartbeats, broadcast retry isolation, queue client single-flight, and dependency CVE fixes. `LIBRARY_VERSION` 93.
 - **0.15.4**: interval scheduler anchoring prevents late worker ticks from accumulating drift, `npm test` now runs the intended non-fuzzer suite, and CI/local compose coverage use stable Valkey 9.1.0 images.
-- **Unreleased**: list-backed workers now reserve `list-active` in the same FCALL as priority/LIFO popping, closing the crash window between removing a job from its list and incrementing the active counter. `LIBRARY_VERSION` 95 follows stalled-cursor 94.
+- **Unreleased**: list-backed workers now reserve `list-active` in `glidemq_popListsReserve`; legacy `glidemq_popLists` remains non-reserving and new workers fall back to it plus typed `INCRBY` during rolling upgrades. `LIBRARY_VERSION` 98 follows stalled-cursor 94.
 
 ### 0.15.4 Release Notes
 
