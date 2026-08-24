@@ -84,6 +84,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     unlink: vi.fn(),
     scan: vi.fn().mockResolvedValue(['0', []]),
     smembers: vi.fn().mockResolvedValue(new Set()),
+    srem: vi.fn(),
     hmget: vi.fn().mockResolvedValue([null, null]),
     close: vi.fn(),
     ...overrides,
@@ -237,21 +238,59 @@ describe('Queue.obliterate', () => {
   });
 
   it('scans and deletes job hashes and deps sets', async () => {
-    // First scan call (job pattern): returns keys, then empty
-    // Second scan call (deps pattern): returns keys, then empty
-    mockClient.scan
-      .mockResolvedValueOnce(['123', ['glide:{obliterate-test}:job:1', 'glide:{obliterate-test}:job:2']])
-      .mockResolvedValueOnce(['0', []])
-      .mockResolvedValueOnce(['456', ['glide:{obliterate-test}:deps:1']])
-      .mockResolvedValueOnce(['0', []]);
+    mockClient.scan.mockResolvedValueOnce([
+      '0',
+      ['glide:{obliterate-test}:job:1', 'glide:{obliterate-test}:job:2', 'glide:{obliterate-test}:deps:1'],
+    ]);
 
     const queue = new Queue('obliterate-test', connOpts);
     await queue.obliterate({ force: true });
 
-    // unlink called: once for static keys, once for job batch, once for deps batch
-    expect(mockClient.unlink).toHaveBeenCalledTimes(3);
-    expect(mockClient.unlink).toHaveBeenCalledWith(['glide:{obliterate-test}:job:1', 'glide:{obliterate-test}:job:2']);
-    expect(mockClient.unlink).toHaveBeenCalledWith(['glide:{obliterate-test}:deps:1']);
+    expect(mockClient.unlink).toHaveBeenCalledTimes(2);
+    expect(mockClient.unlink).toHaveBeenCalledWith([
+      'glide:{obliterate-test}:job:1',
+      'glide:{obliterate-test}:job:2',
+      'glide:{obliterate-test}:deps:1',
+    ]);
+
+    await queue.close();
+  });
+
+  it('deletes the full queue namespace and removes its usage registry entry', async () => {
+    const namespaceKeys = [
+      'glide:{obliterate-test}:job:1',
+      'glide:{obliterate-test}:job:1:usage-lock',
+      'glide:{obliterate-test}:job:1:sub:subscriber',
+      'glide:{obliterate-test}:log:1',
+      'glide:{obliterate-test}:deps:1',
+      'glide:{obliterate-test}:parents:1',
+      'glide:{obliterate-test}:jstream:1',
+      'glide:{obliterate-test}:signals:1',
+      'glide:{obliterate-test}:group:group-a',
+      'glide:{obliterate-test}:groupq:group-a',
+      'glide:{obliterate-test}:orderdone:pending:group-a',
+      'glide:{obliterate-test}:w:worker-a',
+      'glide:{obliterate-test}:budget:flow-a',
+      'glide:{obliterate-test}:usage:60000',
+      'glide:{obliterate-test}:schedulers:lock:__tick__',
+      'glide:{obliterate-test}:suspended:lock:__sweep__',
+    ];
+    mockClient.scan.mockResolvedValueOnce(['0', namespaceKeys]);
+
+    const queue = new Queue('obliterate-test', connOpts);
+    await queue.obliterate({ force: true });
+
+    expect(mockClient.unlink).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        'glide:{obliterate-test}:priority',
+        'glide:{obliterate-test}:list-active',
+        'glide:{obliterate-test}:suspended',
+        'glide:{obliterate-test}:tpm',
+      ]),
+    );
+    expect(mockClient.scan).toHaveBeenCalledWith('0', { match: 'glide:{obliterate-test}:*', count: 100 });
+    expect(mockClient.unlink).toHaveBeenCalledWith(namespaceKeys);
+    expect(mockClient.srem).toHaveBeenCalledWith('glide:usage:queues', ['obliterate-test']);
 
     await queue.close();
   });

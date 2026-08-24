@@ -908,6 +908,42 @@ describeEachMode('Operational patterns', (CONNECTION) => {
     await queue.close();
   }, 10000);
 
+  it('Queue.obliterate removes every dynamic queue key family', async () => {
+    const Q = uniqueQueue('op-obliterate-namespace');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const k = buildKeys(Q);
+    const prefix = k.id.slice(0, -2);
+    const namespaceKeys = [
+      k.job('orphan'),
+      `${k.job('orphan')}:usage-lock`,
+      `${k.job('orphan')}:sub:subscriber`,
+      k.log('orphan'),
+      k.deps('orphan'),
+      k.parents('orphan'),
+      k.jstream('orphan'),
+      k.signals('orphan'),
+      k.group('group-a'),
+      k.groupq('group-a'),
+      `${prefix}orderdone:pending:group-a`,
+      k.worker('worker-a'),
+      k.budget('flow-a'),
+      k.usageBucket(60_000),
+      `${k.schedulers}:lock:__tick__`,
+      `${k.suspended}:lock:__sweep__`,
+    ];
+
+    await Promise.all(namespaceKeys.map((key) => cleanupClient.hset(key, { marker: '1' })));
+    await cleanupClient.sadd(k.usageQueues, [Q]);
+
+    await queue.obliterate({ force: true });
+
+    const exists = await Promise.all(namespaceKeys.map((key) => cleanupClient.exists([key])));
+    expect(exists.every((count) => Number(count) === 0)).toBe(true);
+    expect([...(await cleanupClient.smembers(k.usageQueues))].map(String)).not.toContain(Q);
+
+    await queue.close();
+  }, 10000);
+
   it('failed job can be retried via job.retry() and succeeds', async () => {
     const Q = uniqueQueue('op-retry-failed');
     const queue = new Queue(Q, { connection: CONNECTION });
