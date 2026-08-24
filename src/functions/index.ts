@@ -56,8 +56,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 93: glidemq_completeAndFetchNext always SMEMBERS the child parents SET. The previous hasParents gate sourced its truth from the worker's snapshot of the job hash, which is stale when DAG wiring (hset parentIds + registerParent) lands between the worker's job fetch and the completion FCALL. The SMEMBERS cost on an empty set is negligible; the dropped optimization was unsound (#246).
 // Version 99: closeOrderingHole wakes parked groupq successors after debounce/remove/TTL of an unrun seq; rateLimitGroup keeps the ordered slot on requeue; CAF priority path applies token-bucket and rate-limit gates.
 // Version 100: rateLimitGroup fail pauses before promote; promoteRateLimited finds returning ordered jobs requeued at the back; CAF oversized priority jobs close the ordering hole and count as failed.
-// Version 101: enqueue validates token-bucket cost before allocating IDs or ordering sequences; revoke closes pre-activation ordering holes.
-export const LIBRARY_VERSION = '101';
+// Version 107: ordered rate-limit returns use an explicit marker so retained-slot jobs are promoted beyond bounded scans; oversized token failures advance ordering state.
+export const LIBRARY_VERSION = '107';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
