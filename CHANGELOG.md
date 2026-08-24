@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - `getJobs('waiting')` now follows worker dispatch order across priority, LIFO, and FIFO sources, excludes pending stream entries, and does not expose revoked or removed list jobs.
+- `Job.remove()` skips the FIFO stream scan for waiting LIFO and priority jobs, avoiding an unnecessary O(stream-length) operation.
 
 ---
 
