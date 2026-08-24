@@ -10,6 +10,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { BaseWorker } = require('../dist/base-worker') as typeof import('../src/base-worker');
+const { BatchError, UnrecoverableError } = require('../dist/errors') as typeof import('../src/errors');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
@@ -108,6 +109,43 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
         },
       };
       expect(await worker.isJobRevoked('1')).toBe(false);
+    });
+
+    it('classifies revoked partial-batch failures and completions as terminal', async () => {
+      const failures: Error[] = [];
+      const worker = Object.create(BaseWorker.prototype) as any;
+      worker.commandClient = {
+        fcall: async () => 'REVOKED',
+      };
+      worker.batchProcessor = async () => {
+        throw new BatchError([new Error('processor failure'), 'completed result']);
+      };
+      worker.activeAbortControllers = new Map();
+      worker.opts = {};
+      worker.hasActiveListeners = false;
+      worker.hasCompletedListeners = false;
+      worker.globalRateLimitEnabled = false;
+      worker.stopHeartbeat = () => {};
+      worker.isJobRevoked = async (jobId: string) => jobId === 'revoked-error';
+      worker.handleJobFailure = async (_job: unknown, _jobId: string, _entryId: string, error: Error) => {
+        failures.push(error);
+      };
+      worker.serializer = { serialize: (value: unknown) => JSON.stringify(value) };
+      worker.queueKeys = buildKeys(uniqueQueue('revoke-partial-batch'));
+      worker.consumerGroup = 'workers';
+      worker.broadcastMode = false;
+      worker.buildParentInfo = async () => undefined;
+
+      const makeEntry = (jobId: string) => ({
+        jobId,
+        entryId: `${jobId}-0`,
+        job: { opts: {} },
+      });
+      await worker.processBatch([makeEntry('revoked-error'), makeEntry('revoked-completion')]);
+
+      expect(failures).toHaveLength(2);
+      expect(failures.every((error) => error instanceof UnrecoverableError)).toBe(true);
+      expect(failures.map((error) => error.message)).toEqual(['revoked', 'revoked']);
     });
 
     it('revoke waiting job - moved to failed with revoked reason', async () => {
