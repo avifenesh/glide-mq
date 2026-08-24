@@ -268,9 +268,12 @@ export class Scheduler {
     const members = await this.client.smembers(this.queueKeys.xqPending);
     if (!members || members.size === 0) return;
 
-    const idKey = this.queueKeys.id;
-    const brace = idKey.indexOf(':{');
-    const prefix = brace >= 0 ? idKey.slice(0, brace) : 'glide';
+    const suffix = `:{${this.queueKeys.name}}:id`;
+    if (!this.queueKeys.id.endsWith(suffix)) {
+      this.reportError(new Error(`Invalid queue id key for cross-queue parent notifications: ${this.queueKeys.id}`));
+      return;
+    }
+    const prefix = this.queueKeys.id.slice(0, -suffix.length);
     for (const raw of members) {
       const member = String(raw);
       let parts: string[] | undefined;
@@ -287,8 +290,12 @@ export class Scheduler {
       if (!parts) continue;
       const [parentQueue, parentId, depsMember] = parts;
       try {
-        await completeChild(this.client, buildKeys(parentQueue, prefix), parentId, depsMember);
-        await this.client.srem(this.queueKeys.xqPending, [member]);
+        const remaining = await completeChild(this.client, buildKeys(parentQueue, prefix), parentId, depsMember);
+        // -1 confirms that the parent was deleted, so this is a stale notification.
+        // Non-negative values are the parent's remaining dependency count.
+        if (Number.isInteger(remaining) && remaining >= -1) {
+          await this.client.srem(this.queueKeys.xqPending, [member]);
+        }
       } catch (err) {
         this.reportError(err);
       }
