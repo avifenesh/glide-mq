@@ -12,7 +12,7 @@ const { FlowProducer } = require('../dist/flow-producer') as typeof import('../s
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 const { promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
   let cleanupClient: any;
@@ -121,6 +121,7 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
     });
 
     await done;
+    await waitFor(() => abortSeen, 1000, 10);
     expect(abortSeen).toBe(true);
     expect(ranToEnd).toBe(false);
     await queue.close();
