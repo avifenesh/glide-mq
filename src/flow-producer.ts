@@ -771,8 +771,7 @@ export class FlowProducer {
             if (shouldRegister) {
               if ((await client.exists([queueKeys.job(jid)])) === 0) {
                 const depsMember = `${queuePrefix}:${jid}`;
-                for (let p = 0; p < myDependents.length; p++) {
-                  const depName = myDependents[p];
+                for (const depName of myDependents) {
                   const parentJob = result.get(depName)!;
                   const parentNode = nodeByName.get(depName)!;
                   await client.sadd(buildKeys(parentNode.queueName, prefix).deps(parentJob.id), [depsMember]);
@@ -797,8 +796,7 @@ export class FlowProducer {
               phaseBSlots.push({ kind: 'hset', node: node.name });
               phaseBChildren.push({ node: node.name, jid });
 
-              for (let p = 0; p < myDependents.length; p++) {
-                const depName = myDependents[p];
+              for (const depName of myDependents) {
                 const parentJob = result.get(depName)!;
                 const parentNode = nodeByName.get(depName)!;
                 const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
