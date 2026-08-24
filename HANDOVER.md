@@ -2,6 +2,7 @@
 
 ## Current State
 
+- **In flight**: `fix/revoke-timeout` rebased on upstream `main`. Lua remains sourced from `src/functions/glidemq.lua`; version `96` rejects revoked completion. Batch abort controllers are per job, while a batch timeout aborts all signals and remains retryable.
 - **Branch**: `ci/lua-coverage`, top of the coverage stack.
 - **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
 - **CI**: green across all six fork/upstream stack PRs after the 2026-08-22 packaging update.
