@@ -21,7 +21,7 @@
 
 ### In flight (fork)
 
-- **Nested/cross-queue parents**: test-first regression `211d3b7`; implementation `fec97d1`. Lua source is `src/functions/glidemq.lua`; cross-slot parent notifications are retried by the child queue scheduler.
+- **Nested/cross-queue parents**: test-first regression `211d3b7`; implementation `fec97d1` + `bb6e9b7`. Lua source is `src/functions/glidemq.lua`; cross-slot parent notifications are retried by the child queue scheduler.
 
 ### 0.15.4 Release Notes
 
