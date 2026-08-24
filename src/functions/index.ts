@@ -57,7 +57,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 99: closeOrderingHole wakes parked groupq successors after debounce/remove/TTL of an unrun seq; rateLimitGroup keeps the ordered slot on requeue; CAF priority path applies token-bucket and rate-limit gates.
 // Version 100: rateLimitGroup fail pauses before promote; promoteRateLimited finds returning ordered jobs requeued at the back; CAF oversized priority jobs close the ordering hole and count as failed.
 // Version 107: ordered rate-limit returns use an explicit marker so retained-slot jobs are promoted beyond bounded scans; oversized token failures advance ordering state.
-export const LIBRARY_VERSION = '107';
+// Version 112: ordered terminal paths resolve group-key ordering metadata before waking successors.
+export const LIBRARY_VERSION = '112';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';

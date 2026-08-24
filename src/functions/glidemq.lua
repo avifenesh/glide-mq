@@ -31,6 +31,9 @@ local function markOrderingDone(jobKey, jobId, hintOrderingKey, hintOrderingSeq)
     orderingKey = redis.call('HGET', jobKey, 'orderingKey')
   end
   if not orderingKey or orderingKey == '' then
+    orderingKey = redis.call('HGET', jobKey, 'groupKey')
+  end
+  if not orderingKey or orderingKey == '' then
     return
   end
   local orderingSeq = nil
@@ -151,6 +154,7 @@ local function groupqScore(jobKey, jobId)
   return 0
 end
 
+local closeOrderingHole
 
 local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey, keepSlot)
   local gk = hintGroupKey
@@ -230,6 +234,7 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey, keep
             'finishedOn', tostring(ts))
           emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
           recordMetrics(metricsKey, ts, ts - processedOn)
+          closeOrderingHole(headJobKey, headJobId, ts)
         elseif tbTokensCur < headCost then
           -- Not enough tokens: register delay and skip promotion
           local tbRateVal = tonumber(g.tbRefillRate) or 0
@@ -299,7 +304,7 @@ end
 
 -- Record a skip marker for an ordered job that will never run, advance nextSeq,
 -- and wake groupq successors without decrementing the group's active slot.
-local function closeOrderingHole(jobKey, jobId, now)
+closeOrderingHole = function(jobKey, jobId, now)
   local gk = redis.call('HGET', jobKey, 'groupKey')
   local orderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
   if not gk or gk == '' or orderingSeq <= 0 then return end
@@ -1356,6 +1361,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
           'finishedOn', tostring(timestamp))
         if skipEvents ~= '1' then emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
         if skipMetrics ~= '1' then recordMetrics(metricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn) end
+        closeOrderingHole(nextJobKey, nextJobId, tonumber(timestamp))
         return {'NEXT_NONE', jobId}
       end
       if nextTbTokens < nextJobCostVal then
@@ -2013,6 +2019,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
               'failedReason', 'cost exceeds token bucket capacity',
               'finishedOn', tostring(now))
             emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
+            closeOrderingHole(headJobKey, headJobId, now)
             tbCheckPassed = false
           end
           if tbCheckPassed and prTbTokens < headCost then
@@ -2303,6 +2310,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
           'failedReason', 'cost exceeds token bucket capacity',
           'finishedOn', timestampStr)
         emitEvent(prefix .. 'events', 'failed', jobId, {'failedReason', 'cost exceeds token bucket capacity'})
+        closeOrderingHole(jobKey, jobId, ts)
         return 'ERR:COST_EXCEEDS_CAPACITY'
       end
       if tbTokens < jobCostVal then
@@ -2857,6 +2865,7 @@ redis.register_function('glidemq_revoke', function(keys, args)
       local waitListKey = prefix .. 'groupq:' .. gk
       redis.call('ZREM', waitListKey, jobId)
     end
+    markOrderingDone(jobKey, jobId)
     closeOrderingHole(jobKey, jobId, timestamp)
     redis.call('ZADD', failedKey, timestamp, jobId)
     redis.call('HSET', jobKey,
