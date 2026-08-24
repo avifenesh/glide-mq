@@ -293,7 +293,23 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     await this.refreshMetaFlags();
 
     // Start the internal scheduler for delayed promotion + stalled recovery
-    this.scheduler = new Scheduler(this.commandClient, this.queueKeys, {
+    this.scheduler = this.createScheduler(this.commandClient);
+    this.scheduler.start();
+
+    // Register this worker and start periodic heartbeat
+    await this.registerWorker();
+    const heartbeatMs = Math.max(1000, Math.floor(this.stalledInterval / 2));
+    this.workerHeartbeatTimer = setInterval(() => {
+      void this.registerWorker();
+    }, heartbeatMs);
+
+    this.running = true;
+    this.pollLoopPromise = this.pollLoop();
+  }
+
+  /** Build the scheduler with the same worker settings for init and reconnect. */
+  private createScheduler(client: Client): Scheduler {
+    return new Scheduler(client, this.queueKeys, {
       promotionInterval: this.opts.promotionInterval,
       stalledInterval: this.stalledInterval,
       lockDuration: this.lockDuration,
@@ -309,17 +325,6 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       },
       serializer: this.serializer,
     });
-    this.scheduler.start();
-
-    // Register this worker and start periodic heartbeat
-    await this.registerWorker();
-    const heartbeatMs = Math.max(1000, Math.floor(this.stalledInterval / 2));
-    this.workerHeartbeatTimer = setInterval(() => {
-      void this.registerWorker();
-    }, heartbeatMs);
-
-    this.running = true;
-    this.pollLoopPromise = this.pollLoop();
   }
 
   /**
@@ -413,21 +418,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         if (this.scheduler) {
           this.scheduler.stop();
         }
-        this.scheduler = new Scheduler(this.commandClient!, this.queueKeys, {
-          promotionInterval: this.opts.promotionInterval,
-          stalledInterval: this.stalledInterval,
-          maxStalledCount: this.maxStalledCount,
-          consumerId: this.consumerId,
-          consumerGroup: this.consumerGroup,
-          broadcastMode: this.broadcastMode,
-          onPromotionTick: () => this.refreshMetaFlags(),
-          onError: (err) => {
-            if (!this.closing) {
-              this.emit('error', err);
-            }
-          },
-          serializer: this.serializer,
-        });
+        this.scheduler = this.createScheduler(this.commandClient!);
         this.scheduler.start();
 
         // Re-register worker and restart heartbeat timer after reconnect
