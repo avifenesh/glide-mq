@@ -3,7 +3,7 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { readFileSync } from 'node:fs';
-import { it, expect, beforeAll, afterAll, describe } from 'vitest';
+import { it, expect, beforeAll, afterAll, describe, vi } from 'vitest';
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -23,6 +23,43 @@ describe('DAG wiring source invariants', () => {
     const start = source.indexOf("redis.register_function('glidemq_completeChild'");
     const end = source.indexOf("redis.register_function('glidemq_registerParent'", start);
     expect(source.slice(start, end)).toMatch(/redis\.call\('EXISTS', parentJobKey\) == 0/);
+  });
+});
+
+describe('Scheduler cross-queue notification parsing', () => {
+  it('handles JSON, legacy, malformed, stale, and failed notifications', async () => {
+    const jsonMember = JSON.stringify(['parent', 'p1', 'glide:{child}:c1']);
+    const legacyMember = 'parent\tp2\tglide:{child}:c2';
+    const malformedMember = '{"not":"a notification"}';
+    const failedMember = JSON.stringify(['parent', 'p3', 'glide:{child}:c3']);
+    const errors: Error[] = [];
+    const client = {
+      smembers: vi.fn().mockResolvedValue(new Set([jsonMember, legacyMember, malformedMember, failedMember])),
+      fcall: vi.fn(async (_name: string, _keys: string[], args: string[]) => {
+        if (args[1] === 'p2') return -1;
+        if (args[1] === 'p3') throw new Error('temporary connection failure');
+        return 0;
+      }),
+      srem: vi.fn().mockResolvedValue(1),
+    } as any;
+
+    await new Scheduler(client, buildKeys('child'), {
+      onError: (err: Error) => errors.push(err),
+    }).flushCrossQueueParentNotifies();
+
+    expect(client.fcall).toHaveBeenCalledTimes(3);
+    expect(client.srem).toHaveBeenCalledTimes(2);
+    expect(errors.map((error) => error.message)).toEqual(['temporary connection failure']);
+  });
+
+  it('reports malformed queue key metadata without attempting completion', async () => {
+    const client = { smembers: vi.fn().mockResolvedValue(new Set(['ignored'])) } as any;
+    const errors: Error[] = [];
+    const keys = { ...buildKeys('child'), id: 'glide:child:id' };
+
+    await new Scheduler(client, keys, { onError: (err: Error) => errors.push(err) }).flushCrossQueueParentNotifies();
+
+    expect(errors[0]?.message).toMatch(/Invalid queue id key/);
   });
 });
 
@@ -431,13 +468,7 @@ describeEachMode('FlowProducer', (CONNECTION) => {
   it('reconciles a child deleted between the existence check and parent wiring', async () => {
     const queueName = Q + '-toctou';
     const flow = new FlowProducer({ connection: CONNECTION });
-    const worker = new Worker(queueName, async () => ({ ok: true }), {
-      connection: CONNECTION,
-      blockTimeout: 200,
-      stalledInterval: 60000,
-    });
-    worker.on('error', () => {});
-    await worker.waitUntilReady();
+    let worker: any;
 
     const client = await (flow as any).getClient();
     const originalExists = client.exists.bind(client);
@@ -472,13 +503,21 @@ describeEachMode('FlowProducer', (CONNECTION) => {
       const keys = buildKeys(queueName);
       expect(await cleanupClient.exists([keys.job(nestedId)])).toBe(0);
       expect(await cleanupClient.exists([keys.parents(nestedId)])).toBe(0);
+      worker = new Worker(queueName, async () => ({ ok: true }), {
+        connection: CONNECTION,
+        blockTimeout: 200,
+        stalledInterval: 60000,
+        promotionInterval: 100,
+      });
+      worker.on('error', () => {});
+      await worker.waitUntilReady();
       await waitFor(
         async () => String(await cleanupClient.hget(keys.job(node.job.id), 'state')) === 'completed',
         10000,
       );
     } finally {
       client.exists = originalExists;
-      await worker.close(true);
+      if (worker) await worker.close(true);
       await flow.close();
       await flushQueue(cleanupClient, queueName);
     }
