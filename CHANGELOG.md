@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- **Stalled recovery cursor**: `glidemq_reclaimStalled` now persists a per-consumer-group `XAUTOCLAIM` cursor in queue metadata and bounds each reclaim batch, preventing every scheduler tick from restarting at `0-0` and repeatedly rescanning the same PEL entries.
+- **Stalled recovery cursor**: `glidemq_reclaimStalled` now persists a per-consumer-group `XAUTOCLAIM` cursor in queue metadata and bounds each reclaim batch. Schedulers follow full pages with a guarded yielding continuation instead of waiting another stalled interval.
 
 ---
 

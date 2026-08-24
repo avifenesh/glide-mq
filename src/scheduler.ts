@@ -20,6 +20,8 @@ import type { buildKeys } from './utils';
 import { computeFollowingSchedulerNextRun, isValidSchedulerEvery, MAX_JOB_DATA_SIZE } from './utils';
 import { isClusterClient } from './connection';
 
+const STALLED_RECLAIM_BATCH_SIZE = 100;
+
 export interface SchedulerOptions {
   promotionInterval?: number;
   stalledInterval?: number;
@@ -64,9 +66,11 @@ export class Scheduler {
   private promotionWakeTimer: ReturnType<typeof setTimeout> | null = null;
   private nextPromotionWakeAt = 0;
   private stalledTimer: ReturnType<typeof setInterval> | null = null;
+  private stalledRecoveryContinuationTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private promotionInFlight = false;
   private promotionQueued = false;
+  private stalledRecoveryInFlight = false;
   private pendingRuns = new Set<Promise<unknown>>();
   private tickCount = 0;
 
@@ -121,6 +125,10 @@ export class Scheduler {
     if (this.stalledTimer) {
       clearInterval(this.stalledTimer);
       this.stalledTimer = null;
+    }
+    if (this.stalledRecoveryContinuationTimer) {
+      clearTimeout(this.stalledRecoveryContinuationTimer);
+      this.stalledRecoveryContinuationTimer = null;
     }
   }
 
@@ -219,13 +227,35 @@ export class Scheduler {
   }
 
   private runStalledRecovery(): void {
+    if (!this.running || this.stalledRecoveryInFlight || this.stalledRecoveryContinuationTimer) return;
+
+    this.stalledRecoveryInFlight = true;
+    let continueRecovery = false;
     this.trackRun(
-      Promise.all([this.reclaimStalledJobs(), this.reclaimStalledListJobs(), this.sweepExpiredSuspended()]).catch(
-        (err) => {
+      Promise.all([this.reclaimStalledJobs(), this.reclaimStalledListJobs(), this.sweepExpiredSuspended()])
+        .then(([reclaimed]) => {
+          continueRecovery = reclaimed === STALLED_RECLAIM_BATCH_SIZE;
+        })
+        .catch((err) => {
           this.reportError(err);
-        },
-      ),
+        })
+        .finally(() => {
+          this.stalledRecoveryInFlight = false;
+          if (this.running && continueRecovery) this.scheduleStalledRecoveryContinuation();
+        }),
     );
+  }
+
+  private scheduleStalledRecoveryContinuation(): void {
+    if (this.stalledRecoveryContinuationTimer) return;
+
+    // One bounded XAUTOCLAIM page is processed per timer turn. Yielding here
+    // lets I/O and job processing run between pages while avoiding an interval
+    // of stalledInterval between full PEL pages.
+    this.stalledRecoveryContinuationTimer = setTimeout(() => {
+      this.stalledRecoveryContinuationTimer = null;
+      this.runStalledRecovery();
+    }, 0);
   }
 
   /**
