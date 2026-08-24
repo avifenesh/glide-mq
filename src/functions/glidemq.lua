@@ -2593,6 +2593,10 @@ redis.register_function('glidemq_completeChild', function(keys, args)
   local parentEventsKey = keys[4]
   local depsMember = args[1]
   local parentId = args[2]
+  -- A stale cross-queue notification must not recreate a deleted parent hash.
+  if redis.call('EXISTS', parentJobKey) == 0 then
+    return -1
+  end
   local depMarker = 'depdone:' .. depsMember
   if redis.call('HSETNX', parentJobKey, depMarker, '1') == 0 then
     local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
