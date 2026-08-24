@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GlideClient } from '@glidemq/speedkey';
+import { GlideClient, RequestError } from '@glidemq/speedkey';
 import { Queue } from '../src/queue';
 import { Worker } from '../src/worker';
 import { Job } from '../src/job';
@@ -47,6 +47,12 @@ vi.mock('@glidemq/speedkey', () => {
       return '0';
     }
   }
+  class MockRequestError extends Error {
+    constructor(message?: string) {
+      super(message);
+      this.name = 'RequestError';
+    }
+  }
   return {
     GlideClient: MockGlideClient,
     GlideClusterClient: MockGlideClusterClient,
@@ -57,6 +63,7 @@ vi.mock('@glidemq/speedkey', () => {
     Batch: MockBatch,
     ClusterBatch: MockBatch,
     ClusterScanCursor: MockClusterScanCursor,
+    RequestError: MockRequestError,
   };
 });
 
@@ -80,6 +87,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     zadd: vi.fn(),
     zcard: vi.fn().mockResolvedValue(0),
     zrange: vi.fn().mockResolvedValue([]),
+    lrange: vi.fn().mockResolvedValue([]),
     del: vi.fn(),
     unlink: vi.fn(),
     scan: vi.fn().mockResolvedValue(['0', []]),
@@ -322,6 +330,63 @@ describe('Queue.getJobs', () => {
     expect(jobs).toHaveLength(2);
     expect(jobs[0].id).toBe('1');
     expect(jobs[1].id).toBe('2');
+
+    await queue.close();
+  });
+
+  it('returns waiting jobs from every dispatch source and skips pending stream entries', async () => {
+    const hashes: Record<string, { field: string; value: string }[]> = {};
+    for (const id of ['prio-1', 'prio-2', 'lifo-2', 'lifo-1', 'fifo-1']) {
+      hashes[`glide:{getjobs-test}:job:${id}`] = [
+        { field: 'id', value: id },
+        { field: 'name', value: id },
+        { field: 'data', value: '{}' },
+        { field: 'opts', value: '{}' },
+        { field: 'state', value: 'waiting' },
+      ];
+    }
+    mockClient.hgetall.mockImplementation(async (key: string) => hashes[key] ?? []);
+    mockClient.lrange.mockImplementation(async (key: string) => {
+      if (key.endsWith(':priority')) return ['prio-2', 'prio-1'];
+      if (key.endsWith(':lifo')) return ['lifo-1', 'lifo-2'];
+      return [];
+    });
+    mockClient.xrange
+      .mockResolvedValueOnce({ '1-0': [['jobId', 'active-fifo']] })
+      .mockResolvedValueOnce({ '2-0': [['jobId', 'fifo-1']] });
+    mockClient.xpendingWithOptions.mockResolvedValueOnce([['1-0', 'consumer', 0, 1]]).mockResolvedValueOnce([]);
+
+    const queue = new Queue('getjobs-test', connOpts);
+    const jobs = await queue.getJobs('waiting', 1, 4);
+
+    expect(jobs.map((job) => job.id)).toEqual(['prio-2', 'lifo-2', 'lifo-1', 'fifo-1']);
+    expect(mockClient.lrange).toHaveBeenCalledWith('glide:{getjobs-test}:priority', -5, -1);
+    expect(mockClient.lrange).toHaveBeenCalledWith('glide:{getjobs-test}:lifo', -3, -1);
+    expect(mockClient.xrange).toHaveBeenNthCalledWith(
+      1,
+      'glide:{getjobs-test}:stream',
+      '-',
+      '+',
+      { count: 1 },
+    );
+    expect(mockClient.xrange).toHaveBeenNthCalledWith(
+      2,
+      'glide:{getjobs-test}:stream',
+      { value: '1-0', isInclusive: false },
+      '+',
+      { count: 1 },
+    );
+
+    await queue.close();
+  });
+
+  it('propagates non-NOGROUP errors while checking pending waiting jobs', async () => {
+    mockClient.xrange.mockResolvedValue({ '1-0': [['jobId', 'fifo-1']] });
+    mockClient.xpendingWithOptions.mockRejectedValue(new RequestError('ERR ACL user lacks XPENDING permission'));
+
+    const queue = new Queue('getjobs-test', connOpts);
+
+    await expect(queue.getJobs('waiting')).rejects.toThrow('ERR ACL user lacks XPENDING permission');
 
     await queue.close();
   });
