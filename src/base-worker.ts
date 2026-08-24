@@ -807,7 +807,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       // A timeout is retryable. Revocation is terminal only when completion or
       // an explicit state check positively identifies the revoked job.
       for (const entry of batch) {
-        await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, thrownError);
+        const failure = (await this.isJobRevoked(entry.jobId))
+          ? new UnrecoverableError('revoked')
+          : thrownError;
+        await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
       }
     }
   }
