@@ -17,22 +17,14 @@ import {
   healListActive,
   sweepSuspended,
 } from './functions/index';
-import { buildKeys, computeFollowingSchedulerNextRun, isValidSchedulerEvery, MAX_JOB_DATA_SIZE } from './utils';
+import {
+  buildKeys,
+  computeFollowingSchedulerNextRun,
+  isValidSchedulerEvery,
+  MAX_JOB_DATA_SIZE,
+  parseCrossQueueParentNotification,
+} from './utils';
 import { isClusterClient } from './connection';
-
-function parseCrossQueueParentNotification(member: string): [string, string, string] | undefined {
-  try {
-    const decoded: unknown = JSON.parse(member);
-    if (Array.isArray(decoded) && decoded.length === 3 && decoded.every((part) => typeof part === 'string')) {
-      return decoded as [string, string, string];
-    }
-  } catch {
-    // Support notifications written by version 101 during rolling upgrades.
-    const legacy = member.split('\t');
-    if (legacy.length === 3) return legacy as [string, string, string];
-  }
-  return undefined;
-}
 
 export interface SchedulerOptions {
   promotionInterval?: number;

@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- **Nested and DAG cross-queue parents could remain in `waiting-children`**: parent wiring now avoids cross-slot FCALLs, preserves nested parent hash fields, retries idempotent notifications from the child slot, reconciles removed children without recreating hashes, and ignores stale notifications for deleted parents. Pending notifications use unambiguous JSON encoding and are removed by `obliterate`. DAG Phase B now reconciles children deleted after existence checks, including cross-queue cases. `LIBRARY_VERSION` bumped to `108`.
+- **Nested and DAG cross-queue parents could remain in `waiting-children`**: parent wiring now avoids cross-slot FCALLs, preserves nested parent hash fields, retries idempotent notifications from the child slot, reconciles removed children without recreating hashes, and ignores stale notifications for deleted parents. Pending notifications use unambiguous JSON encoding and are removed by `obliterate`. DAG Phase B now reconciles children deleted after existence checks, including cross-queue cases. Completion FCALLs return newly queued cross-queue edges for eager delivery without an extra parent lookup or waiting for a promotion tick. `LIBRARY_VERSION` bumped to `109`.
 
 ## [0.15.4] - 2026-06-04
 
