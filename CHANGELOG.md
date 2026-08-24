@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Nested cross-queue flow parents could remain in `waiting-children`**: parent wiring now avoids cross-slot FCALLs, preserves nested parent hash fields, re-reads late parent metadata, and retries cross-queue notifications from the child slot. `LIBRARY_VERSION` bumped to `101`.
+
 ## [0.15.4] - 2026-06-04
 
 ### Fixed
