@@ -1076,10 +1076,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * 1. Non-atomic: This update happens after the job completion transaction,
    *    so a worker crash between completion and this call will leave the scheduler
    *    stuck at nextRun=0 (awaiting completion sentinel) indefinitely.
-   * 2. Non-worker failures: Jobs that reach terminal failure outside the worker
-   *    path (e.g., revoked jobs, expired jobs in moveToActive, stalled terminal
-   *    failures in glidemq_reclaimStalled) never trigger this update, leaving
-   *    the scheduler permanently stuck.
+   * 2. Other non-worker failures: Revoked jobs and jobs expired in moveToActive
+   *    never trigger this update, leaving the scheduler permanently stuck.
    * 3. Race conditions: The idempotency check (nextRun === 0) prevents duplicate
    *    updates from stalled reclaim, but doesn't prevent races with concurrent
    *    upsertJobScheduler/removeJobScheduler (those use scheduler lock, this doesn't).
@@ -1087,8 +1085,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * MITIGATION: Run multiple workers for redundancy. Manually remove/re-add the
    * scheduler to recover from stuck state.
    *
-   * FUTURE WORK: Move scheduler update into Lua completion/failure functions to
-   * make it atomic and handle all terminal failure paths.
+   * Stalled terminal failures advance the scheduler atomically in Lua.
    */
   protected async updateSchedulerAfterComplete(schedulerName: string, now: number): Promise<void> {
     if (!this.commandClient) return;

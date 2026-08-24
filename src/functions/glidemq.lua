@@ -293,6 +293,10 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   end
 end
 
+-- Forward declaration: expireJob is used by all terminal TTL paths below,
+-- while the implementation is kept with the scheduler helpers.
+local advanceRepeatAfterComplete
+
 local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, hintOrderingSeq, hintGroupKey)
   if curState == 'failed' then return true end
   local wasActive = (curState == 'active')
@@ -305,6 +309,7 @@ local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, 
     'state', 'failed',
     'failedReason', 'expired',
     'finishedOn', tostring(now))
+  advanceRepeatAfterComplete(jobKey, prefix, now)
   markOrderingDone(jobKey, jobId, hintOrderingKey, hintOrderingSeq)
   -- Only release group slot if the job was actually active (held a slot)
   if wasActive then
@@ -442,6 +447,81 @@ local function extractLockDurationFromOpts(optsJson)
   return lockDuration
 end
 
+-- Advance a repeat-after-complete scheduler from its awaiting-completion
+-- sentinel in the same FCALL as a terminal server-side failure.
+local function replaceTopLevelJsonZero(raw, field, replacement)
+  local target = '"' .. field .. '"'
+  local depth = 0
+  local inString = false
+  local escaped = false
+  local i = 1
+  while i <= #raw do
+    local char = string.sub(raw, i, i)
+    if inString then
+      if escaped then
+        escaped = false
+      elseif char == '\\' then
+        escaped = true
+      elseif char == '"' then
+        inString = false
+      end
+    elseif char == '"' then
+      if depth == 1 and string.sub(raw, i, i + #target - 1) == target then
+        local valueStart = i + #target
+        while string.match(string.sub(raw, valueStart, valueStart), '%s') do
+          valueStart = valueStart + 1
+        end
+        if string.sub(raw, valueStart, valueStart) == ':' then
+          valueStart = valueStart + 1
+          while string.match(string.sub(raw, valueStart, valueStart), '%s') do
+            valueStart = valueStart + 1
+          end
+          local nextChar = string.sub(raw, valueStart + 1, valueStart + 1)
+          if string.sub(raw, valueStart, valueStart) == '0' and (nextChar == ',' or nextChar == '}') then
+            return string.sub(raw, 1, valueStart - 1) .. replacement .. string.sub(raw, valueStart + 1)
+          end
+        end
+      end
+      inString = true
+    elseif char == '{' or char == '[' then
+      depth = depth + 1
+    elseif char == '}' or char == ']' then
+      depth = depth - 1
+    end
+    i = i + 1
+  end
+  return nil
+end
+
+advanceRepeatAfterComplete = function(jobKey, prefix, timestamp)
+  local schedulerName = redis.call('HGET', jobKey, 'schedulerName')
+  if not schedulerName or schedulerName == '' then return end
+
+  local schedulersKey = prefix .. 'schedulers'
+  local raw = redis.call('HGET', schedulersKey, schedulerName)
+  if not raw then return end
+
+  local ok, config = pcall(cjson.decode, raw)
+  if not ok or type(config) ~= 'table' then return end
+  local repeatMs = tonumber(config['repeatAfterComplete']) or 0
+  if repeatMs <= 0 or tonumber(config['nextRun']) ~= 0 then return end
+
+  local nextRun = timestamp + repeatMs
+  local endDate = tonumber(config['endDate'])
+  local limit = tonumber(config['limit'])
+  local iterationCount = tonumber(config['iterationCount']) or 0
+  if (endDate and nextRun > endDate) or (limit and iterationCount >= limit) then
+    redis.call('HDEL', schedulersKey, schedulerName)
+    return
+  end
+
+  -- Replace only the top-level sentinel so Lua CJSON cannot round
+  -- high-precision numbers nested in the job template.
+  local updated = replaceTopLevelJsonZero(raw, 'nextRun', tostring(nextRun))
+  if not updated then return end
+  redis.call('HSET', schedulersKey, schedulerName, updated)
+end
+
 -- Apply stall logic to a job: increment stalledCount, fail if over max, else emit stalled event.
 -- Returns true if the job was moved to failed, false if only stalled.
 local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp)
@@ -455,6 +535,7 @@ local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, ma
       'failedReason', 'job stalled more than maxStalledCount',
       'finishedOn', tostring(timestamp)
     )
+    advanceRepeatAfterComplete(jobKey, prefix, timestamp)
     markOrderingDone(jobKey, jobId)
     releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
     emitEvent(eventsKey, 'failed', jobId, {

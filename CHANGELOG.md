@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Stalled repeat-after-complete jobs**: terminal stalled recovery now advances the linked scheduler atomically instead of leaving it stuck at `nextRun=0`.
 - **Interval scheduler drift accumulation**: `every` schedulers now advance from the previous due slot instead of the late worker tick timestamp, so CI/event-loop jitter does not accumulate drift over repeated firings. Missed slots are skipped rather than replayed.
 - **Release test command**: `npm test` now passes the fuzzer exclusion as a single Vitest argument, so the release gate runs the intended non-fuzzer suite.
 
