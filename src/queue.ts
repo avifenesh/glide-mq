@@ -1,6 +1,14 @@
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
-import { InfBoundary, Batch, ClusterBatch, ClusterScanCursor, GlideFt, SortOrder } from '@glidemq/speedkey';
+import {
+  InfBoundary,
+  Batch,
+  ClusterBatch,
+  ClusterScanCursor,
+  GlideFt,
+  RequestError,
+  SortOrder,
+} from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient, Field, FtCreateOptions } from '@glidemq/speedkey';
 import type {
   QueueOptions,
@@ -368,6 +376,57 @@ export class Queue<D = any, R = any> extends EventEmitter {
         jobIds.push(...extractJobIdsFromStreamEntries(result as any));
       }
     }
+    return jobIds;
+  }
+
+  /** @internal Read list-backed waiting jobs in the same order workers RPOP them. */
+  private async getWaitingListJobIds(client: Client, key: string, limit: number): Promise<string[]> {
+    if (limit === 0) return [];
+    const ids = await client.lrange(key, limit < 0 ? 0 : -limit, -1);
+    return ids.map((id) => String(id)).reverse();
+  }
+
+  /** @internal Read FIFO waiting jobs while excluding entries in the consumer-group PEL. */
+  private async getWaitingStreamJobIds(client: Client, limit: number): Promise<string[]> {
+    if (limit === 0) return [];
+
+    const jobIds: string[] = [];
+    let streamStart: typeof InfBoundary.NegativeInfinity | { value: string; isInclusive: false } =
+      InfBoundary.NegativeInfinity;
+
+    while (limit < 0 || jobIds.length < limit) {
+      const count = limit < 0 ? PIPELINE_CHUNK_SIZE : limit - jobIds.length;
+      const entries = await client.xrange(this.keys.stream, streamStart, InfBoundary.PositiveInfinity, { count });
+      if (!entries) break;
+
+      const entryIds = Object.keys(entries);
+      if (entryIds.length === 0) break;
+
+      const firstEntryId = entryIds[0]!;
+      const lastEntryId = entryIds[entryIds.length - 1]!;
+      let pendingEntryIds = new Set<string>();
+      try {
+        const pendingEntries = await client.xpendingWithOptions(this.keys.stream, CONSUMER_GROUP, {
+          start: { value: firstEntryId },
+          end: { value: lastEntryId },
+          count: entryIds.length,
+        });
+        pendingEntryIds = new Set(pendingEntries.map(([entryId]) => String(entryId)));
+      } catch (err) {
+        // The stream can legitimately have no consumer group before any worker starts.
+        if (!(err instanceof RequestError) || !err.message.startsWith('NOGROUP')) throw err;
+      }
+
+      const waitingEntries: Record<string, [unknown, unknown][]> = {};
+      for (const entryId of entryIds) {
+        if (!pendingEntryIds.has(entryId)) waitingEntries[entryId] = entries[entryId]!;
+      }
+      jobIds.push(...extractJobIdsFromStreamEntries(waitingEntries));
+
+      if (entryIds.length < count) break;
+      streamStart = { value: lastEntryId, isInclusive: false };
+    }
+
     return jobIds;
   }
 
@@ -1795,18 +1854,15 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     switch (type) {
       case 'waiting': {
-        // Note: stream pagination reads from start to end+1, then slices.
-        // For large offsets this is O(end) rather than O(end-start).
-        // Consider cursor-based pagination for better performance at scale.
-        const entries = await client.xrange(
-          this.keys.stream,
-          InfBoundary.NegativeInfinity,
-          InfBoundary.PositiveInfinity,
-          end >= 0 ? { count: end + 1 } : undefined,
-        );
-        if (!entries) return [];
-        const allIds = extractJobIdsFromStreamEntries(entries);
-        jobIds = allIds.slice(start, end >= 0 ? end + 1 : undefined);
+        // Workers dispatch priority, then LIFO, then FIFO jobs. Read each source
+        // only through the requested inclusive end index before applying start.
+        const limit = end >= 0 ? end + 1 : -1;
+        const priorityJobIds = await this.getWaitingListJobIds(client, this.keys.priority, limit);
+        const lifoLimit = limit < 0 ? -1 : Math.max(0, limit - priorityJobIds.length);
+        const lifoJobIds = await this.getWaitingListJobIds(client, this.keys.lifo, lifoLimit);
+        const fifoLimit = limit < 0 ? -1 : Math.max(0, lifoLimit - lifoJobIds.length);
+        const fifoJobIds = await this.getWaitingStreamJobIds(client, fifoLimit);
+        jobIds = priorityJobIds.concat(lifoJobIds, fifoJobIds).slice(start, end >= 0 ? end + 1 : undefined);
         break;
       }
       case 'active': {

@@ -44,3 +44,4 @@ See CHANGELOG.md `0.15.4` for the full list. Highlights:
 - streamChunk: thin wrapper over stream(), not new infrastructure.
 - Search 1.1+ options: forward-compatible types, graceful skip on older servers.
 - Plugins: AI endpoints under `/flows/:id/usage`, `/flows/:id/budget`, `/jobs/:id/stream`.
+- **In flight**: `Queue.getJobs('waiting')` follows worker dispatch order across priority, LIFO, and FIFO sources; it pages FIFO stream reads and excludes entries in the consumer-group PEL.
