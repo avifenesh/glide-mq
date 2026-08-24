@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Reconnect rebuilt Scheduler without lockDuration**: after a connection error, stall reclaim fell back to 30s while heartbeats still used the worker lock, so healthy long jobs were redispatched.
+
+---
+
 ## [0.15.4] - 2026-06-04
 
 ### Fixed
