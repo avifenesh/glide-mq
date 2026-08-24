@@ -141,11 +141,9 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
       }
 
       if (jobIds.length > 0) {
-        // INCR list-active so complete/fail Lua DECRs stay balanced.
-        // rpopAndReserve already did the INCR atomically; for non-gc paths do it here.
-        if (!this.globalConcurrencyEnabled) {
-          await this.commandClient.incrBy(this.queueKeys.listActive, jobIds.length);
-        }
+        // Both list-pop functions reserve list-active atomically with the pop.
+        // rpopAndReserve does so while enforcing global concurrency; popLists
+        // does so for the non-global path.
         // Batch mode: route list-popped jobs through the batch processor.
         // Single-job processor is a throwing sentinel in batch mode (#212).
         // Chunk by batchSize so one pop (up to concurrency * batchSize jobs

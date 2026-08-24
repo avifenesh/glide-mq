@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Atomic list reservation**: priority/LIFO workers now increment `list-active` in the same server function that pops job IDs, so a worker failure cannot lose a list job between the pop and counter update. `LIBRARY_VERSION` is now `95`.
+
 ## [0.15.4] - 2026-06-04
 
 ### Fixed
