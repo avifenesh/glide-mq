@@ -154,7 +154,26 @@ local function groupqScore(jobKey, jobId)
   return 0
 end
 
-local closeOrderingHole
+local function returningSlotsKey(prefix, groupKey)
+  return prefix .. 'group:return:' .. groupKey
+end
+
+-- Record a skip marker for an ordered job that will never run. A returning
+-- rate-limited job retains an active group slot while it is parked, so its
+-- terminal path must release that exact slot before successors can progress.
+local function closeOrderingHole(jobKey, jobId, now)
+  local gk = redis.call('HGET', jobKey, 'groupKey')
+  local orderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+  if not gk or gk == '' or orderingSeq <= 0 then return end
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  local groupHashKey = prefix .. 'group:' .. gk
+  redis.call('HSET', groupHashKey, 'skip:' .. tostring(orderingSeq), '1')
+  redis.call('ZREM', returningSlotsKey(prefix, gk), jobId)
+  if redis.call('HDEL', jobKey, 'retainedSlot') == 1 then
+    local active = tonumber(redis.call('HGET', groupHashKey, 'active')) or 0
+    if active > 0 then redis.call('HSET', groupHashKey, 'active', tostring(active - 1)) end
+  end
+end
 
 local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey, keepSlot)
   local gk = hintGroupKey
@@ -171,6 +190,8 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey, keep
   local cur = tonumber(g.active) or 0
   local newActive = cur
   if not keepSlot then
+    redis.call('HDEL', jobKey, 'retainedSlot')
+    redis.call('ZREM', returningSlotsKey(prefix, gk), jobId)
     newActive = (cur > 0) and (cur - 1) or 0
     if cur > 0 then
       redis.call('HSET', groupHashKey, 'active', tostring(newActive))
@@ -249,7 +270,12 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey, keep
         end
       end
     end
-    if not tbOk and tbCheckPasses >= 10 then return end
+    if not tbOk and tbCheckPasses >= 10 then
+      -- Continue oversized-head cleanup on the bounded rate-limited sweep.
+      -- Calling closeOrderingHole recursively here can overflow Lua's stack.
+      redis.call('ZADD', prefix .. 'ratelimited', ts, gk)
+      return
+    end
   end
   -- Calculate how many slots are available for promotion
   local available = 1
@@ -302,14 +328,16 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey, keep
   end
 end
 
--- Record a skip marker for an ordered job that will never run, advance nextSeq,
--- and wake groupq successors without decrementing the group's active slot.
-closeOrderingHole = function(jobKey, jobId, now)
+-- Wake a successor after closing a non-running ordering hole unless a group
+-- rate-limit pause is still active. The release helper is iterative and
+-- bounded, so this does not recurse through consecutive oversized heads.
+local function closeOrderingHoleAndPromote(jobKey, jobId, now)
+  closeOrderingHole(jobKey, jobId, now)
   local gk = redis.call('HGET', jobKey, 'groupKey')
-  local orderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
-  if not gk or gk == '' or orderingSeq <= 0 then return end
+  if not gk or gk == '' then return end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-  redis.call('HSET', prefix .. 'group:' .. gk, 'skip:' .. tostring(orderingSeq), '1')
+  local resumeAt = tonumber(redis.call('ZSCORE', prefix .. 'ratelimited', gk)) or 0
+  if resumeAt > now then return end
   releaseGroupSlotAndPromote(jobKey, jobId, now, gk, true)
 end
 
@@ -330,7 +358,7 @@ local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, 
   if wasActive then
     releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
   else
-    closeOrderingHole(jobKey, jobId, now)
+    closeOrderingHoleAndPromote(jobKey, jobId, now)
   end
   emitEvent(eventsKey, 'expired', jobId, nil)
   recordMetrics(metricsKey, now, now - processedOn)
@@ -1149,7 +1177,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
                   if skipMetrics ~= '1' then recordMetrics(prefix .. 'metrics:failed', tonumber(timestamp), tonumber(timestamp) - priProcessedOn) end
                   if priOrdSeq > 0 then
                     markOrderingDone(priJobKey, priJobId, priGroupKey, priOrdSeq)
-                    closeOrderingHole(priJobKey, priJobId, tonumber(timestamp))
+                    closeOrderingHoleAndPromote(priJobKey, priJobId, tonumber(timestamp))
                   end
                 elseif priTbTokens < priJobCostVal then
                   priTbBlocked = true
@@ -1361,7 +1389,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
           'finishedOn', tostring(timestamp))
         if skipEvents ~= '1' then emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
         if skipMetrics ~= '1' then recordMetrics(metricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn) end
-        closeOrderingHole(nextJobKey, nextJobId, tonumber(timestamp))
+        closeOrderingHoleAndPromote(nextJobKey, nextJobId, tonumber(timestamp))
         return {'NEXT_NONE', jobId}
       end
       if nextTbTokens < nextJobCostVal then
@@ -1794,7 +1822,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
           redis.call('ZREM', scheduledKey, existingJobId)
           markOrderingDone(jobKey, existingJobId)
           if delGroupKey and delGroupKey ~= '' and delOrderingSeq > 0 then
-            closeOrderingHole(jobKey, existingJobId, timestamp)
+            closeOrderingHoleAndPromote(jobKey, existingJobId, timestamp)
           end
           redis.call('UNLINK', jobKey)
           if skipEvents ~= '1' then emitEvent(eventsKey, 'removed', existingJobId, nil) end
@@ -2019,7 +2047,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
               'failedReason', 'cost exceeds token bucket capacity',
               'finishedOn', tostring(now))
             emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
-            closeOrderingHole(headJobKey, headJobId, now)
+            closeOrderingHoleAndPromote(headJobKey, headJobId, now)
             tbCheckPassed = false
           end
           if tbCheckPassed and prTbTokens < headCost then
@@ -2051,26 +2079,30 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
           prNextSeq = prAdv
         end
       end
-      local returningJobId = redis.call('HGET', groupHashKey, 'returningJobId')
-      local returningReady = false
-      if returningJobId and returningJobId ~= '' then
+      -- Each rate-limited ordered job retains its own slot. Track all of them
+      -- in a per-group ZSET so concurrent requeues cannot overwrite one marker.
+      local returningKey = returningSlotsKey(prefix, gk)
+      local returningJobIds = redis.call('ZRANGE', returningKey, 0, 999)
+      local readyReturners = {}
+      for rri = 1, #returningJobIds do
+        local returningJobId = returningJobIds[rri]
         local returningJobKey = prefix .. 'job:' .. returningJobId
         local returningState = redis.call('HGET', returningJobKey, 'state')
         local returningSeq = tonumber(redis.call('HGET', returningJobKey, 'orderingSeq')) or 0
         if returningState == 'group-waiting' and returningSeq > 0 and
            redis.call('ZSCORE', waitListKey, returningJobId) then
-          returningReady = true
+          readyReturners[#readyReturners + 1] = returningJobId
         else
-          redis.call('HDEL', groupHashKey, 'returningJobId')
-          returningJobId = nil
+          redis.call('ZREM', returningKey, returningJobId)
         end
       end
-      -- A rate-limited ordered job keeps its slot; allow that returning job
-      -- to resume even when active already equals maxConcurrency. requeuePosition
-      -- 'back' parks it behind successors, so scan past the head.
-      if returningReady and canPromote == 0 then
-        canPromote = 1
-      elseif not returningReady and canPromote == 0 and prNextSeq > 0 then
+      local returningCount = #readyReturners
+      -- Returning jobs already hold their slots, so they can resume even when
+      -- active equals maxConcurrency. Leave ordinary successors parked until
+      -- those retained slots are released by a terminal transition.
+      if returningCount > 0 then
+        canPromote = math.min(1000, canPromote + returningCount)
+      elseif canPromote == 0 and prNextSeq > 0 then
         local waitMembers = redis.call('ZRANGE', waitListKey, 0, 127)
         for wmi = 1, #waitMembers do
           local waitJobId = waitMembers[wmi]
@@ -2087,12 +2119,13 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
       local groupPromoted = 0
       local prIter = 0
       local prMaxIter = canPromote + 20
-      if returningReady then
+      for rri = 1, returningCount do
+        local returningJobId = readyReturners[rri]
         local returningJobKey = prefix .. 'job:' .. returningJobId
         redis.call('ZREM', waitListKey, returningJobId)
         xaddJob(streamKey, returningJobId, redis.call('HGET', returningJobKey, 'name'))
         redis.call('HSET', returningJobKey, 'state', 'waiting')
-        redis.call('HDEL', groupHashKey, 'returningJobId')
+        redis.call('ZREM', returningKey, returningJobId)
         promoted = promoted + 1
         groupPromoted = groupPromoted + 1
       end
@@ -2310,7 +2343,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
           'failedReason', 'cost exceeds token bucket capacity',
           'finishedOn', timestampStr)
         emitEvent(prefix .. 'events', 'failed', jobId, {'failedReason', 'cost exceeds token bucket capacity'})
-        closeOrderingHole(jobKey, jobId, ts)
+        closeOrderingHoleAndPromote(jobKey, jobId, ts)
         return 'ERR:COST_EXCEEDS_CAPACITY'
       end
       if tbTokens < jobCostVal then
@@ -2791,7 +2824,7 @@ redis.register_function('glidemq_removeJob', function(keys, args)
         local prefix_g = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
         redis.call('ZREM', prefix_g .. 'groupq:' .. groupKey, jobId)
       end
-      closeOrderingHole(jobKey, jobId, 0)
+      closeOrderingHoleAndPromote(jobKey, jobId, 0)
     end
   end
   -- DECR list-active if the job was active and list-sourced (LIFO or priority-list)
@@ -2866,7 +2899,7 @@ redis.register_function('glidemq_revoke', function(keys, args)
       redis.call('ZREM', waitListKey, jobId)
     end
     markOrderingDone(jobKey, jobId)
-    closeOrderingHole(jobKey, jobId, timestamp)
+    closeOrderingHoleAndPromote(jobKey, jobId, timestamp)
     redis.call('ZADD', failedKey, timestamp, jobId)
     redis.call('HSET', jobKey,
       'state', 'failed',
@@ -2909,7 +2942,7 @@ redis.register_function('glidemq_revoke', function(keys, args)
       'finishedOn', tostring(timestamp)
     )
     markOrderingDone(jobKey, jobId)
-    closeOrderingHole(jobKey, jobId, timestamp)
+    closeOrderingHoleAndPromote(jobKey, jobId, timestamp)
     emitEvent(eventsKey, 'revoked', jobId, nil)
     return 'revoked'
   end
@@ -3257,6 +3290,8 @@ redis.register_function('glidemq_rateLimitGroup', function(keys, args)
   local keepSlot = (currentJob == 'requeue' and orderingSeq > 0)
 
   if not keepSlot then
+    redis.call('HDEL', jobKey, 'retainedSlot')
+    redis.call('ZREM', returningSlotsKey(prefix, groupKey), jobId)
     local active = tonumber(redis.call('HGET', groupHashKey, 'active')) or 0
     if active > 0 then redis.call('HSET', groupHashKey, 'active', tostring(active - 1)) end
   end
@@ -3275,10 +3310,12 @@ redis.register_function('glidemq_rateLimitGroup', function(keys, args)
     end
     redis.call('ZADD', waitListKey, score, jobId)
     redis.call('HSET', jobKey, 'state', 'group-waiting')
-    if requeuePosition == 'back' and orderingSeq > 0 then
-      redis.call('HSET', groupHashKey, 'returningJobId', jobId)
+    if keepSlot then
+      redis.call('HSET', jobKey, 'retainedSlot', '1')
+      redis.call('ZADD', returningSlotsKey(prefix, groupKey), orderingSeq, jobId)
     else
-      redis.call('HDEL', groupHashKey, 'returningJobId')
+      redis.call('HDEL', jobKey, 'retainedSlot')
+      redis.call('ZREM', returningSlotsKey(prefix, groupKey), jobId)
     end
   else
     redis.call('ZADD', prefix .. 'failed', timestamp, jobId)

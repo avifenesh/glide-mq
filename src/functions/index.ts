@@ -58,7 +58,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 100: rateLimitGroup fail pauses before promote; promoteRateLimited finds returning ordered jobs requeued at the back; CAF oversized priority jobs close the ordering hole and count as failed.
 // Version 107: ordered rate-limit returns use an explicit marker so retained-slot jobs are promoted beyond bounded scans; oversized token failures advance ordering state.
 // Version 112: ordered terminal paths resolve group-key ordering metadata before waking successors.
-export const LIBRARY_VERSION = '112';
+// Version 113: ordered rate-limit returns track every retained slot; terminal paths release retained slots; oversized-head cleanup is iterative and bounded.
+export const LIBRARY_VERSION = '113';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
