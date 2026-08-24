@@ -404,14 +404,19 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
       const firstEntryId = entryIds[0]!;
       const lastEntryId = entryIds[entryIds.length - 1]!;
-      let pendingEntryIds = new Set<string>();
+      const pendingEntryIds = new Set<string>();
       try {
-        const pendingEntries = await client.xpendingWithOptions(this.keys.stream, CONSUMER_GROUP, {
-          start: { value: firstEntryId },
-          end: { value: lastEntryId },
-          count: entryIds.length,
-        });
-        pendingEntryIds = new Set(pendingEntries.map(([entryId]) => String(entryId)));
+        let pendingStart: { value: string; isInclusive?: boolean } = { value: firstEntryId };
+        while (true) {
+          const pendingEntries = await client.xpendingWithOptions(this.keys.stream, CONSUMER_GROUP, {
+            start: pendingStart,
+            end: { value: lastEntryId },
+            count: PIPELINE_CHUNK_SIZE,
+          });
+          for (const [entryId] of pendingEntries) pendingEntryIds.add(String(entryId));
+          if (pendingEntries.length < PIPELINE_CHUNK_SIZE) break;
+          pendingStart = { value: String(pendingEntries[pendingEntries.length - 1]![0]), isInclusive: false };
+        }
       } catch (err) {
         // The stream can legitimately have no consumer group before any worker starts.
         if (!(err instanceof RequestError) || !err.message.startsWith('NOGROUP')) throw err;
