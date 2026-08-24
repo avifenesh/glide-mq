@@ -393,9 +393,10 @@ export class FlowProducer {
    * parent dependency.
    *
    * Submission is pipelined by topological level: within a level, all primary
-   * FCALLs are sent in one Batch (non-atomic pipeline), then a second Batch
-   * wires cross-level edges (registerParent) and persists parentIds metadata.
-   * RTT is O(levels) instead of O(N).
+   * FCALLs are sent in one Batch (non-atomic pipeline), then a child-slot batch
+   * persists parent metadata and cross-queue parent references. Same-queue
+   * registerParent calls and cross-queue parent notifications are completed
+   * after that batch. RTT is O(levels) plus cross-slot notification wiring.
    *
    * Returns a map of node name to Job instance.
    */
@@ -539,14 +540,15 @@ export class FlowProducer {
               );
               submits.push({ node, kind: 'addFlow', timestamp, opts });
             } else if (myDependents.length === 1) {
-              // Leaf with a single dependent: piggyback on addJob's
+              // Leaf with a same-queue dependent: piggyback on addJob's
               // parentId/parentDepsKey so the leaf atomically registers as
-              // child of that dependent. No second dependent, so no race
-              // between addJob enqueueing and parents-SET wiring.
+              // child of that dependent. Cross-queue keys cannot be passed
+              // to this FCALL; those edges are wired in Phase B instead.
               const firstDepName = myDependents[0];
               const firstParentJob = result.get(firstDepName)!;
               const firstParentNode = nodeByName.get(firstDepName)!;
-              const firstParentKeys = buildKeys(firstParentNode.queueName, prefix);
+              const sameQueue = firstParentNode.queueName === node.queueName;
+              const firstParentKeys = sameQueue ? buildKeys(firstParentNode.queueName, prefix) : undefined;
               const { keys, args } = addJobArgs(
                 queueKeys,
                 node.name,
@@ -555,7 +557,7 @@ export class FlowProducer {
                 timestamp,
                 opts.delay ?? 0,
                 opts.priority ?? 0,
-                firstParentJob.id,
+                sameQueue ? firstParentJob.id : '',
                 opts.attempts ?? 0,
                 orderingKey ?? '',
                 groupConcurrency,
@@ -567,8 +569,8 @@ export class FlowProducer {
                 opts.ttl ?? 0,
                 customJobId,
                 opts.lifo ? 1 : 0,
-                firstParentNode.queueName,
-                firstParentKeys.deps(firstParentJob.id),
+                sameQueue ? firstParentNode.queueName : '',
+                sameQueue ? firstParentKeys!.deps(firstParentJob.id) : '',
                 '',
               );
               batchA.fcall('glidemq_addJob', keys, args);
@@ -685,11 +687,25 @@ export class FlowProducer {
             result.set(sub.node.name, job);
           }
 
-          // Phase B: pipeline cross-level wiring (registerParent + parentIds hset).
+          // Phase B: pipeline child-slot wiring and parent metadata.
+          //
+          // A ClusterBatch may contain commands for different slots, but an
+          // FCALL may not. Keep every batched command single-key and run
+          // registerParent only for same-queue edges. Cross-queue parent deps
+          // are added with a parent-slot SADD, while the child parents SET is
+          // written in this child-slot batch. Both operations are idempotent;
+          // completed-state reconciliation below closes the race where a
+          // child finishes between them.
           const batchB = isCluster ? new ClusterBatch(false) : new Batch(false);
-          let phaseBCount = 0;
-          // Track each batched registerParent's edge so we can report failures.
-          const phaseBRegEdges: { node: string; dep: string }[] = [];
+          const phaseBSlots: { kind: 'hset' | 'parents'; node: string; dep?: string }[] = [];
+          const sameQueueEdges: { node: string; jid: string; dep: string }[] = [];
+          const crossQueueEdges: {
+            node: string;
+            jid: string;
+            dep: string;
+            parentId: string;
+            parentQueue: string;
+          }[] = [];
 
           for (const sub of submits) {
             const node = sub.node;
@@ -714,6 +730,12 @@ export class FlowProducer {
               registerStart = 0;
             } else if (deps.length === 0 && myDependents.length > 1) {
               registerStart = 0;
+            } else if (
+              deps.length === 0 &&
+              myDependents.length === 1 &&
+              nodeByName.get(myDependents[0])!.queueName !== node.queueName
+            ) {
+              registerStart = 0;
             }
 
             if (registerStart >= 0) {
@@ -725,8 +747,7 @@ export class FlowProducer {
                 parentIds: JSON.stringify(pIds),
                 parentQueues: JSON.stringify(pQueues),
               });
-              phaseBCount++;
-              phaseBRegEdges.push({ node: '', dep: '' }); // placeholder for hset slot
+              phaseBSlots.push({ kind: 'hset', node: node.name });
 
               for (let p = registerStart; p < myDependents.length; p++) {
                 const depName = myDependents[p];
@@ -734,25 +755,27 @@ export class FlowProducer {
                 const parentNode = nodeByName.get(depName)!;
                 const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
                 const depsMember = `${queuePrefix}:${jid}`;
-                batchB.fcall(
-                  'glidemq_registerParent',
-                  [
-                    queueKeys.job(jid),
-                    queueKeys.parents(jid),
-                    parentQueueKeys.deps(parentJob.id),
-                    parentQueueKeys.job(parentJob.id),
-                    parentQueueKeys.stream,
-                    parentQueueKeys.events,
-                  ],
-                  [jid, parentJob.id, keyPrefix(prefix, parentNode.queueName), depsMember],
-                );
-                phaseBCount++;
-                phaseBRegEdges.push({ node: node.name, dep: depName });
+                if (parentNode.queueName === node.queueName) {
+                  sameQueueEdges.push({ node: node.name, jid, dep: depName });
+                } else {
+                  // Parent deps live on the parent queue's slot. SADD is
+                  // idempotent, so retries cannot double-count a dependency.
+                  await client.sadd(parentQueueKeys.deps(parentJob.id), [depsMember]);
+                  batchB.sadd(queueKeys.parents(jid), [`${keyPrefix(prefix, parentNode.queueName)}:${parentJob.id}`]);
+                  phaseBSlots.push({ kind: 'parents', node: node.name, dep: depName });
+                  crossQueueEdges.push({
+                    node: node.name,
+                    jid,
+                    dep: depName,
+                    parentId: parentJob.id,
+                    parentQueue: parentNode.queueName,
+                  });
+                }
               }
             }
           }
 
-          if (phaseBCount > 0) {
+          if (phaseBSlots.length > 0) {
             let rawB: unknown;
             try {
               rawB = isCluster
@@ -764,16 +787,50 @@ export class FlowProducer {
                 `DAG partially submitted: cross-level wiring batch failed: ${msg}. Graph may be in inconsistent state.`,
               );
             }
-            if (!Array.isArray(rawB) || rawB.length !== phaseBCount) {
+            if (!Array.isArray(rawB) || rawB.length !== phaseBSlots.length) {
               throw new GlideMQError('addDAG cross-level batch returned unexpected result length');
             }
-            for (let i = 0; i < phaseBCount; i++) {
-              const edge = phaseBRegEdges[i];
-              if (edge.node === '') continue; // hset slot
+            for (let i = 0; i < phaseBSlots.length; i++) {
+              const edge = phaseBSlots[i];
               const res = String(rawB[i]);
               if (res.startsWith('error:')) {
-                throw new GlideMQError(`Failed to register dependent ${edge.dep} for node ${edge.node}: ${res}`);
+                throw new GlideMQError(`Failed to wire dependent ${edge.dep ?? ''} for node ${edge.node}: ${res}`);
               }
+            }
+          }
+
+          for (const edge of sameQueueEdges) {
+            const node = nodeByName.get(edge.node)!;
+            const parentNode = nodeByName.get(edge.dep)!;
+            const parentJob = result.get(edge.dep)!;
+            const childKeys = buildKeys(node.queueName, prefix);
+            const parentKeys = buildKeys(parentNode.queueName, prefix);
+            const depsMember = `${keyPrefix(prefix, node.queueName)}:${edge.jid}`;
+            const registration = await registerParent(
+              client,
+              childKeys,
+              edge.jid,
+              parentJob.id,
+              keyPrefix(prefix, parentNode.queueName),
+              parentKeys,
+              depsMember,
+            );
+            if (registration.startsWith('error:')) {
+              throw new GlideMQError(`Failed to register dependent ${edge.dep} for node ${edge.node}: ${registration}`);
+            }
+          }
+
+          for (const edge of crossQueueEdges) {
+            const node = nodeByName.get(edge.node)!;
+            const childKeys = buildKeys(node.queueName, prefix);
+            const state = await client.hget(childKeys.job(edge.jid), 'state');
+            if (String(state) === 'completed') {
+              await completeChild(
+                client,
+                buildKeys(edge.parentQueue, prefix),
+                edge.parentId,
+                `${keyPrefix(prefix, node.queueName)}:${edge.jid}`,
+              );
             }
           }
         }
