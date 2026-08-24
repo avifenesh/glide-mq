@@ -362,13 +362,7 @@ describe('Queue.getJobs', () => {
     expect(jobs.map((job) => job.id)).toEqual(['prio-2', 'lifo-2', 'lifo-1', 'fifo-1']);
     expect(mockClient.lrange).toHaveBeenCalledWith('glide:{getjobs-test}:priority', -5, -1);
     expect(mockClient.lrange).toHaveBeenCalledWith('glide:{getjobs-test}:lifo', -3, -1);
-    expect(mockClient.xrange).toHaveBeenNthCalledWith(
-      1,
-      'glide:{getjobs-test}:stream',
-      '-',
-      '+',
-      { count: 1 },
-    );
+    expect(mockClient.xrange).toHaveBeenNthCalledWith(1, 'glide:{getjobs-test}:stream', '-', '+', { count: 1 });
     expect(mockClient.xrange).toHaveBeenNthCalledWith(
       2,
       'glide:{getjobs-test}:stream',
