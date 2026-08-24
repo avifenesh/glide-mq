@@ -1409,12 +1409,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
 
       if (processError || aborted) {
-        const confirmedRevoked = !processError && (await this.isJobRevoked(currentJobId));
+        const confirmedRevoked = aborted && (await this.isJobRevoked(currentJobId));
         await this.handleJobFailure(
           job,
           currentJobId,
           currentEntryId,
-          processError ?? (confirmedRevoked ? new UnrecoverableError('revoked') : new Error('Job aborted')),
+          confirmedRevoked ? new UnrecoverableError('revoked') : (processError ?? new Error('Job aborted')),
         );
         return;
       }
