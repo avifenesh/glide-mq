@@ -605,12 +605,19 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
     if (this.opts.tokenLimiter) await this.waitForTokenLimit();
 
-    // Set up abort controllers for all jobs
-    const batchAc = new AbortController();
+    // Per-job abort controllers so a revoke heartbeat cannot cancel the rest of the batch.
+    const batchTimeoutAc = new AbortController();
     for (const entry of batch) {
-      this.activeAbortControllers.set(entry.jobId, batchAc);
-      entry.job.abortSignal = batchAc.signal;
+      const ac = new AbortController();
+      this.activeAbortControllers.set(entry.jobId, ac);
+      entry.job.abortSignal = ac.signal;
     }
+    const abortBatch = () => {
+      batchTimeoutAc.abort();
+      for (const entry of batch) {
+        this.activeAbortControllers.get(entry.jobId)?.abort();
+      }
+    };
 
     let results: R[] | undefined;
     let batchError: BatchError | undefined;
@@ -632,7 +639,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             this.batchProcessor(jobs),
             new Promise<never>((_, reject) => {
               timer = setTimeout(() => {
-                batchAc.abort();
+                abortBatch();
                 reject(new Error('Batch timeout exceeded'));
               }, maxTimeout);
             }),
@@ -700,7 +707,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
         const parentInfo = await this.buildParentInfo(entry.job, entry.jobId);
 
-        await completeJob(
+        const completeResult = await completeJob(
           this.commandClient!,
           this.queueKeys,
           entry.jobId,
@@ -712,6 +719,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           parentInfo,
           this.broadcastMode ? true : undefined,
         );
+        if (String(completeResult) === 'REVOKED') {
+          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
+          continue;
+        }
 
         entry.job.returnvalue = result;
         entry.job.finishedOn = Date.now();
@@ -774,7 +785,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             this.broadcastMode ? true : undefined,
           );
           if (String(completeResult) === 'REVOKED') {
-            await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new Error('revoked'));
+            await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
             continue;
           }
 
@@ -793,8 +804,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
     } else if (thrownError) {
       // All jobs fail
-      const aborted = batchAc.signal.aborted;
-      const err = thrownError ?? (aborted ? new Error('revoked') : thrownError);
+      const aborted = batchTimeoutAc.signal.aborted;
+      const err = thrownError ?? (aborted ? new UnrecoverableError('revoked') : thrownError);
       for (const entry of batch) {
         await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
       }
@@ -1405,7 +1416,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           job,
           currentJobId,
           currentEntryId,
-          processError ?? new Error('revoked'),
+          processError ?? new UnrecoverableError('revoked'),
         );
         return;
       }
@@ -1464,7 +1475,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       );
 
       if (fetchResult.next === 'CURRENT_REVOKED') {
-        await this.handleJobFailure(job, currentJobId, currentEntryId, new Error('revoked'));
+        await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
         return;
       }
 
