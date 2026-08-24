@@ -82,6 +82,40 @@ describeEachMode('Queue.getJobs waiting sources', (CONNECTION) => {
     expect(await (queue as any).getWaitingStreamJobIds(deletedPelClient, -1)).toEqual(['waiting-live']);
   });
 
+  it('reads a full stream chunk when a limited page starts with PEL entries', async () => {
+    const ids = ['1-0', '2-0', '3-0', '4-0', '5-0', '6-0'];
+    const pendingIds = new Set(ids.slice(0, 3));
+    const xrangeCounts: number[] = [];
+    const chunkedClient = {
+      xrange: async (
+        _key: string,
+        start: '-' | { value: string; isInclusive: false },
+        _end: '+',
+        options: { count: number },
+      ) => {
+        xrangeCounts.push(options.count);
+        const startId = typeof start === 'string' ? undefined : start.value;
+        const startIndex = startId == null ? 0 : ids.indexOf(startId) + 1;
+        const pageIds = ids.slice(startIndex, startIndex + options.count);
+        return Object.fromEntries(pageIds.map((id) => [id, [['jobId', id]]]));
+      },
+      xpendingWithOptions: async (
+        _key: string,
+        _group: string,
+        options: { start: { value: string }; end: { value: string } },
+      ) =>
+        ids
+          .filter((id) => pendingIds.has(id))
+          .filter((id) => id >= options.start.value && id <= options.end.value)
+          .map((id) => [id, 'consumer', 0, 1] as [string, string, number, number]),
+    };
+
+    const result = await (queue as any).getWaitingStreamJobIds(chunkedClient, 1);
+    expect(result).toEqual(['4-0']);
+    expect(result).toHaveLength(1);
+    expect(xrangeCounts).toEqual([1000]);
+  });
+
   it('removes revoked and deleted jobs from list-backed waiting sources', async () => {
     const isolatedName = `${queueName}-stale-list`;
     const isolatedQueue = new Queue(isolatedName, { connection: CONNECTION });
