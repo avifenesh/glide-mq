@@ -190,6 +190,6 @@ describeEachMode('Sandboxed Processor', (CONNECTION) => {
     await waitFor(() => worker.abortJob(jobId), 15_000);
 
     const err = await failedPromise;
-    expect(err.message).toMatch(/revoked/);
+    expect(err.message).toBe('Job aborted');
   }, 60_000);
 });

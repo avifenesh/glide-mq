@@ -54,7 +54,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 91: Stalled-recovery redispatches under-threshold jobs back to the stream / lifo / priority list so a healthy worker can pick them up; jobs only fail once stalledCount > maxStalledCount. Aligns with the at-least-once redelivery promise in DURABILITY.md and matches BullMQ semantics (#242).
 // Version 92: Replace DEL with UNLINK on every multi-key / large-collection delete (job hashes, retention purge, glidemq_clean batches, glidemq_drain stream/zset/lifo/priority sweeps). UNLINK keeps in-script atomicity - the keyspace removal is still synchronous from the script's view - but defers memory reclamation to the bio thread, so obliterate / retention / drain stop blocking the server thread on MB-sized job hashes. Small-key DELs (lockKey) kept as DEL (#243).
 // Version 93: glidemq_completeAndFetchNext always SMEMBERS the child parents SET. The previous hasParents gate sourced its truth from the worker's snapshot of the job hash, which is stale when DAG wiring (hset parentIds + registerParent) lands between the worker's job fetch and the completion FCALL. The SMEMBERS cost on an empty set is negligible; the dropped optimization was unsound (#246).
-export const LIBRARY_VERSION = '93';
+// Version 96: completion refuses jobs revoked while their processor was running.
+export const LIBRARY_VERSION = '96';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -369,7 +370,7 @@ export async function completeJob(
  */
 export interface CompleteAndFetchResult {
   completed: string;
-  next: false | 'REVOKED' | Record<string, string>;
+  next: false | 'REVOKED' | 'CURRENT_REVOKED' | Record<string, string>;
   nextJobId?: string;
   nextEntryId?: string;
 }
@@ -442,6 +443,9 @@ export async function completeAndFetchNext(
     const tag = String(raw[0]);
     if (tag === 'NEXT_NONE') {
       return { completed: raw[1] != null ? String(raw[1]) : jobId, next: false };
+    }
+    if (tag === 'CURRENT_REVOKED') {
+      return { completed: raw[1] != null ? String(raw[1]) : jobId, next: 'CURRENT_REVOKED' };
     }
     if (tag === 'NEXT_REVOKED') {
       return {

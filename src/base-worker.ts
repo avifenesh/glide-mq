@@ -761,7 +761,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
           const parentInfo = await this.buildParentInfo(entry.job, entry.jobId);
 
-          await completeJob(
+          const completeResult = await completeJob(
             this.commandClient!,
             this.queueKeys,
             entry.jobId,
@@ -773,6 +773,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             parentInfo,
             this.broadcastMode ? true : undefined,
           );
+          if (String(completeResult) === 'REVOKED') {
+            await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new Error('revoked'));
+            continue;
+          }
 
           entry.job.returnvalue = result as R;
           entry.job.finishedOn = Date.now();
@@ -790,7 +794,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     } else if (thrownError) {
       // All jobs fail
       const aborted = batchAc.signal.aborted;
-      const err = aborted ? new Error('revoked') : thrownError;
+      const err = thrownError ?? (aborted ? new Error('revoked') : thrownError);
       for (const entry of batch) {
         await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
       }
@@ -932,7 +936,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           result = await Promise.race([
             this.processor(job),
             new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs);
+              timer = setTimeout(() => {
+                ac.abort();
+                reject(new Error('Job timeout exceeded'));
+              }, timeoutMs);
             }),
           ]);
         } finally {
@@ -1394,7 +1401,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
 
       if (processError || aborted) {
-        await this.handleJobFailure(job, currentJobId, currentEntryId, aborted ? new Error('revoked') : processError!);
+        await this.handleJobFailure(
+          job,
+          currentJobId,
+          currentEntryId,
+          processError ?? new Error('revoked'),
+        );
         return;
       }
 
@@ -1450,6 +1462,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.skipEvents,
         this.skipMetrics,
       );
+
+      if (fetchResult.next === 'CURRENT_REVOKED') {
+        await this.handleJobFailure(job, currentJobId, currentEntryId, new Error('revoked'));
+        return;
+      }
 
       job.returnvalue = processResult;
       job.finishedOn = now;
@@ -1564,7 +1581,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
     const timer = setInterval(() => {
-      client.hset(jobKey, { lastActive: Date.now().toString() }).catch(() => {});
+      client
+        .hset(jobKey, { lastActive: Date.now().toString() })
+        .then(async () => {
+          const revoked = await client.hget(jobKey, 'revoked');
+          if (String(revoked) === '1') this.abortJob(jobId);
+        })
+        .catch(() => {});
     }, interval);
     this.heartbeatIntervals.set(jobId, timer);
   }

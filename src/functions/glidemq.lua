@@ -814,6 +814,9 @@ redis.register_function('glidemq_complete', function(keys, args)
   local parentId = args[10] or ''
   local broadcastMode = args[11] or '0'
   local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
+  if redis.call('HGET', jobKey, 'revoked') == '1' then
+    return 'REVOKED'
+  end
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   redis.call('ZADD', completedKey, timestamp, jobId)
@@ -949,6 +952,9 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     processedOn = tonumber(hintProcessedOn) or timestamp
   else
     processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
+  end
+  if redis.call('HGET', jobKey, 'revoked') == '1' then
+    return {'CURRENT_REVOKED', jobId}
   end
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
