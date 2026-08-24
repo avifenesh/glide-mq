@@ -383,7 +383,29 @@ export class Queue<D = any, R = any> extends EventEmitter {
   private async getWaitingListJobIds(client: Client, key: string, limit: number): Promise<string[]> {
     if (limit === 0) return [];
     const ids = await client.lrange(key, limit < 0 ? 0 : -limit, -1);
-    return ids.map((id) => String(id)).reverse();
+    return ids.map(String).reverse();
+  }
+
+  /** @internal Read every pending entry ID in an inclusive stream range. */
+  private async getPendingEntryIds(client: Client, firstEntryId: string, lastEntryId: string): Promise<Set<string>> {
+    const pendingEntryIds = new Set<string>();
+    try {
+      let pendingStart: { value: string; isInclusive?: boolean } = { value: firstEntryId };
+      while (true) {
+        const pendingEntries = await client.xpendingWithOptions(this.keys.stream, CONSUMER_GROUP, {
+          start: pendingStart,
+          end: { value: lastEntryId },
+          count: PIPELINE_CHUNK_SIZE,
+        });
+        for (const [entryId] of pendingEntries) pendingEntryIds.add(String(entryId));
+        if (pendingEntries.length < PIPELINE_CHUNK_SIZE) return pendingEntryIds;
+        pendingStart = { value: String(pendingEntries.at(-1)![0]), isInclusive: false };
+      }
+    } catch (err) {
+      // The stream can legitimately have no consumer group before any worker starts.
+      if (err instanceof RequestError && err.message.startsWith('NOGROUP')) return pendingEntryIds;
+      throw err;
+    }
   }
 
   /** @internal Read FIFO waiting jobs while excluding entries in the consumer-group PEL. */
@@ -403,24 +425,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
       if (entryIds.length === 0) break;
 
       const firstEntryId = entryIds[0]!;
-      const lastEntryId = entryIds[entryIds.length - 1]!;
-      const pendingEntryIds = new Set<string>();
-      try {
-        let pendingStart: { value: string; isInclusive?: boolean } = { value: firstEntryId };
-        while (true) {
-          const pendingEntries = await client.xpendingWithOptions(this.keys.stream, CONSUMER_GROUP, {
-            start: pendingStart,
-            end: { value: lastEntryId },
-            count: PIPELINE_CHUNK_SIZE,
-          });
-          for (const [entryId] of pendingEntries) pendingEntryIds.add(String(entryId));
-          if (pendingEntries.length < PIPELINE_CHUNK_SIZE) break;
-          pendingStart = { value: String(pendingEntries[pendingEntries.length - 1]![0]), isInclusive: false };
-        }
-      } catch (err) {
-        // The stream can legitimately have no consumer group before any worker starts.
-        if (!(err instanceof RequestError) || !err.message.startsWith('NOGROUP')) throw err;
-      }
+      const lastEntryId = entryIds.at(-1)!;
+      const pendingEntryIds = await this.getPendingEntryIds(client, firstEntryId, lastEntryId);
 
       const waitingEntries: Record<string, [unknown, unknown][]> = {};
       for (const entryId of entryIds) {
