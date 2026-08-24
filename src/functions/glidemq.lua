@@ -3489,7 +3489,6 @@ end)
 redis.register_function('glidemq_popLists', function(keys, args)
   local priorityKey = keys[1]
   local lifoKey = keys[2]
-  local listActiveKey = keys[3]
   local count = tonumber(args[1]) or 1
   local results = {}
   for i = 1, count do
@@ -3498,15 +3497,36 @@ redis.register_function('glidemq_popLists', function(keys, args)
     results[#results + 1] = id
   end
   if #results > 0 then
-    if listActiveKey and listActiveKey ~= '' then
-      redis.call('INCRBY', listActiveKey, #results)
-    end
     return results
   end
   for i = 1, count do
     local id = redis.call('RPOP', lifoKey)
     if not id then break end
     results[#results + 1] = id
+  end
+  return results
+end)
+
+-- Reservation-aware list pop added after glidemq_popLists was deployed.
+-- Keep the legacy function's no-reservation behavior for old workers and old
+-- libraries; new workers call this function and fall back when unavailable.
+redis.register_function('glidemq_popListsReserve', function(keys, args)
+  local priorityKey = keys[1]
+  local lifoKey = keys[2]
+  local listActiveKey = keys[3]
+  local count = tonumber(args[1]) or 1
+  local results = {}
+  for i = 1, count do
+    local id = redis.call('RPOP', priorityKey)
+    if not id then break end
+    results[#results + 1] = id
+  end
+  if #results == 0 then
+    for i = 1, count do
+      local id = redis.call('RPOP', lifoKey)
+      if not id then break end
+      results[#results + 1] = id
+    end
   end
   if #results > 0 and listActiveKey and listActiveKey ~= '' then
     redis.call('INCRBY', listActiveKey, #results)

@@ -141,9 +141,9 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
       }
 
       if (jobIds.length > 0) {
-        // Both list-pop functions reserve list-active atomically with the pop.
-        // rpopAndReserve does so while enforcing global concurrency; popLists
-        // does so for the non-global path.
+        // rpopAndReserve reserves while enforcing global concurrency. popLists
+        // reserves atomically when the new server function is available and
+        // uses a typed legacy pop plus INCRBY during rolling upgrades.
         // Batch mode: route list-popped jobs through the batch processor.
         // Single-job processor is a throwing sentinel in batch mode (#212).
         // Chunk by batchSize so one pop (up to concurrency * batchSize jobs
