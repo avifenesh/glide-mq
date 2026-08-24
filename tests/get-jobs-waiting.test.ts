@@ -149,6 +149,72 @@ describeEachMode('Queue.getJobs waiting sources', (CONNECTION) => {
     }
   });
 
+  it('removes a stream-backed job after clearing a delayed LIFO job', async () => {
+    const isolatedName = `${queueName}-remove-cleared-lifo-delay`;
+    const isolatedQueue = new Queue(isolatedName, { connection: CONNECTION });
+    try {
+      const job = await isolatedQueue.add('cleared-lifo-delay', {}, { delay: 60_000, lifo: true });
+      const keys = buildKeys(isolatedName);
+
+      await job!.changeDelay(0);
+      expect(await cleanupClient.xlen(keys.stream)).toBe(1);
+
+      await job!.remove();
+      expect(await cleanupClient.xlen(keys.stream)).toBe(0);
+      expect(await isolatedQueue.getJobs('waiting')).toEqual([]);
+      expect((await isolatedQueue.getJobCounts()).waiting).toBe(0);
+    } finally {
+      await isolatedQueue.close();
+      await flushQueue(cleanupClient, isolatedName);
+    }
+  });
+
+  it('revokes non-FIFO jobs without scanning the FIFO stream', async () => {
+    const cases = [
+      { suffix: 'waiting-lifo', options: { lifo: true }, promote: false },
+      { suffix: 'waiting-priority', options: { priority: 1 }, promote: true },
+      { suffix: 'delayed', options: { delay: 60_000 }, promote: false },
+      { suffix: 'prioritized', options: { priority: 1 }, promote: false },
+    ];
+
+    for (const testCase of cases) {
+      const isolatedName = `${queueName}-revoke-no-scan-${testCase.suffix}`;
+      const isolatedQueue = new Queue(isolatedName, { connection: CONNECTION });
+      try {
+        const job = await isolatedQueue.add('revoke-no-scan', {}, testCase.options);
+        const keys = buildKeys(isolatedName);
+        if (testCase.promote) {
+          await promote(cleanupClient, keys, Number.MAX_SAFE_INTEGER);
+        }
+
+        // A FIFO scan would raise WRONGTYPE. These jobs cannot have a stream entry.
+        await cleanupClient.set(keys.stream, 'non-fifo-sentinel');
+        await expect(isolatedQueue.revoke(job!.id)).resolves.toBe('revoked');
+      } finally {
+        await isolatedQueue.close();
+        await flushQueue(cleanupClient, isolatedName);
+      }
+    }
+  });
+
+  it('revokes a stream-backed job after clearing a delayed LIFO job', async () => {
+    const isolatedName = `${queueName}-revoke-cleared-lifo-delay`;
+    const isolatedQueue = new Queue(isolatedName, { connection: CONNECTION });
+    try {
+      const job = await isolatedQueue.add('cleared-lifo-delay', {}, { delay: 60_000, lifo: true });
+      const keys = buildKeys(isolatedName);
+
+      await job!.changeDelay(0);
+      expect(await cleanupClient.xlen(keys.stream)).toBe(1);
+
+      expect(await isolatedQueue.revoke(job!.id)).toBe('revoked');
+      expect(await cleanupClient.xlen(keys.stream)).toBe(0);
+    } finally {
+      await isolatedQueue.close();
+      await flushQueue(cleanupClient, isolatedName);
+    }
+  });
+
   it('removes a waiting FIFO stream entry with the legacy seven-key call shape', async () => {
     const isolatedName = `${queueName}-stale-stream`;
     const isolatedQueue = new Queue(isolatedName, { connection: CONNECTION });
