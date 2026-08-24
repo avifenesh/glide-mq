@@ -86,7 +86,124 @@ describeEachMode('Per-job timeout - deep edge cases', (CONNECTION) => {
     await flushQueue(cleanupClient, Q);
   }, 15000);
 
-  // 3. Job timeout + retry: times out first attempt, succeeds on 2nd
+  it('timeout aborts the processor via abortSignal', async () => {
+    const Q = 'deep-to-abort-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+
+    let abortSeen = false;
+    let ranToEnd = false;
+    const job = await queue.add('slow-abort', { val: 1 }, { timeout: 200 });
+
+    const done = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('test timeout')), 10000);
+      const worker = new Worker(
+        Q,
+        async (j: any) => {
+          for (let i = 0; i < 20; i++) {
+            await new Promise((r) => setTimeout(r, 100));
+            if (j.abortSignal?.aborted) {
+              abortSeen = true;
+              return 'ignored';
+            }
+          }
+          ranToEnd = true;
+          return 'should-not-reach';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
+      );
+      worker.on('error', () => {});
+      worker.on('failed', (j: any, err: Error) => {
+        expect(j.id).toBe(job.id);
+        expect(err.message).toBe('Job timeout exceeded');
+        clearTimeout(timer);
+        worker.close(true).then(resolve);
+      });
+    });
+
+    await done;
+    expect(abortSeen).toBe(true);
+    expect(ranToEnd).toBe(false);
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+  }, 15000);
+
+  it('batch timeout aborts every signal and retries the batch jobs', async () => {
+    const Q = 'deep-batch-timeout-' + Date.now();
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const k = buildKeys(Q);
+    const jobs = await Promise.all(
+      ['one', 'two'].map((name) =>
+        queue.add(name, { name }, { timeout: 150, attempts: 2, backoff: { type: 'fixed', delay: 50 } }),
+      ),
+    );
+
+    let calls = 0;
+    let abortedSignals = 0;
+    let failed = 0;
+    let completed = 0;
+    const worker = new Worker(
+      Q,
+      async (batch: any[]) => {
+        calls++;
+        if (calls === 1) {
+          await Promise.all(
+            batch.map(
+              (job) =>
+                new Promise<void>((resolve) => {
+                  job.abortSignal?.addEventListener(
+                    'abort',
+                    () => {
+                      abortedSignals++;
+                      resolve();
+                    },
+                    { once: true },
+                  );
+                }),
+            ),
+          );
+        }
+        return batch.map((job) => `ok-${job.data.name}`);
+      },
+      {
+        connection: CONNECTION,
+        batch: { size: 2 },
+        concurrency: 1,
+        blockTimeout: 100,
+        stalledInterval: 60000,
+      },
+    );
+    worker.on('error', () => {});
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('test timeout')), 15000);
+      worker.on('failed', (_job: any, error: Error) => {
+        if (error.message !== 'Batch timeout exceeded') return;
+        failed++;
+        if (failed === jobs.length) {
+          setTimeout(() => promote(cleanupClient, k, Date.now()).catch(reject), 75);
+        }
+      });
+      worker.on('completed', () => {
+        completed++;
+        if (completed === jobs.length) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    });
+
+    expect(abortedSignals).toBe(jobs.length);
+    expect(failed).toBe(jobs.length);
+    expect(calls).toBeGreaterThanOrEqual(2);
+    for (const job of jobs) {
+      expect(String(await cleanupClient.hget(k.job(job.id), 'state'))).toBe('completed');
+      expect(String(await cleanupClient.hget(k.job(job.id), 'attemptsMade'))).toBe('1');
+    }
+
+    await worker.close(true);
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+  }, 20000);
   it('timed-out job retries and succeeds on 2nd attempt', async () => {
     const Q = 'deep-to-retry-ok-' + Date.now();
     const queue = new Queue(Q, { connection: CONNECTION });
