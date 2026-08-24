@@ -135,9 +135,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected sandboxClose?: (force?: boolean) => Promise<void>;
   protected workerHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   protected pollLoopPromise: Promise<void> | null = null;
-  protected suspendContinuations = new Map<string, (signals: SignalEntry[]) => Promise<any>>();
+  protected suspendContinuations = new Map<
+    string,
+    { job: Job<D, R>; onResume: (signals: SignalEntry[]) => Promise<any> }
+  >();
   protected readonly startedAt = Date.now();
   protected readonly hostname = os.hostname();
+
+  private static readonly REVOCATION_POLL_INTERVAL = 1000;
   protected serializer: Serializer;
   protected readonly batchMode: boolean;
   protected readonly batchSize: number;
@@ -601,10 +606,6 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
     }
 
-    // Rate limit check (once per batch)
-    if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
-    if (this.opts.tokenLimiter) await this.waitForTokenLimit();
-
     // Per-job abort controllers keep a revoke local to its job.
     for (const entry of batch) {
       const ac = new AbortController();
@@ -622,6 +623,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     let thrownError: Error | undefined;
 
     try {
+      // Rate limit check (once per batch). Controllers must already be active
+      // so revocation during this wait is visible to the batch processor.
+      if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
+      if (this.opts.tokenLimiter) await this.waitForTokenLimit();
+
       // Calculate batch timeout: max timeout across all jobs in the batch
       let maxTimeout = 0;
       for (const entry of batch) {
@@ -1299,18 +1305,23 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       let aborted: boolean;
       const hasContinuation = job.signals.length > 0 && this.suspendContinuations.has(currentJobId);
       if (hasContinuation) {
-        const onResume = this.suspendContinuations.get(currentJobId)!;
+        const continuation = this.suspendContinuations.get(currentJobId)!;
         this.suspendContinuations.delete(currentJobId);
+        const ac = new AbortController();
+        this.activeAbortControllers.set(currentJobId, ac);
+        job.abortSignal = ac.signal;
+        continuation.job.abortSignal = ac.signal;
         this.startHeartbeat(currentJobId, job.opts.lockDuration);
         try {
-          processResult = await onResume(job.signals);
+          processResult = await continuation.onResume(job.signals);
           processError = undefined;
         } catch (err) {
           processError = err instanceof Error ? err : new Error(String(err));
         } finally {
           this.stopHeartbeat(currentJobId);
+          this.activeAbortControllers.delete(currentJobId);
         }
-        aborted = false;
+        aborted = ac.signal.aborted;
       } else {
         this.suspendContinuations.delete(currentJobId);
         ({ result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId));
@@ -1387,7 +1398,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         if (!this.commandClient) return;
         try {
           if (suspendReq?.onResume) {
-            this.suspendContinuations.set(currentJobId, suspendReq.onResume);
+            this.suspendContinuations.set(currentJobId, { job, onResume: suspendReq.onResume });
           }
           const suspResult = await suspendJob(
             this.commandClient,
@@ -1596,7 +1607,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (!this.commandClient) return;
     // Use per-job lockDuration when specified, otherwise fall back to worker-level.
     const effectiveLock = jobLockDuration ?? this.lockDuration;
-    const interval = effectiveLock / 2;
+    const interval = Math.min(effectiveLock / 2, BaseWorker.REVOCATION_POLL_INTERVAL);
     if (interval <= 0) return;
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
