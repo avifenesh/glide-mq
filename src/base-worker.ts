@@ -742,7 +742,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         const result = i < batchResults.length ? batchResults[i] : new Error('No result in BatchError');
 
         if (result instanceof Error) {
-          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, result);
+          const failure = (await this.isJobRevoked(entry.jobId))
+            ? new UnrecoverableError('revoked')
+            : result;
+          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
         } else {
           let returnvalue: string;
           try {
