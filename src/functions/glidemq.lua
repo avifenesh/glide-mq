@@ -84,6 +84,17 @@ local function advancePastSkips(groupHashKey, nextSeq)
   return nextSeq
 end
 
+-- A deleted ordered job can remain in groupq. Advancing only the group's
+-- admission frontier lets its successor reach the stream, but the worker also
+-- waits on orderdone:<orderingKey>. Advance both frontiers together.
+local function consumeOrderedTombstone(prefix, groupHashKey, orderingKey, nextSeq, jobId, jobSeq)
+  if nextSeq <= 0 or jobSeq ~= nextSeq then return nextSeq end
+  markOrderingDone(prefix .. 'job:' .. jobId, jobId, orderingKey, jobSeq)
+  nextSeq = advancePastSkips(groupHashKey, nextSeq + 1)
+  redis.call('HSET', groupHashKey, 'nextSeq', tostring(nextSeq))
+  return nextSeq
+end
+
 -- Refill token bucket using remainder accumulator for precision.
 -- tbRefillRate is in millitokens/second. Returns current millitokens after refill.
 -- Side effect: updates tbTokens, tbLastRefill, tbRefillRemainder on the group hash.
@@ -196,6 +207,7 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
       end
     end
   end
+  local nextSeq = tonumber(g.nextSeq) or 0
   -- Token bucket gate: check head job cost before promoting
   local tbCap = tonumber(g.tbCapacity) or 0
   if ts > 0 and tbCap > 0 then
@@ -211,7 +223,9 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
       local headJobKey = prefix .. 'job:' .. headJobId
       -- Tombstone guard: job hash deleted - remove and check next
       if redis.call('EXISTS', headJobKey) == 0 then
+        local tombstoneSeq = tonumber(redis.call('ZSCORE', waitListKey, headJobId)) or 0
         redis.call('ZREM', waitListKey, headJobId)
+        nextSeq = consumeOrderedTombstone(prefix, groupHashKey, gk, nextSeq, headJobId, tombstoneSeq)
       else
         local headCost = tonumber(redis.call('HGET', headJobKey, 'cost')) or 1000
         -- DLQ guard: cost > capacity - remove, fail, check next
@@ -254,7 +268,6 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
     available = math.min(available, rateRemaining)
   end
   local streamKey = prefix .. 'stream'
-  local nextSeq = tonumber(g.nextSeq) or 0
   if nextSeq > 0 then
     local advanced = advancePastSkips(groupHashKey, nextSeq)
     if advanced > nextSeq then
@@ -269,12 +282,16 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
     iter = iter + 1
     local zpResult = redis.call('ZPOPMIN', waitListKey, 1)
     local nextJobId = zpResult[1]
+    local nextJobScore = tonumber(zpResult[2]) or 0
     if not nextJobId then break end
     local nextJobKey = prefix .. 'job:' .. nextJobId
     -- Skip stale entries (job no longer in group-waiting state)
     local nextState = redis.call('HGET', nextJobKey, 'state')
     if nextState ~= 'group-waiting' then
       -- Stale: already processed via another path. Discard.
+      if nextState == nil then
+        nextSeq = consumeOrderedTombstone(prefix, groupHashKey, gk, nextSeq, nextJobId, nextJobScore)
+      end
     else
       if nextSeq > 0 then
         local jobSeq = tonumber(redis.call('HGET', nextJobKey, 'orderingSeq')) or 0
@@ -1919,6 +1936,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
       local prTbTokens = tbRefill(groupHashKey, prGrp, now)
       local tbHeadReady = false
       local tbChecks = 0
+      local tbNextSeq = tonumber(prGrp.nextSeq) or 0
       while tbChecks < 100 do
         tbChecks = tbChecks + 1
         local headMembers = redis.call('ZRANGE', waitListKey, 0, 0)
@@ -1926,7 +1944,10 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
         if not headJobId then break end
         local headJobKey = prefix .. 'job:' .. headJobId
         if redis.call('EXISTS', headJobKey) == 0 then
+          local tombstoneSeq = tonumber(redis.call('ZSCORE', waitListKey, headJobId)) or 0
           redis.call('ZREM', waitListKey, headJobId)
+          tbNextSeq = consumeOrderedTombstone(prefix, groupHashKey, gk, tbNextSeq, headJobId, tombstoneSeq)
+          prGrp.nextSeq = tostring(tbNextSeq)
         else
           local headCost = tonumber(redis.call('HGET', headJobKey, 'cost')) or 1000
           if headCost > prTbCap then
@@ -1980,11 +2001,16 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
         prIter = prIter + 1
         local zpResult = redis.call('ZPOPMIN', waitListKey, 1)
         local nextJobId = zpResult[1]
+        local nextJobScore = tonumber(zpResult[2]) or 0
         if not nextJobId then break end
         local nextJobKey = prefix .. 'job:' .. nextJobId
         local nextState = redis.call('HGET', nextJobKey, 'state')
         if nextState ~= 'group-waiting' then
-          -- Stale: skip
+          -- A deleted ordered head is a tombstone. Consume its sequence so
+          -- the next ordered job is not left behind the missing hash forever.
+          if nextState == nil and prNextSeq > 0 and nextJobScore == prNextSeq then
+            prNextSeq = consumeOrderedTombstone(prefix, groupHashKey, gk, prNextSeq, nextJobId, nextJobScore)
+          end
         elseif checkExpired(nextJobKey, nextJobId, prefix, now) then
           -- Expired: skip
         else
