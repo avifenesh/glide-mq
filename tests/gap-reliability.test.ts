@@ -5,13 +5,14 @@
  *
  * Run: npx vitest run tests/gap-reliability.test.ts
  */
+import net from 'node:net';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, STANDALONE, waitFor } from './helpers/fixture';
 
 describeEachMode('Gap Reliability', (CONNECTION) => {
   let cleanupClient: any;
@@ -267,6 +268,41 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       await worker.close(true);
     }, 10000);
 
+    it('reconnect preserves worker lockDuration on the stall scheduler', async () => {
+      const Q = uniqueQueue('failover-lock');
+      const worker = new Worker(Q, async () => 'ok', {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 500,
+        stalledInterval: 5000,
+        lockDuration: 120000,
+      });
+      worker.on('error', () => {});
+      await worker.waitUntilReady();
+
+      expect((worker as any).scheduler.lockDuration).toBe(120000);
+      const schedulerBefore = (worker as any).scheduler;
+
+      const origPollOnce = (worker as any).pollOnce.bind(worker);
+      let failNext = true;
+      (worker as any).pollOnce = async () => {
+        if (failNext) {
+          failNext = false;
+          throw new Error('Connection lost');
+        }
+        return origPollOnce();
+      };
+
+      const start = Date.now();
+      while ((worker as any).scheduler === schedulerBefore && Date.now() - start < 10000) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect((worker as any).scheduler).not.toBe(schedulerBefore);
+      expect((worker as any).scheduler.lockDuration).toBe(120000);
+
+      await worker.close(true);
+    }, 15000);
+
     it('Queue.add after queue close throws error, new queue works', async () => {
       const Q = uniqueQueue('failover-queue-add');
       const queue = new Queue(Q, { connection: CONNECTION });
@@ -481,9 +517,115 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
   });
 });
 
+describe('Standalone TCP proxy reconnect', () => {
+  it('resumes blocked polling after the proxy severs connections without stranded PEL entries', async () => {
+    const proxy = await createTcpProxy();
+    const Q = `proxy-reconnect-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const queue = new Queue(Q, { connection: STANDALONE });
+    const cleanupClient = await createCleanupClient(STANDALONE);
+    const processed: string[] = [];
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        processed.push(String(job.name));
+        return 'ok';
+      },
+      {
+        connection: proxy.connection,
+        concurrency: 1,
+        blockTimeout: 5000,
+        stalledInterval: 5000,
+        lockDuration: 120000,
+      },
+    );
+    worker.on('error', () => {});
+
+    try {
+      await worker.waitUntilReady();
+      expect((worker as any).scheduler.lockDuration).toBe(120000);
+
+      await queue.add('before-cut', { value: 1 });
+      await waitFor(() => processed.length === 1, 10000);
+      const schedulerBefore = (worker as any).scheduler;
+
+      // Both the command and blocking clients are idle/blocked through the proxy.
+      await waitFor(() => proxy.connectionCount >= 2, 5000);
+      proxy.cutConnections();
+
+      await queue.add('after-cut', { value: 2 });
+      await waitFor(() => (worker as any).scheduler !== schedulerBefore, 15000);
+      await waitFor(() => processed.length === 2, 15000);
+
+      const k = buildKeys(Q);
+      const pending = await cleanupClient.xpending(k.stream, 'workers');
+      expect(Number(pending[0])).toBe(0);
+      expect((worker as any).scheduler.lockDuration).toBe(120000);
+    } finally {
+      await worker.close(true).catch(() => {});
+      await queue.close().catch(() => {});
+      await flushQueue(cleanupClient, Q).catch(() => {});
+      cleanupClient.close();
+      await proxy.close();
+    }
+  }, 30000);
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+async function createTcpProxy(): Promise<{
+  connection: { addresses: { host: string; port: number }[] };
+  connectionCount: number;
+  cutConnections: () => void;
+  close: () => Promise<void>;
+}> {
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((client) => {
+    const target = net.createConnection({ host: '127.0.0.1', port: 6379 });
+    sockets.add(client);
+    sockets.add(target);
+
+    const cleanup = () => {
+      sockets.delete(client);
+      sockets.delete(target);
+      client.destroy();
+      target.destroy();
+    };
+    client.on('error', cleanup);
+    target.on('error', cleanup);
+    client.on('close', cleanup);
+    target.on('close', cleanup);
+    client.pipe(target);
+    target.pipe(client);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw new Error('TCP proxy did not expose a listening address');
+  }
+
+  return {
+    connection: { addresses: [{ host: '127.0.0.1', port: address.port }] },
+    get connectionCount() {
+      return sockets.size;
+    },
+    cutConnections: () => {
+      for (const socket of sockets) socket.destroy();
+    },
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => resolve());
+      }),
+  };
+}
+
 function _parseConnectedClients(info: string | Record<string, string>): number {
   if (typeof info === 'string') {
     const match = info.match(/connected_clients:(\d+)/);
