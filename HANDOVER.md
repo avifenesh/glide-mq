@@ -21,7 +21,7 @@
 
 ### In flight (fork)
 
-- **Nested/cross-queue parents**: test-first regression `cec217e`; implementation commits `feda517`, `2328af9`, `1605889`, `6446530`, and `3465f30`. The branch is independent of `upstream/main`, uses `LIBRARY_VERSION` 104, reconciles removed children including nested and DAG exists-to-HSET TOCTOU races with ghost parent-set cleanup, JSON-encodes retryable child-slot notifications, and removes `xq-pending` during obliterate. Standalone flow and distinct-queue DAG execution regressions are green; cluster services were not available locally.
+- **Nested/cross-queue parents**: test-first regression `d31d6d3`; implementation commits include `df7fbac`, `b292c2c`, `fd145cc`, `a7cd7fa`, `4d5057c`, and `1765895`. The branch is independent of `upstream/main`, uses `LIBRARY_VERSION` 106, reconciles removed children including nested and DAG exists-to-HSET TOCTOU races with ghost parent-set cleanup, JSON-encodes retryable child-slot notifications, and removes `xq-pending` during obliterate. Standalone flow and distinct-queue DAG execution regressions are green; cluster services were not available locally.
 
 ### 0.15.4 Release Notes
 
