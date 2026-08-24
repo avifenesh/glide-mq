@@ -54,10 +54,11 @@ describeEachMode('Queue.getJobs waiting sources', (CONNECTION) => {
       pending.push([entryId, 'consumer', 0, 1]);
     }
 
-    let page = 0;
+    let streamPage = 0;
+    let pelPage = 0;
     const pagedClient = {
-      xrange: async () => (page++ === 0 ? entries : { '1001-0': [['jobId', 'waiting-final']] }),
-      xpendingWithOptions: async () => (page === 1 ? pending : []),
+      xrange: async () => (streamPage++ === 0 ? entries : { '1001-0': [['jobId', 'waiting-final']] }),
+      xpendingWithOptions: async () => (pelPage++ === 0 ? pending : []),
     };
     expect(await (queue as any).getWaitingStreamJobIds(pagedClient, -1)).toEqual(['waiting-final']);
 
@@ -68,6 +69,17 @@ describeEachMode('Queue.getJobs waiting sources', (CONNECTION) => {
       },
     };
     expect(await (queue as any).getWaitingStreamJobIds(noGroupClient, -1)).toEqual(['waiting-without-group']);
+
+    const deletedPending = Array.from({ length: 1000 }, (_, index) => [`${index + 2}-0`, 'consumer', 0, 1]);
+    let deletedPelPage = 0;
+    const deletedPelClient = {
+      xrange: async () => ({
+        '1-0': [['jobId', 'waiting-live']],
+        '2000-0': [['jobId', 'active-live']],
+      }),
+      xpendingWithOptions: async () => (deletedPelPage++ === 0 ? deletedPending : [['2000-0', 'consumer', 0, 1]]),
+    };
+    expect(await (queue as any).getWaitingStreamJobIds(deletedPelClient, -1)).toEqual(['waiting-live']);
   });
 
   it('removes revoked and deleted jobs from list-backed waiting sources', async () => {
