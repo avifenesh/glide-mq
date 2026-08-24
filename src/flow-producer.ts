@@ -344,6 +344,7 @@ export class FlowProducer {
           // The hash was deleted between EXISTS and HSET. Remove the partial
           // hash so a removed child is not resurrected as a ghost job.
           await client.del([childKeys.job(subNode.job.id)]);
+          await client.del([childKeys.parents(subNode.job.id)]);
           await client.sadd(parentKeys.deps(parentId), [depsMember]);
           await completeChild(client, parentKeys, parentId, depsMember);
         } else {
@@ -371,7 +372,9 @@ export class FlowProducer {
         await client.sadd(childKeys.parents(subNode.job.id), [`${keyPrefix(prefix, parentQueueName)}:${parentId}`]);
         const state = await client.hget(childKeys.job(subNode.job.id), 'state');
         if (state == null || String(state) === 'completed') {
-          if (state == null) await client.del([childKeys.job(subNode.job.id)]);
+          if (state == null) {
+            await client.del([childKeys.job(subNode.job.id), childKeys.parents(subNode.job.id)]);
+          }
           await completeChild(client, parentKeys, parentId, depsMember);
         }
       }
