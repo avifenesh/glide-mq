@@ -59,7 +59,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 107: extract the final queue hash tag for cross-queue DAG notifications so custom prefixes may contain braces.
 // Version 108: all parent dependency completion paths ignore deleted parent hashes.
 // Version 109: completion replies carry cross-queue parent notifications for eager delivery.
-export const LIBRARY_VERSION = '109';
+// Version 110: dedupe overlapping tree and DAG parent notifications per completion.
+export const LIBRARY_VERSION = '110';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';

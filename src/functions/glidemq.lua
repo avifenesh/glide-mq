@@ -343,6 +343,13 @@ local function appendParentNotifications(result, notifications)
   return result
 end
 
+local function addParentNotification(notifications, seen, member)
+  if member and not seen[member] then
+    seen[member] = true
+    notifications[#notifications + 1] = member
+  end
+end
+
 local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, hintOrderingSeq, hintGroupKey)
   if curState == 'failed' then return true end
   local wasActive = (curState == 'active')
@@ -880,8 +887,12 @@ redis.register_function('glidemq_complete', function(keys, args)
   local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
   local storedParentId = redis.call('HGET', jobKey, 'parentId')
   local parentNotifications = {}
-  local parentNotification = enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
-  if parentNotification then parentNotifications[#parentNotifications + 1] = parentNotification end
+  local parentNotificationSet = {}
+  addParentNotification(
+    parentNotifications,
+    parentNotificationSet,
+    enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
+  )
   if broadcastMode ~= '1' then
     if removeMode == 'true' then
       redis.call('ZREM', completedKey, jobId)
@@ -950,8 +961,11 @@ redis.register_function('glidemq_complete', function(keys, args)
           completeParentDependency(pDepsKey, pJobKey, pStreamKey, pEventsKey, dagDepsMember, pId)
         else
           local pTag = extractQueueTag(pQueue)
-          local notification = enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
-          if notification then parentNotifications[#parentNotifications + 1] = notification end
+          addParentNotification(
+            parentNotifications,
+            parentNotificationSet,
+            enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
+          )
         end
       end
     end
@@ -1013,8 +1027,12 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
   local storedParentId = redis.call('HGET', jobKey, 'parentId')
   local parentNotifications = {}
-  local parentNotification = enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
-  if parentNotification then parentNotifications[#parentNotifications + 1] = parentNotification end
+  local parentNotificationSet = {}
+  addParentNotification(
+    parentNotifications,
+    parentNotificationSet,
+    enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
+  )
   if entryId == '' then decrListActive(prefix .. 'list-active') end
 
   -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
@@ -1087,8 +1105,11 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
             completeParentDependency(pDepsKey, pJobKey, pStreamKey, pEventsKey, dagDepsMember, pId)
           else
             local pTag = extractQueueTag(pQueue)
-            local notification = enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
-            if notification then parentNotifications[#parentNotifications + 1] = notification end
+            addParentNotification(
+              parentNotifications,
+              parentNotificationSet,
+              enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
+            )
           end
         end
       end
