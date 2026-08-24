@@ -1917,18 +1917,18 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
     local tbCheckPassed = true
     if prTbCap > 0 then
       local prTbTokens = tbRefill(groupHashKey, prGrp, now)
-      local headMembers = redis.call('ZRANGE', waitListKey, 0, 0)
-      local headJobId = headMembers[1]
-      if headJobId then
+      local tbHeadReady = false
+      local tbChecks = 0
+      while tbChecks < 100 do
+        tbChecks = tbChecks + 1
+        local headMembers = redis.call('ZRANGE', waitListKey, 0, 0)
+        local headJobId = headMembers[1]
+        if not headJobId then break end
         local headJobKey = prefix .. 'job:' .. headJobId
-        -- Tombstone guard
         if redis.call('EXISTS', headJobKey) == 0 then
           redis.call('ZREM', waitListKey, headJobId)
-          tbCheckPassed = false
-        end
-        if tbCheckPassed then
+        else
           local headCost = tonumber(redis.call('HGET', headJobKey, 'cost')) or 1000
-          -- DLQ guard: cost > capacity
           if headCost > prTbCap then
             redis.call('ZREM', waitListKey, headJobId)
             redis.call('ZADD', prefix .. 'failed', now, headJobId)
@@ -1937,16 +1937,21 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
               'failedReason', 'cost exceeds token bucket capacity',
               'finishedOn', tostring(now))
             emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
-            tbCheckPassed = false
-          end
-          if tbCheckPassed and prTbTokens < headCost then
-            -- Not enough tokens: re-register with calculated delay
+          elseif prTbTokens < headCost then
             local prTbRate = math.max(tonumber(prGrp.tbRefillRate) or 0, 1)
             local prTbDelay = math.ceil((headCost - prTbTokens) * 1000 / prTbRate)
             redis.call('ZADD', rateLimitedKey, now + prTbDelay, gk)
             tbCheckPassed = false
+            break
+          else
+            tbHeadReady = true
+            break
           end
         end
+      end
+      if tbCheckPassed and not tbHeadReady and redis.call('ZCARD', waitListKey) > 0 then
+        redis.call('ZADD', rateLimitedKey, now, gk)
+        tbCheckPassed = false
       end
     end
     if tbCheckPassed then
