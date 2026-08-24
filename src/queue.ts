@@ -1690,6 +1690,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       this.keys.schedulers,
       this.keys.ordering,
       this.keys.ratelimited,
+      this.keys.xqPending,
       this.keys.metricsCompleted,
       this.keys.metricsFailed,
       this.keys.lifo,
