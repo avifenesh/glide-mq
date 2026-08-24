@@ -54,7 +54,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 91: Stalled-recovery redispatches under-threshold jobs back to the stream / lifo / priority list so a healthy worker can pick them up; jobs only fail once stalledCount > maxStalledCount. Aligns with the at-least-once redelivery promise in DURABILITY.md and matches BullMQ semantics (#242).
 // Version 92: Replace DEL with UNLINK on every multi-key / large-collection delete (job hashes, retention purge, glidemq_clean batches, glidemq_drain stream/zset/lifo/priority sweeps). UNLINK keeps in-script atomicity - the keyspace removal is still synchronous from the script's view - but defers memory reclamation to the bio thread, so obliterate / retention / drain stop blocking the server thread on MB-sized job hashes. Small-key DELs (lockKey) kept as DEL (#243).
 // Version 93: glidemq_completeAndFetchNext always SMEMBERS the child parents SET. The previous hasParents gate sourced its truth from the worker's snapshot of the job hash, which is stale when DAG wiring (hset parentIds + registerParent) lands between the worker's job fetch and the completion FCALL. The SMEMBERS cost on an empty set is negligible; the dropped optimization was unsound (#246).
-export const LIBRARY_VERSION = '93';
+// Version 96: Honor queue pause in activation paths (moveToActive, completeAndFetchNext next-fetch, popLists, rpopAndReserve) so Queue.pause() stops workers from claiming new jobs. Pause-race defer restores list jobs in their original dispatch order, and broadcast claims stay in the subscription PEL (no XADD duplicate).
+export const LIBRARY_VERSION = '96';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -667,6 +668,7 @@ export async function popLists(client: Client, k: QueueKeys, count: number): Pro
  * Returns:
  * - null if job hash doesn't exist
  * - 'REVOKED' if the job's revoked flag is set
+ * - 'PAUSED' if the queue is paused (job was not activated)
  * - 'GROUP_FULL' if the job's group is at max concurrency (job was parked)
  * - 'GROUP_RATE_LIMITED' if the job's group exceeded its rate limit (job was parked)
  * - 'GROUP_TOKEN_LIMITED' if the job's group has insufficient tokens (job was parked)
@@ -685,6 +687,7 @@ export async function moveToActive(
 ): Promise<
   | Record<string, string>
   | 'REVOKED'
+  | 'PAUSED'
   | 'EXPIRED'
   | 'GROUP_FULL'
   | 'GROUP_RATE_LIMITED'
@@ -714,6 +717,7 @@ export async function moveToActive(
   const str = String(result);
   if (str === '' || str === 'null') return null;
   if (str === 'REVOKED') return 'REVOKED';
+  if (str === 'PAUSED') return 'PAUSED';
   if (str === 'EXPIRED') return 'EXPIRED';
   if (str === 'GROUP_FULL') return 'GROUP_FULL';
   if (str === 'GROUP_RATE_LIMITED') return 'GROUP_RATE_LIMITED';
@@ -799,7 +803,8 @@ export async function rateLimitGroupExternal(
 
 /**
  * Defers an active job back to waiting by acknowledging + deleting the current
- * stream entry and re-enqueuing the same jobId to the stream tail.
+ * stream entry and re-enqueuing the same jobId. Pause-race list jobs are restored
+ * to their original priority/LIFO list, and broadcast claims remain in the PEL.
  * If the job hash no longer exists, it only removes the stream entry.
  */
 export async function deferActive(
@@ -809,9 +814,11 @@ export async function deferActive(
   entryId: string,
   group: string = CONSUMER_GROUP,
   broadcastMode?: boolean,
+  pausedRestore?: boolean,
 ): Promise<void> {
   const args = [jobId, entryId, group];
-  if (broadcastMode) args.push('1');
+  args.push(broadcastMode ? '1' : '0');
+  if (pausedRestore) args.push('1');
   await client.fcall('glidemq_deferActive', [k.stream, k.job(jobId), k.listActive], args);
 }
 

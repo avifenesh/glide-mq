@@ -126,6 +126,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected xreadStreams: Record<string, string> = Object.create(null);
   protected globalConcurrencyEnabled = false;
   protected globalRateLimitEnabled = false;
+  protected queuePaused = false;
   protected cachedRateLimitMax = 0;
   protected cachedRateLimitDuration = 0;
 
@@ -807,6 +808,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     moveResult:
       | Record<string, string>
       | 'REVOKED'
+      | 'PAUSED'
       | 'EXPIRED'
       | 'GROUP_FULL'
       | 'GROUP_RATE_LIMITED'
@@ -851,6 +853,26 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           this.consumerGroup,
           undefined,
           this.broadcastMode ? true : undefined,
+        );
+      } catch (err) {
+        this.emit('error', err);
+      }
+      return true;
+    }
+    if (moveResult === 'PAUSED') {
+      // Cache immediately so the next poll skips fetch instead of claim/defer looping.
+      this.queuePaused = true;
+      // Restore to the original list (priority/LIFO). Broadcast leaves the PEL
+      // claim in this subscription so other groups do not get a duplicate XADD.
+      try {
+        await deferActive(
+          this.commandClient,
+          this.queueKeys,
+          jobId,
+          entryId,
+          this.consumerGroup,
+          this.broadcastMode ? true : undefined,
+          true,
         );
       } catch (err) {
         this.emit('error', err);
@@ -1724,7 +1746,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   }
 
   /** Refresh cached meta flags from Valkey. Called on init and each scheduler tick. */
-  private async refreshMetaFlags(): Promise<void> {
+  protected async refreshMetaFlags(): Promise<void> {
     if (!this.commandClient) return;
     try {
       // Read only the 3 specific fields we need - avoids O(N) on orderdone:* fields
@@ -1732,17 +1754,36 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         'globalConcurrency',
         'rateLimitMax',
         'rateLimitDuration',
+        'paused',
       ]);
       const gcVal = vals?.[0] != null ? String(vals[0]) : null;
       const rlMax = vals?.[1] != null ? String(vals[1]) : null;
       const rlDur = vals?.[2] != null ? String(vals[2]) : null;
+      const pausedVal = vals?.[3] != null ? String(vals[3]) : null;
       this.globalConcurrencyEnabled = gcVal != null && Number(gcVal) > 0;
       this.globalRateLimitEnabled = rlMax != null && Number(rlMax) > 0;
       this.cachedRateLimitMax = Number(rlMax) || 0;
       this.cachedRateLimitDuration = Number(rlDur) || 0;
+      const wasPaused = this.queuePaused;
+      this.queuePaused = pausedVal === '1';
+      if (wasPaused && !this.queuePaused && this.broadcastMode) {
+        this.xreadStreams[this.queueKeys.stream] = '0';
+      }
     } catch {
       // Transient error - next tick will retry
     }
+  }
+
+  /**
+   * If the queue is paused, refresh meta and wait briefly.
+   * Returns true when the caller should skip this poll iteration.
+   */
+  protected async waitIfQueuePaused(): Promise<boolean> {
+    if (!this.queuePaused) return false;
+    await this.refreshMetaFlags();
+    if (!this.queuePaused) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    return true;
   }
 
   /**

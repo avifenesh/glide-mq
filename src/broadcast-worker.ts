@@ -26,6 +26,9 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
 
   protected async pollOnce(): Promise<void> {
     if (!this.blockingClient || !this.commandClient) return;
+    if (this.paused || this.closing) return;
+    if (await this.waitIfQueuePaused()) return;
+    if (this.paused || this.closing) return;
 
     // Calculate how many jobs we can fetch without exceeding concurrency
     const available = this.prefetch - this.activeCount;
@@ -52,10 +55,15 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
 
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
     // STREAMS {streamKey} >
+    const readingPending = this.xreadStreams[this.queueKeys.stream] === '0';
     const result = await this.blockingClient.xreadgroup(this.consumerGroup, this.consumerId, this.xreadStreams, {
       count: fetchCount,
       block: this.blockTimeout,
     });
+
+    if (readingPending) {
+      this.xreadStreams[this.queueKeys.stream] = '>';
+    }
 
     if (!result) {
       if (!this.isDrained && this.activeCount === 0) {
@@ -171,6 +179,12 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
       while (collected.length < this.batchSize && this.running && !this.closing) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) break;
+
+        // Queue.pause() can race with the initial read while a batch waits for
+        // its timeout. Refresh before every refill so a paused queue does not
+        // claim another entry during that secondary read.
+        await this.refreshMetaFlags();
+        if (this.queuePaused) break;
 
         const blockMs = Math.min(remaining, this.blockTimeout);
         const moreResult = await this.blockingClient.xreadgroup(

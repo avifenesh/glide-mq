@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **`Queue.pause()` did not stop workers**: pause only wrote `meta.paused=1`. Activation paths (`moveToActive`, `completeAndFetchNext`, `popLists`, `rpopAndReserve`) never read it, so workers kept claiming jobs. Pause-race claims restore LIFO/priority lists in their original dispatch order; broadcast claims stay in the subscription PEL. `LIBRARY_VERSION` bumped to `96`.
+
+---
+
 ## [0.15.4] - 2026-06-04
 
 ### Fixed
