@@ -323,6 +323,15 @@ export class FlowProducer {
       const child = flow.children[i];
       const childKeys = buildKeys(child.queueName, prefix);
       const depsMember = `${keyPrefix(prefix, child.queueName)}:${subNode.job.id}`;
+      if ((await client.exists([childKeys.job(subNode.job.id)])) === 0) {
+        // The recursive child may have been removed after the parent was
+        // created. Reconcile the parent dependency without recreating a ghost
+        // child hash.
+        await completeChild(client, parentKeys, parentId, depsMember);
+        subNode.job.parentId = parentId;
+        subNode.job.parentQueue = parentQueueName;
+        continue;
+      }
       if (child.queueName === parentQueueName) {
         // Persist the edge before registerParent's completed-state check so a
         // worker completing in this window can re-read parent metadata.
@@ -330,15 +339,30 @@ export class FlowProducer {
           parentId: parentId,
           parentQueue: parentQueueName,
         });
-        await registerParent(
-          client,
-          childKeys,
-          subNode.job.id,
-          parentId,
-          keyPrefix(prefix, parentQueueName),
-          parentKeys,
-          depsMember,
-        );
+        const childState = await client.hget(childKeys.job(subNode.job.id), 'state');
+        if (childState == null) {
+          // The hash was deleted between EXISTS and HSET. Remove the partial
+          // hash so a removed child is not resurrected as a ghost job.
+          await client.del([childKeys.job(subNode.job.id)]);
+          await client.sadd(parentKeys.deps(parentId), [depsMember]);
+          await completeChild(client, parentKeys, parentId, depsMember);
+        } else {
+          const registration = await registerParent(
+            client,
+            childKeys,
+            subNode.job.id,
+            parentId,
+            keyPrefix(prefix, parentQueueName),
+            parentKeys,
+            depsMember,
+          );
+          if (registration.startsWith('error:child_not_found')) {
+            await client.sadd(parentKeys.deps(parentId), [depsMember]);
+            await completeChild(client, parentKeys, parentId, depsMember);
+          } else if (registration.startsWith('error:')) {
+            throw new GlideMQError(`Failed to register nested child ${subNode.job.id}: ${registration}`);
+          }
+        }
       } else {
         await client.hset(childKeys.job(subNode.job.id), {
           parentId: parentId,
@@ -346,7 +370,8 @@ export class FlowProducer {
         });
         await client.sadd(childKeys.parents(subNode.job.id), [`${keyPrefix(prefix, parentQueueName)}:${parentId}`]);
         const state = await client.hget(childKeys.job(subNode.job.id), 'state');
-        if (state && String(state) === 'completed') {
+        if (state == null || String(state) === 'completed') {
+          if (state == null) await client.del([childKeys.job(subNode.job.id)]);
           await completeChild(client, parentKeys, parentId, depsMember);
         }
       }
@@ -706,6 +731,13 @@ export class FlowProducer {
             parentId: string;
             parentQueue: string;
           }[] = [];
+          const missingChildEdges: {
+            node: string;
+            jid: string;
+            parentId: string;
+            parentQueue: string;
+            dep: string;
+          }[] = [];
 
           for (const sub of submits) {
             const node = sub.node;
@@ -739,6 +771,23 @@ export class FlowProducer {
             }
 
             if (registerStart >= 0) {
+              if ((await client.exists([queueKeys.job(jid)])) === 0) {
+                const depsMember = `${queuePrefix}:${jid}`;
+                for (let p = registerStart; p < myDependents.length; p++) {
+                  const depName = myDependents[p];
+                  const parentJob = result.get(depName)!;
+                  const parentNode = nodeByName.get(depName)!;
+                  await client.sadd(buildKeys(parentNode.queueName, prefix).deps(parentJob.id), [depsMember]);
+                  missingChildEdges.push({
+                    node: node.name,
+                    jid,
+                    dep: depName,
+                    parentId: parentJob.id,
+                    parentQueue: parentNode.queueName,
+                  });
+                }
+                continue;
+              }
               const pIds = myDependents.map((d) => result.get(d)!.id);
               const pQueues = myDependents.map((d) => nodeByName.get(d)!.queueName);
               job.parentIds = pIds;
@@ -815,16 +864,28 @@ export class FlowProducer {
               parentKeys,
               depsMember,
             );
-            if (registration.startsWith('error:')) {
+            if (registration.startsWith('error:child_not_found')) {
+              await client.sadd(parentKeys.deps(parentJob.id), [depsMember]);
+              await completeChild(client, parentKeys, parentJob.id, depsMember);
+            } else if (registration.startsWith('error:')) {
               throw new GlideMQError(`Failed to register dependent ${edge.dep} for node ${edge.node}: ${registration}`);
             }
+          }
+
+          for (const edge of missingChildEdges) {
+            await completeChild(
+              client,
+              buildKeys(edge.parentQueue, prefix),
+              edge.parentId,
+              `${keyPrefix(prefix, nodeByName.get(edge.node)!.queueName)}:${edge.jid}`,
+            );
           }
 
           for (const edge of crossQueueEdges) {
             const node = nodeByName.get(edge.node)!;
             const childKeys = buildKeys(node.queueName, prefix);
             const state = await client.hget(childKeys.job(edge.jid), 'state');
-            if (String(state) === 'completed') {
+            if (state == null || String(state) === 'completed') {
               await completeChild(
                 client,
                 buildKeys(edge.parentQueue, prefix),
