@@ -21,7 +21,7 @@
 
 ### In flight (fork)
 
-- **Nested/cross-queue parents**: test-first regression `d3a9782`; implementation `1cc2530` + `8cef166` + `c5eaaab` + `507fb63`. Lua source is `src/functions/glidemq.lua`; cross-slot DAG parent deps use single-slot commands and child-scheduler notifications are retryable/idempotent.
+- **Nested/cross-queue parents**: test-first regression `42e35b4`; implementation commits `6fe1f48`, `937e9aa`, and `e793cf9`. The branch is independent of `upstream/main`, uses `LIBRARY_VERSION` 104, reconciles removed children, JSON-encodes retryable child-slot notifications, and removes `xq-pending` during obliterate. Standalone targeted flow and distinct-queue DAG regressions are green; cluster services were not available locally.
 
 ### 0.15.4 Release Notes
 
