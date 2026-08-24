@@ -54,7 +54,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 91: Stalled-recovery redispatches under-threshold jobs back to the stream / lifo / priority list so a healthy worker can pick them up; jobs only fail once stalledCount > maxStalledCount. Aligns with the at-least-once redelivery promise in DURABILITY.md and matches BullMQ semantics (#242).
 // Version 92: Replace DEL with UNLINK on every multi-key / large-collection delete (job hashes, retention purge, glidemq_clean batches, glidemq_drain stream/zset/lifo/priority sweeps). UNLINK keeps in-script atomicity - the keyspace removal is still synchronous from the script's view - but defers memory reclamation to the bio thread, so obliterate / retention / drain stop blocking the server thread on MB-sized job hashes. Small-key DELs (lockKey) kept as DEL (#243).
 // Version 93: glidemq_completeAndFetchNext always SMEMBERS the child parents SET. The previous hasParents gate sourced its truth from the worker's snapshot of the job hash, which is stale when DAG wiring (hset parentIds + registerParent) lands between the worker's job fetch and the completion FCALL. The SMEMBERS cost on an empty set is negligible; the dropped optimization was unsound (#246).
-export const LIBRARY_VERSION = '93';
+// Version 108: revoke/remove delete list-backed waiting entries so getJobs pagination cannot expose or count stale jobs.
+export const LIBRARY_VERSION = '108';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -822,7 +823,7 @@ export async function deferActive(
 export async function removeJob(client: Client, k: QueueKeys, jobId: string): Promise<number> {
   const result = await client.fcall(
     'glidemq_removeJob',
-    [k.job(jobId), k.stream, k.scheduled, k.completed, k.failed, k.events, k.log(jobId)],
+    [k.job(jobId), k.stream, k.scheduled, k.completed, k.failed, k.events, k.log(jobId), k.lifo, k.priority],
     [jobId],
   );
   return result as number;
@@ -903,7 +904,7 @@ export async function revokeJob(
 ): Promise<string> {
   const result = await client.fcall(
     'glidemq_revoke',
-    [k.job(jobId), k.stream, k.scheduled, k.failed, k.events],
+    [k.job(jobId), k.stream, k.scheduled, k.failed, k.events, k.lifo, k.priority],
     [jobId, timestamp.toString(), group],
   );
   return result as string;

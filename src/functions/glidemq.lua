@@ -2645,6 +2645,8 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   local failedKey = keys[5]
   local eventsKey = keys[6]
   local logKey = keys[7]
+  local lifoKey = keys[8]
+  local priorityKey = keys[9]
   local jobId = args[1]
   local exists = redis.call('EXISTS', jobKey)
   if exists == 0 then
@@ -2673,6 +2675,8 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('ZREM', scheduledKey, jobId)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
+  redis.call('LREM', lifoKey, 0, jobId)
+  redis.call('LREM', priorityKey, 0, jobId)
   markOrderingDone(jobKey, jobId)
   -- Clean up DAG parents SET, per-job streaming channel, and signals.
   -- Job hash + log can be MB-sized; parents/jstream/signals carry per-step
@@ -2716,6 +2720,8 @@ redis.register_function('glidemq_revoke', function(keys, args)
   local scheduledKey = keys[3]
   local failedKey = keys[4]
   local eventsKey = keys[5]
+  local lifoKey = keys[6]
+  local priorityKey = keys[7]
   local jobId = args[1]
   local timestamp = tonumber(args[2])
   local group = args[3]
@@ -2743,6 +2749,8 @@ redis.register_function('glidemq_revoke', function(keys, args)
   end
   if state == 'waiting' or state == 'delayed' or state == 'prioritized' then
     redis.call('ZREM', scheduledKey, jobId)
+    redis.call('LREM', lifoKey, 0, jobId)
+    redis.call('LREM', priorityKey, 0, jobId)
     local cursor = '-'
     local found = false
     while not found do
