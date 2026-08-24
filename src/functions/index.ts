@@ -58,7 +58,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 102: completeChild ignores stale notifications for deleted parent hashes.
 // Version 104: encode cross-queue notifications as JSON and reconcile deleted children without recreating hashes.
 // Version 107: extract the final queue hash tag for cross-queue DAG notifications so custom prefixes may contain braces.
-export const LIBRARY_VERSION = '107';
+// Version 108: all parent dependency completion paths ignore deleted parent hashes.
+export const LIBRARY_VERSION = '108';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';

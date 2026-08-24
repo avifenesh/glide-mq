@@ -140,6 +140,30 @@ end
 local function xaddJob(streamKey, jobId, jobName)
   redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name', jobName or '')
 end
+
+-- Complete one parent dependency without recreating a parent removed while its
+-- child was still in flight. All callers run inside a single FCALL, so the
+-- EXISTS/HSETNX sequence is atomic with respect to removal and completion.
+local function completeParentDependency(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
+  if redis.call('EXISTS', parentJobKey) == 0 then
+    return -1
+  end
+  local depMarker = 'depdone:' .. depsMember
+  if redis.call('HSETNX', parentJobKey, depMarker, '1') == 0 then
+    local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
+    return redis.call('SCARD', parentDepsKey) - doneCount
+  end
+  local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+  local totalDeps = redis.call('SCARD', parentDepsKey)
+  local remaining = totalDeps - doneCount
+  if remaining <= 0 and redis.call('HGET', parentJobKey, 'state') == 'waiting-children' then
+    redis.call('HSET', parentJobKey, 'state', 'waiting')
+    xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
+    emitEvent(parentEventsKey, 'active', parentId, nil)
+  end
+  return remaining
+end
+
 local function groupqScore(jobKey, jobId)
   local seq = tonumber(redis.call('HGET', jobKey, 'orderingSeq'))
   if seq and seq > 0 then return seq end
@@ -875,20 +899,7 @@ redis.register_function('glidemq_complete', function(keys, args)
     local parentJobKey = keys[7]
     local parentStreamKey = keys[8]
     local parentEventsKey = keys[9]
-    local depMarker = 'depdone:' .. depsMember
-    if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
-      local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-      local totalDeps = redis.call('SCARD', parentDepsKey)
-      local remaining = totalDeps - doneCount
-      if remaining <= 0 then
-        local parentState = redis.call('HGET', parentJobKey, 'state')
-        if parentState == 'waiting-children' then
-          redis.call('HSET', parentJobKey, 'state', 'waiting')
-          xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
-          emitEvent(parentEventsKey, 'active', parentId, nil)
-        end
-      end
-    end
+    completeParentDependency(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
   end
   -- DAG multi-parent: notify additional same-queue parents via parents SET
   local parentsKey = prefix .. 'parents:' .. jobId
@@ -914,19 +925,7 @@ redis.register_function('glidemq_complete', function(keys, args)
           local pDepsKey = pPrefix .. 'deps:' .. pId
           local pStreamKey = pPrefix .. 'stream'
           local pEventsKey = pPrefix .. 'events'
-          local pDepMarker = 'depdone:' .. dagDepsMember
-          if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
-            local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
-            local pTotalDeps = redis.call('SCARD', pDepsKey)
-            if pTotalDeps - pDoneCount <= 0 then
-              local pState = redis.call('HGET', pJobKey, 'state')
-              if pState == 'waiting-children' then
-                redis.call('HSET', pJobKey, 'state', 'waiting')
-                xaddJob(pStreamKey, pId, redis.call('HGET', pJobKey, 'name'))
-                emitEvent(pEventsKey, 'active', pId, nil)
-              end
-            end
-          end
+          completeParentDependency(pDepsKey, pJobKey, pStreamKey, pEventsKey, dagDepsMember, pId)
         else
           local pTag = extractQueueTag(pQueue)
           enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
@@ -1024,19 +1023,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local parentJobKey = keys[7]
     local parentStreamKey = keys[8]
     local parentEventsKey = keys[9]
-    local depMarker = 'depdone:' .. depsMember
-    if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
-      local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-      local totalDeps = redis.call('SCARD', parentDepsKey)
-      if totalDeps - doneCount <= 0 then
-        local parentState = redis.call('HGET', parentJobKey, 'state')
-        if parentState == 'waiting-children' then
-          redis.call('HSET', parentJobKey, 'state', 'waiting')
-          xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
-          emitEvent(parentEventsKey, 'active', parentId, nil)
-        end
-      end
-    end
+    completeParentDependency(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
   end
   -- DAG multi-parent: always check parents SET. The previous hasParents
   -- arg was sourced from the worker's snapshot of the job hash, which is
@@ -1061,19 +1048,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
             local pDepsKey = pPrefix .. 'deps:' .. pId
             local pStreamKey = pPrefix .. 'stream'
             local pEventsKey = pPrefix .. 'events'
-            local pDepMarker = 'depdone:' .. dagDepsMember
-            if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
-              local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
-              local pTotalDeps = redis.call('SCARD', pDepsKey)
-              if pTotalDeps - pDoneCount <= 0 then
-                local pState = redis.call('HGET', pJobKey, 'state')
-                if pState == 'waiting-children' then
-                  redis.call('HSET', pJobKey, 'state', 'waiting')
-                  xaddJob(pStreamKey, pId, redis.call('HGET', pJobKey, 'name'))
-                  emitEvent(pEventsKey, 'active', pId, nil)
-                end
-              end
-            end
+            completeParentDependency(pDepsKey, pJobKey, pStreamKey, pEventsKey, dagDepsMember, pId)
           else
             local pTag = extractQueueTag(pQueue)
             enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
@@ -2599,28 +2574,7 @@ redis.register_function('glidemq_completeChild', function(keys, args)
   local parentEventsKey = keys[4]
   local depsMember = args[1]
   local parentId = args[2]
-  -- A stale cross-queue notification must not recreate a deleted parent hash.
-  if redis.call('EXISTS', parentJobKey) == 0 then
-    return -1
-  end
-  local depMarker = 'depdone:' .. depsMember
-  if redis.call('HSETNX', parentJobKey, depMarker, '1') == 0 then
-    local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
-    local totalDeps = redis.call('SCARD', depsKey)
-    return totalDeps - doneCount
-  end
-  local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-  local totalDeps = redis.call('SCARD', depsKey)
-  local remaining = totalDeps - doneCount
-  if remaining <= 0 then
-    local parentState = redis.call('HGET', parentJobKey, 'state')
-    if parentState == 'waiting-children' then
-      redis.call('HSET', parentJobKey, 'state', 'waiting')
-      xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
-      emitEvent(parentEventsKey, 'active', parentId, nil)
-    end
-  end
-  return remaining
+  return completeParentDependency(depsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
 end)
 
 redis.register_function('glidemq_registerParent', function(keys, args)
@@ -2648,19 +2602,7 @@ redis.register_function('glidemq_registerParent', function(keys, args)
   -- Race condition check: if child already completed, trigger parent notification immediately
   local childState = redis.call('HGET', childJobKey, 'state')
   if childState == 'completed' then
-    local depMarker = 'depdone:' .. depsMember
-    if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
-      local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-      local totalDeps = redis.call('SCARD', parentDepsKey)
-      if totalDeps - doneCount <= 0 then
-        local parentState = redis.call('HGET', parentJobKey, 'state')
-        if parentState == 'waiting-children' then
-          redis.call('HSET', parentJobKey, 'state', 'waiting')
-          xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
-          emitEvent(parentEventsKey, 'active', parentId, nil)
-        end
-      end
-    end
+    completeParentDependency(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
     return 'already_completed'
   end
   return 'ok'
