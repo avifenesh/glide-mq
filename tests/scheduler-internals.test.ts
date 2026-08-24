@@ -72,4 +72,63 @@ describe('Scheduler internals', () => {
       vi.useRealTimers();
     }
   });
+
+  it('does not overlap or run a queued continuation after stop', async () => {
+    vi.useFakeTimers();
+    let reclaimCalls = 0;
+    const client = {
+      fcall: vi.fn((name: string) => {
+        if (name === 'glidemq_reclaimStalled') {
+          reclaimCalls++;
+          return Promise.resolve(100);
+        }
+        if (name === 'glidemq_nextDue') return Promise.resolve(-1);
+        return Promise.resolve(0);
+      }),
+    } as any;
+    const scheduler = new Scheduler(client, buildKeys('scheduler-stalled-stop'), {
+      promotionInterval: 60_000,
+      stalledInterval: 60_000,
+    });
+
+    try {
+      scheduler.start();
+      await scheduler.waitForIdle();
+
+      (scheduler as any).runStalledRecovery();
+      expect(reclaimCalls).toBe(1);
+
+      scheduler.stop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reclaimCalls).toBe(1);
+    } finally {
+      scheduler.stop();
+      await scheduler.waitForIdle();
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports a stalled recovery failure without rejecting scheduler idle', async () => {
+    const error = new Error('reclaim failed');
+    const errors: Error[] = [];
+    const client = {
+      fcall: vi.fn((name: string) => {
+        if (name === 'glidemq_reclaimStalled') return Promise.reject(error);
+        if (name === 'glidemq_nextDue') return Promise.resolve(-1);
+        return Promise.resolve(0);
+      }),
+      hgetall: vi.fn().mockResolvedValue([]),
+    } as any;
+    const scheduler = new Scheduler(client, buildKeys('scheduler-stalled-error'), {
+      promotionInterval: 60_000,
+      stalledInterval: 60_000,
+      onError: (err) => errors.push(err),
+    });
+
+    scheduler.start();
+    await scheduler.waitForIdle();
+    scheduler.stop();
+
+    expect(errors).toContain(error);
+  });
 });
