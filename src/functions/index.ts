@@ -57,6 +57,7 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 108: revoke/remove delete list-backed waiting entries so getJobs pagination cannot expose or count stale jobs.
 // Version 110: derive list keys in remove/revoke and remove waiting FIFO stream entries.
 // Version 111: skip the FIFO stream scan when removing list-backed waiting jobs.
+// Version 112: route remove/revoke FIFO cleanup by actual waiting-list membership.
 export const LIBRARY_VERSION = '112';
 
 // Consumer group name used by workers

@@ -5,7 +5,7 @@
 - **Branch**: `fix/get-jobs-waiting`, based directly on `upstream/main`.
 - **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
 - **Validation**: waiting-source integration tests pass on isolated standalone Valkey; fork and upstream CI are pending.
-- **Unreleased**: `getJobs('waiting')` reads priority, LIFO, and non-pending FIFO sources; revoke/remove clean list entries. List-backed removals skip the FIFO stream scan. Server-function library identity is `111`.
+- **Unreleased**: `getJobs('waiting')` reads priority, LIFO, and non-pending FIFO sources; revoke/remove clean list entries. Removal and revocation route FIFO cleanup by actual list membership so list-backed jobs skip the scan while stale source fields cannot orphan stream entries. Server-function library identity is `112`.
 - **Review gate**: automatic Claude review is retired; the Revuto GitHub App check reviews pull requests.
 - **Dependency security**: the lockfile carries protobufjs 7.6.5, brace-expansion 5.0.9, PostCSS 8.5.25, and body-parser 2.3.0.
 
