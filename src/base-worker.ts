@@ -1085,8 +1085,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * MITIGATION: Run multiple workers for redundancy. Manually remove/re-add the
    * scheduler to recover from stuck state.
    *
-   * Stalled terminal failures and TTL expiry advance the scheduler atomically in
-   * Lua (`applyStalledLogic` / `expireJob`).
+   * Stalled recovery, TTL expiry, suspend timeout, capacity rejection, and
+   * group-rate failure advance the scheduler atomically in Lua.
    */
   protected async updateSchedulerAfterComplete(schedulerName: string, now: number): Promise<void> {
     if (!this.commandClient) return;

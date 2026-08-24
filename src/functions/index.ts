@@ -56,7 +56,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 93: glidemq_completeAndFetchNext always SMEMBERS the child parents SET. The previous hasParents gate sourced its truth from the worker's snapshot of the job hash, which is stale when DAG wiring (hset parentIds + registerParent) lands between the worker's job fetch and the completion FCALL. The SMEMBERS cost on an empty set is negligible; the dropped optimization was unsound (#246).
 // Version 105: Terminal stalled recovery atomically advances repeatAfterComplete schedulers without lossy scheduler JSON reserialization.
 // Version 106: Terminal TTL expiry atomically advances repeatAfterComplete schedulers through the shared expireJob path.
-export const LIBRARY_VERSION = '106';
+// Version 107: Terminal suspend timeout, capacity rejection, and group-rate failure atomically advance repeatAfterComplete schedulers.
+export const LIBRARY_VERSION = '107';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';

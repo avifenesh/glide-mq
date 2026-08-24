@@ -2,6 +2,10 @@
 
 local PRIORITY_SHIFT = 4398046511104
 
+-- Forward declaration: terminal paths defined before the scheduler helpers
+-- also advance repeatAfterComplete schedulers.
+local advanceRepeatAfterComplete
+
 -- Guarded decrement of the per-queue list-active counter.
 -- Used at every site that tracks completion/failure/release of a list-sourced
 -- job (entryId == ''). The guard is required because healListActive cannot
@@ -224,6 +228,7 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
             'state', 'failed',
             'failedReason', 'cost exceeds token bucket capacity',
             'finishedOn', tostring(ts))
+          advanceRepeatAfterComplete(headJobKey, prefix, ts)
           emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
           recordMetrics(metricsKey, ts, ts - processedOn)
         elseif tbTokensCur < headCost then
@@ -292,10 +297,6 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey)
     end
   end
 end
-
--- Forward declaration: expireJob is used by all terminal TTL paths below,
--- while the implementation is kept with the scheduler helpers.
-local advanceRepeatAfterComplete
 
 local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, hintOrderingSeq, hintGroupKey)
   if curState == 'failed' then return true end
@@ -1358,6 +1359,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
           'state', 'failed',
           'failedReason', 'cost exceeds token bucket capacity',
           'finishedOn', tostring(timestamp))
+        advanceRepeatAfterComplete(nextJobKey, prefix, tonumber(timestamp))
         if skipEvents ~= '1' then emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
         if skipMetrics ~= '1' then recordMetrics(metricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn) end
         return {'NEXT_NONE', jobId}
@@ -2017,6 +2019,7 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
               'state', 'failed',
               'failedReason', 'cost exceeds token bucket capacity',
               'finishedOn', tostring(now))
+            advanceRepeatAfterComplete(headJobKey, prefix, now)
             emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
             tbCheckPassed = false
           end
@@ -2262,6 +2265,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
           'state', 'failed',
           'failedReason', 'cost exceeds token bucket capacity',
           'finishedOn', timestampStr)
+        advanceRepeatAfterComplete(jobKey, prefix, ts)
         emitEvent(prefix .. 'events', 'failed', jobId, {'failedReason', 'cost exceeds token bucket capacity'})
         return 'ERR:COST_EXCEEDS_CAPACITY'
       end
@@ -3220,6 +3224,7 @@ redis.register_function('glidemq_rateLimitGroup', function(keys, args)
     redis.call('ZADD', prefix .. 'failed', timestamp, jobId)
     local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
     redis.call('HSET', jobKey, 'state', 'failed', 'failedReason', 'group rate limited', 'finishedOn', tostring(timestamp), 'processedOn', tostring(processedOn))
+    advanceRepeatAfterComplete(jobKey, prefix, timestamp)
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', 'group rate limited'})
     local metricsKey = prefix .. 'metrics:failed'
     recordMetrics(metricsKey, timestamp, timestamp - processedOn)
@@ -3694,6 +3699,7 @@ redis.register_function('glidemq_sweepSuspended', function(keys, args)
         'finishedOn', tostring(now),
         'processedOn', tostring(now)
       )
+      advanceRepeatAfterComplete(jobKey, keyPrefix, now)
       markOrderingDone(jobKey, id, ordKey, ordSeq)
       -- Only release the group slot for ordered jobs. Non-ordered jobs already
       -- released their slot in glidemq_suspend; releasing again would double-
