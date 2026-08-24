@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Queue pause now expires suspended jobs**: `Queue.pause()` immediately sweeps suspended jobs whose timeouts have elapsed, so pausing does not leave expired human-in-the-loop jobs pending until the background sweep.
+
 ## [0.15.4] - 2026-06-04
 
 ### Fixed
