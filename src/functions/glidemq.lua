@@ -2051,7 +2051,6 @@ redis.register_function('glidemq_promoteRateLimited', function(keys, args)
         local returningState = redis.call('HGET', returningJobKey, 'state')
         local returningSeq = tonumber(redis.call('HGET', returningJobKey, 'orderingSeq')) or 0
         if returningState == 'group-waiting' and returningSeq > 0 and
-           (prNextSeq == 0 or returningSeq < prNextSeq) and
            redis.call('ZSCORE', waitListKey, returningJobId) then
           returningReady = true
         else
