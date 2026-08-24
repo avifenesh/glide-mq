@@ -459,8 +459,8 @@ export async function completeAndFetchNext(
   // Fast path: array protocol from Lua function
   if (Array.isArray(raw)) {
     const notificationOffset =
-      raw.length >= 2 && String(raw[raw.length - 2]) === PARENT_NOTIFICATIONS_MARKER ? raw.length - 2 : raw.length;
-    const parentNotifications = notificationOffset < raw.length ? parseParentNotifications(raw[raw.length - 1]) : [];
+      raw.length >= 2 && String(raw.at(-2)) === PARENT_NOTIFICATIONS_MARKER ? raw.length - 2 : raw.length;
+    const parentNotifications = notificationOffset < raw.length ? parseParentNotifications(raw.at(-1)) : [];
     const tag = String(raw[0]);
     if (tag === 'NEXT_NONE') {
       return { completed: raw[1] != null ? String(raw[1]) : jobId, next: false, parentNotifications };
