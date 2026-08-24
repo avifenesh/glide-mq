@@ -531,6 +531,7 @@ describeEachMode('DAG flows', (CONNECTION) => {
       if (!deleted && result === 1 && key.includes(`{${queueName}}:job:`)) {
         deleted = true;
         await cleanupClient.del([key]);
+        return 0;
       }
       return result;
     };
@@ -573,6 +574,41 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await flushQueue(cleanupClient, queueName);
     }
   }, 20000);
+
+  it('reconciles a child deleted during same-queue parent registration', async () => {
+    const queueName = Q + '-register-race';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const client = await (flow as any).getClient();
+    const originalFcall = client.fcall.bind(client);
+    let deleted = false;
+    client.fcall = async (name: string, keys: string[], args: string[]) => {
+      if (!deleted && name === 'glidemq_registerParent') {
+        deleted = true;
+        await cleanupClient.del([String(keys[0])]);
+      }
+      return originalFcall(name, keys, args);
+    };
+
+    try {
+      const jobs = await flow.addDAG({
+        nodes: [
+          { name: 'A', queueName, data: {} },
+          { name: 'B', queueName, data: {}, deps: ['A'] },
+          { name: 'C', queueName, data: {}, deps: ['A'] },
+        ],
+      });
+
+      expect(deleted).toBe(true);
+      const keys = buildKeys(queueName);
+      expect(await cleanupClient.exists([keys.job(jobs.get('A')!.id)])).toBe(0);
+      expect(String(await cleanupClient.hget(keys.job(jobs.get('B')!.id), 'state'))).toBe('waiting');
+      expect(String(await cleanupClient.hget(keys.job(jobs.get('C')!.id), 'state'))).toBe('waiting');
+    } finally {
+      client.fcall = originalFcall;
+      await flow.close();
+      await flushQueue(cleanupClient, queueName);
+    }
+  });
 
   it('handles race: registerParent after child completes', async () => {
     const qName = Q + '-race';
