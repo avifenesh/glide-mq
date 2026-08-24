@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- **Revoked active jobs could complete**: the Lua source library now rejects completion after a revoke, workers abort the affected processor, and batch workers keep each job's abort signal isolated. Batch timeouts still retry according to job attempts. `LIBRARY_VERSION` is now `96`.
+- **Revoked active jobs could complete**: the Lua source library now rejects completion after a revoke, workers abort the affected processor, and batch workers keep each job's abort signal isolated. Batch processor failures for revoked jobs are terminal, while batch timeouts still retry according to job attempts. `LIBRARY_VERSION` is now `97`.
 
 ---
 
