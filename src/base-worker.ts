@@ -605,15 +605,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
     if (this.opts.tokenLimiter) await this.waitForTokenLimit();
 
-    // Per-job abort controllers so a revoke heartbeat cannot cancel the rest of the batch.
-    const batchTimeoutAc = new AbortController();
+    // Per-job abort controllers keep a revoke local to its job.
     for (const entry of batch) {
       const ac = new AbortController();
       this.activeAbortControllers.set(entry.jobId, ac);
       entry.job.abortSignal = ac.signal;
     }
     const abortBatch = () => {
-      batchTimeoutAc.abort();
       for (const entry of batch) {
         this.activeAbortControllers.get(entry.jobId)?.abort();
       }
@@ -803,11 +801,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         }
       }
     } else if (thrownError) {
-      // All jobs fail
-      const aborted = batchTimeoutAc.signal.aborted;
-      const err = thrownError ?? (aborted ? new UnrecoverableError('revoked') : thrownError);
+      // A timeout is retryable. Revocation is terminal only when completion or
+      // an explicit state check positively identifies the revoked job.
       for (const entry of batch) {
-        await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
+        await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, thrownError);
       }
     }
   }
@@ -1412,11 +1409,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
 
       if (processError || aborted) {
+        const confirmedRevoked = !processError && (await this.isJobRevoked(currentJobId));
         await this.handleJobFailure(
           job,
           currentJobId,
           currentEntryId,
-          processError ?? new UnrecoverableError('revoked'),
+          processError ?? (confirmedRevoked ? new UnrecoverableError('revoked') : new Error('Job aborted')),
         );
         return;
       }
@@ -1581,6 +1579,15 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       return true;
     }
     return false;
+  }
+
+  protected async isJobRevoked(jobId: string): Promise<boolean> {
+    if (!this.commandClient) return false;
+    try {
+      return String(await this.commandClient.hget(this.queueKeys.job(jobId), 'revoked')) === '1';
+    } catch {
+      return false;
+    }
   }
 
   protected startHeartbeat(jobId: string, jobLockDuration?: number): void {
