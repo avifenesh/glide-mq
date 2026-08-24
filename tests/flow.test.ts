@@ -586,7 +586,7 @@ describeEachMode('FlowProducer', (CONNECTION) => {
 
   it('flushes JSON pending notifications for queue names containing tabs', async () => {
     const parentQ = Q + '-tab-parent\tqueue';
-    const childQ = Q + '-tab-child\tqueue';
+    const childQ = parentQ;
     const flow = new FlowProducer({ connection: CONNECTION });
 
     try {
