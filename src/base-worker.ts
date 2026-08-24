@@ -536,6 +536,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
     // Activate jobs and build batch
     const batch: { jobId: string; entryId: string; job: Job<D, R> }[] = [];
+    const pausedListEntries: { jobId: string; entryId: string }[] = [];
+    const pausedStreamEntries: { jobId: string; entryId: string }[] = [];
     for (const entry of collected) {
       if (!this.commandClient) break;
       const moveResult = await moveToActive(
@@ -548,6 +550,15 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.consumerGroup,
         this.broadcastMode ? true : undefined,
       );
+      if (moveResult === 'PAUSED') {
+        // Defer the restores until every claim has been inspected. List jobs
+        // are popped from the right, so restoring them in reverse claim order
+        // keeps the original dispatch sequence on the next RPOP.
+        await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId, false);
+        if (entry.entryId === '') pausedListEntries.push(entry);
+        else pausedStreamEntries.push(entry);
+        continue;
+      }
       if (await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId)) continue;
       const hash = moveResult as Record<string, string>;
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, entry.jobId, hash, this.serializer);
@@ -562,6 +573,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       this.startHeartbeat(entry.jobId, job.opts.lockDuration);
       batch.push({ jobId: entry.jobId, entryId: entry.entryId, job });
+    }
+
+    for (const entry of pausedStreamEntries) {
+      await this.deferPausedActivation(entry);
+    }
+    for (let i = pausedListEntries.length - 1; i >= 0; i--) {
+      await this.deferPausedActivation(pausedListEntries[i]);
     }
 
     if (batch.length === 0) return;
@@ -818,6 +836,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       | null,
     jobId: string,
     entryId: string,
+    deferPausedRestore = true,
   ): Promise<boolean> {
     if (!this.commandClient) return true;
     if (moveResult === null) {
@@ -862,21 +881,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (moveResult === 'PAUSED') {
       // Cache immediately so the next poll skips fetch instead of claim/defer looping.
       this.queuePaused = true;
+      if (!deferPausedRestore) return true;
       // Restore to the original list (priority/LIFO). Broadcast leaves the PEL
       // claim in this subscription so other groups do not get a duplicate XADD.
-      try {
-        await deferActive(
-          this.commandClient,
-          this.queueKeys,
-          jobId,
-          entryId,
-          this.consumerGroup,
-          this.broadcastMode ? true : undefined,
-          true,
-        );
-      } catch (err) {
-        this.emit('error', err);
-      }
+      await this.deferPausedActivation({ jobId, entryId });
       return true;
     }
     if (moveResult === 'EXPIRED') {
@@ -902,6 +910,23 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       return true;
     }
     return false;
+  }
+
+  private async deferPausedActivation(entry: { jobId: string; entryId: string }): Promise<void> {
+    if (!this.commandClient) return;
+    try {
+      await deferActive(
+        this.commandClient,
+        this.queueKeys,
+        entry.jobId,
+        entry.entryId,
+        this.consumerGroup,
+        this.broadcastMode ? true : undefined,
+        true,
+      );
+    } catch (err) {
+      this.emit('error', err);
+    }
   }
 
   /**

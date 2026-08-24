@@ -55,7 +55,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 92: Replace DEL with UNLINK on every multi-key / large-collection delete (job hashes, retention purge, glidemq_clean batches, glidemq_drain stream/zset/lifo/priority sweeps). UNLINK keeps in-script atomicity - the keyspace removal is still synchronous from the script's view - but defers memory reclamation to the bio thread, so obliterate / retention / drain stop blocking the server thread on MB-sized job hashes. Small-key DELs (lockKey) kept as DEL (#243).
 // Version 93: glidemq_completeAndFetchNext always SMEMBERS the child parents SET. The previous hasParents gate sourced its truth from the worker's snapshot of the job hash, which is stale when DAG wiring (hset parentIds + registerParent) lands between the worker's job fetch and the completion FCALL. The SMEMBERS cost on an empty set is negligible; the dropped optimization was unsound (#246).
 // Version 96: Honor queue pause in activation paths (moveToActive, completeAndFetchNext next-fetch, popLists, rpopAndReserve) so Queue.pause() stops workers from claiming new jobs. Pause-race defer restores list jobs in their original dispatch order, and broadcast claims stay in the subscription PEL (no XADD duplicate).
-export const LIBRARY_VERSION = '96';
+// Version 97: Preserve batch pause-race list claim order and skip stalled reclaim while the queue is paused so parked PEL/list claims survive until resume.
+export const LIBRARY_VERSION = '97';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';

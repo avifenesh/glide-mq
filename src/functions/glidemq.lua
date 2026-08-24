@@ -1462,6 +1462,12 @@ end)
 redis.register_function('glidemq_reclaimStalled', function(keys, args)
   local streamKey = keys[1]
   local eventsKey = keys[2]
+  local prefix = string.sub(streamKey, 1, #streamKey - 6)
+  -- Queue.pause() parks broadcast claims in the subscription PEL. Do not
+  -- XAUTOCLAIM them while paused; doing so would make stale claims look like
+  -- stalled work and can fail them before resume. This guard is intentionally
+  -- before the bounded XAUTOCLAIM scan so paused recovery has no side effects.
+  if isQueuePaused(prefix) then return 0 end
   local group = args[1]
   local consumer = args[2]
   local minIdleMs = tonumber(args[3])
@@ -1478,7 +1484,6 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   if not entries or #entries == 0 then
     return 0
   end
-  local prefix = string.sub(streamKey, 1, #streamKey - 6)
   local count = 0
   for i = 1, #entries do
     local entry = entries[i]
@@ -1559,6 +1564,10 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
   -- Worker-level lockDuration; per-entry threshold when opts.lockDuration unset. (#213)
   local workerLockDuration = tonumber(args[5]) or 0
   local prefix = string.sub(streamKey, 1, #streamKey - 6)
+  -- Paused list claims retain their list-active reservation until resume.
+  -- Skip the bounded SCAN entirely so the reclaimer cannot redispatch or fail
+  -- a claim that was deliberately parked by a pause-race activation.
+  if isQueuePaused(prefix) then return 0 end
   local listActiveKey = prefix .. 'list-active'
   local currentActive = tonumber(redis.call('GET', listActiveKey)) or 0
   if currentActive <= 0 then return 0 end
