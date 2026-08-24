@@ -59,7 +59,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 107: ordered rate-limit returns use an explicit marker so retained-slot jobs are promoted beyond bounded scans; oversized token failures advance ordering state.
 // Version 112: ordered terminal paths resolve group-key ordering metadata before waking successors.
 // Version 113: ordered rate-limit returns track every retained slot; terminal paths release retained slots; oversized-head cleanup is iterative and bounded.
-export const LIBRARY_VERSION = '113';
+// Version 114: ordered retry, delay, suspend, and waiting-children transitions mark their retained group slot.
+export const LIBRARY_VERSION = '114';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';

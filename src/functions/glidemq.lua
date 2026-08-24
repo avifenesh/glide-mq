@@ -1507,7 +1507,9 @@ redis.register_function('glidemq_fail', function(keys, args)
     )
     -- Only release group slot if not an ordering-key job (ordering jobs hold the slot through retries)
     local failOrdSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
-    if failOrdSeq <= 0 then
+    if failOrdSeq > 0 then
+      redis.call('HSET', jobKey, 'retainedSlot', '1')
+    else
       releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
     end
     emitEvent(eventsKey, 'retrying', jobId, {
@@ -3203,7 +3205,9 @@ redis.register_function('glidemq_moveActiveToDelayed', function(keys, args)
   -- Only release group slot if this is NOT an ordering-key step-job.
   -- Ordering-key jobs hold the slot until full completion to preserve per-key order.
   local jobOrdSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
-  if jobOrdSeq <= 0 then
+  if jobOrdSeq > 0 then
+    redis.call('HSET', jobKey, 'retainedSlot', '1')
+  else
     releaseGroupSlotAndPromote(jobKey, jobId, now, nil)
   end
   emitEvent(eventsKey, 'delay-changed', jobId, {'delay', tostring(delay)})
@@ -3233,7 +3237,9 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
   redis.call('HSET', jobKey, 'state', 'waiting-children')
 
   local wcOrdSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
-  if wcOrdSeq <= 0 then
+  if wcOrdSeq > 0 then
+    redis.call('HSET', jobKey, 'retainedSlot', '1')
+  else
     releaseGroupSlotAndPromote(jobKey, jobId, now)
   end
 
@@ -3725,7 +3731,9 @@ redis.register_function('glidemq_suspend', function(keys, args)
   redis.call('ZADD', suspendedKey, deadline, jobId)
 
   local ordSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
-  if ordSeq <= 0 then
+  if ordSeq > 0 then
+    redis.call('HSET', jobKey, 'retainedSlot', '1')
+  else
     releaseGroupSlotAndPromote(jobKey, jobId, now)
   end
 
