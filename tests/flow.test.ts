@@ -375,6 +375,7 @@ describeEachMode('FlowProducer', (CONNECTION) => {
         async () => String(await cleanupClient.hget(parentKeys.job(node.job.id), 'state')) === 'completed',
         10000,
       );
+      expect(String(await cleanupClient.hget(parentKeys.job(node.job.id), 'state'))).toBe('completed');
     } finally {
       releaseMiddle();
       await parentWorker.close(true);
@@ -523,6 +524,7 @@ describeEachMode('FlowProducer', (CONNECTION) => {
         async () => String(await cleanupClient.hget(parentKeys.job(node.job.id), 'state')) === 'completed',
         10000,
       );
+      expect(String(await cleanupClient.hget(parentKeys.job(node.job.id), 'state'))).toBe('completed');
     } finally {
       await parentWorker.close(true);
       await flow.close();
