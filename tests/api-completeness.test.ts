@@ -3,7 +3,8 @@ import { GlideClient, RequestError } from '@glidemq/speedkey';
 import { Queue } from '../src/queue';
 import { Worker } from '../src/worker';
 import { Job } from '../src/job';
-import { LIBRARY_VERSION } from '../src/functions/index';
+import { LIBRARY_VERSION, removeJob, revokeJob } from '../src/functions/index';
+import { buildKeys } from '../src/utils';
 
 // Mock speedkey module
 vi.mock('@glidemq/speedkey', () => {
@@ -301,6 +302,37 @@ describe('Queue.getJobs', () => {
     vi.clearAllMocks();
     mockClient = makeMockClient();
     vi.mocked(GlideClient.createClient).mockResolvedValue(mockClient as any);
+  });
+
+  it('passes list keys when removing or revoking waiting jobs', async () => {
+    const keys = buildKeys('getjobs-cleanup');
+    mockClient.fcall.mockResolvedValueOnce(1).mockResolvedValueOnce('revoked');
+
+    await removeJob(mockClient, keys, '1');
+    expect(mockClient.fcall).toHaveBeenNthCalledWith(
+      1,
+      'glidemq_removeJob',
+      [
+        keys.job('1'),
+        keys.stream,
+        keys.scheduled,
+        keys.completed,
+        keys.failed,
+        keys.events,
+        keys.log('1'),
+        keys.lifo,
+        keys.priority,
+      ],
+      ['1'],
+    );
+
+    await revokeJob(mockClient, keys, '2', 123, 'workers');
+    expect(mockClient.fcall).toHaveBeenNthCalledWith(
+      2,
+      'glidemq_revoke',
+      [keys.job('2'), keys.stream, keys.scheduled, keys.failed, keys.events, keys.lifo, keys.priority],
+      ['2', '123', 'workers'],
+    );
   });
 
   it('returns waiting jobs from the stream', async () => {

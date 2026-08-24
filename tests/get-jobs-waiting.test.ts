@@ -69,4 +69,21 @@ describeEachMode('Queue.getJobs waiting sources', (CONNECTION) => {
     };
     expect(await (queue as any).getWaitingStreamJobIds(noGroupClient, -1)).toEqual(['waiting-without-group']);
   });
+
+  it('removes revoked and deleted jobs from list-backed waiting sources', async () => {
+    const isolatedName = `${queueName}-stale-list`;
+    const isolatedQueue = new Queue(isolatedName, { connection: CONNECTION });
+    const revoked = await isolatedQueue.add('revoked-priority', {}, { priority: 1 });
+    const removed = await isolatedQueue.add('removed-lifo', {}, { lifo: true });
+    const waiting = await isolatedQueue.add('waiting-priority', {}, { priority: 2 });
+    await promote(cleanupClient, buildKeys(isolatedName), Number.MAX_SAFE_INTEGER);
+
+    expect(await isolatedQueue.revoke(revoked!.id)).toBe('revoked');
+    await removed!.remove();
+
+    expect((await isolatedQueue.getJobs('waiting')).map((job) => job.id)).toEqual([waiting!.id]);
+
+    await isolatedQueue.close();
+    await flushQueue(cleanupClient, isolatedName);
+  });
 });
