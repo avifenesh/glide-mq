@@ -438,6 +438,66 @@ describeEachMode('DAG flows', (CONNECTION) => {
     }
   }, 20000);
 
+  it('notifies cross-queue DAG parents without waiting for the promotion tick', async () => {
+    const qA = Q + '-eager-a';
+    const qB = Q + '-eager-b';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const processed: string[] = [];
+    let releaseA!: () => void;
+    const finishA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const workers = [
+      new Worker(
+        qA,
+        async () => {
+          processed.push('A');
+          await finishA;
+          return 'A';
+        },
+        { connection: CONNECTION, blockTimeout: 100, stalledInterval: 60000, promotionInterval: 10000 },
+      ),
+      new Worker(
+        qB,
+        async () => {
+          processed.push('B');
+          return 'B';
+        },
+        { connection: CONNECTION, blockTimeout: 100, stalledInterval: 60000, promotionInterval: 10000 },
+      ),
+    ];
+    for (const worker of workers) {
+      worker.on('error', () => {});
+      await worker.waitUntilReady();
+    }
+    // Let the startup promotion tick finish before submitting the DAG. The
+    // next scheduled tick is deliberately far outside this test's deadline.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    try {
+      const jobs = await flow.addDAG({
+        nodes: [
+          { name: 'A', queueName: qA, data: {} },
+          { name: 'B', queueName: qB, data: {}, deps: ['A'] },
+        ],
+      });
+      releaseA();
+      const bKeys = buildKeys(qB);
+      await waitFor(
+        async () => String(await cleanupClient.hget(bKeys.job(jobs.get('B')!.id), 'state')) === 'completed',
+        1500,
+        25,
+      );
+      expect(processed).toEqual(['A', 'B']);
+    } finally {
+      releaseA();
+      for (const worker of workers) await worker.close(true);
+      await flow.close();
+      await flushQueue(cleanupClient, qA);
+      await flushQueue(cleanupClient, qB);
+    }
+  }, 5000);
+
   it('executes a cross-queue DAG with a prefix containing braces', async () => {
     const prefix = 'test-dag:{tenant}';
     const qA = Q + '-prefix-a';

@@ -300,6 +300,7 @@ describe('Worker', () => {
     expect(completeAndFetchNextCall).toBeDefined();
     const completionArgs = completeAndFetchNextCall[2] as string[];
     expect(completionArgs.slice(-8, -5)).toEqual(['tenant-a', '1', 'group-1']);
+    expect(mockCommandClient.hmget).not.toHaveBeenCalledWith(keys.job('1'), ['parentId', 'parentQueue']);
 
     // Event should have been emitted
     expect(completedJobs).toHaveLength(1);
