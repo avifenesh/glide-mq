@@ -1726,7 +1726,16 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   -- job has no opts.lockDuration of its own. Falls back to minIdleMs (the
   -- stalledInterval cadence) when neither is set, matching old behavior. (#213)
   local workerLockDuration = tonumber(args[8]) or 0
-  local result = redis.call('XAUTOCLAIM', streamKey, group, consumer, minIdleMs, '0-0')
+  local prefix = string.sub(streamKey, 1, #streamKey - 6)
+  local metaKey = prefix .. 'meta'
+  local cursorField = 'stalledCursor:' .. group
+  local startCursor = redis.call('HGET', metaKey, cursorField) or '0-0'
+  -- Bound each reclaim call and continue from the previous XAUTOCLAIM cursor.
+  -- The meta hash is shared by schedulers for this consumer group, so concurrent
+  -- schedulers advance one queue-wide scan instead of repeatedly rescanning 0-0.
+  local result = redis.call('XAUTOCLAIM', streamKey, group, consumer, minIdleMs, startCursor, 'COUNT', '100')
+  local nextCursor = result[1] or '0-0'
+  redis.call('HSET', metaKey, cursorField, nextCursor)
   local entries = result[2]
   if not entries or #entries == 0 then
     return 0

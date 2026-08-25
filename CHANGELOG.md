@@ -14,6 +14,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Atomic list reservation**: priority/LIFO workers now increment `list-active` in `glidemq_popListsReserve`, while legacy `glidemq_popLists` remains non-reserving for rolling compatibility. New workers fall back to the legacy pop plus typed `INCRBY` when the reservation function is unavailable.
 - **`Queue.pause()` did not stop workers**: pause only wrote `meta.paused=1`. Activation paths (`moveToActive`, `completeAndFetchNext`, `popLists`, `rpopAndReserve`) never read it, so workers kept claiming jobs. Pause-race claims restore LIFO/priority lists in their original dispatch order; batch restores preserve claim order; broadcast claims stay in the subscription PEL, and stalled reclaim skips paused queues.
 - **Revoked active jobs could complete**: the Lua source library now rejects completion after a revoke, workers abort the affected processor, and batch workers keep each job's abort signal isolated. Batch processor failures for revoked jobs are terminal, while batch timeouts still retry according to job attempts.
+- **Stalled recovery cursor**: `glidemq_reclaimStalled` now persists a per-consumer-group `XAUTOCLAIM` cursor in queue metadata and bounds each reclaim batch. Schedulers follow full pages with a guarded yielding continuation instead of waiting another stalled interval.
 
 ---
 
