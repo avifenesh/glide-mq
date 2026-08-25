@@ -12,10 +12,12 @@
  *
  * Run: npx vitest run tests/list-active-counter.test.ts
  */
-import { it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { RequestError } from '@glidemq/speedkey';
 
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+const { popLists } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
 const CONSUMER_GROUP = 'workers';
 
@@ -56,6 +58,47 @@ describeEachMode('list-active counter underflow (issue #217)', (CONNECTION) => {
 
   afterAll(async () => {
     cleanupClient.close();
+  });
+
+  it('keeps legacy popLists non-reserving and reserves in the new function', async () => {
+    const Q = `la-pop-reserve-${Date.now()}`;
+    const k = buildKeys(Q);
+    const jobId = 'lifo-job';
+
+    await cleanupClient.rpush(k.lifo, jobId);
+    const result = await cleanupClient.fcall('glidemq_popLists', [k.priority, k.lifo, k.listActive], ['1']);
+
+    expect(result.map((value: unknown) => String(value))).toEqual([jobId]);
+    expect(Number(await cleanupClient.get(k.listActive))).toBe(0);
+
+    const priorityJobId = 'priority-job';
+    await cleanupClient.lpush(k.priority, priorityJobId);
+    const priorityResult = await cleanupClient.fcall(
+      'glidemq_popListsReserve',
+      [k.priority, k.lifo, k.listActive],
+      ['1'],
+    );
+
+    expect(priorityResult.map((value: unknown) => String(value))).toEqual([priorityJobId]);
+    expect(Number(await cleanupClient.get(k.listActive))).toBe(1);
+
+    await flushQueue(cleanupClient, Q);
+  });
+
+  it('falls back to legacy popLists and increments list-active when reservation function is missing', async () => {
+    const client = {
+      fcall: vi
+        .fn()
+        .mockRejectedValueOnce(new RequestError('ERR Function not found'))
+        .mockResolvedValueOnce(['legacy-job']),
+      incrBy: vi.fn().mockResolvedValue(1),
+    };
+    const result = await popLists(client, buildKeys('wrapper-fallback'), 1);
+
+    expect(result).toEqual(['legacy-job']);
+    expect(client.fcall).toHaveBeenNthCalledWith(1, 'glidemq_popListsReserve', expect.any(Array), ['1']);
+    expect(client.fcall).toHaveBeenNthCalledWith(2, 'glidemq_popLists', expect.any(Array), ['1']);
+    expect(client.incrBy).toHaveBeenCalledWith(buildKeys('wrapper-fallback').listActive, 1);
   });
 
   it('complete-twice on list-sourced job does not underflow', async () => {

@@ -21,6 +21,7 @@
 - **0.15.2** (#212, #213, #216-219): priority/LIFO in batch-mode workers, `list-active` underflow guards (12 sites through one `decrListActive` helper), priority/LIFO active visibility via `glidemq_getActiveListJobIds`, lockDuration-aware stall reclaim (`stalledInterval` no longer conflated with threshold). `LIBRARY_VERSION` 84. **Behavior change**: workers that relied on short `stalledInterval` without setting `lockDuration` now see slower stall recovery; set `lockDuration` explicitly to match if needed.
 - **0.15.3** (#222-#246): DAG dependency direction/tree rendering/multi-dependent leaf fixes, `addDAG` level batching, stalled-job redispatch semantics, large-key `UNLINK` cleanup, bounded ordering skip-marker advancement, serverless credential cache scoping, flow ID-collision guards, proxy strict opts validation, long-running job heartbeats, broadcast retry isolation, queue client single-flight, and dependency CVE fixes. `LIBRARY_VERSION` 93.
 - **0.15.4**: interval scheduler anchoring prevents late worker ticks from accumulating drift, `npm test` now runs the intended non-fuzzer suite, and CI/local compose coverage use stable Valkey 9.1.0 images.
+- **Unreleased**: list-backed workers now reserve `list-active` in `glidemq_popListsReserve`; legacy `glidemq_popLists` remains non-reserving and new workers fall back to it plus typed `INCRBY` during rolling upgrades. `LIBRARY_VERSION` 98 follows stalled-cursor 94.
 
 ### In flight (fork)
 
@@ -39,7 +40,7 @@ See CHANGELOG.md `0.15.4` for the full list. Highlights:
 - **Ordered groups**: pre-activation removal, revoke, and expiry close ordering holes; rejected token-bucket enqueue operations do not consume IDs or sequences; rate-limit requeues preserve their slot and use explicit returning-job markers; priority-list fast fetches apply token-bucket and fixed-window gates; oversized token failures close holes across activation, completion, and promotion paths. `LIBRARY_VERSION` 117.
 - **Bun/Deno NAPI compatibility testing**: still pending from 0.14.0 handover.
 - **Valkey CI images**: CI is off release candidates. Standalone and cluster coverage use stable `valkey/valkey:9.1.0`; search coverage uses stable `valkey/valkey-bundle:9.1.0`, which carries Valkey Search 1.2.x and keeps the Search 1.1+ option tests active.
-- **Coverage**: stacked fork PRs. Extract Lua (`refactor/extract-lua-library`) -> TS V8 coverage (`ci/ts-coverage`) -> Lua line probes (`ci/lua-coverage`). Codecov project status is informational; patch target 80%. Integration and lua are separate flags. `npm run build:lua-cov` instruments dist Lua and stamps dist `LIBRARY_VERSION` as `93-cov`; Vitest aliases `src/functions` to `dist/functions` so src-imported clients cannot REPLACE the probed library. CI dumps LCOV with `node scripts/dump-lua-coverage.cjs` after the suite. The build now copies both `glidemq.lua` and `glidemq.embedded.json` to `dist/functions`, and npm CD smoke-loads `dist` before publishing.
+- **Coverage**: Codecov project status is informational; patch target 80%. Integration and Lua coverage remain separate CI flags.
 
 ## API Design Decisions (locked)
 

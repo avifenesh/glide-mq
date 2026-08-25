@@ -1,3 +1,4 @@
+import { RequestError } from '@glidemq/speedkey';
 import type { GlideReturnType } from '@glidemq/speedkey';
 import type { Client } from '../types';
 import { librarySourceFrom, loadLibraryFile } from './load-library-source';
@@ -54,6 +55,7 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 91: Stalled-recovery redispatches under-threshold jobs back to the stream / lifo / priority list so a healthy worker can pick them up; jobs only fail once stalledCount > maxStalledCount. Aligns with the at-least-once redelivery promise in DURABILITY.md and matches BullMQ semantics (#242).
 // Version 92: Replace DEL with UNLINK on every multi-key / large-collection delete (job hashes, retention purge, glidemq_clean batches, glidemq_drain stream/zset/lifo/priority sweeps). UNLINK keeps in-script atomicity - the keyspace removal is still synchronous from the script's view - but defers memory reclamation to the bio thread, so obliterate / retention / drain stop blocking the server thread on MB-sized job hashes. Small-key DELs (lockKey) kept as DEL (#243).
 // Version 93: glidemq_completeAndFetchNext always SMEMBERS the child parents SET. The previous hasParents gate sourced its truth from the worker's snapshot of the job hash, which is stale when DAG wiring (hset parentIds + registerParent) lands between the worker's job fetch and the completion FCALL. The SMEMBERS cost on an empty set is negligible; the dropped optimization was unsound (#246).
+// Version 98: glidemq_popListsReserve reserves list-active in the same FCALL as the list pop, closing the worker crash window between pop and INCRBY; legacy glidemq_popLists remains non-reserving for rolling compatibility.
 // Version 102: rate-limited token-bucket promotion skips bounded tombstones and re-registers the group when more cleanup remains.
 // Version 103: ordered rate-limited promotion advances nextSeq past missing head tombstones.
 // Version 104: ordered tombstone cleanup also advances the worker orderdone frontier.
@@ -664,11 +666,21 @@ export async function rpopAndReserve(
 }
 
 /**
- * Pop from priority and LIFO lists in a single FCALL (1 RTT instead of 2).
+ * Pop from priority and LIFO lists, reserving list-active atomically when the
+ * reservation-aware function is available. During rolling upgrades, fall back
+ * to the legacy pop and typed counter increment if that function is missing.
  * Returns job IDs popped, or empty array if both lists are empty.
  */
 export async function popLists(client: Client, k: QueueKeys, count: number): Promise<string[]> {
-  const result = await client.fcall('glidemq_popLists', [k.priority, k.lifo], [count.toString()]);
+  const safeCount = Math.max(1, Math.min(Math.floor(count) || 1, 1000));
+  let result: GlideReturnType;
+  try {
+    result = await client.fcall('glidemq_popListsReserve', [k.priority, k.lifo, k.listActive], [safeCount.toString()]);
+  } catch (error) {
+    if (!(error instanceof RequestError) || !/function\s+not\s+found/i.test(error.message)) throw error;
+    result = await client.fcall('glidemq_popLists', [k.priority, k.lifo, k.listActive], [safeCount.toString()]);
+    if (Array.isArray(result) && result.length > 0) await client.incrBy(k.listActive, result.length);
+  }
   if (!Array.isArray(result) || result.length === 0) return [];
   return result.map((v) => String(v));
 }
