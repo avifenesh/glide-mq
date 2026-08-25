@@ -137,9 +137,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected sandboxClose?: (force?: boolean) => Promise<void>;
   protected workerHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   protected pollLoopPromise: Promise<void> | null = null;
-  protected suspendContinuations = new Map<string, (signals: SignalEntry[]) => Promise<any>>();
+  protected suspendContinuations = new Map<
+    string,
+    { job: Job<D, R>; onResume: (signals: SignalEntry[]) => Promise<any> }
+  >();
   protected readonly startedAt = Date.now();
   protected readonly hostname = os.hostname();
+
+  private static readonly REVOCATION_POLL_INTERVAL = 1000;
   protected serializer: Serializer;
   protected readonly batchMode: boolean;
   protected readonly batchSize: number;
@@ -612,22 +617,28 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
     }
 
-    // Rate limit check (once per batch)
-    if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
-    if (this.opts.tokenLimiter) await this.waitForTokenLimit();
-
-    // Set up abort controllers for all jobs
-    const batchAc = new AbortController();
+    // Per-job abort controllers keep a revoke local to its job.
     for (const entry of batch) {
-      this.activeAbortControllers.set(entry.jobId, batchAc);
-      entry.job.abortSignal = batchAc.signal;
+      const ac = new AbortController();
+      this.activeAbortControllers.set(entry.jobId, ac);
+      entry.job.abortSignal = ac.signal;
     }
+    const abortBatch = () => {
+      for (const entry of batch) {
+        this.activeAbortControllers.get(entry.jobId)?.abort();
+      }
+    };
 
     let results: R[] | undefined;
     let batchError: BatchError | undefined;
     let thrownError: Error | undefined;
 
     try {
+      // Rate limit check (once per batch). Controllers must already be active
+      // so revocation during this wait is visible to the batch processor.
+      if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
+      if (this.opts.tokenLimiter) await this.waitForTokenLimit();
+
       // Calculate batch timeout: max timeout across all jobs in the batch
       let maxTimeout = 0;
       for (const entry of batch) {
@@ -643,7 +654,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             this.batchProcessor(jobs),
             new Promise<never>((_, reject) => {
               timer = setTimeout(() => {
-                batchAc.abort();
+                abortBatch();
                 reject(new Error('Batch timeout exceeded'));
               }, maxTimeout);
             }),
@@ -711,7 +722,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
         const parentInfo = await this.buildParentInfo(entry.job, entry.jobId);
 
-        await completeJob(
+        const completeResult = await completeJob(
           this.commandClient!,
           this.queueKeys,
           entry.jobId,
@@ -723,6 +734,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           parentInfo,
           this.broadcastMode ? true : undefined,
         );
+        if (String(completeResult) === 'REVOKED') {
+          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
+          continue;
+        }
 
         entry.job.returnvalue = result;
         entry.job.finishedOn = Date.now();
@@ -744,7 +759,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         const result = i < batchResults.length ? batchResults[i] : new Error('No result in BatchError');
 
         if (result instanceof Error) {
-          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, result);
+          const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : result;
+          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
         } else {
           let returnvalue: string;
           try {
@@ -772,7 +788,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
           const parentInfo = await this.buildParentInfo(entry.job, entry.jobId);
 
-          await completeJob(
+          const completeResult = await completeJob(
             this.commandClient!,
             this.queueKeys,
             entry.jobId,
@@ -784,6 +800,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             parentInfo,
             this.broadcastMode ? true : undefined,
           );
+          if (String(completeResult) === 'REVOKED') {
+            await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
+            continue;
+          }
 
           entry.job.returnvalue = result as R;
           entry.job.finishedOn = Date.now();
@@ -799,11 +819,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         }
       }
     } else if (thrownError) {
-      // All jobs fail
-      const aborted = batchAc.signal.aborted;
-      const err = aborted ? new Error('revoked') : thrownError;
+      // A timeout is retryable. Revocation is terminal only when completion or
+      // an explicit state check positively identifies the revoked job.
       for (const entry of batch) {
-        await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
+        const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : thrownError;
+        await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
       }
     }
   }
@@ -974,7 +994,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           result = await Promise.race([
             this.processor(job),
             new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs);
+              timer = setTimeout(() => {
+                ac.abort();
+                reject(new Error('Job timeout exceeded'));
+              }, timeoutMs);
             }),
           ]);
         } finally {
@@ -1322,18 +1345,23 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       let aborted: boolean;
       const hasContinuation = job.signals.length > 0 && this.suspendContinuations.has(currentJobId);
       if (hasContinuation) {
-        const onResume = this.suspendContinuations.get(currentJobId)!;
+        const continuation = this.suspendContinuations.get(currentJobId)!;
         this.suspendContinuations.delete(currentJobId);
+        const ac = new AbortController();
+        this.activeAbortControllers.set(currentJobId, ac);
+        job.abortSignal = ac.signal;
+        continuation.job.abortSignal = ac.signal;
         this.startHeartbeat(currentJobId, job.opts.lockDuration);
         try {
-          processResult = await onResume(job.signals);
+          processResult = await continuation.onResume(job.signals);
           processError = undefined;
         } catch (err) {
           processError = err instanceof Error ? err : new Error(String(err));
         } finally {
           this.stopHeartbeat(currentJobId);
+          this.activeAbortControllers.delete(currentJobId);
         }
-        aborted = false;
+        aborted = ac.signal.aborted;
       } else {
         this.suspendContinuations.delete(currentJobId);
         ({ result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId));
@@ -1410,7 +1438,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         if (!this.commandClient) return;
         try {
           if (suspendReq?.onResume) {
-            this.suspendContinuations.set(currentJobId, suspendReq.onResume);
+            this.suspendContinuations.set(currentJobId, { job, onResume: suspendReq.onResume });
           }
           const suspResult = await suspendJob(
             this.commandClient,
@@ -1434,7 +1462,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
 
       if (processError || aborted) {
-        await this.handleJobFailure(job, currentJobId, currentEntryId, aborted ? new Error('revoked') : processError!);
+        const confirmedRevoked = aborted && (await this.isJobRevoked(currentJobId));
+        await this.handleJobFailure(
+          job,
+          currentJobId,
+          currentEntryId,
+          confirmedRevoked ? new UnrecoverableError('revoked') : (processError ?? new Error('Job aborted')),
+        );
         return;
       }
 
@@ -1490,6 +1524,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.skipEvents,
         this.skipMetrics,
       );
+
+      if (fetchResult.next === 'CURRENT_REVOKED') {
+        await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
+        return;
+      }
 
       job.returnvalue = processResult;
       job.finishedOn = now;
@@ -1595,16 +1634,31 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     return false;
   }
 
+  protected async isJobRevoked(jobId: string): Promise<boolean> {
+    if (!this.commandClient) return false;
+    try {
+      return String(await this.commandClient.hget(this.queueKeys.job(jobId), 'revoked')) === '1';
+    } catch {
+      return false;
+    }
+  }
+
   protected startHeartbeat(jobId: string, jobLockDuration?: number): void {
     if (!this.commandClient) return;
     // Use per-job lockDuration when specified, otherwise fall back to worker-level.
     const effectiveLock = jobLockDuration ?? this.lockDuration;
-    const interval = effectiveLock / 2;
+    const interval = Math.min(effectiveLock / 2, BaseWorker.REVOCATION_POLL_INTERVAL);
     if (interval <= 0) return;
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
     const timer = setInterval(() => {
-      client.hset(jobKey, { lastActive: Date.now().toString() }).catch(() => {});
+      client
+        .hset(jobKey, { lastActive: Date.now().toString() })
+        .then(async () => {
+          const revoked = await client.hget(jobKey, 'revoked');
+          if (String(revoked) === '1') this.abortJob(jobId);
+        })
+        .catch(() => {});
     }, interval);
     this.heartbeatIntervals.set(jobId, timer);
   }

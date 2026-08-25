@@ -10,6 +10,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
+const { BaseWorker } = require('../dist/base-worker') as typeof import('../src/base-worker');
+const { BatchError, UnrecoverableError } = require('../dist/errors') as typeof import('../src/errors');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 import { describeEachMode, createCleanupClient, flushQueue, STANDALONE, waitFor } from './helpers/fixture';
@@ -37,6 +39,116 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
   // JOB REVOCATION (gap #4)
   // ---------------------------------------------------------------------------
   describe('Job revocation', () => {
+    it('registers batch abort controllers before limiter waits', async () => {
+      let releaseLimiter!: () => void;
+      const limiterReleased = new Promise<void>((resolve) => {
+        releaseLimiter = resolve;
+      });
+      let markLimiterStarted!: () => void;
+      const limiterStarted = new Promise<void>((resolve) => {
+        markLimiterStarted = resolve;
+      });
+      let processorSawAborted = false;
+      let stoppedHeartbeats = 0;
+      let handledFailures = 0;
+
+      const worker = Object.create(BaseWorker.prototype) as any;
+      worker.commandClient = {};
+      worker.batchProcessor = async (jobs: any[]) => {
+        processorSawAborted = jobs[0].abortSignal?.aborted === true;
+        throw new Error('processor stopped');
+      };
+      worker.activeAbortControllers = new Map();
+      worker.opts = { limiter: { max: 1, duration: 1 } };
+      worker.hasActiveListeners = false;
+      worker.globalRateLimitEnabled = false;
+      worker.waitForRateLimit = async () => {
+        markLimiterStarted();
+        await limiterReleased;
+      };
+      worker.stopHeartbeat = () => {
+        stoppedHeartbeats++;
+      };
+      worker.isJobRevoked = async () => false;
+      worker.handleJobFailure = async () => {
+        handledFailures++;
+      };
+
+      const batch = [{ jobId: '1', entryId: '1-0', job: { opts: {} } }];
+      const processing = worker.processBatch(batch);
+      await limiterStarted;
+
+      expect(worker.abortJob('1')).toBe(true);
+      releaseLimiter();
+      await processing;
+
+      expect(processorSawAborted).toBe(true);
+      expect(handledFailures).toBe(1);
+      expect(stoppedHeartbeats).toBe(1);
+      expect(worker.activeAbortControllers.size).toBe(0);
+    });
+
+    it('treats revoke lookup failures as unconfirmed', async () => {
+      const worker = Object.create(Worker.prototype) as {
+        commandClient?: { hget: () => Promise<unknown> };
+        queueKeys: ReturnType<typeof buildKeys>;
+        isJobRevoked: (jobId: string) => Promise<boolean>;
+      };
+      worker.queueKeys = buildKeys(uniqueQueue('revoke-lookup'));
+
+      expect(await worker.isJobRevoked('1')).toBe(false);
+
+      worker.commandClient = { hget: async () => '1' };
+      expect(await worker.isJobRevoked('1')).toBe(true);
+
+      worker.commandClient = { hget: async () => null };
+      expect(await worker.isJobRevoked('1')).toBe(false);
+
+      worker.commandClient = {
+        hget: async () => {
+          throw new Error('connection lost');
+        },
+      };
+      expect(await worker.isJobRevoked('1')).toBe(false);
+    });
+
+    it('classifies revoked partial-batch failures and completions as terminal', async () => {
+      const failures: Error[] = [];
+      const worker = Object.create(BaseWorker.prototype) as any;
+      worker.commandClient = {
+        fcall: async () => 'REVOKED',
+      };
+      worker.batchProcessor = async () => {
+        throw new BatchError([new Error('processor failure'), 'completed result']);
+      };
+      worker.activeAbortControllers = new Map();
+      worker.opts = {};
+      worker.hasActiveListeners = false;
+      worker.hasCompletedListeners = false;
+      worker.globalRateLimitEnabled = false;
+      worker.stopHeartbeat = () => {};
+      worker.isJobRevoked = async (jobId: string) => jobId === 'revoked-error';
+      worker.handleJobFailure = async (_job: unknown, _jobId: string, _entryId: string, error: Error) => {
+        failures.push(error);
+      };
+      worker.serializer = { serialize: (value: unknown) => JSON.stringify(value) };
+      worker.queueKeys = buildKeys(uniqueQueue('revoke-partial-batch'));
+      worker.consumerGroup = 'workers';
+      worker.broadcastMode = false;
+      worker.buildParentInfo = async () => undefined;
+
+      const makeEntry = (jobId: string) => ({
+        jobId,
+        entryId: `${jobId}-0`,
+        job: { opts: {} },
+      });
+      await worker.processBatch([makeEntry('revoked-error'), makeEntry('revoked-completion')]);
+
+      expect(failures).toHaveLength(2);
+      expect(failures.every((error) => error instanceof UnrecoverableError)).toBe(true);
+      expect(failures.map((error) => error.message)).toEqual(['revoked', 'revoked']);
+    });
+
     it('revoke waiting job - moved to failed with revoked reason', async () => {
       const Q = uniqueQueue('revoke-waiting');
       const queue = new Queue(Q, { connection: CONNECTION });
@@ -133,7 +245,7 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
       let abortSignalFired = false;
       let processorStarted = false;
 
-      const job = await queue.add('active-revoke', { value: 'test' });
+      const job = await queue.add('active-revoke', { value: 'test' }, { attempts: 2 });
 
       const done = new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => reject(new Error('timeout')), 15000);
@@ -152,12 +264,12 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
             for (let i = 0; i < 50; i++) {
               await new Promise((r) => setTimeout(r, 100));
               if (j.abortSignal?.aborted) {
-                throw new Error('Job was revoked');
+                throw new Error('processor observed abort');
               }
             }
             return 'completed';
           },
-          { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000 },
+          { connection: CONNECTION, concurrency: 1, blockTimeout: 500, stalledInterval: 60000, lockDuration: 400 },
         );
         worker.on('error', () => {});
 
@@ -166,7 +278,6 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
             clearInterval(checkInterval);
 
             await queue.revoke(job.id);
-            worker.abortJob(job.id);
 
             setTimeout(() => {
               clearTimeout(timeout);
@@ -180,7 +291,304 @@ describeEachMode('Gap Reliability', (CONNECTION) => {
 
       expect(processorStarted).toBe(true);
       expect(abortSignalFired).toBe(true);
+
+      const k = buildKeys(Q);
+      const state = await cleanupClient.hget(k.job(job.id), 'state');
+      const reason = await cleanupClient.hget(k.job(job.id), 'failedReason');
+      const attemptsMade = await cleanupClient.hget(k.job(job.id), 'attemptsMade');
+      expect(String(state)).toBe('failed');
+      expect(String(reason)).toBe('revoked');
+      expect(String(attemptsMade)).toBe('1');
+
+      await queue.close();
     }, 20000);
+
+    it('polls revocation promptly with the default lock duration', async () => {
+      const Q = uniqueQueue('revoke-default-poll');
+      const queue = new Queue(Q, { connection: CONNECTION });
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      let markAborted!: () => void;
+      const aborted = new Promise<void>((resolve) => {
+        markAborted = resolve;
+      });
+      const worker = new Worker(
+        Q,
+        async (job: any) => {
+          markStarted();
+          await new Promise<void>((resolve) => {
+            job.abortSignal?.addEventListener(
+              'abort',
+              () => {
+                markAborted();
+                resolve();
+              },
+              { once: true },
+            );
+          });
+          return 'ignored-after-revoke';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 100, stalledInterval: 60000 },
+      );
+      worker.on('error', () => {});
+      const job = await queue.add('default-poll', {});
+
+      try {
+        await started;
+        expect(await queue.revoke(job.id)).toBe('flagged');
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('abort signal was not prompt')), 3000);
+          aborted.then(() => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      } finally {
+        await worker.close(true);
+        await queue.close();
+      }
+    }, 10000);
+
+    it('aborts resumed continuations after revocation', async () => {
+      const Q = uniqueQueue('revoke-continuation');
+      const queue = new Queue(Q, { connection: CONNECTION });
+      const k = buildKeys(Q);
+      let markContinuationStarted!: () => void;
+      const continuationStarted = new Promise<void>((resolve) => {
+        markContinuationStarted = resolve;
+      });
+      let markContinuationAborted!: () => void;
+      const continuationAborted = new Promise<void>((resolve) => {
+        markContinuationAborted = resolve;
+      });
+      let releaseContinuation!: () => void;
+      const continuationReleased = new Promise<void>((resolve) => {
+        releaseContinuation = resolve;
+      });
+      const worker = new Worker(
+        Q,
+        async (job: any) => {
+          if (job.signals.length === 0) {
+            await job.suspend({
+              onResume: async () => {
+                markContinuationStarted();
+                await new Promise<void>((resolve) => {
+                  job.abortSignal?.addEventListener(
+                    'abort',
+                    () => {
+                      markContinuationAborted();
+                      resolve();
+                    },
+                    { once: true },
+                  );
+                });
+                await continuationReleased;
+                return 'ignored-after-revoke';
+              },
+            });
+          }
+          return 'processor-should-not-run-on-resume';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 100, stalledInterval: 60000 },
+      );
+      worker.on('error', () => {});
+      const job = await queue.add('continuation', {});
+
+      try {
+        await waitFor(async () => (await queue.getSuspendInfo(job.id)) !== null, 8000);
+        expect(await queue.signal(job.id, 'resume')).toBe(true);
+        await continuationStarted;
+        expect(await queue.revoke(job.id)).toBe('flagged');
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('continuation abort signal was not prompt')), 3000);
+          continuationAborted.then(() => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+        releaseContinuation();
+        await waitFor(async () => String(await cleanupClient.hget(k.job(job.id), 'state')) === 'failed', 5000);
+        expect(String(await cleanupClient.hget(k.job(job.id), 'failedReason'))).toBe('revoked');
+      } finally {
+        releaseContinuation?.();
+        await worker.close(true);
+        await queue.close();
+      }
+    }, 15000);
+
+    it('does not complete a revoked job when its processor ignores abort', async () => {
+      const Q = uniqueQueue('revoke-ignore-abort');
+      const queue = new Queue(Q, { connection: CONNECTION });
+      const k = buildKeys(Q);
+      const job = await queue.add('ignore-abort', {});
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      let releaseProcessor!: () => void;
+      const released = new Promise<void>((resolve) => {
+        releaseProcessor = resolve;
+      });
+
+      const worker = new Worker(
+        Q,
+        async () => {
+          markStarted();
+          await released;
+          return 'must-not-complete';
+        },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 200, stalledInterval: 60000, lockDuration: 400 },
+      );
+      worker.on('error', () => {});
+
+      await started;
+      expect(await queue.revoke(job.id)).toBe('flagged');
+      releaseProcessor();
+
+      await waitFor(async () => String(await cleanupClient.hget(k.job(job.id), 'state')) === 'failed', 5000);
+      expect(String(await cleanupClient.hget(k.job(job.id), 'failedReason'))).toBe('revoked');
+      expect(await cleanupClient.zscore(k.completed, job.id)).toBeNull();
+
+      await worker.close(true);
+      await queue.close();
+    }, 10000);
+
+    it('revoking one batch job does not abort or complete the other job', async () => {
+      const Q = uniqueQueue('revoke-batch-one');
+      const queue = new Queue(Q, { connection: CONNECTION });
+      const k = buildKeys(Q);
+      const revokedJob = await queue.add('revoked', { target: true });
+      const otherJob = await queue.add('other', { target: false });
+      let targetStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        targetStarted = resolve;
+      });
+      let otherAborted = false;
+      let completed = 0;
+      let failed = 0;
+      let resolveSettled!: () => void;
+      const settled = new Promise<void>((resolve) => {
+        resolveSettled = resolve;
+      });
+      const resolveWhenSettled = () => {
+        if (completed === 1 && failed === 1) resolveSettled();
+      };
+
+      const worker = new Worker(
+        Q,
+        async (batch: any[]) => {
+          const target = batch.find((job) => job.id === revokedJob.id)!;
+          const other = batch.find((job) => job.id === otherJob.id)!;
+          targetStarted();
+          other.abortSignal?.addEventListener('abort', () => {
+            otherAborted = true;
+          });
+          await new Promise<void>((resolve) => {
+            target.abortSignal?.addEventListener('abort', resolve, { once: true });
+          });
+          return batch.map((job) => (job.id === otherJob.id ? 'other-complete' : 'revoked-result'));
+        },
+        {
+          connection: CONNECTION,
+          batch: { size: 2 },
+          concurrency: 1,
+          blockTimeout: 100,
+          stalledInterval: 60000,
+          lockDuration: 2000,
+        },
+      );
+      worker.on('error', () => {});
+      worker.on('completed', () => {
+        completed++;
+        resolveWhenSettled();
+      });
+      worker.on('failed', (job: any) => {
+        if (job.id === revokedJob.id) {
+          failed++;
+          resolveWhenSettled();
+        }
+      });
+
+      await started;
+      expect(await queue.revoke(revokedJob.id)).toBe('flagged');
+      await settled;
+
+      expect(otherAborted).toBe(false);
+      expect(completed).toBe(1);
+      expect(failed).toBe(1);
+      expect(String(await cleanupClient.hget(k.job(revokedJob.id), 'state'))).toBe('failed');
+      expect(String(await cleanupClient.hget(k.job(revokedJob.id), 'failedReason'))).toBe('revoked');
+      expect(String(await cleanupClient.hget(k.job(otherJob.id), 'state'))).toBe('completed');
+
+      await worker.close(true);
+      await queue.close();
+    }, 30000);
+
+    it('batch thrown errors classify revoked jobs as terminal failures', async () => {
+      const Q = uniqueQueue('revoke-batch-error');
+      const queue = new Queue(Q, { connection: CONNECTION });
+      const k = buildKeys(Q);
+      const revokedJob = await queue.add('revoked', { target: true }, { attempts: 2 });
+      let releaseProcessor!: () => void;
+      const processorReady = new Promise<void>((resolve) => {
+        releaseProcessor = resolve;
+      });
+      let processorStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        processorStarted = resolve;
+      });
+      let failed = 0;
+      let resolveSettled!: () => void;
+      const settled = new Promise<void>((resolve) => {
+        resolveSettled = resolve;
+      });
+      const checkSettled = () => {
+        if (failed === 1) resolveSettled();
+      };
+
+      let calls = 0;
+      const worker = new Worker(
+        Q,
+        async (_batch: any[]) => {
+          calls++;
+          if (calls > 1) throw new Error('unexpected retry after revoked batch error');
+          processorStarted();
+          await processorReady;
+          throw new Error('batch failure');
+        },
+        {
+          connection: CONNECTION,
+          batch: { size: 2 },
+          concurrency: 1,
+          blockTimeout: 100,
+          stalledInterval: 60000,
+          lockDuration: 2000,
+        },
+      );
+      worker.on('error', () => {});
+      worker.on('failed', (job: any) => {
+        if (job.id === revokedJob.id) {
+          failed++;
+          checkSettled();
+        }
+      });
+
+      await started;
+      expect(await queue.revoke(revokedJob.id)).toBe('flagged');
+      releaseProcessor();
+      await settled;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      expect(calls).toBe(1);
+      expect(String(await cleanupClient.hget(k.job(revokedJob.id), 'state'))).toBe('failed');
+      expect(String(await cleanupClient.hget(k.job(revokedJob.id), 'failedReason'))).toBe('revoked');
+      expect(String(await cleanupClient.hget(k.job(revokedJob.id), 'attemptsMade'))).toBe('1');
+
+      await worker.close(true);
+      await queue.close();
+    }, 30000);
 
     it('Job.isRevoked returns correct state', async () => {
       const Q = uniqueQueue('revoke-is-check');

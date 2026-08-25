@@ -57,6 +57,7 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 93: glidemq_completeAndFetchNext always SMEMBERS the child parents SET. The previous hasParents gate sourced its truth from the worker's snapshot of the job hash, which is stale when DAG wiring (hset parentIds + registerParent) lands between the worker's job fetch and the completion FCALL. The SMEMBERS cost on an empty set is negligible; the dropped optimization was unsound (#246).
 // Version 96: Honor queue pause in activation paths (moveToActive, completeAndFetchNext next-fetch, popLists, rpopAndReserve) so Queue.pause() stops workers from claiming new jobs. Pause-race defer restores list jobs in their original dispatch order, and broadcast claims stay in the subscription PEL (no XADD duplicate).
 // Version 97: Preserve batch pause-race list claim order and skip stalled reclaim while the queue is paused so parked PEL/list claims survive until resume.
+// Version 97: completion and per-job batch failures refuse jobs revoked while their processor was running.
 // Version 98: glidemq_popListsReserve reserves list-active in the same FCALL as the list pop, closing the worker crash window between pop and INCRBY; legacy glidemq_popLists remains non-reserving for rolling compatibility.
 // Version 102: rate-limited token-bucket promotion skips bounded tombstones and re-registers the group when more cleanup remains.
 // Version 103: ordered rate-limited promotion advances nextSeq past missing head tombstones.
@@ -388,7 +389,7 @@ export async function completeJob(
  */
 export interface CompleteAndFetchResult {
   completed: string;
-  next: false | 'REVOKED' | Record<string, string>;
+  next: false | 'REVOKED' | 'CURRENT_REVOKED' | Record<string, string>;
   nextJobId?: string;
   nextEntryId?: string;
 }
@@ -461,6 +462,9 @@ export async function completeAndFetchNext(
     const tag = String(raw[0]);
     if (tag === 'NEXT_NONE') {
       return { completed: raw[1] != null ? String(raw[1]) : jobId, next: false };
+    }
+    if (tag === 'CURRENT_REVOKED') {
+      return { completed: raw[1] != null ? String(raw[1]) : jobId, next: 'CURRENT_REVOKED' };
     }
     if (tag === 'NEXT_REVOKED') {
       return {
