@@ -6,6 +6,7 @@
 - **Audit fix**: `fix/repeat-after-stalled` atomically advances repeat-after-complete schedulers during terminal stalled recovery.
 - **Branch**: `automation/cover-open-fixes-20260825` consolidates the reviewed correctness queue.
 - **Revoke/timeout safety**: revoked active jobs cannot complete; each batch job owns its abort signal, and timeouts remain retryable.
+- **Coverage CI**: fuzzer exclusion is quoted and integration/Lua uploads use Codecov OIDC (`id-token: write`, `use_oidc: true`).
 - **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
 - **CI**: green across all six fork/upstream stack PRs after the 2026-08-22 packaging update.
 - **Ordered-group recovery**: retained rate-limit slots are tracked per job and released on terminal paths; oversized token-bucket heads are cleaned iteratively through bounded sweeps.
