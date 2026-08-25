@@ -26,6 +26,9 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
 
   protected async pollOnce(): Promise<void> {
     if (!this.blockingClient || !this.commandClient) return;
+    if (this.paused || this.closing) return;
+    if (await this.waitIfQueuePaused()) return;
+    if (this.paused || this.closing) return;
 
     // Calculate how many jobs we can fetch without exceeding concurrency
     const available = this.prefetch - this.activeCount;
@@ -50,6 +53,12 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
       }
     }
 
+    const parkedResult = await this.recoverPausedBroadcastEntries(fetchCount);
+    if (parkedResult) {
+      await this.processReadResult(parkedResult);
+      return;
+    }
+
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
     // STREAMS {streamKey} >
     const result = await this.blockingClient.xreadgroup(this.consumerGroup, this.consumerId, this.xreadStreams, {
@@ -65,6 +74,39 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
       return;
     }
 
+    await this.processReadResult(result);
+  }
+
+  /**
+   * Recover only broadcast entries parked by this worker during a queue-pause
+   * activation race. XREADGROUP with `0` would redeliver all of this
+   * consumer's PEL, including live processing, so target known IDs with
+   * XCLAIM instead.
+   */
+  private async recoverPausedBroadcastEntries(
+    count: number,
+  ): Promise<NonNullable<Awaited<ReturnType<Client['xreadgroup']>>> | null> {
+    if (!this.commandClient || this.pausedBroadcastEntries.size === 0) return null;
+
+    const entryIds = [...this.pausedBroadcastEntries].slice(0, count);
+    try {
+      const entries = await this.commandClient.xclaim(
+        this.queueKeys.stream,
+        this.consumerGroup,
+        this.consumerId,
+        0,
+        entryIds,
+      );
+      for (const entryId of entryIds) this.pausedBroadcastEntries.delete(entryId);
+      if (Object.keys(entries).length === 0) return null;
+      return [{ key: this.queueKeys.stream, value: entries }] as NonNullable<Awaited<ReturnType<Client['xreadgroup']>>>;
+    } catch (err) {
+      this.emit('error', err);
+      return null;
+    }
+  }
+
+  private async processReadResult(result: NonNullable<Awaited<ReturnType<Client['xreadgroup']>>>): Promise<void> {
     // Batch mode: collect entries and process as a batch
     if (this.batchMode) {
       await this.collectAndProcessBatch(result);
@@ -171,6 +213,12 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
       while (collected.length < this.batchSize && this.running && !this.closing) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) break;
+
+        // Queue.pause() can race with the initial read while a batch waits for
+        // its timeout. Refresh before every refill so a paused queue does not
+        // claim another entry during that secondary read.
+        await this.refreshMetaFlags();
+        if (this.queuePaused) break;
 
         const blockMs = Math.min(remaining, this.blockTimeout);
         const moreResult = await this.blockingClient.xreadgroup(

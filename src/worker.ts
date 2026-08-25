@@ -14,6 +14,9 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
 
   protected async pollOnce(): Promise<void> {
     if (!this.blockingClient || !this.commandClient) return;
+    if (this.paused || this.closing) return;
+    if (await this.waitIfQueuePaused()) return;
+    if (this.paused || this.closing) return;
 
     // Calculate how many jobs we can fetch without exceeding concurrency
     const available = this.prefetch - this.activeCount;
@@ -42,7 +45,9 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
     }
 
     // Check priority list first (priority > LIFO > FIFO), then LIFO, before blocking on stream
+    if (this.paused || this.closing || this.queuePaused) return;
     if (await this.tryPopFromLists(fetchCount)) return;
+    if (this.paused || this.closing || this.queuePaused) return;
 
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}
     // STREAMS {streamKey} >
@@ -53,7 +58,7 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
 
     if (!result) {
       // Stream empty - check priority and LIFO lists for jobs added while we were blocking
-      if (this.commandClient) {
+      if (this.commandClient && !this.paused && !this.closing && !this.queuePaused) {
         if (await this.tryPopFromLists(fetchCount)) return;
       }
 
@@ -216,6 +221,12 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
       while (collected.length < this.batchSize && this.running && !this.closing) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) break;
+
+        // Queue.pause() can race with the initial read while a batch waits for
+        // its timeout. Refresh before every refill so a paused queue does not
+        // claim another entry during that secondary read.
+        await this.refreshMetaFlags();
+        if (this.queuePaused) break;
 
         const blockMs = Math.min(remaining, this.blockTimeout);
         const moreResult = await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {

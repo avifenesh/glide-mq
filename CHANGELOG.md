@@ -12,6 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Reconnect rebuilt Scheduler without lockDuration**: after a connection error, stall reclaim fell back to 30s while heartbeats still used the worker lock, so healthy long jobs were redispatched.
 - **Atomic list reservation**: priority/LIFO workers now increment `list-active` in `glidemq_popListsReserve`, while legacy `glidemq_popLists` remains non-reserving for rolling compatibility. New workers fall back to the legacy pop plus typed `INCRBY` when the reservation function is unavailable.
+- **`Queue.pause()` did not stop workers**: pause only wrote `meta.paused=1`. Activation paths (`moveToActive`, `completeAndFetchNext`, `popLists`, `rpopAndReserve`) never read it, so workers kept claiming jobs. Pause-race claims restore LIFO/priority lists in their original dispatch order; batch restores preserve claim order; broadcast claims stay in the subscription PEL, and stalled reclaim skips paused queues.
 
 ---
 

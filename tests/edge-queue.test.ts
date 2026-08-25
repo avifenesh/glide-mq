@@ -3,11 +3,13 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+const { completeAndFetchNext, moveToActive, popLists, rpopAndReserve } =
+  require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Edge: Queue', (CONNECTION) => {
   let cleanupClient: any;
@@ -370,11 +372,12 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
       const k = buildKeys(Q);
       expect(String(await cleanupClient.hget(k.meta, 'paused'))).toBe('1');
 
-      const job = await queue.add('paused-job', { v: 1 });
-      expect(job).not.toBeNull();
-
-      const fetched = await queue.getJob(job!.id);
-      expect(fetched).not.toBeNull();
+      const fifo = await queue.add('paused-fifo', { v: 1 });
+      const priority = await queue.add('paused-priority', { v: 2 }, { priority: 1 });
+      const lifo = await queue.add('paused-lifo', { v: 3 }, { lifo: true });
+      expect(fifo).not.toBeNull();
+      expect(priority).not.toBeNull();
+      expect(lifo).not.toBeNull();
 
       const worker = new Worker(
         Q,
@@ -382,25 +385,307 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
           processed.push(j.id);
           return 'ok';
         },
-        { connection: CONNECTION, concurrency: 1, blockTimeout: 1000 },
+        { connection: CONNECTION, concurrency: 1, blockTimeout: 200, stalledInterval: 60000 },
       );
       worker.on('error', () => {});
 
-      await new Promise((r) => setTimeout(r, 2000));
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(processed).toHaveLength(0);
+
+      const fifoState = await fifo!.getState();
+      const priorityState = await priority!.getState();
+      const lifoState = await lifo!.getState();
+      expect(fifoState).not.toBe('active');
+      expect(fifoState).not.toBe('completed');
+      expect(priorityState).not.toBe('active');
+      expect(priorityState).not.toBe('completed');
+      expect(lifoState).not.toBe('active');
+      expect(lifoState).not.toBe('completed');
 
       await queue.resume();
 
-      await new Promise<void>((resolve) => {
-        const timeout = setTimeout(resolve, 5000);
-        worker.on('completed', () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-      });
+      await waitFor(() => processed.length >= 3, 8000);
+      expect(processed).toHaveLength(3);
+      expect(processed).toEqual(expect.arrayContaining([fifo!.id, priority!.id, lifo!.id]));
 
       await worker.close(true);
       await queue.close();
     }, 20000);
+  });
+
+  describe('Pause-race defer restores original placement', () => {
+    const Q = 'edge-pause-defer-' + Date.now();
+
+    afterAll(async () => {
+      await flushQueue(cleanupClient, Q);
+      await flushQueue(cleanupClient, Q + '-bc');
+    });
+
+    it('restores priority and LIFO jobs to their lists and FIFO jobs to the stream', async () => {
+      const k = buildKeys(Q);
+      // Priority lists are consumed with RPOP, so priority 1 must return ahead
+      // of an already-waiting priority 2 job after the pause-race restore.
+      await cleanupClient.hset(k.job('pri-2'), {
+        name: 'waiting-priority',
+        state: 'waiting',
+        priority: '2',
+      });
+      await cleanupClient.rpush(k.priority, 'pri-2');
+      await cleanupClient.hset(k.job('pri-1'), {
+        name: 'paused-priority',
+        state: 'active',
+        priority: '1',
+      });
+      await cleanupClient.set(k.listActive, '1');
+      await cleanupClient.fcall(
+        'glidemq_deferActive',
+        [k.stream, k.job('pri-1'), k.listActive],
+        ['pri-1', '', 'workers', '0', '1'],
+      );
+      expect(Number(await cleanupClient.get(k.listActive))).toBe(0);
+      expect(Number(await cleanupClient.llen(k.priority))).toBe(2);
+      expect(String(await cleanupClient.rpop(k.priority))).toBe('pri-1');
+      expect(Number(await cleanupClient.xlen(k.stream))).toBe(0);
+      expect(String(await cleanupClient.hget(k.job('pri-1'), 'state'))).toBe('waiting');
+
+      await cleanupClient.hset(k.job('lifo-1'), {
+        name: 'paused-lifo',
+        state: 'active',
+        lifo: '1',
+      });
+      await cleanupClient.set(k.listActive, '1');
+      await cleanupClient.fcall(
+        'glidemq_deferActive',
+        [k.stream, k.job('lifo-1'), k.listActive],
+        ['lifo-1', '', 'workers', '0', '1'],
+      );
+      expect(Number(await cleanupClient.get(k.listActive))).toBe(0);
+      expect(Number(await cleanupClient.llen(k.lifo))).toBe(1);
+      expect(Number(await cleanupClient.xlen(k.stream))).toBe(0);
+      expect(String(await cleanupClient.hget(k.job('lifo-1'), 'state'))).toBe('waiting');
+
+      await cleanupClient.hset(k.job('fifo-1'), {
+        name: 'paused-fifo',
+        state: 'active',
+      });
+      await cleanupClient.set(k.listActive, '1');
+      await cleanupClient.fcall(
+        'glidemq_deferActive',
+        [k.stream, k.job('fifo-1'), k.listActive],
+        ['fifo-1', '', 'workers', '0', '1'],
+      );
+      expect(Number(await cleanupClient.get(k.listActive))).toBe(0);
+      expect(Number(await cleanupClient.xlen(k.stream))).toBe(1);
+      expect(String(await cleanupClient.hget(k.job('fifo-1'), 'state'))).toBe('waiting');
+
+      // A non-pause defer remains the normal FIFO fallback for list claims.
+      await cleanupClient.hset(k.job('default-fifo-1'), {
+        name: 'default-fifo',
+        state: 'active',
+      });
+      await cleanupClient.set(k.listActive, '1');
+      await cleanupClient.fcall(
+        'glidemq_deferActive',
+        [k.stream, k.job('default-fifo-1'), k.listActive],
+        ['default-fifo-1', '', 'workers', '0'],
+      );
+      expect(Number(await cleanupClient.get(k.listActive))).toBe(0);
+      expect(Number(await cleanupClient.xlen(k.stream))).toBe(2);
+      expect(String(await cleanupClient.hget(k.job('default-fifo-1'), 'state'))).toBe('waiting');
+    });
+
+    it('does not XADD a duplicate when a paused broadcast claim is deferred', async () => {
+      const k = buildKeys(Q + '-bc');
+      await cleanupClient.hset(k.job('bc-1'), { name: 'message', state: 'active' });
+      const entryId = await cleanupClient.xadd(k.stream, ['jobId', 'bc-1', 'name', 'message']);
+      await cleanupClient.xgroupCreate(k.stream, 'sub-a', '0', { mkStream: true });
+      await cleanupClient.xgroupCreate(k.stream, 'sub-b', '0');
+      await cleanupClient.xreadgroup('sub-a', 'c1', { [k.stream]: '>' }, { count: 1 });
+      await cleanupClient.xreadgroup('sub-b', 'c1', { [k.stream]: '>' }, { count: 1 });
+      const before = Number(await cleanupClient.xlen(k.stream));
+      expect(before).toBe(1);
+
+      await cleanupClient.fcall(
+        'glidemq_deferActive',
+        [k.stream, k.job('bc-1'), k.listActive],
+        ['bc-1', String(entryId), 'sub-a', '1', '1'],
+      );
+
+      expect(Number(await cleanupClient.xlen(k.stream))).toBe(1);
+      expect(Number((await cleanupClient.xpending(k.stream, 'sub-a'))[0])).toBe(1);
+      expect(Number((await cleanupClient.xpending(k.stream, 'sub-b'))[0])).toBe(1);
+    });
+
+    it('blocks every Lua activation path while paused', async () => {
+      const qName = Q + '-lua-activation';
+      const queue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+      const fifo = await queue.add('fifo', { n: 1 });
+      const current = await queue.add('current', { n: 3 });
+      const priorityId = 'paused-priority';
+      await cleanupClient.hset(k.job(priorityId), { name: 'priority', state: 'waiting', priority: '1' });
+      await cleanupClient.rpush(k.priority, priorityId);
+
+      expect(fifo).not.toBeNull();
+      expect(current).not.toBeNull();
+
+      // Activate the current job before pausing. A subsequent fast-path
+      // completion must not claim the priority job behind it.
+      expect(await moveToActive(cleanupClient, k, current!.id, Date.now(), k.stream, '', 'workers')).toMatchObject({
+        state: 'active',
+      });
+      await queue.pause();
+
+      expect(await moveToActive(cleanupClient, k, fifo!.id, Date.now(), k.stream, '', 'workers')).toBe('PAUSED');
+      expect(await popLists(cleanupClient, k, 1)).toEqual([]);
+      expect(await rpopAndReserve(cleanupClient, k, k.priority, 'workers', 1)).toEqual([]);
+      expect(Number(await cleanupClient.llen(k.priority))).toBe(1);
+
+      const completion = await completeAndFetchNext(
+        cleanupClient,
+        k,
+        current!.id,
+        '',
+        '"done"',
+        Date.now(),
+        'workers',
+        'pause-coverage',
+      );
+      expect(completion).toEqual({ completed: current!.id, next: false });
+      expect(String(await cleanupClient.hget(k.job(priorityId), 'state'))).toBe('waiting');
+
+      await queue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('restores a list job after the worker observes a PAUSED activation result', async () => {
+      const qName = Q + '-worker-race';
+      const queue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+      const worker = new Worker(qName, async () => 'unexpected', {
+        connection: CONNECTION,
+        blockTimeout: 200,
+        stalledInterval: 60000,
+      });
+      worker.on('error', () => {});
+      await worker.waitUntilReady();
+      await worker.pause(true);
+
+      const priorityId = 'paused-priority';
+      await cleanupClient.hset(k.job(priorityId), { name: 'priority', state: 'waiting', priority: '1' });
+      await cleanupClient.rpush(k.priority, priorityId);
+      expect(String(await cleanupClient.rpop(k.priority))).toBe(priorityId);
+      await cleanupClient.incrBy(k.listActive, 1);
+      await queue.pause();
+
+      const activation = await moveToActive(cleanupClient, k, priorityId, Date.now(), k.stream, '', 'workers');
+      expect(activation).toBe('PAUSED');
+      expect(await (worker as any).handleMoveToActiveEdgeCase(activation, priorityId, '')).toBe(true);
+
+      expect(String(await cleanupClient.rpop(k.priority))).toBe(priorityId);
+      expect(Number(await cleanupClient.get(k.listActive))).toBe(0);
+      expect(String(await cleanupClient.hget(k.job(priorityId), 'state'))).toBe('waiting');
+
+      await worker.close(true);
+      await queue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('preserves dispatch order when a paused batch restores multiple priority claims', async () => {
+      const qName = Q + '-batch-order';
+      const queue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+      const worker = new Worker(qName, async (jobs: any[]) => jobs.map(() => 'ok'), {
+        connection: CONNECTION,
+        concurrency: 2,
+        batch: { size: 2 },
+        blockTimeout: 200,
+        stalledInterval: 60000,
+      });
+      worker.on('error', () => {});
+      await worker.waitUntilReady();
+      await worker.pause(true);
+
+      await queue.pause();
+      await cleanupClient.hset(k.job('existing'), {
+        name: 'existing',
+        state: 'waiting',
+        priority: '1',
+      });
+      await cleanupClient.rpush(k.priority, 'existing');
+      for (const id of ['first', 'second']) {
+        await cleanupClient.hset(k.job(id), {
+          name: id,
+          state: 'waiting',
+          priority: '1',
+        });
+      }
+      await cleanupClient.set(k.listActive, '2');
+
+      await (worker as any).activateAndProcessBatch([
+        { jobId: 'first', entryId: '' },
+        { jobId: 'second', entryId: '' },
+      ]);
+
+      expect(Number(await cleanupClient.get(k.listActive))).toBe(0);
+      expect(await cleanupClient.lrange(k.priority, 0, -1)).toEqual(['existing', 'second', 'first']);
+      expect(String(await cleanupClient.hget(k.job('first'), 'state'))).toBe('waiting');
+      expect(String(await cleanupClient.hget(k.job('second'), 'state'))).toBe('waiting');
+
+      await worker.close(true);
+      await queue.close();
+      await flushQueue(cleanupClient, qName);
+    });
+
+    it('does not reclaim paused broadcast claims or list reservations', async () => {
+      const qName = Q + '-reclaim-paused';
+      const queue = new Queue(qName, { connection: CONNECTION });
+      const k = buildKeys(qName);
+      const broadcastJobId = 'broadcast-claim';
+      const listJobId = 'list-claim';
+      const now = Date.now();
+      await queue.pause();
+
+      await cleanupClient.hset(k.job(broadcastJobId), {
+        name: 'message',
+        state: 'active',
+        lastActive: String(now - 120000),
+      });
+      await cleanupClient.xadd(k.stream, ['jobId', broadcastJobId, 'name', 'message']);
+      await cleanupClient.xgroupCreate(k.stream, 'paused-sub', '0', { mkStream: true });
+      await cleanupClient.xreadgroup('paused-sub', 'consumer', { [k.stream]: '>' }, { count: 1 });
+
+      await cleanupClient.hset(k.job(listJobId), {
+        name: 'list',
+        state: 'active',
+        priority: '1',
+        lastActive: String(now - 120000),
+      });
+      await cleanupClient.set(k.listActive, '1');
+
+      const reclaimed = await cleanupClient.fcall(
+        'glidemq_reclaimStalled',
+        [k.stream, k.events],
+        ['paused-sub', 'scheduler', '1', '1', String(now), k.failed, '1', '1'],
+      );
+      const reclaimedLists = await cleanupClient.fcall(
+        'glidemq_reclaimStalledListJobs',
+        [k.stream, k.events],
+        ['1', '1', String(now), k.failed, '1'],
+      );
+
+      expect(Number(reclaimed)).toBe(0);
+      expect(Number(reclaimedLists)).toBe(0);
+      expect(Number((await cleanupClient.xpending(k.stream, 'paused-sub'))[0])).toBe(1);
+      expect(String(await cleanupClient.hget(k.job(broadcastJobId), 'state'))).toBe('active');
+      expect(String(await cleanupClient.hget(k.job(listJobId), 'state'))).toBe('active');
+      expect(Number(await cleanupClient.get(k.listActive))).toBe(1);
+      expect(await cleanupClient.zscore(k.failed, broadcastJobId)).toBeNull();
+      expect(await cleanupClient.zscore(k.failed, listJobId)).toBeNull();
+
+      await queue.close();
+      await flushQueue(cleanupClient, qName);
+    });
   });
 
   // ---------------------------------------------------------------------------

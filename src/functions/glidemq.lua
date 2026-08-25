@@ -18,6 +18,10 @@ local function decrListActive(listActiveKey)
   if la > 0 then redis.call('DECR', listActiveKey) end
 end
 
+local function isQueuePaused(prefix)
+  return redis.call('HGET', prefix .. 'meta', 'paused') == '1'
+end
+
 local function emitEvent(eventsKey, eventType, jobId, extraFields)
   local fields = {'event', eventType, 'jobId', tostring(jobId)}
   if extraFields then
@@ -1239,6 +1243,11 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     return {'NEXT_NONE', jobId}
   end
 
+  -- Queue.pause(): finish the current job but do not claim the next one.
+  if isQueuePaused(prefix) then
+    return {'NEXT_NONE', jobId}
+  end
+
   -- Return protocol (array-based to avoid cjson encode/decode per job):
   -- {'NEXT_NONE', completedJobId}
   -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId}
@@ -1694,6 +1703,12 @@ end)
 redis.register_function('glidemq_reclaimStalled', function(keys, args)
   local streamKey = keys[1]
   local eventsKey = keys[2]
+  local prefix = string.sub(streamKey, 1, #streamKey - 6)
+  -- Queue.pause() parks broadcast claims in the subscription PEL. Do not
+  -- XAUTOCLAIM them while paused; doing so would make stale claims look like
+  -- stalled work and can fail them before resume. This guard is intentionally
+  -- before the bounded XAUTOCLAIM scan so paused recovery has no side effects.
+  if isQueuePaused(prefix) then return 0 end
   local group = args[1]
   local consumer = args[2]
   local minIdleMs = tonumber(args[3])
@@ -1710,7 +1725,6 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   if not entries or #entries == 0 then
     return 0
   end
-  local prefix = string.sub(streamKey, 1, #streamKey - 6)
   local count = 0
   for i = 1, #entries do
     local entry = entries[i]
@@ -1791,6 +1805,10 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
   -- Worker-level lockDuration; per-entry threshold when opts.lockDuration unset. (#213)
   local workerLockDuration = tonumber(args[5]) or 0
   local prefix = string.sub(streamKey, 1, #streamKey - 6)
+  -- Paused list claims retain their list-active reservation until resume.
+  -- Skip the bounded SCAN entirely so the reclaimer cannot redispatch or fail
+  -- a claim that was deliberately parked by a pause-race activation.
+  if isQueuePaused(prefix) then return 0 end
   local listActiveKey = prefix .. 'list-active'
   local currentActive = tonumber(redis.call('GET', listActiveKey)) or 0
   if currentActive <= 0 then return 0 end
@@ -2378,6 +2396,9 @@ redis.register_function('glidemq_rpopAndReserve', function(keys, args)
   local group = args[1]
   local requested = tonumber(args[2]) or 1
   local maxPop = requested
+  if redis.call('HGET', metaKey, 'paused') == '1' then
+    return {}
+  end
   local gc = tonumber(redis.call('HGET', metaKey, 'globalConcurrency')) or 0
   if gc > 0 then
     local ok_ra, pending = pcall(redis.call, 'XPENDING', streamKey, group)
@@ -2455,6 +2476,9 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     return 'REVOKED'
   end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  if isQueuePaused(prefix) then
+    return 'PAUSED'
+  end
   if expireAt > 0 and ts > expireAt then
     expireJob(jobKey, jobId, prefix, ts, curState, orderingKey, orderingSeq, groupKey)
     if streamKey ~= '' and entryId ~= '' and group ~= '' then
@@ -2625,6 +2649,12 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   local entryId = args[2]
   local group = args[3]
   local broadcastMode = args[4] or '0'
+  local pausedRestore = args[5] or '0'
+  -- Broadcast + pause: leave the PEL claim on this subscription. XADD would
+  -- duplicate the message for every other consumer group.
+  if pausedRestore == '1' and broadcastMode == '1' then
+    return 0
+  end
   local exists = redis.call('EXISTS', jobKey)
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
@@ -2633,7 +2663,20 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   if exists == 0 then
     return 0
   end
-  xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
+  if pausedRestore == '1' and entryId == '' then
+    local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+    local jobLifo = redis.call('HGET', jobKey, 'lifo')
+    local jobPriority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
+    if jobLifo == '1' then
+      redis.call('RPUSH', prefix .. 'lifo', jobId)
+    elseif jobPriority > 0 then
+      redis.call('RPUSH', prefix .. 'priority', jobId)
+    else
+      xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
+    end
+  else
+    xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
+  end
   redis.call('HSET', jobKey, 'state', 'waiting')
   return 1
 end)
@@ -3867,6 +3910,11 @@ redis.register_function('glidemq_popLists', function(keys, args)
   local priorityKey = keys[1]
   local lifoKey = keys[2]
   local count = tonumber(args[1]) or 1
+  -- priorityKey is prefix .. 'priority'; strip that suffix for the queue prefix.
+  local prefix = string.sub(priorityKey, 1, #priorityKey - 8)
+  if isQueuePaused(prefix) then
+    return {}
+  end
   local results = {}
   for i = 1, count do
     local id = redis.call('RPOP', priorityKey)
