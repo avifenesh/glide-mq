@@ -103,6 +103,7 @@ const SCHEDULER_LOCK_MAX_ATTEMPTS = Math.ceil(SCHEDULER_LOCK_TTL_MS / SCHEDULER_
 const SUSPEND_SWEEP_INTERVAL_MS = 1000;
 const SUSPEND_SWEEP_IDLE_POLL_MS = 5000;
 const SUSPEND_SWEEP_LOCK_TTL_MS = 5000;
+const SUSPEND_SWEEP_BATCH_SIZE = 100;
 const SUSPEND_NO_TIMEOUT_SCORE = 9_999_999_999_999;
 const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
 const MAX_USAGE_SUMMARY_KEY_READS = 100_000;
@@ -588,15 +589,27 @@ export class Queue<D = any, R = any> extends EventEmitter {
     );
   }
 
-  private async sweepExpiredSuspended(client: Client): Promise<boolean> {
+  private async sweepExpiredSuspended(client: Client, timestamp = Date.now()): Promise<boolean> {
     const lockKey = this.suspendSweepLockKey();
     const token = randomBytes(8).toString('hex');
     const acquired = await tryLock(client, lockKey, token, SUSPEND_SWEEP_LOCK_TTL_MS);
     if (!acquired) return false;
 
     try {
+      // glidemq_sweepSuspended processes at most 100 members per invocation.
+      // Bound the repeated calls to the number of jobs that were expired at
+      // this sweep's timestamp. Jobs suspended while the sweep runs have a
+      // later deadline and are intentionally left for a future sweep.
+      const expiredCount = await client.zcount(
+        this.keys.suspended,
+        { value: 0, isInclusive: true },
+        { value: timestamp, isInclusive: true },
+      );
+      const batches = Math.ceil(expiredCount / SUSPEND_SWEEP_BATCH_SIZE);
       const keyPrefix = this.keys.id.slice(0, -2);
-      await sweepSuspended(client, this.keys, Date.now(), keyPrefix);
+      for (let i = 0; i < batches; i++) {
+        await sweepSuspended(client, this.keys, timestamp, keyPrefix);
+      }
       return true;
     } finally {
       try {
@@ -1369,7 +1382,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
    */
   async pause(): Promise<void> {
     const client = await this.getClient();
+    const timestamp = Date.now();
     await pause(client, this.keys);
+    await this.sweepExpiredSuspended(client, timestamp);
   }
 
   /**
