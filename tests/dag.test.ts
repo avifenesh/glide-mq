@@ -349,6 +349,327 @@ describeEachMode('DAG flows', (CONNECTION) => {
     }
   });
 
+  it('wires a DAG across distinct queue slots', async () => {
+    const qA = Q + '-distinct-a';
+    const qB = Q + '-distinct-b';
+    const qC = Q + '-distinct-c';
+    const flow = new FlowProducer({ connection: CONNECTION });
+
+    try {
+      const jobs = await flow.addDAG({
+        nodes: [
+          { name: 'A', queueName: qA, data: {} },
+          { name: 'B', queueName: qB, data: {}, deps: ['A'] },
+          { name: 'C', queueName: qC, data: {}, deps: ['B'] },
+        ],
+      });
+
+      expect(String(await cleanupClient.hget(buildKeys(qB).job(jobs.get('B')!.id), 'state'))).toBe('waiting-children');
+      expect(String(await cleanupClient.hget(buildKeys(qC).job(jobs.get('C')!.id), 'state'))).toBe('waiting-children');
+      expect((await cleanupClient.smembers(buildKeys(qB).deps(jobs.get('B')!.id))).size).toBe(1);
+      expect((await cleanupClient.smembers(buildKeys(qC).deps(jobs.get('C')!.id))).size).toBe(1);
+      const parentsA = await cleanupClient.smembers(buildKeys(qA).parents(jobs.get('A')!.id));
+      expect(parentsA.size).toBe(1);
+    } finally {
+      await flow.close();
+      await flushQueue(cleanupClient, qA);
+      await flushQueue(cleanupClient, qB);
+      await flushQueue(cleanupClient, qC);
+    }
+  });
+
+  it('executes a DAG across distinct queue workers', async () => {
+    const qA = Q + '-execute-a';
+    const qB = Q + '-execute-b';
+    const qC = Q + '-execute-c';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const processed: string[] = [];
+    const workers = [
+      new Worker(
+        qA,
+        async () => {
+          processed.push('A');
+          return 'A';
+        },
+        { connection: CONNECTION, blockTimeout: 200, stalledInterval: 60000, promotionInterval: 100 },
+      ),
+      new Worker(
+        qB,
+        async () => {
+          processed.push('B');
+          return 'B';
+        },
+        { connection: CONNECTION, blockTimeout: 200, stalledInterval: 60000, promotionInterval: 100 },
+      ),
+      new Worker(
+        qC,
+        async () => {
+          processed.push('C');
+          return 'C';
+        },
+        { connection: CONNECTION, blockTimeout: 200, stalledInterval: 60000, promotionInterval: 100 },
+      ),
+    ];
+    for (const worker of workers) {
+      worker.on('error', () => {});
+      await worker.waitUntilReady();
+    }
+
+    try {
+      const jobs = await flow.addDAG({
+        nodes: [
+          { name: 'A', queueName: qA, data: {} },
+          { name: 'B', queueName: qB, data: {}, deps: ['A'] },
+          { name: 'C', queueName: qC, data: {}, deps: ['B'] },
+        ],
+      });
+      const cKeys = buildKeys(qC);
+      await waitFor(
+        async () => String(await cleanupClient.hget(cKeys.job(jobs.get('C')!.id), 'state')) === 'completed',
+        10000,
+      );
+      expect(processed).toEqual(['A', 'B', 'C']);
+    } finally {
+      for (const worker of workers) await worker.close(true);
+      await flow.close();
+      await flushQueue(cleanupClient, qA);
+      await flushQueue(cleanupClient, qB);
+      await flushQueue(cleanupClient, qC);
+    }
+  }, 20000);
+
+  it('notifies cross-queue DAG parents without waiting for the promotion tick', async () => {
+    const qA = Q + '-eager-a';
+    const qB = Q + '-eager-b';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const processed: string[] = [];
+    let releaseA!: () => void;
+    const finishA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const workers = [
+      new Worker(
+        qA,
+        async () => {
+          processed.push('A');
+          await finishA;
+          return 'A';
+        },
+        { connection: CONNECTION, blockTimeout: 100, stalledInterval: 60000, promotionInterval: 10000 },
+      ),
+      new Worker(
+        qB,
+        async () => {
+          processed.push('B');
+          return 'B';
+        },
+        { connection: CONNECTION, blockTimeout: 100, stalledInterval: 60000, promotionInterval: 10000 },
+      ),
+    ];
+    for (const worker of workers) {
+      worker.on('error', () => {});
+      await worker.waitUntilReady();
+    }
+    // Let the startup promotion tick finish before submitting the DAG. The
+    // next scheduled tick is deliberately far outside this test's deadline.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    try {
+      const jobs = await flow.addDAG({
+        nodes: [
+          { name: 'A', queueName: qA, data: {} },
+          { name: 'B', queueName: qB, data: {}, deps: ['A'] },
+        ],
+      });
+      releaseA();
+      const bKeys = buildKeys(qB);
+      await waitFor(
+        async () => String(await cleanupClient.hget(bKeys.job(jobs.get('B')!.id), 'state')) === 'completed',
+        1500,
+        25,
+      );
+      expect(processed).toEqual(['A', 'B']);
+    } finally {
+      releaseA();
+      for (const worker of workers) await worker.close(true);
+      await flow.close();
+      await flushQueue(cleanupClient, qA);
+      await flushQueue(cleanupClient, qB);
+    }
+  }, 5000);
+
+  it('executes a cross-queue DAG with a prefix containing braces', async () => {
+    const prefix = 'test-dag:{tenant}';
+    const qA = Q + '-prefix-a';
+    const qB = Q + '-prefix-b';
+    const qC = Q + '-prefix-c';
+    const flow = new FlowProducer({ connection: CONNECTION, prefix });
+    const processed: string[] = [];
+    const workers = [
+      new Worker(
+        qA,
+        async () => {
+          processed.push('A');
+          return 'A';
+        },
+        {
+          connection: CONNECTION,
+          prefix,
+          blockTimeout: 200,
+          stalledInterval: 60000,
+          promotionInterval: 100,
+        },
+      ),
+      new Worker(
+        qB,
+        async () => {
+          processed.push('B');
+          return 'B';
+        },
+        {
+          connection: CONNECTION,
+          prefix,
+          blockTimeout: 200,
+          stalledInterval: 60000,
+          promotionInterval: 100,
+        },
+      ),
+      new Worker(
+        qC,
+        async () => {
+          processed.push('C');
+          return 'C';
+        },
+        {
+          connection: CONNECTION,
+          prefix,
+          blockTimeout: 200,
+          stalledInterval: 60000,
+          promotionInterval: 100,
+        },
+      ),
+    ];
+    for (const worker of workers) {
+      worker.on('error', () => {});
+      await worker.waitUntilReady();
+    }
+
+    try {
+      const jobs = await flow.addDAG({
+        nodes: [
+          { name: 'A', queueName: qA, data: {} },
+          { name: 'B', queueName: qB, data: {}, deps: ['A'] },
+          { name: 'C', queueName: qC, data: {}, deps: ['B'] },
+        ],
+      });
+      await waitFor(
+        async () =>
+          String(await cleanupClient.hget(buildKeys(qC, prefix).job(jobs.get('C')!.id), 'state')) === 'completed',
+        10000,
+      );
+      expect(processed).toEqual(['A', 'B', 'C']);
+    } finally {
+      for (const worker of workers) await worker.close(true);
+      await flow.close();
+      await flushQueue(cleanupClient, qA, prefix);
+      await flushQueue(cleanupClient, qB, prefix);
+      await flushQueue(cleanupClient, qC, prefix);
+    }
+  }, 20000);
+
+  it('reconciles a DAG child deleted between Phase A and Phase B', async () => {
+    const queueName = Q + '-phaseb-race';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    let worker: any;
+
+    const client = await (flow as any).getClient();
+    const originalExists = client.exists.bind(client);
+    let deleted = false;
+    client.exists = async (keys: string[]) => {
+      const result = await originalExists(keys);
+      const key = String(keys[0] ?? '');
+      if (!deleted && result === 1 && key.includes(`{${queueName}}:job:`)) {
+        deleted = true;
+        await cleanupClient.del([key]);
+        return 0;
+      }
+      return result;
+    };
+
+    try {
+      const jobs = await flow.addDAG({
+        nodes: [
+          { name: 'A', queueName, data: {} },
+          { name: 'B', queueName, data: {}, deps: ['A'] },
+          { name: 'C', queueName, data: {}, deps: ['A'] },
+        ],
+      });
+      expect(deleted).toBe(true);
+      const keys = buildKeys(queueName);
+      const streamEntries = (await cleanupClient.xrange(keys.stream, '-', '+')) as Record<string, [string, string][]>;
+      for (const [entryId, fields] of Object.entries(streamEntries)) {
+        if (fields.some(([field, value]) => String(field) === 'jobId' && String(value) === jobs.get('A')!.id)) {
+          await cleanupClient.xdel(keys.stream, [entryId]);
+        }
+      }
+      worker = new Worker(queueName, async () => 'ok', {
+        connection: CONNECTION,
+        blockTimeout: 200,
+        stalledInterval: 60000,
+      });
+      worker.on('error', () => {});
+      await worker.waitUntilReady();
+      await waitFor(
+        async () =>
+          String(await cleanupClient.hget(keys.job(jobs.get('B')!.id), 'state')) === 'completed' &&
+          String(await cleanupClient.hget(keys.job(jobs.get('C')!.id), 'state')) === 'completed',
+        10000,
+      );
+      expect(await cleanupClient.exists([keys.job(jobs.get('A')!.id)])).toBe(0);
+      expect(await cleanupClient.exists([keys.parents(jobs.get('A')!.id)])).toBe(0);
+    } finally {
+      client.exists = originalExists;
+      await worker?.close(true);
+      await flow.close();
+      await flushQueue(cleanupClient, queueName);
+    }
+  }, 20000);
+
+  it('reconciles a child deleted during same-queue parent registration', async () => {
+    const queueName = Q + '-register-race';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const client = await (flow as any).getClient();
+    const originalFcall = client.fcall.bind(client);
+    let deleted = false;
+    client.fcall = async (name: string, keys: string[], args: string[]) => {
+      if (!deleted && name === 'glidemq_registerParent') {
+        deleted = true;
+        await cleanupClient.del([String(keys[0])]);
+      }
+      return originalFcall(name, keys, args);
+    };
+
+    try {
+      const jobs = await flow.addDAG({
+        nodes: [
+          { name: 'A', queueName, data: {} },
+          { name: 'B', queueName, data: {}, deps: ['A'] },
+          { name: 'C', queueName, data: {}, deps: ['A'] },
+        ],
+      });
+
+      expect(deleted).toBe(true);
+      const keys = buildKeys(queueName);
+      expect(await cleanupClient.exists([keys.job(jobs.get('A')!.id)])).toBe(0);
+      expect(String(await cleanupClient.hget(keys.job(jobs.get('B')!.id), 'state'))).toBe('waiting');
+      expect(String(await cleanupClient.hget(keys.job(jobs.get('C')!.id), 'state'))).toBe('waiting');
+    } finally {
+      client.fcall = originalFcall;
+      await flow.close();
+      await flushQueue(cleanupClient, queueName);
+    }
+  });
+
   it('handles race: registerParent after child completes', async () => {
     const qName = Q + '-race';
     const flow = new FlowProducer({ connection: CONNECTION });

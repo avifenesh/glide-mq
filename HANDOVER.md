@@ -34,6 +34,10 @@
 
 - **Reconnect lockDuration**: Scheduler rebuilt after reconnect keeps worker `lockDuration`. Branch `fix/reconnect-lock-duration`.
 
+### In flight (fork)
+
+- **Nested/cross-queue parents**: test-first regression `a39d87a`; implementation spans `5603dc0` through `32f1395`, followed by the Sonar cleanup in `79a573a`. The branch is independent of `upstream/main`, uses `LIBRARY_VERSION` 110, reconciles removed children including nested and DAG exists-to-HSET TOCTOU races with ghost parent-set cleanup, JSON-encodes retryable child-slot notifications, eagerly delivers completion-time cross-queue notifications without adding a steady-state RTT, deduplicates overlapping tree/DAG edges, and removes `xq-pending` during obliterate. Standalone and cluster integration CI are green.
+
 ### 0.15.4 Release Notes
 
 See CHANGELOG.md `0.15.4` for the full list. Highlights:

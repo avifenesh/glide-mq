@@ -551,7 +551,7 @@ describeEachMode('Edge: Queue', (CONNECTION) => {
         'workers',
         'pause-coverage',
       );
-      expect(completion).toEqual({ completed: current!.id, next: false });
+      expect(completion).toEqual({ completed: current!.id, next: false, parentNotifications: [] });
       expect(String(await cleanupClient.hget(k.job(priorityId), 'state'))).toBe('waiting');
 
       await queue.close();

@@ -93,6 +93,25 @@ export function keyPrefixPattern(prefix: string, queueName: string): string {
   return `${escapeGlob(prefix)}:{${escapeGlob(queueName)}}`;
 }
 
+/** Encode a retryable cross-queue parent notification without delimiter ambiguity. */
+export function encodeCrossQueueParentNotify(parentQueue: string, parentId: string, depsMember: string): string {
+  return JSON.stringify([parentQueue, parentId, depsMember]);
+}
+
+/** Decode a current JSON or legacy tab-delimited parent notification. */
+export function parseCrossQueueParentNotification(member: string): [string, string, string] | undefined {
+  try {
+    const decoded: unknown = JSON.parse(member);
+    if (Array.isArray(decoded) && decoded.length === 3 && decoded.every((part) => typeof part === 'string')) {
+      return decoded as [string, string, string];
+    }
+  } catch {
+    const legacy = member.split('\t');
+    if (legacy.length === 3) return legacy as [string, string, string];
+  }
+  return undefined;
+}
+
 export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
   const p = keyPrefix(prefix, queueName);
   return {
@@ -122,6 +141,7 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     groupq: (key: string) => `${p}:groupq:${key}`,
     parents: (id: string) => `${p}:parents:${id}`,
     jstream: (id: string) => `${p}:jstream:${id}`,
+    xqPending: `${p}:xq-pending`,
     worker: (id: string) => `${p}:w:${id}`,
     suspended: `${p}:suspended`,
     signals: (id: string) => `${p}:signals:${id}`,

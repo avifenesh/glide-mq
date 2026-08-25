@@ -13,11 +13,17 @@ import {
   tryLock,
   renewLock,
   unlock,
+  completeChild,
   healListActive,
   sweepSuspended,
 } from './functions/index';
-import type { buildKeys } from './utils';
-import { computeFollowingSchedulerNextRun, isValidSchedulerEvery, MAX_JOB_DATA_SIZE } from './utils';
+import {
+  buildKeys,
+  computeFollowingSchedulerNextRun,
+  isValidSchedulerEvery,
+  MAX_JOB_DATA_SIZE,
+  parseCrossQueueParentNotification,
+} from './utils';
 import { isClusterClient } from './connection';
 
 const STALLED_RECLAIM_BATCH_SIZE = 100;
@@ -160,6 +166,7 @@ export class Scheduler {
     this.trackRun(
       this.promoteDelayed()
         .then(() => this.promoteRateLimitedGroups())
+        .then(() => this.flushCrossQueueParentNotifies())
         .then(() => this.runSchedulers())
         .then(() => {
           this.onPromotionTick?.();
@@ -286,6 +293,39 @@ export class Scheduler {
    */
   async promoteRateLimitedGroups(): Promise<number> {
     return promoteRateLimited(this.client, this.queueKeys, Date.now());
+  }
+
+  /**
+   * Retry cross-queue parent notifications recorded on this child's slot.
+   * The completion FCALL cannot include keys from multiple cluster slots, so
+   * the child records the parent edge and this scheduler completes it later.
+   */
+  async flushCrossQueueParentNotifies(): Promise<void> {
+    const members = await this.client.smembers(this.queueKeys.xqPending);
+    if (!members || members.size === 0) return;
+
+    const suffix = `:{${this.queueKeys.name}}:id`;
+    if (!this.queueKeys.id.endsWith(suffix)) {
+      this.reportError(new Error(`Invalid queue id key for cross-queue parent notifications: ${this.queueKeys.id}`));
+      return;
+    }
+    const prefix = this.queueKeys.id.slice(0, -suffix.length);
+    for (const raw of members) {
+      const member = String(raw);
+      const parts = parseCrossQueueParentNotification(member);
+      if (!parts) continue;
+      const [parentQueue, parentId, depsMember] = parts;
+      try {
+        const remaining = await completeChild(this.client, buildKeys(parentQueue, prefix), parentId, depsMember);
+        // -1 confirms that the parent was deleted, so this is a stale notification.
+        // Non-negative values are the parent's remaining dependency count.
+        if (Number.isInteger(remaining) && remaining >= -1) {
+          await this.client.srem(this.queueKeys.xqPending, [member]);
+        }
+      } catch (err) {
+        this.reportError(err);
+      }
+    }
   }
 
   /**

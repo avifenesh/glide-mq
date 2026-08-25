@@ -162,6 +162,30 @@ end
 local function xaddJob(streamKey, jobId, jobName)
   redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name', jobName or '')
 end
+
+-- Complete one parent dependency without recreating a parent removed while its
+-- child was still in flight. All callers run inside a single FCALL, so the
+-- EXISTS/HSETNX sequence is atomic with respect to removal and completion.
+local function completeParentDependency(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
+  if redis.call('EXISTS', parentJobKey) == 0 then
+    return -1
+  end
+  local depMarker = 'depdone:' .. depsMember
+  if redis.call('HSETNX', parentJobKey, depMarker, '1') == 0 then
+    local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
+    return redis.call('SCARD', parentDepsKey) - doneCount
+  end
+  local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+  local totalDeps = redis.call('SCARD', parentDepsKey)
+  local remaining = totalDeps - doneCount
+  if remaining <= 0 and redis.call('HGET', parentJobKey, 'state') == 'waiting-children' then
+    redis.call('HSET', parentJobKey, 'state', 'waiting')
+    xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
+    emitEvent(parentEventsKey, 'active', parentId, nil)
+  end
+  return remaining
+end
+
 local function groupqScore(jobKey, jobId)
   local seq = tonumber(redis.call('HGET', jobKey, 'orderingSeq'))
   if seq and seq > 0 then return seq end
@@ -393,6 +417,39 @@ local function closeOrderingHoleAndPromote(jobKey, jobId, now)
   local resumeAt = tonumber(redis.call('ZSCORE', prefix .. 'ratelimited', gk)) or 0
   if resumeAt > now then return end
   releaseGroupSlotAndPromote(jobKey, jobId, now, gk, true)
+end
+
+-- Extract the queue's hash tag from a queue prefix. The configured prefix may
+-- itself contain braces, so only the final tag is the queue name.
+local function extractQueueTag(queuePrefix)
+  return string.match(queuePrefix, '{([^{}]+)}$')
+end
+
+-- Persist a retryable cross-queue parent notification on this child's hash
+-- slot. The scheduler later calls completeChild using only the parent keys.
+-- Member: JSON array [parentQueueName, parentId, childQueuePrefix:childId]
+local function enqueueCrossQueueParentNotify(prefix, jobId, parentQueueName, parentId)
+  if not parentQueueName or parentQueueName == '' or not parentId or parentId == '' then return nil end
+  local childQueueName = extractQueueTag(string.sub(prefix, 1, #prefix - 1))
+  if childQueueName and parentQueueName == childQueueName then return nil end
+  local childQueuePrefix = string.sub(prefix, 1, #prefix - 1)
+  local member = cjson.encode({parentQueueName, parentId, childQueuePrefix .. ':' .. jobId})
+  redis.call('SADD', prefix .. 'xq-pending', member)
+  return member
+end
+
+local function appendParentNotifications(result, notifications)
+  if #notifications == 0 then return result end
+  result[#result + 1] = '__glidemq_parent_notifications__'
+  result[#result + 1] = cjson.encode(notifications)
+  return result
+end
+
+local function addParentNotification(notifications, seen, member)
+  if member and not seen[member] then
+    seen[member] = true
+    notifications[#notifications + 1] = member
+  end
 end
 
 local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, hintOrderingSeq, hintGroupKey)
@@ -1010,6 +1067,15 @@ redis.register_function('glidemq_complete', function(keys, args)
   emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
   recordMetrics(metricsKey, timestamp, timestamp - processedOn)
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
+  local storedParentId = redis.call('HGET', jobKey, 'parentId')
+  local parentNotifications = {}
+  local parentNotificationSet = {}
+  addParentNotification(
+    parentNotifications,
+    parentNotificationSet,
+    enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
+  )
   if broadcastMode ~= '1' then
     if removeMode == 'true' then
       redis.call('ZREM', completedKey, jobId)
@@ -1040,20 +1106,16 @@ redis.register_function('glidemq_complete', function(keys, args)
     local parentJobKey = keys[7]
     local parentStreamKey = keys[8]
     local parentEventsKey = keys[9]
-    local depMarker = 'depdone:' .. depsMember
-    if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
-      local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-      local totalDeps = redis.call('SCARD', parentDepsKey)
-      local remaining = totalDeps - doneCount
-      if remaining <= 0 then
-        local parentState = redis.call('HGET', parentJobKey, 'state')
-        if parentState == 'waiting-children' then
-          redis.call('HSET', parentJobKey, 'state', 'waiting')
-          xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
-          emitEvent(parentEventsKey, 'active', parentId, nil)
-        end
-      end
-    end
+    completeParentDependency(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
+  elseif storedParentQueue == extractQueueTag(string.sub(prefix, 1, #prefix - 1)) and storedParentId and storedParentId ~= '' then
+    completeParentDependency(
+      prefix .. 'deps:' .. storedParentId,
+      prefix .. 'job:' .. storedParentId,
+      prefix .. 'stream',
+      prefix .. 'events',
+      string.sub(prefix, 1, #prefix - 1) .. ':' .. jobId,
+      storedParentId
+    )
   end
   -- DAG multi-parent: notify additional same-queue parents via parents SET
   local parentsKey = prefix .. 'parents:' .. jobId
@@ -1079,25 +1141,20 @@ redis.register_function('glidemq_complete', function(keys, args)
           local pDepsKey = pPrefix .. 'deps:' .. pId
           local pStreamKey = pPrefix .. 'stream'
           local pEventsKey = pPrefix .. 'events'
-          local pDepMarker = 'depdone:' .. dagDepsMember
-          if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
-            local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
-            local pTotalDeps = redis.call('SCARD', pDepsKey)
-            if pTotalDeps - pDoneCount <= 0 then
-              local pState = redis.call('HGET', pJobKey, 'state')
-              if pState == 'waiting-children' then
-                redis.call('HSET', pJobKey, 'state', 'waiting')
-                xaddJob(pStreamKey, pId, redis.call('HGET', pJobKey, 'name'))
-                emitEvent(pEventsKey, 'active', pId, nil)
-              end
-            end
-          end
+          completeParentDependency(pDepsKey, pJobKey, pStreamKey, pEventsKey, dagDepsMember, pId)
+        else
+          local pTag = extractQueueTag(pQueue)
+          addParentNotification(
+            parentNotifications,
+            parentNotificationSet,
+            enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
+          )
         end
       end
     end
   end
   if entryId == '' then decrListActive(prefix .. 'list-active') end
-  return 1
+  return #parentNotifications > 0 and cjson.encode(parentNotifications) or ''
 end)
 
 redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
@@ -1153,6 +1210,15 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
   if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
+  local storedParentId = redis.call('HGET', jobKey, 'parentId')
+  local parentNotifications = {}
+  local parentNotificationSet = {}
+  addParentNotification(
+    parentNotifications,
+    parentNotificationSet,
+    enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
+  )
   if entryId == '' then decrListActive(prefix .. 'list-active') end
 
   -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
@@ -1188,19 +1254,16 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local parentJobKey = keys[7]
     local parentStreamKey = keys[8]
     local parentEventsKey = keys[9]
-    local depMarker = 'depdone:' .. depsMember
-    if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
-      local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-      local totalDeps = redis.call('SCARD', parentDepsKey)
-      if totalDeps - doneCount <= 0 then
-        local parentState = redis.call('HGET', parentJobKey, 'state')
-        if parentState == 'waiting-children' then
-          redis.call('HSET', parentJobKey, 'state', 'waiting')
-          xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
-          emitEvent(parentEventsKey, 'active', parentId, nil)
-        end
-      end
-    end
+    completeParentDependency(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
+  elseif storedParentQueue == extractQueueTag(string.sub(prefix, 1, #prefix - 1)) and storedParentId and storedParentId ~= '' then
+    completeParentDependency(
+      prefix .. 'deps:' .. storedParentId,
+      prefix .. 'job:' .. storedParentId,
+      prefix .. 'stream',
+      prefix .. 'events',
+      string.sub(prefix, 1, #prefix - 1) .. ':' .. jobId,
+      storedParentId
+    )
   end
   -- DAG multi-parent: always check parents SET. The previous hasParents
   -- arg was sourced from the worker's snapshot of the job hash, which is
@@ -1225,19 +1288,14 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
             local pDepsKey = pPrefix .. 'deps:' .. pId
             local pStreamKey = pPrefix .. 'stream'
             local pEventsKey = pPrefix .. 'events'
-            local pDepMarker = 'depdone:' .. dagDepsMember
-            if redis.call('HSETNX', pJobKey, pDepMarker, '1') == 1 then
-              local pDoneCount = redis.call('HINCRBY', pJobKey, 'depsCompleted', 1)
-              local pTotalDeps = redis.call('SCARD', pDepsKey)
-              if pTotalDeps - pDoneCount <= 0 then
-                local pState = redis.call('HGET', pJobKey, 'state')
-                if pState == 'waiting-children' then
-                  redis.call('HSET', pJobKey, 'state', 'waiting')
-                  xaddJob(pStreamKey, pId, redis.call('HGET', pJobKey, 'name'))
-                  emitEvent(pEventsKey, 'active', pId, nil)
-                end
-              end
-            end
+            completeParentDependency(pDepsKey, pJobKey, pStreamKey, pEventsKey, dagDepsMember, pId)
+          else
+            local pTag = extractQueueTag(pQueue)
+            addParentNotification(
+              parentNotifications,
+              parentNotificationSet,
+              enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
+            )
           end
         end
       end
@@ -1246,18 +1304,19 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
 
   -- In broadcast mode: do not fetch next (avoids XDEL of next entry which would break other consumer groups)
   if broadcastMode == '1' then
-    return {'NEXT_NONE', jobId}
+    return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
   end
 
   -- Queue.pause(): finish the current job but do not claim the next one.
   if isQueuePaused(prefix) then
-    return {'NEXT_NONE', jobId}
+    return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
   end
 
   -- Return protocol (array-based to avoid cjson encode/decode per job):
-  -- {'NEXT_NONE', completedJobId}
-  -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId}
-  -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ...}
+  -- Cross-queue completions append '__glidemq_parent_notifications__', JSON members.
+  -- {'NEXT_NONE', completedJobId, ...}
+  -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId, ...}
+  -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ..., ...}
 
   -- Phase 1.0: Try priority list first (highest priority: priority > LIFO > FIFO)
   local priorityKey = prefix .. 'priority'
@@ -1343,7 +1402,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
                 redis.call('ZADD', priWaitListKey, groupqScore(priJobKey, priJobId), priJobId)
                 redis.call('HSET', priJobKey, 'state', 'group-waiting')
                 redis.call('ZADD', prefix .. 'ratelimited', tonumber(timestamp) + math.max(priTbDelay, priRlDelay), priGroupKey)
-                return {'NEXT_NONE', jobId}
+                return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
               elseif priTbCapacity > 0 and priJobCostVal > priTbCapacity then
                 -- Failed above; try the next priority job.
               else
@@ -1372,7 +1431,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
                 if skipEvents ~= '1' then emitEvent(eventsKey, 'active', priJobId, nil) end
                 local priJobFields = redis.call('HGETALL', priJobKey)
                 redis.call('INCR', prefix .. 'list-active')
-                return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
+                return appendParentNotifications({'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}, parentNotifications)
               end
             end
           else
@@ -1381,7 +1440,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
             if skipEvents ~= '1' then emitEvent(eventsKey, 'active', priJobId, nil) end
             local priJobFields = redis.call('HGETALL', priJobKey)
             redis.call('INCR', prefix .. 'list-active')
-            return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
+            return appendParentNotifications({'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}, parentNotifications)
           end
         else
           expireJob(priJobKey, priJobId, prefix, timestamp, priMeta[1], nil, nil, nil)
@@ -1409,7 +1468,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
           if skipEvents ~= '1' then emitEvent(eventsKey, 'active', lifoJobId, nil) end
           local lifoJobFields = redis.call('HGETALL', lifoJobKey)
           redis.call('INCR', prefix .. 'list-active')
-          return {'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}
+          return appendParentNotifications({'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}, parentNotifications)
         else
           expireJob(lifoJobKey, lifoJobId, prefix, timestamp, lifoMeta[1], nil, nil, nil)
         end
@@ -1423,12 +1482,12 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   for _fetchAttempt = 1, 3 do
     local nextEntries = redis.call('XREADGROUP', 'GROUP', group, consumer, 'COUNT', 1, 'STREAMS', streamKey, '>')
     if not nextEntries or #nextEntries == 0 then
-      return {'NEXT_NONE', jobId}
+      return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
     end
     local streamData = nextEntries[1]
     local entries = streamData[2]
     if not entries or #entries == 0 then
-      return {'NEXT_NONE', jobId}
+      return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
     end
     local nextEntry = entries[1]
     nextEntryId = nextEntry[1]
@@ -1441,17 +1500,17 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       end
     end
     if not nextJobId then
-      return {'NEXT_NONE', jobId}
+      return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
     end
     nextJobKey = prefix .. 'job:' .. nextJobId
     -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' + HGET 'groupKey' (4 → 1)
     local nextMeta = redis.call('HMGET', nextJobKey, 'state', 'revoked', 'expireAt', 'groupKey')
     if not nextMeta[1] then
       -- state is nil: job hash does not exist
-      return {'NEXT_NONE', jobId}
+      return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
     end
     if nextMeta[2] == '1' then
-      return {'NEXT_REVOKED', jobId, nextJobId, nextEntryId}
+      return appendParentNotifications({'NEXT_REVOKED', jobId, nextJobId, nextEntryId}, parentNotifications)
     end
     -- Inline expiry check (avoids checkExpired's redundant HGET)
     local nextExpireAt = tonumber(nextMeta[3])
@@ -1467,7 +1526,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     end
   end
   if not nextJobId then
-    return {'NEXT_NONE', jobId}
+    return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
   end
 
   -- Phase 3: Activate next job (same as moveToActive)
@@ -1497,7 +1556,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         redis.call('XDEL', streamKey, nextEntryId)
         redis.call('ZADD', nextWaitListKey, nextJobOrderingSeq, nextJobId)
         redis.call('HSET', nextJobKey, 'state', 'group-waiting')
-        return {'NEXT_NONE', jobId}
+        return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
       end
       nextReturning = (nextExpectedSeq > 0 and nextJobOrderingSeq < nextExpectedSeq)
     end
@@ -1507,7 +1566,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       redis.call('XDEL', streamKey, nextEntryId)
       redis.call('ZADD', nextWaitListKey, groupqScore(nextJobKey, nextJobId), nextJobId)
       redis.call('HSET', nextJobKey, 'state', 'group-waiting')
-      return {'NEXT_NONE', jobId}
+      return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
     end
     -- Token bucket gate (read-only)
     local nextTbCapacity = tonumber(nGrp.tbCapacity) or 0
@@ -1533,7 +1592,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         if skipEvents ~= '1' then emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
         if skipMetrics ~= '1' then recordMetrics(metricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn) end
         closeOrderingHoleAndPromote(nextJobKey, nextJobId, tonumber(timestamp))
-        return {'NEXT_NONE', jobId}
+        return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
       end
       if nextTbTokens < nextJobCostVal then
         nextTbBlocked = true
@@ -1564,7 +1623,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       local nextMaxDelay = math.max(nextTbDelay, nextRlDelay)
       local rateLimitedKey = prefix .. 'ratelimited'
       redis.call('ZADD', rateLimitedKey, tonumber(timestamp) + nextMaxDelay, nextGroupKey)
-      return {'NEXT_NONE', jobId}
+      return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
     end
     -- All gates passed: mutate state
     if nextTbCapacity > 0 then
@@ -1595,7 +1654,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   for i = 1, #nextHash do
     out[#out + 1] = nextHash[i]
   end
-  return out
+  return appendParentNotifications(out, parentNotifications)
 end)
 
 redis.register_function('glidemq_fail', function(keys, args)
@@ -2982,24 +3041,7 @@ redis.register_function('glidemq_completeChild', function(keys, args)
   local parentEventsKey = keys[4]
   local depsMember = args[1]
   local parentId = args[2]
-  local depMarker = 'depdone:' .. depsMember
-  if redis.call('HSETNX', parentJobKey, depMarker, '1') == 0 then
-    local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
-    local totalDeps = redis.call('SCARD', depsKey)
-    return totalDeps - doneCount
-  end
-  local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-  local totalDeps = redis.call('SCARD', depsKey)
-  local remaining = totalDeps - doneCount
-  if remaining <= 0 then
-    local parentState = redis.call('HGET', parentJobKey, 'state')
-    if parentState == 'waiting-children' then
-      redis.call('HSET', parentJobKey, 'state', 'waiting')
-      xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
-      emitEvent(parentEventsKey, 'active', parentId, nil)
-    end
-  end
-  return remaining
+  return completeParentDependency(depsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
 end)
 
 redis.register_function('glidemq_registerParent', function(keys, args)
@@ -3027,19 +3069,7 @@ redis.register_function('glidemq_registerParent', function(keys, args)
   -- Race condition check: if child already completed, trigger parent notification immediately
   local childState = redis.call('HGET', childJobKey, 'state')
   if childState == 'completed' then
-    local depMarker = 'depdone:' .. depsMember
-    if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
-      local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-      local totalDeps = redis.call('SCARD', parentDepsKey)
-      if totalDeps - doneCount <= 0 then
-        local parentState = redis.call('HGET', parentJobKey, 'state')
-        if parentState == 'waiting-children' then
-          redis.call('HSET', parentJobKey, 'state', 'waiting')
-          xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
-          emitEvent(parentEventsKey, 'active', parentId, nil)
-        end
-      end
-    end
+    completeParentDependency(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
     return 'already_completed'
   end
   return 'ok'
@@ -3988,6 +4018,12 @@ redis.register_function('glidemq_popListsReserve', function(keys, args)
   local lifoKey = keys[2]
   local listActiveKey = keys[3]
   local count = tonumber(args[1]) or 1
+  -- priorityKey is prefix .. 'priority'; preserve Queue.pause semantics in
+  -- the reservation-aware path just as the legacy pop function does.
+  local prefix = string.sub(priorityKey, 1, #priorityKey - 8)
+  if isQueuePaused(prefix) then
+    return {}
+  end
   local results = {}
   for i = 1, count do
     local id = redis.call('RPOP', priorityKey)

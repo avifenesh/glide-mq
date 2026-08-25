@@ -18,8 +18,8 @@ import {
   calculateBackoff,
   computeFollowingSchedulerNextRun,
   computeWeightedTotal,
-  keyPrefix,
   nextReconnectDelay,
+  parseCrossQueueParentNotification,
   parseJsonRecord,
   reconnectWithBackoff,
   MAX_JOB_DATA_SIZE,
@@ -44,7 +44,9 @@ import {
 } from './errors';
 import {
   completeJob,
+  isCompleteJobRevoked,
   completeAndFetchNext,
+  completeChild,
   failJob,
   addJob,
   rateLimit as rateLimitFn,
@@ -57,7 +59,6 @@ import {
   checkBudget,
   recordUsageAndCheckBudget,
 } from './functions/index';
-import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
 
 export type WorkerEvent =
@@ -720,8 +721,6 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           continue;
         }
 
-        const parentInfo = await this.buildParentInfo(entry.job, entry.jobId);
-
         const completeResult = await completeJob(
           this.commandClient!,
           this.queueKeys,
@@ -731,13 +730,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           Date.now(),
           this.consumerGroup,
           entry.job.opts.removeOnComplete,
-          parentInfo,
+          undefined,
           this.broadcastMode ? true : undefined,
         );
-        if (String(completeResult) === 'REVOKED') {
+        if (isCompleteJobRevoked(completeResult)) {
           await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
           continue;
         }
+        await this.notifyCrossQueueParents(completeResult);
 
         entry.job.returnvalue = result;
         entry.job.finishedOn = Date.now();
@@ -786,8 +786,6 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             continue;
           }
 
-          const parentInfo = await this.buildParentInfo(entry.job, entry.jobId);
-
           const completeResult = await completeJob(
             this.commandClient!,
             this.queueKeys,
@@ -797,13 +795,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             Date.now(),
             this.consumerGroup,
             entry.job.opts.removeOnComplete,
-            parentInfo,
+            undefined,
             this.broadcastMode ? true : undefined,
           );
-          if (String(completeResult) === 'REVOKED') {
+          if (isCompleteJobRevoked(completeResult)) {
             await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
             continue;
           }
+          await this.notifyCrossQueueParents(completeResult);
 
           entry.job.returnvalue = result as R;
           entry.job.finishedOn = Date.now();
@@ -1185,35 +1184,16 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
   }
 
-  /**
-   * Build parent dependency info for complete/completeAndFetchNext calls.
-   */
-  protected async buildParentInfo(
-    job: Job<D, R>,
-    jobId: string,
-  ): Promise<{ depsMember: string; parentId: string; parentKeys: QueueKeys } | undefined> {
-    let parentId = job.parentId;
-    let parentQueue = job.parentQueue;
-
-    // Fast path: no parent fields at all - skip the Valkey round trip
-    if (!parentId && !parentQueue) return undefined;
-
-    // One field missing: re-fetch from hash to handle partial data
-    if ((!parentId || !parentQueue) && this.commandClient) {
-      const [refreshedParentId, refreshedParentQueue] = await this.commandClient.hmget(this.queueKeys.job(jobId), [
-        'parentId',
-        'parentQueue',
-      ]);
-      parentId = refreshedParentId ? String(refreshedParentId) : parentId;
-      parentQueue = refreshedParentQueue ? String(refreshedParentQueue) : parentQueue;
+  /** Deliver notifications recorded atomically by the completion FCALL. */
+  protected async notifyCrossQueueParents(notifications: string[]): Promise<void> {
+    if (!this.commandClient) return;
+    for (const member of notifications) {
+      const notification = parseCrossQueueParentNotification(member);
+      if (!notification) continue;
+      const [parentQueue, parentId, depsMember] = notification;
+      await completeChild(this.commandClient, buildKeys(parentQueue, this.opts.prefix), parentId, depsMember);
+      await this.commandClient.srem(this.queueKeys.xqPending, [member]);
     }
-
-    if (!parentId || !parentQueue) return undefined;
-    return {
-      depsMember: `${keyPrefix(this.opts.prefix ?? 'glide', this.name)}:${jobId}`,
-      parentId,
-      parentKeys: buildKeys(parentQueue, this.opts.prefix),
-    };
   }
 
   protected orderingMetaField(job: Job<D, R>): string | null {
@@ -1502,9 +1482,6 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           return;
         }
       }
-      // Fast path: skip async buildParentInfo when no parent fields present
-      const parentInfo = job.parentId || job.parentQueue ? await this.buildParentInfo(job, currentJobId) : undefined;
-
       const now = Date.now();
       const fetchResult = await completeAndFetchNext(
         this.commandClient,
@@ -1516,7 +1493,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.consumerGroup,
         this.consumerId,
         job.opts.removeOnComplete,
-        parentInfo,
+        undefined,
         completionHints,
         this.broadcastMode ? true : undefined,
         job.processedOn,
@@ -1529,7 +1506,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
         return;
       }
-
+      await this.notifyCrossQueueParents(fetchResult.parentNotifications);
       job.returnvalue = processResult;
       job.finishedOn = now;
       if (this.hasCompletedListeners) this.emit('completed', job, processResult);

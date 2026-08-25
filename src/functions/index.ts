@@ -79,7 +79,15 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 115: token-bucket gate each ordered rate-limit returner before it resumes.
 // Version 116: retained ordered-return slots use a namespace that cannot alias user group hashes.
 // Version 117: migrate retained-return slots from the v115 namespace before consuming them.
-export const LIBRARY_VERSION = '117';
+// Version 101: complete/CAF enqueue cross-queue parent notifies on a same-slot pending set so a later scheduler tick can retry if the worker dies between complete and completeChild.
+// Version 102: completeChild ignores stale notifications for deleted parent hashes.
+// Version 104: encode cross-queue notifications as JSON and reconcile deleted children without recreating hashes.
+// Version 107: extract the final queue hash tag for cross-queue DAG notifications so custom prefixes may contain braces.
+// Version 108: all parent dependency completion paths ignore deleted parent hashes.
+// Version 109: completion replies carry cross-queue parent notifications for eager delivery.
+// Version 110: dedupe overlapping tree and DAG parent notifications per completion.
+// Version 119: integrate the reviewed correctness queue and preserve Queue.pause in the reservation-aware list pop.
+export const LIBRARY_VERSION = '119';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -320,6 +328,22 @@ export async function renewLock(client: Client, lockKey: string, token: string, 
  */
 const RETENTION_NONE = { mode: '0', count: 0, age: 0 } as const;
 const RETENTION_TRUE = { mode: 'true', count: 0, age: 0 } as const;
+const PARENT_NOTIFICATIONS_MARKER = '__glidemq_parent_notifications__';
+const COMPLETE_REVOKED_MARKER = '__glidemq_complete_revoked__';
+
+function parseParentNotifications(raw: unknown): string[] {
+  if (typeof raw !== 'string' || raw === '') return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.every((member) => typeof member === 'string') ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function isCompleteJobRevoked(result: string[]): boolean {
+  return result.length === 1 && result[0] === COMPLETE_REVOKED_MARKER;
+}
 
 function encodeRetention(opt?: boolean | number | { age: number; count: number }): {
   mode: string;
@@ -355,7 +379,7 @@ export async function completeJob(
   removeOnComplete?: boolean | number | { age: number; count: number },
   parentInfo?: { depsMember: string; parentId: string; parentKeys: QueueKeys },
   broadcastMode?: boolean,
-): Promise<GlideReturnType> {
+): Promise<string[]> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
   const keys: string[] = [k.stream, k.completed, k.events, k.job(jobId), k.metricsCompleted];
@@ -380,7 +404,8 @@ export async function completeJob(
 
   if (broadcastMode) args.push('1');
 
-  return client.fcall('glidemq_complete', keys, args);
+  const raw = await client.fcall('glidemq_complete', keys, args);
+  return String(raw) === 'REVOKED' ? [COMPLETE_REVOKED_MARKER] : parseParentNotifications(raw);
 }
 
 /**
@@ -397,6 +422,8 @@ export interface CompleteAndFetchResult {
   next: false | 'REVOKED' | 'CURRENT_REVOKED' | Record<string, string>;
   nextJobId?: string;
   nextEntryId?: string;
+  /** Retryable cross-queue parent notifications recorded by the completion FCALL. */
+  parentNotifications: string[];
 }
 
 export interface CompleteAndFetchHints {
@@ -464,12 +491,19 @@ export async function completeAndFetchNext(
 
   // Fast path: array protocol from Lua function
   if (Array.isArray(raw)) {
+    const notificationOffset =
+      raw.length >= 2 && String(raw.at(-2)) === PARENT_NOTIFICATIONS_MARKER ? raw.length - 2 : raw.length;
+    const parentNotifications = notificationOffset < raw.length ? parseParentNotifications(raw.at(-1)) : [];
     const tag = String(raw[0]);
     if (tag === 'NEXT_NONE') {
-      return { completed: raw[1] != null ? String(raw[1]) : jobId, next: false };
+      return { completed: raw[1] != null ? String(raw[1]) : jobId, next: false, parentNotifications };
     }
     if (tag === 'CURRENT_REVOKED') {
-      return { completed: raw[1] != null ? String(raw[1]) : jobId, next: 'CURRENT_REVOKED' };
+      return {
+        completed: raw[1] != null ? String(raw[1]) : jobId,
+        next: 'CURRENT_REVOKED',
+        parentNotifications: [],
+      };
     }
     if (tag === 'NEXT_REVOKED') {
       return {
@@ -477,11 +511,12 @@ export async function completeAndFetchNext(
         next: 'REVOKED',
         nextJobId: String(raw[2]),
         nextEntryId: String(raw[3]),
+        parentNotifications,
       };
     }
     if (tag === 'NEXT_HASH') {
       const hash: Record<string, string> = Object.create(null);
-      for (let i = 4; i + 1 < raw.length; i += 2) {
+      for (let i = 4; i + 1 < notificationOffset; i += 2) {
         hash[String(raw[i])] = String(raw[i + 1]);
       }
       return {
@@ -489,6 +524,7 @@ export async function completeAndFetchNext(
         next: hash,
         nextJobId: String(raw[2]),
         nextEntryId: String(raw[3]),
+        parentNotifications,
       };
     }
     throw new Error(`Unexpected glidemq_completeAndFetchNext tag: ${tag}`);
@@ -497,7 +533,7 @@ export async function completeAndFetchNext(
   // Backward compatibility: JSON protocol (older library versions)
   const parsed = JSON.parse(String(raw));
   if (!parsed.next || parsed.next === false) {
-    return { completed: parsed.completed, next: false };
+    return { completed: parsed.completed, next: false, parentNotifications: [] };
   }
   if (parsed.next === 'REVOKED') {
     return {
@@ -505,6 +541,7 @@ export async function completeAndFetchNext(
       next: 'REVOKED',
       nextJobId: parsed.nextJobId,
       nextEntryId: parsed.nextEntryId,
+      parentNotifications: [],
     };
   }
   const parsedHash = parsed.next as string[];
@@ -517,6 +554,7 @@ export async function completeAndFetchNext(
     next: hash,
     nextJobId: parsed.nextJobId,
     nextEntryId: parsed.nextEntryId,
+    parentNotifications: [],
   };
 }
 

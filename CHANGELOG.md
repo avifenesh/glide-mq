@@ -18,6 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `getJobs('waiting')` now follows worker dispatch order across priority, LIFO, and FIFO sources, excludes pending stream entries, and does not expose revoked or removed list jobs.
 - Job removal and revocation scan the FIFO stream only when the waiting job was absent from both list-backed sources, avoiding unnecessary O(stream-length) work without orphaning stream entries whose legacy source fields are stale.
 - **Queue pause now expires suspended jobs**: `Queue.pause()` immediately sweeps suspended jobs whose timeouts have elapsed, so pausing does not leave expired human-in-the-loop jobs pending until the background sweep.
+- **Nested and DAG cross-queue parents could remain in `waiting-children`**: parent wiring now avoids cross-slot FCALLs, preserves nested parent hash fields, retries idempotent notifications from the child slot, reconciles removed children without recreating hashes, and ignores stale notifications for deleted parents. Completion returns newly queued cross-queue edges for eager delivery while deduplicating overlapping tree and DAG metadata.
 
 ---
 
