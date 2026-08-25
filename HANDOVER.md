@@ -20,6 +20,10 @@
 - **0.15.3** (#222-#246): DAG dependency direction/tree rendering/multi-dependent leaf fixes, `addDAG` level batching, stalled-job redispatch semantics, large-key `UNLINK` cleanup, bounded ordering skip-marker advancement, serverless credential cache scoping, flow ID-collision guards, proxy strict opts validation, long-running job heartbeats, broadcast retry isolation, queue client single-flight, and dependency CVE fixes. `LIBRARY_VERSION` 93.
 - **0.15.4**: interval scheduler anchoring prevents late worker ticks from accumulating drift, `npm test` now runs the intended non-fuzzer suite, and CI/local compose coverage use stable Valkey 9.1.0 images.
 
+### In flight (fork)
+
+- **Reconnect lockDuration**: Scheduler rebuilt after reconnect keeps worker `lockDuration`. Branch `fix/reconnect-lock-duration`.
+
 ### 0.15.4 Release Notes
 
 See CHANGELOG.md `0.15.4` for the full list. Highlights:
