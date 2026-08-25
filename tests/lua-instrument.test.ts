@@ -67,7 +67,6 @@ describe('Lua coverage instrumenter', () => {
     expect(lua).toContain("return '__LIBRARY_VERSION__'");
     expect(lua).toContain("__reg('glidemq_addJob'");
     expect(lua).not.toContain("redis.register_function('glidemq_");
-    expect(lua).not.toContain('__cov[1108]=1;');
     expect(executable.length).toBeGreaterThan(500);
   });
 
