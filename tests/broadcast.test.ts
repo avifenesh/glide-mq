@@ -6,6 +6,9 @@ import { it, expect, beforeAll, afterAll } from 'vitest';
 
 const { Broadcast } = require('../dist/broadcast') as typeof import('../src/broadcast');
 const { BroadcastWorker } = require('../dist/broadcast-worker') as typeof import('../src/broadcast-worker');
+const { Queue } = require('../dist/queue') as typeof import('../src/queue');
+const { moveToActive } = require('../dist/functions') as typeof import('../src/functions');
+const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
@@ -396,5 +399,171 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
 
     await worker.close(true);
     await broadcast.close();
+  }, 15000);
+
+  it('honors queue-wide pause and resumes pending delivery', async () => {
+    const qName = Q + '-queue-pause';
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const broadcast = new Broadcast(qName, { connection: CONNECTION });
+    const received: any[] = [];
+
+    await queue.pause();
+    const worker = new BroadcastWorker(
+      qName,
+      async (job: any) => {
+        received.push(job.data);
+      },
+      { connection: CONNECTION, subscription: 'sub-queue-pause', startFrom: '0', blockTimeout: 200 },
+    );
+    await worker.waitUntilReady();
+
+    await broadcast.publish('message', { msg: 'queue-paused' });
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    expect(received).toHaveLength(0);
+
+    await queue.resume();
+    await waitFor(() => received.length === 1, 8000);
+    expect(received[0]).toEqual({ msg: 'queue-paused' });
+
+    await worker.close(true);
+    await broadcast.close();
+    await queue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
+  it('keeps a paused activation race pending for its broadcast subscriber', async () => {
+    const qName = Q + '-queue-pause-race';
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const broadcast = new Broadcast(qName, { connection: CONNECTION });
+    const received: any[] = [];
+    const worker = new BroadcastWorker(
+      qName,
+      async (job: any) => {
+        received.push(job.data);
+      },
+      { connection: CONNECTION, subscription: 'sub-queue-pause-race', startFrom: '0', blockTimeout: 200 },
+    );
+    const k = buildKeys(qName);
+
+    // Keep the worker from consuming while we create its exact claim/pause race.
+    await queue.pause();
+    await worker.waitUntilReady();
+    await worker.pause(true);
+    const jobId = await broadcast.publish('message', { msg: 'claimed-while-paused' });
+    expect(jobId).not.toBeNull();
+
+    await queue.resume();
+    const consumerId = (worker as any).consumerId;
+    const claimed = await cleanupClient.xreadgroup(
+      'sub-queue-pause-race',
+      consumerId,
+      { [k.stream]: '>' },
+      { count: 1 },
+    );
+    const entryId = Object.keys(claimed[0].value)[0];
+
+    await queue.pause();
+    const activation = await moveToActive(
+      cleanupClient,
+      k,
+      jobId!,
+      Date.now(),
+      k.stream,
+      entryId,
+      'sub-queue-pause-race',
+      true,
+    );
+    expect(activation).toBe('PAUSED');
+    expect(await (worker as any).handleMoveToActiveEdgeCase(activation, jobId!, entryId)).toBe(true);
+    expect(Number(await cleanupClient.xlen(k.stream))).toBe(1);
+    expect(Number((await cleanupClient.xpending(k.stream, 'sub-queue-pause-race'))[0])).toBe(1);
+
+    await worker.resume();
+    await queue.resume();
+    await waitFor(() => received.length === 1, 8000);
+    expect(received).toEqual([{ msg: 'claimed-while-paused' }]);
+
+    await worker.close(true);
+    await broadcast.close();
+    await queue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
+  it('recovers only the pause-parked claim without redispatching active PEL work', async () => {
+    const qName = Q + '-queue-pause-targeted-recovery';
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const broadcast = new Broadcast(qName, { connection: CONNECTION });
+    const calls: string[] = [];
+    let releaseActive!: () => void;
+    const activeRelease = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    let markActiveStarted!: () => void;
+    const activeStarted = new Promise<void>((resolve) => {
+      markActiveStarted = resolve;
+    });
+    const worker = new BroadcastWorker(
+      qName,
+      async (job: any) => {
+        calls.push(job.data.kind);
+        if (job.data.kind === 'active') {
+          markActiveStarted();
+          await activeRelease;
+        }
+      },
+      {
+        connection: CONNECTION,
+        subscription: 'sub-queue-pause-targeted-recovery',
+        startFrom: '0',
+        concurrency: 2,
+        prefetch: 1,
+        blockTimeout: 100,
+      },
+    );
+    const k = buildKeys(qName);
+    await worker.waitUntilReady();
+
+    await broadcast.publish('message', { kind: 'active' });
+    await activeStarted;
+    await queue.pause();
+    await worker.pause(true);
+
+    const parkedJobId = await broadcast.publish('message', { kind: 'parked' });
+    expect(parkedJobId).not.toBeNull();
+    const consumerId = (worker as any).consumerId;
+    const claimed = await cleanupClient.xreadgroup(
+      'sub-queue-pause-targeted-recovery',
+      consumerId,
+      { [k.stream]: '>' },
+      { count: 1 },
+    );
+    const parkedEntryId = Object.keys(claimed[0].value)[0];
+    expect(
+      await moveToActive(
+        cleanupClient,
+        k,
+        parkedJobId!,
+        Date.now(),
+        k.stream,
+        parkedEntryId,
+        'sub-queue-pause-targeted-recovery',
+        true,
+      ),
+    ).toBe('PAUSED');
+    await (worker as any).handleMoveToActiveEdgeCase('PAUSED', parkedJobId!, parkedEntryId);
+
+    (worker as any).prefetch = 2;
+    await worker.resume();
+    await queue.resume();
+    await waitFor(() => calls.includes('parked'), 8000);
+    expect(calls.filter((kind) => kind === 'active')).toHaveLength(1);
+    await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    expect(calls.filter((kind) => kind === 'active')).toHaveLength(1);
+
+    releaseActive();
+    await worker.close(true);
+    await broadcast.close();
+    await queue.close();
+    await flushQueue(cleanupClient, qName);
   }, 15000);
 });

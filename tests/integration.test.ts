@@ -11,7 +11,7 @@ const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 const { LIBRARY_VERSION } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 describeEachMode('Function Library', (CONNECTION) => {
   let cleanupClient: any;
@@ -114,6 +114,41 @@ describeEachMode('Queue pause/resume', (CONNECTION) => {
     await queue.resume();
     expect(String(await cleanupClient.hget(k.meta, 'paused'))).toBe('0');
   });
+
+  it('pause sweeps all expired suspended jobs, not just the first batch', async () => {
+    const qName = `test-pause-suspended-sweep-${Date.now()}`;
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        await job.suspend({ timeout: 60000 });
+      },
+      { connection: CONNECTION, concurrency: 128, prefetch: 128, blockTimeout: 1000 },
+    );
+    const jobs = [] as any[];
+    const k = buildKeys(qName);
+
+    try {
+      worker.on('error', () => {});
+      await worker.waitUntilReady();
+      for (let i = 0; i < 101; i++) {
+        jobs.push(await queue.add(`suspend-${i}`, { i }));
+      }
+
+      await waitFor(async () => Number(await cleanupClient.zcard(k.suspended)) === jobs.length, 15000, 50);
+      await cleanupClient.zadd(k.suspended, Object.fromEntries(jobs.map((job) => [job.id, 0])));
+
+      await queue.pause();
+
+      expect(await cleanupClient.zcard(k.suspended)).toBe(0);
+      const states = await Promise.all(jobs.map((job) => cleanupClient.hget(k.job(job.id), 'state')));
+      expect(states.every((state) => String(state) === 'failed')).toBe(true);
+    } finally {
+      await worker.close(true).catch(() => undefined);
+      await queue.close().catch(() => undefined);
+      await flushQueue(cleanupClient, qName);
+    }
+  }, 30000);
 });
 
 describeEachMode('Worker processes jobs', (CONNECTION) => {

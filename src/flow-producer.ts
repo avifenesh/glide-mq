@@ -4,7 +4,7 @@ import { Job } from './job';
 import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE, validateJobId, validateQueueName } from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
-import { LIBRARY_SOURCE, addFlow, addJob, addJobArgs, completeChild } from './functions/index';
+import { LIBRARY_SOURCE, addFlow, addJob, addJobArgs, completeChild, registerParent } from './functions/index';
 import { withSpan } from './telemetry';
 import { validateDAG, topoSort } from './dag-utils';
 import { Batch, ClusterBatch, type GlideClient, type GlideClusterClient } from '@glidemq/speedkey';
@@ -13,19 +13,6 @@ export interface JobNode {
   job: Job;
   children?: JobNode[];
 }
-
-/**
- * Race-condition constants for late-parent reconciliation in addFlowRecursive.
- *
- * Children are created before the parent job exists. Between child creation and
- * parent creation, a worker may pick up and complete a child job. When that
- * happens, the child's completion Lua script cannot notify the parent (it does
- * not exist yet). The reconcile loop below polls the child state after parent
- * creation; if the child has already completed, it manually calls completeChild
- * so the parent's dependency counter is incremented and the parent can proceed.
- */
-const LATE_PARENT_RECONCILE_ATTEMPTS = 5;
-const LATE_PARENT_RECONCILE_DELAY_MS = 10;
 
 /**
  * Creates parent-child job flows and DAG workflows.
@@ -328,28 +315,71 @@ export class FlowProducer {
     if (ids[0] === 'ERR:ID_EXHAUSTED') {
       throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
     }
+    if (ids[0] === 'ERR:COST_EXCEEDS_CAPACITY') {
+      throw new Error('Job cost exceeds token bucket capacity');
+    }
     const parentId = ids[0];
 
-    // Set parentId and parentQueue on pre-existing sub-flow children
+    // Wire pre-existing sub-flow children to this parent. registerParent also
+    // notifies the parent if the child already completed during the race.
     for (const [i, subNode] of childNodeMap.entries()) {
       const child = flow.children[i];
       const childKeys = buildKeys(child.queueName, prefix);
       const depsMember = `${keyPrefix(prefix, child.queueName)}:${subNode.job.id}`;
-      await client.hset(childKeys.job(subNode.job.id), {
-        parentId: parentId,
-        parentQueue: parentQueueName,
-      });
-      let state = await client.hget(childKeys.job(subNode.job.id), 'state');
-      for (
-        let attempt = 0;
-        state && String(state) !== 'completed' && attempt < LATE_PARENT_RECONCILE_ATTEMPTS;
-        attempt++
-      ) {
-        await new Promise<void>((resolve) => setTimeout(resolve, LATE_PARENT_RECONCILE_DELAY_MS));
-        state = await client.hget(childKeys.job(subNode.job.id), 'state');
-      }
-      if (state && String(state) === 'completed') {
+      if ((await client.exists([childKeys.job(subNode.job.id)])) === 0) {
+        // The recursive child may have been removed after the parent was
+        // created. Reconcile the parent dependency without recreating a ghost
+        // child hash.
         await completeChild(client, parentKeys, parentId, depsMember);
+        subNode.job.parentId = parentId;
+        subNode.job.parentQueue = parentQueueName;
+        continue;
+      }
+      if (child.queueName === parentQueueName) {
+        // Persist the edge before registerParent's completed-state check so a
+        // worker completing in this window can re-read parent metadata.
+        await client.hset(childKeys.job(subNode.job.id), {
+          parentId: parentId,
+          parentQueue: parentQueueName,
+        });
+        const childState = await client.hget(childKeys.job(subNode.job.id), 'state');
+        if (childState == null) {
+          // The hash was deleted between EXISTS and HSET. Remove the partial
+          // hash so a removed child is not resurrected as a ghost job.
+          await client.del([childKeys.job(subNode.job.id)]);
+          await client.del([childKeys.parents(subNode.job.id)]);
+          await client.sadd(parentKeys.deps(parentId), [depsMember]);
+          await completeChild(client, parentKeys, parentId, depsMember);
+        } else {
+          const registration = await registerParent(
+            client,
+            childKeys,
+            subNode.job.id,
+            parentId,
+            keyPrefix(prefix, parentQueueName),
+            parentKeys,
+            depsMember,
+          );
+          if (registration.startsWith('error:child_not_found')) {
+            await client.sadd(parentKeys.deps(parentId), [depsMember]);
+            await completeChild(client, parentKeys, parentId, depsMember);
+          } else if (registration.startsWith('error:')) {
+            throw new GlideMQError(`Failed to register nested child ${subNode.job.id}: ${registration}`);
+          }
+        }
+      } else {
+        await client.hset(childKeys.job(subNode.job.id), {
+          parentId: parentId,
+          parentQueue: parentQueueName,
+        });
+        await client.sadd(childKeys.parents(subNode.job.id), [`${keyPrefix(prefix, parentQueueName)}:${parentId}`]);
+        const state = await client.hget(childKeys.job(subNode.job.id), 'state');
+        if (state == null || String(state) === 'completed') {
+          if (state == null) {
+            await client.del([childKeys.job(subNode.job.id), childKeys.parents(subNode.job.id)]);
+          }
+          await completeChild(client, parentKeys, parentId, depsMember);
+        }
       }
       subNode.job.parentId = parentId;
       subNode.job.parentQueue = parentQueueName;
@@ -394,9 +424,10 @@ export class FlowProducer {
    * parent dependency.
    *
    * Submission is pipelined by topological level: within a level, all primary
-   * FCALLs are sent in one Batch (non-atomic pipeline), then a second Batch
-   * wires cross-level edges (registerParent) and persists parentIds metadata.
-   * RTT is O(levels) instead of O(N).
+   * FCALLs are sent in one Batch (non-atomic pipeline), then a child-slot batch
+   * persists parent metadata and cross-queue parent references. Same-queue
+   * registerParent calls and cross-queue parent notifications are completed
+   * after that batch. RTT is O(levels) plus cross-slot notification wiring.
    *
    * Returns a map of node name to Job instance.
    */
@@ -540,14 +571,15 @@ export class FlowProducer {
               );
               submits.push({ node, kind: 'addFlow', timestamp, opts });
             } else if (myDependents.length === 1) {
-              // Leaf with a single dependent: piggyback on addJob's
+              // Leaf with a same-queue dependent: piggyback on addJob's
               // parentId/parentDepsKey so the leaf atomically registers as
-              // child of that dependent. No second dependent, so no race
-              // between addJob enqueueing and parents-SET wiring.
+              // child of that dependent. Cross-queue keys cannot be passed
+              // to this FCALL; those edges are wired in Phase B instead.
               const firstDepName = myDependents[0];
               const firstParentJob = result.get(firstDepName)!;
               const firstParentNode = nodeByName.get(firstDepName)!;
-              const firstParentKeys = buildKeys(firstParentNode.queueName, prefix);
+              const sameQueue = firstParentNode.queueName === node.queueName;
+              const firstParentKeys = sameQueue ? buildKeys(firstParentNode.queueName, prefix) : undefined;
               const { keys, args } = addJobArgs(
                 queueKeys,
                 node.name,
@@ -556,7 +588,7 @@ export class FlowProducer {
                 timestamp,
                 opts.delay ?? 0,
                 opts.priority ?? 0,
-                firstParentJob.id,
+                sameQueue ? firstParentJob.id : '',
                 opts.attempts ?? 0,
                 orderingKey ?? '',
                 groupConcurrency,
@@ -568,8 +600,8 @@ export class FlowProducer {
                 opts.ttl ?? 0,
                 customJobId,
                 opts.lifo ? 1 : 0,
-                firstParentNode.queueName,
-                firstParentKeys.deps(firstParentJob.id),
+                sameQueue ? firstParentNode.queueName : '',
+                sameQueue ? firstParentKeys!.deps(firstParentJob.id) : '',
                 '',
               );
               batchA.fcall('glidemq_addJob', keys, args);
@@ -686,11 +718,34 @@ export class FlowProducer {
             result.set(sub.node.name, job);
           }
 
-          // Phase B: pipeline cross-level wiring (registerParent + parentIds hset).
+          // Phase B: pipeline child-slot wiring and parent metadata.
+          //
+          // A ClusterBatch may contain commands for different slots, but an
+          // FCALL may not. Keep every batched command single-key and run
+          // registerParent only for same-queue edges. Cross-queue parent deps
+          // are added with a parent-slot SADD, while the child parents SET is
+          // written in this child-slot batch. Both operations are idempotent;
+          // completed-state reconciliation below closes the race where a
+          // child finishes between them.
           const batchB = isCluster ? new ClusterBatch(false) : new Batch(false);
-          let phaseBCount = 0;
-          // Track each batched registerParent's edge so we can report failures.
-          const phaseBRegEdges: { node: string; dep: string }[] = [];
+          const phaseBSlots: { kind: 'hset' | 'parents'; node: string; dep?: string }[] = [];
+          const sameQueueEdges: { node: string; jid: string; dep: string }[] = [];
+          const crossQueueEdges: {
+            node: string;
+            jid: string;
+            dep: string;
+            parentId: string;
+            parentQueue: string;
+          }[] = [];
+          const missingChildEdges: {
+            node: string;
+            jid: string;
+            parentId: string;
+            parentQueue: string;
+            dep: string;
+          }[] = [];
+          const phaseBChildren: { node: string; jid: string }[] = [];
+          const removedPhaseBChildren = new Set<string>();
 
           for (const sub of submits) {
             const node = sub.node;
@@ -710,14 +765,29 @@ export class FlowProducer {
             //    was submitted with no parent fields to avoid the partial-
             //    notification race; registerParent wires every dependent here
             //    and its already_completed path covers late wiring).
-            let registerStart = -1;
-            if (deps.length > 0 && myDependents.length > 0) {
-              registerStart = 0;
-            } else if (deps.length === 0 && myDependents.length > 1) {
-              registerStart = 0;
-            }
+            const shouldRegister =
+              (deps.length > 0 && myDependents.length > 0) ||
+              (deps.length === 0 &&
+                (myDependents.length > 1 ||
+                  (myDependents.length === 1 && nodeByName.get(myDependents[0])!.queueName !== node.queueName)));
 
-            if (registerStart >= 0) {
+            if (shouldRegister) {
+              if ((await client.exists([queueKeys.job(jid)])) === 0) {
+                const depsMember = `${queuePrefix}:${jid}`;
+                for (const depName of myDependents) {
+                  const parentJob = result.get(depName)!;
+                  const parentNode = nodeByName.get(depName)!;
+                  await client.sadd(buildKeys(parentNode.queueName, prefix).deps(parentJob.id), [depsMember]);
+                  missingChildEdges.push({
+                    node: node.name,
+                    jid,
+                    dep: depName,
+                    parentId: parentJob.id,
+                    parentQueue: parentNode.queueName,
+                  });
+                }
+                continue;
+              }
               const pIds = myDependents.map((d) => result.get(d)!.id);
               const pQueues = myDependents.map((d) => nodeByName.get(d)!.queueName);
               job.parentIds = pIds;
@@ -726,34 +796,35 @@ export class FlowProducer {
                 parentIds: JSON.stringify(pIds),
                 parentQueues: JSON.stringify(pQueues),
               });
-              phaseBCount++;
-              phaseBRegEdges.push({ node: '', dep: '' }); // placeholder for hset slot
+              phaseBSlots.push({ kind: 'hset', node: node.name });
+              phaseBChildren.push({ node: node.name, jid });
 
-              for (let p = registerStart; p < myDependents.length; p++) {
-                const depName = myDependents[p];
+              for (const depName of myDependents) {
                 const parentJob = result.get(depName)!;
                 const parentNode = nodeByName.get(depName)!;
                 const parentQueueKeys = buildKeys(parentNode.queueName, prefix);
                 const depsMember = `${queuePrefix}:${jid}`;
-                batchB.fcall(
-                  'glidemq_registerParent',
-                  [
-                    queueKeys.job(jid),
-                    queueKeys.parents(jid),
-                    parentQueueKeys.deps(parentJob.id),
-                    parentQueueKeys.job(parentJob.id),
-                    parentQueueKeys.stream,
-                    parentQueueKeys.events,
-                  ],
-                  [jid, parentJob.id, keyPrefix(prefix, parentNode.queueName), depsMember],
-                );
-                phaseBCount++;
-                phaseBRegEdges.push({ node: node.name, dep: depName });
+                if (parentNode.queueName === node.queueName) {
+                  sameQueueEdges.push({ node: node.name, jid, dep: depName });
+                } else {
+                  // Parent deps live on the parent queue's slot. SADD is
+                  // idempotent, so retries cannot double-count a dependency.
+                  await client.sadd(parentQueueKeys.deps(parentJob.id), [depsMember]);
+                  batchB.sadd(queueKeys.parents(jid), [`${keyPrefix(prefix, parentNode.queueName)}:${parentJob.id}`]);
+                  phaseBSlots.push({ kind: 'parents', node: node.name, dep: depName });
+                  crossQueueEdges.push({
+                    node: node.name,
+                    jid,
+                    dep: depName,
+                    parentId: parentJob.id,
+                    parentQueue: parentNode.queueName,
+                  });
+                }
               }
             }
           }
 
-          if (phaseBCount > 0) {
+          if (phaseBSlots.length > 0) {
             let rawB: unknown;
             try {
               rawB = isCluster
@@ -765,16 +836,84 @@ export class FlowProducer {
                 `DAG partially submitted: cross-level wiring batch failed: ${msg}. Graph may be in inconsistent state.`,
               );
             }
-            if (!Array.isArray(rawB) || rawB.length !== phaseBCount) {
+            if (!Array.isArray(rawB) || rawB.length !== phaseBSlots.length) {
               throw new GlideMQError('addDAG cross-level batch returned unexpected result length');
             }
-            for (let i = 0; i < phaseBCount; i++) {
-              const edge = phaseBRegEdges[i];
-              if (edge.node === '') continue; // hset slot
+            for (let i = 0; i < phaseBSlots.length; i++) {
+              const edge = phaseBSlots[i];
               const res = String(rawB[i]);
               if (res.startsWith('error:')) {
-                throw new GlideMQError(`Failed to register dependent ${edge.dep} for node ${edge.node}: ${res}`);
+                throw new GlideMQError(`Failed to wire dependent ${edge.dep ?? ''} for node ${edge.node}: ${res}`);
               }
+            }
+          }
+
+          // A child can be deleted after the Phase-A EXISTS check but before
+          // the Phase-B HSET. HSET would recreate a hash without state, and a
+          // same-queue registerParent would then incorrectly return ok. Remove
+          // that ghost and reconcile every dependent instead.
+          for (const child of phaseBChildren) {
+            const node = nodeByName.get(child.node)!;
+            const childKeys = buildKeys(node.queueName, prefix);
+            const childState = await client.hget(childKeys.job(child.jid), 'state');
+            if (childState != null) continue;
+            removedPhaseBChildren.add(child.node);
+            await client.del([childKeys.job(child.jid), childKeys.parents(child.jid)]);
+            const depsMember = `${keyPrefix(prefix, node.queueName)}:${child.jid}`;
+            for (const depName of dependents.get(child.node) ?? []) {
+              const parentJob = result.get(depName)!;
+              const parentKeys = buildKeys(nodeByName.get(depName)!.queueName, prefix);
+              await client.sadd(parentKeys.deps(parentJob.id), [depsMember]);
+              await completeChild(client, parentKeys, parentJob.id, depsMember);
+            }
+          }
+
+          for (const edge of sameQueueEdges) {
+            if (removedPhaseBChildren.has(edge.node)) continue;
+            const node = nodeByName.get(edge.node)!;
+            const parentNode = nodeByName.get(edge.dep)!;
+            const parentJob = result.get(edge.dep)!;
+            const childKeys = buildKeys(node.queueName, prefix);
+            const parentKeys = buildKeys(parentNode.queueName, prefix);
+            const depsMember = `${keyPrefix(prefix, node.queueName)}:${edge.jid}`;
+            const registration = await registerParent(
+              client,
+              childKeys,
+              edge.jid,
+              parentJob.id,
+              keyPrefix(prefix, parentNode.queueName),
+              parentKeys,
+              depsMember,
+            );
+            if (registration.startsWith('error:child_not_found')) {
+              await client.sadd(parentKeys.deps(parentJob.id), [depsMember]);
+              await completeChild(client, parentKeys, parentJob.id, depsMember);
+            } else if (registration.startsWith('error:')) {
+              throw new GlideMQError(`Failed to register dependent ${edge.dep} for node ${edge.node}: ${registration}`);
+            }
+          }
+
+          for (const edge of missingChildEdges) {
+            await completeChild(
+              client,
+              buildKeys(edge.parentQueue, prefix),
+              edge.parentId,
+              `${keyPrefix(prefix, nodeByName.get(edge.node)!.queueName)}:${edge.jid}`,
+            );
+          }
+
+          for (const edge of crossQueueEdges) {
+            if (removedPhaseBChildren.has(edge.node)) continue;
+            const node = nodeByName.get(edge.node)!;
+            const childKeys = buildKeys(node.queueName, prefix);
+            const state = await client.hget(childKeys.job(edge.jid), 'state');
+            if (state == null || String(state) === 'completed') {
+              await completeChild(
+                client,
+                buildKeys(edge.parentQueue, prefix),
+                edge.parentId,
+                `${keyPrefix(prefix, node.queueName)}:${edge.jid}`,
+              );
             }
           }
         }

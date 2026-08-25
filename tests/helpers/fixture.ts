@@ -108,6 +108,7 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
     k.schedulers,
     k.ordering,
     k.ratelimited,
+    k.xqPending,
     k.metricsCompleted,
     k.metricsFailed,
     k.lifo,

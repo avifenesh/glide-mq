@@ -3,10 +3,19 @@
 ## Current State
 
 - **In flight**: rate-limited token-bucket promotion skips bounded tombstones and advances both ordered frontiers without stranding successors.
-- **Branch**: `ci/lua-coverage`, top of the coverage stack.
+- **Audit fix**: `fix/repeat-after-stalled` atomically advances repeat-after-complete schedulers during terminal stalled recovery.
+- **Branch**: `automation/cover-open-fixes-20260825` consolidates the reviewed correctness queue.
+- **Revoke/timeout safety**: revoked active jobs cannot complete; each batch job owns its abort signal, and timeouts remain retryable.
+- **Coverage CI**: fuzzer exclusion is quoted and integration/Lua uploads use Codecov OIDC (`id-token: write`, `use_oidc: true`).
+- **Pause sweep**: `Queue.pause()` immediately expires suspended jobs whose timeouts elapsed.
 - **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
 - **CI**: green across all six fork/upstream stack PRs after the 2026-08-22 packaging update.
+- **Ordered-group recovery**: retained rate-limit slots are tracked per job and released on terminal paths; oversized token-bucket heads are cleaned iteratively through bounded sweeps.
 - **Local branches**: `refactor/extract-lua-library` -> `ci/ts-coverage` -> `ci/lua-coverage`.
+- **Coverage**: CI-included internal pause-worker regressions cover worker/broadcast pause guards, pending-read reset, and batch-refill stops. Standalone TS coverage and focused Lua coverage were verified on an isolated Valkey instance; changed executable lines are hit.
+- **Broadcast pause recovery**: a queue-pause activation race records only its parked PEL IDs. Resume uses targeted `XCLAIM`; it never rewinds `XREADGROUP` to `0`, which could redeliver live work from the same consumer's PEL.
+- **Stalled recovery**: `XAUTOCLAIM` persists a per-group cursor. Full 100-entry pages continue on a guarded zero-delay timer, yielding to I/O between pages without waiting another stalled interval.
+- **Unreleased**: `getJobs('waiting')` reads priority, LIFO, and non-pending FIFO sources; revoke/remove clean list entries. Removal and revocation route FIFO cleanup by actual list membership so list-backed jobs skip the scan while stale source fields cannot orphan stream entries. Server-function library identity is `112`.
 - **Review gate**: automatic Claude review is retired; the Revuto GitHub App check reviews pull requests.
 - **Dependency security**: the lockfile carries protobufjs 7.6.5, brace-expansion 5.0.9, PostCSS 8.5.25, and body-parser 2.3.0.
 
@@ -19,10 +28,15 @@
 - **0.15.2** (#212, #213, #216-219): priority/LIFO in batch-mode workers, `list-active` underflow guards (12 sites through one `decrListActive` helper), priority/LIFO active visibility via `glidemq_getActiveListJobIds`, lockDuration-aware stall reclaim (`stalledInterval` no longer conflated with threshold). `LIBRARY_VERSION` 84. **Behavior change**: workers that relied on short `stalledInterval` without setting `lockDuration` now see slower stall recovery; set `lockDuration` explicitly to match if needed.
 - **0.15.3** (#222-#246): DAG dependency direction/tree rendering/multi-dependent leaf fixes, `addDAG` level batching, stalled-job redispatch semantics, large-key `UNLINK` cleanup, bounded ordering skip-marker advancement, serverless credential cache scoping, flow ID-collision guards, proxy strict opts validation, long-running job heartbeats, broadcast retry isolation, queue client single-flight, and dependency CVE fixes. `LIBRARY_VERSION` 93.
 - **0.15.4**: interval scheduler anchoring prevents late worker ticks from accumulating drift, `npm test` now runs the intended non-fuzzer suite, and CI/local compose coverage use stable Valkey 9.1.0 images.
+- **Unreleased**: list-backed workers now reserve `list-active` in `glidemq_popListsReserve`; legacy `glidemq_popLists` remains non-reserving and new workers fall back to it plus typed `INCRBY` during rolling upgrades. `LIBRARY_VERSION` 98 follows stalled-cursor 94.
 
 ### In flight (fork)
 
 - **Reconnect lockDuration**: Scheduler rebuilt after reconnect keeps worker `lockDuration`. Branch `fix/reconnect-lock-duration`.
+
+### In flight (fork)
+
+- **Nested/cross-queue parents**: test-first regression `a39d87a`; implementation spans `5603dc0` through `32f1395`, followed by the Sonar cleanup in `79a573a`. The branch is independent of `upstream/main`, uses `LIBRARY_VERSION` 110, reconciles removed children including nested and DAG exists-to-HSET TOCTOU races with ghost parent-set cleanup, JSON-encodes retryable child-slot notifications, eagerly delivers completion-time cross-queue notifications without adding a steady-state RTT, deduplicates overlapping tree/DAG edges, and removes `xq-pending` during obliterate. Standalone and cluster integration CI are green.
 
 ### 0.15.4 Release Notes
 
@@ -34,9 +48,10 @@ See CHANGELOG.md `0.15.4` for the full list. Highlights:
 
 ## Open Threads
 
+- **Ordered groups**: pre-activation removal, revoke, and expiry close ordering holes; rejected token-bucket enqueue operations do not consume IDs or sequences; rate-limit requeues preserve their slot and use explicit returning-job markers; priority-list fast fetches apply token-bucket and fixed-window gates; oversized token failures close holes across activation, completion, and promotion paths. `LIBRARY_VERSION` 117.
 - **Bun/Deno NAPI compatibility testing**: still pending from 0.14.0 handover.
 - **Valkey CI images**: CI is off release candidates. Standalone and cluster coverage use stable `valkey/valkey:9.1.0`; search coverage uses stable `valkey/valkey-bundle:9.1.0`, which carries Valkey Search 1.2.x and keeps the Search 1.1+ option tests active.
-- **Coverage**: stacked fork PRs. Extract Lua (`refactor/extract-lua-library`) -> TS V8 coverage (`ci/ts-coverage`) -> Lua line probes (`ci/lua-coverage`). Codecov project status is informational; patch target 80%. Integration and lua are separate flags. `npm run build:lua-cov` instruments dist Lua and stamps dist `LIBRARY_VERSION` as `93-cov`; Vitest aliases `src/functions` to `dist/functions` so src-imported clients cannot REPLACE the probed library. CI dumps LCOV with `node scripts/dump-lua-coverage.cjs` after the suite. The build now copies both `glidemq.lua` and `glidemq.embedded.json` to `dist/functions`, and npm CD smoke-loads `dist` before publishing.
+- **Coverage**: Codecov project status is informational; patch target 80%. Integration and Lua coverage remain separate CI flags.
 
 ## API Design Decisions (locked)
 
@@ -49,3 +64,4 @@ See CHANGELOG.md `0.15.4` for the full list. Highlights:
 - streamChunk: thin wrapper over stream(), not new infrastructure.
 - Search 1.1+ options: forward-compatible types, graceful skip on older servers.
 - Plugins: AI endpoints under `/flows/:id/usage`, `/flows/:id/budget`, `/jobs/:id/stream`.
+- **In flight**: `Queue.getJobs('waiting')` follows worker dispatch order across priority, LIFO, and FIFO sources; it pages FIFO stream reads and excludes entries in the consumer-group PEL.

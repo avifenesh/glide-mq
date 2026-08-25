@@ -18,8 +18,8 @@ import {
   calculateBackoff,
   computeFollowingSchedulerNextRun,
   computeWeightedTotal,
-  keyPrefix,
   nextReconnectDelay,
+  parseCrossQueueParentNotification,
   parseJsonRecord,
   reconnectWithBackoff,
   MAX_JOB_DATA_SIZE,
@@ -44,7 +44,9 @@ import {
 } from './errors';
 import {
   completeJob,
+  isCompleteJobRevoked,
   completeAndFetchNext,
+  completeChild,
   failJob,
   addJob,
   rateLimit as rateLimitFn,
@@ -57,7 +59,6 @@ import {
   checkBudget,
   recordUsageAndCheckBudget,
 } from './functions/index';
-import type { QueueKeys } from './functions/index';
 import { Scheduler } from './scheduler';
 
 export type WorkerEvent =
@@ -126,6 +127,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected xreadStreams: Record<string, string> = Object.create(null);
   protected globalConcurrencyEnabled = false;
   protected globalRateLimitEnabled = false;
+  protected queuePaused = false;
+  protected pausedBroadcastEntries = new Set<string>();
   protected cachedRateLimitMax = 0;
   protected cachedRateLimitDuration = 0;
 
@@ -135,9 +138,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected sandboxClose?: (force?: boolean) => Promise<void>;
   protected workerHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   protected pollLoopPromise: Promise<void> | null = null;
-  protected suspendContinuations = new Map<string, (signals: SignalEntry[]) => Promise<any>>();
+  protected suspendContinuations = new Map<
+    string,
+    { job: Job<D, R>; onResume: (signals: SignalEntry[]) => Promise<any> }
+  >();
   protected readonly startedAt = Date.now();
   protected readonly hostname = os.hostname();
+
+  private static readonly REVOCATION_POLL_INTERVAL = 1000;
   protected serializer: Serializer;
   protected readonly batchMode: boolean;
   protected readonly batchSize: number;
@@ -526,6 +534,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
     // Activate jobs and build batch
     const batch: { jobId: string; entryId: string; job: Job<D, R> }[] = [];
+    const pausedListEntries: { jobId: string; entryId: string }[] = [];
+    const pausedStreamEntries: { jobId: string; entryId: string }[] = [];
     for (const entry of collected) {
       if (!this.commandClient) break;
       const moveResult = await moveToActive(
@@ -538,6 +548,15 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.consumerGroup,
         this.broadcastMode ? true : undefined,
       );
+      if (moveResult === 'PAUSED') {
+        // Defer the restores until every claim has been inspected. List jobs
+        // are popped from the right, so restoring them in reverse claim order
+        // keeps the original dispatch sequence on the next RPOP.
+        await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId, false);
+        if (entry.entryId === '') pausedListEntries.push(entry);
+        else pausedStreamEntries.push(entry);
+        continue;
+      }
       if (await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId)) continue;
       const hash = moveResult as Record<string, string>;
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, entry.jobId, hash, this.serializer);
@@ -552,6 +571,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       this.startHeartbeat(entry.jobId, job.opts.lockDuration);
       batch.push({ jobId: entry.jobId, entryId: entry.entryId, job });
+    }
+
+    for (const entry of pausedStreamEntries) {
+      await this.deferPausedActivation(entry);
+    }
+    for (let i = pausedListEntries.length - 1; i >= 0; i--) {
+      await this.deferPausedActivation(pausedListEntries[i]);
     }
 
     if (batch.length === 0) return;
@@ -592,22 +618,28 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
     }
 
-    // Rate limit check (once per batch)
-    if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
-    if (this.opts.tokenLimiter) await this.waitForTokenLimit();
-
-    // Set up abort controllers for all jobs
-    const batchAc = new AbortController();
+    // Per-job abort controllers keep a revoke local to its job.
     for (const entry of batch) {
-      this.activeAbortControllers.set(entry.jobId, batchAc);
-      entry.job.abortSignal = batchAc.signal;
+      const ac = new AbortController();
+      this.activeAbortControllers.set(entry.jobId, ac);
+      entry.job.abortSignal = ac.signal;
     }
+    const abortBatch = () => {
+      for (const entry of batch) {
+        this.activeAbortControllers.get(entry.jobId)?.abort();
+      }
+    };
 
     let results: R[] | undefined;
     let batchError: BatchError | undefined;
     let thrownError: Error | undefined;
 
     try {
+      // Rate limit check (once per batch). Controllers must already be active
+      // so revocation during this wait is visible to the batch processor.
+      if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
+      if (this.opts.tokenLimiter) await this.waitForTokenLimit();
+
       // Calculate batch timeout: max timeout across all jobs in the batch
       let maxTimeout = 0;
       for (const entry of batch) {
@@ -623,7 +655,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             this.batchProcessor(jobs),
             new Promise<never>((_, reject) => {
               timer = setTimeout(() => {
-                batchAc.abort();
+                abortBatch();
                 reject(new Error('Batch timeout exceeded'));
               }, maxTimeout);
             }),
@@ -689,9 +721,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           continue;
         }
 
-        const parentInfo = await this.buildParentInfo(entry.job, entry.jobId);
-
-        await completeJob(
+        const completeResult = await completeJob(
           this.commandClient!,
           this.queueKeys,
           entry.jobId,
@@ -700,9 +730,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           Date.now(),
           this.consumerGroup,
           entry.job.opts.removeOnComplete,
-          parentInfo,
+          undefined,
           this.broadcastMode ? true : undefined,
         );
+        if (isCompleteJobRevoked(completeResult)) {
+          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
+          continue;
+        }
+        await this.notifyCrossQueueParents(completeResult);
 
         entry.job.returnvalue = result;
         entry.job.finishedOn = Date.now();
@@ -724,7 +759,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         const result = i < batchResults.length ? batchResults[i] : new Error('No result in BatchError');
 
         if (result instanceof Error) {
-          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, result);
+          const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : result;
+          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
         } else {
           let returnvalue: string;
           try {
@@ -750,9 +786,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             continue;
           }
 
-          const parentInfo = await this.buildParentInfo(entry.job, entry.jobId);
-
-          await completeJob(
+          const completeResult = await completeJob(
             this.commandClient!,
             this.queueKeys,
             entry.jobId,
@@ -761,9 +795,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             Date.now(),
             this.consumerGroup,
             entry.job.opts.removeOnComplete,
-            parentInfo,
+            undefined,
             this.broadcastMode ? true : undefined,
           );
+          if (isCompleteJobRevoked(completeResult)) {
+            await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
+            continue;
+          }
+          await this.notifyCrossQueueParents(completeResult);
 
           entry.job.returnvalue = result as R;
           entry.job.finishedOn = Date.now();
@@ -779,11 +818,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         }
       }
     } else if (thrownError) {
-      // All jobs fail
-      const aborted = batchAc.signal.aborted;
-      const err = aborted ? new Error('revoked') : thrownError;
+      // A timeout is retryable. Revocation is terminal only when completion or
+      // an explicit state check positively identifies the revoked job.
       for (const entry of batch) {
-        await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
+        const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : thrownError;
+        await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
       }
     }
   }
@@ -798,6 +837,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     moveResult:
       | Record<string, string>
       | 'REVOKED'
+      | 'PAUSED'
       | 'EXPIRED'
       | 'GROUP_FULL'
       | 'GROUP_RATE_LIMITED'
@@ -807,6 +847,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       | null,
     jobId: string,
     entryId: string,
+    deferPausedRestore = true,
   ): Promise<boolean> {
     if (!this.commandClient) return true;
     if (moveResult === null) {
@@ -848,6 +889,15 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
       return true;
     }
+    if (moveResult === 'PAUSED') {
+      // Cache immediately so the next poll skips fetch instead of claim/defer looping.
+      this.queuePaused = true;
+      if (!deferPausedRestore) return true;
+      // Restore to the original list (priority/LIFO). Broadcast leaves the PEL
+      // claim in this subscription so other groups do not get a duplicate XADD.
+      await this.deferPausedActivation({ jobId, entryId });
+      return true;
+    }
     if (moveResult === 'EXPIRED') {
       // Already handled server-side by checkExpired in Lua.
       // For list-backed jobs (entryId=''), release the reserved list-active slot.
@@ -871,6 +921,26 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       return true;
     }
     return false;
+  }
+
+  private async deferPausedActivation(entry: { jobId: string; entryId: string }): Promise<void> {
+    if (!this.commandClient) return;
+    try {
+      await deferActive(
+        this.commandClient,
+        this.queueKeys,
+        entry.jobId,
+        entry.entryId,
+        this.consumerGroup,
+        this.broadcastMode ? true : undefined,
+        true,
+      );
+      if (this.broadcastMode && entry.entryId !== '') {
+        this.pausedBroadcastEntries.add(entry.entryId);
+      }
+    } catch (err) {
+      this.emit('error', err);
+    }
   }
 
   /**
@@ -923,7 +993,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           result = await Promise.race([
             this.processor(job),
             new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new Error('Job timeout exceeded')), timeoutMs);
+              timer = setTimeout(() => {
+                ac.abort();
+                reject(new Error('Job timeout exceeded'));
+              }, timeoutMs);
             }),
           ]);
         } finally {
@@ -1067,10 +1140,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * 1. Non-atomic: This update happens after the job completion transaction,
    *    so a worker crash between completion and this call will leave the scheduler
    *    stuck at nextRun=0 (awaiting completion sentinel) indefinitely.
-   * 2. Non-worker failures: Jobs that reach terminal failure outside the worker
-   *    path (e.g., revoked jobs, expired jobs in moveToActive, stalled terminal
-   *    failures in glidemq_reclaimStalled) never trigger this update, leaving
-   *    the scheduler permanently stuck.
+   * 2. Revoked jobs never trigger this update, leaving the scheduler permanently
+   *    stuck.
    * 3. Race conditions: The idempotency check (nextRun === 0) prevents duplicate
    *    updates from stalled reclaim, but doesn't prevent races with concurrent
    *    upsertJobScheduler/removeJobScheduler (those use scheduler lock, this doesn't).
@@ -1078,8 +1149,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * MITIGATION: Run multiple workers for redundancy. Manually remove/re-add the
    * scheduler to recover from stuck state.
    *
-   * FUTURE WORK: Move scheduler update into Lua completion/failure functions to
-   * make it atomic and handle all terminal failure paths.
+   * Stalled recovery, TTL expiry, suspend timeout, capacity rejection, and
+   * group-rate failure advance the scheduler atomically in Lua.
    */
   protected async updateSchedulerAfterComplete(schedulerName: string, now: number): Promise<void> {
     if (!this.commandClient) return;
@@ -1113,35 +1184,16 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
   }
 
-  /**
-   * Build parent dependency info for complete/completeAndFetchNext calls.
-   */
-  protected async buildParentInfo(
-    job: Job<D, R>,
-    jobId: string,
-  ): Promise<{ depsMember: string; parentId: string; parentKeys: QueueKeys } | undefined> {
-    let parentId = job.parentId;
-    let parentQueue = job.parentQueue;
-
-    // Fast path: no parent fields at all - skip the Valkey round trip
-    if (!parentId && !parentQueue) return undefined;
-
-    // One field missing: re-fetch from hash to handle partial data
-    if ((!parentId || !parentQueue) && this.commandClient) {
-      const [refreshedParentId, refreshedParentQueue] = await this.commandClient.hmget(this.queueKeys.job(jobId), [
-        'parentId',
-        'parentQueue',
-      ]);
-      parentId = refreshedParentId ? String(refreshedParentId) : parentId;
-      parentQueue = refreshedParentQueue ? String(refreshedParentQueue) : parentQueue;
+  /** Deliver notifications recorded atomically by the completion FCALL. */
+  protected async notifyCrossQueueParents(notifications: string[]): Promise<void> {
+    if (!this.commandClient) return;
+    for (const member of notifications) {
+      const notification = parseCrossQueueParentNotification(member);
+      if (!notification) continue;
+      const [parentQueue, parentId, depsMember] = notification;
+      await completeChild(this.commandClient, buildKeys(parentQueue, this.opts.prefix), parentId, depsMember);
+      await this.commandClient.srem(this.queueKeys.xqPending, [member]);
     }
-
-    if (!parentId || !parentQueue) return undefined;
-    return {
-      depsMember: `${keyPrefix(this.opts.prefix ?? 'glide', this.name)}:${jobId}`,
-      parentId,
-      parentKeys: buildKeys(parentQueue, this.opts.prefix),
-    };
   }
 
   protected orderingMetaField(job: Job<D, R>): string | null {
@@ -1273,18 +1325,23 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       let aborted: boolean;
       const hasContinuation = job.signals.length > 0 && this.suspendContinuations.has(currentJobId);
       if (hasContinuation) {
-        const onResume = this.suspendContinuations.get(currentJobId)!;
+        const continuation = this.suspendContinuations.get(currentJobId)!;
         this.suspendContinuations.delete(currentJobId);
+        const ac = new AbortController();
+        this.activeAbortControllers.set(currentJobId, ac);
+        job.abortSignal = ac.signal;
+        continuation.job.abortSignal = ac.signal;
         this.startHeartbeat(currentJobId, job.opts.lockDuration);
         try {
-          processResult = await onResume(job.signals);
+          processResult = await continuation.onResume(job.signals);
           processError = undefined;
         } catch (err) {
           processError = err instanceof Error ? err : new Error(String(err));
         } finally {
           this.stopHeartbeat(currentJobId);
+          this.activeAbortControllers.delete(currentJobId);
         }
-        aborted = false;
+        aborted = ac.signal.aborted;
       } else {
         this.suspendContinuations.delete(currentJobId);
         ({ result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId));
@@ -1361,7 +1418,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         if (!this.commandClient) return;
         try {
           if (suspendReq?.onResume) {
-            this.suspendContinuations.set(currentJobId, suspendReq.onResume);
+            this.suspendContinuations.set(currentJobId, { job, onResume: suspendReq.onResume });
           }
           const suspResult = await suspendJob(
             this.commandClient,
@@ -1385,7 +1442,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
 
       if (processError || aborted) {
-        await this.handleJobFailure(job, currentJobId, currentEntryId, aborted ? new Error('revoked') : processError!);
+        const confirmedRevoked = aborted && (await this.isJobRevoked(currentJobId));
+        await this.handleJobFailure(
+          job,
+          currentJobId,
+          currentEntryId,
+          confirmedRevoked ? new UnrecoverableError('revoked') : (processError ?? new Error('Job aborted')),
+        );
         return;
       }
 
@@ -1419,9 +1482,6 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           return;
         }
       }
-      // Fast path: skip async buildParentInfo when no parent fields present
-      const parentInfo = job.parentId || job.parentQueue ? await this.buildParentInfo(job, currentJobId) : undefined;
-
       const now = Date.now();
       const fetchResult = await completeAndFetchNext(
         this.commandClient,
@@ -1433,7 +1493,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.consumerGroup,
         this.consumerId,
         job.opts.removeOnComplete,
-        parentInfo,
+        undefined,
         completionHints,
         this.broadcastMode ? true : undefined,
         job.processedOn,
@@ -1442,6 +1502,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.skipMetrics,
       );
 
+      if (fetchResult.next === 'CURRENT_REVOKED') {
+        await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
+        return;
+      }
+      await this.notifyCrossQueueParents(fetchResult.parentNotifications);
       job.returnvalue = processResult;
       job.finishedOn = now;
       if (this.hasCompletedListeners) this.emit('completed', job, processResult);
@@ -1546,16 +1611,31 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     return false;
   }
 
+  protected async isJobRevoked(jobId: string): Promise<boolean> {
+    if (!this.commandClient) return false;
+    try {
+      return String(await this.commandClient.hget(this.queueKeys.job(jobId), 'revoked')) === '1';
+    } catch {
+      return false;
+    }
+  }
+
   protected startHeartbeat(jobId: string, jobLockDuration?: number): void {
     if (!this.commandClient) return;
     // Use per-job lockDuration when specified, otherwise fall back to worker-level.
     const effectiveLock = jobLockDuration ?? this.lockDuration;
-    const interval = effectiveLock / 2;
+    const interval = Math.min(effectiveLock / 2, BaseWorker.REVOCATION_POLL_INTERVAL);
     if (interval <= 0) return;
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
     const timer = setInterval(() => {
-      client.hset(jobKey, { lastActive: Date.now().toString() }).catch(() => {});
+      client
+        .hset(jobKey, { lastActive: Date.now().toString() })
+        .then(async () => {
+          const revoked = await client.hget(jobKey, 'revoked');
+          if (String(revoked) === '1') this.abortJob(jobId);
+        })
+        .catch(() => {});
     }, interval);
     this.heartbeatIntervals.set(jobId, timer);
   }
@@ -1715,7 +1795,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   }
 
   /** Refresh cached meta flags from Valkey. Called on init and each scheduler tick. */
-  private async refreshMetaFlags(): Promise<void> {
+  protected async refreshMetaFlags(): Promise<void> {
     if (!this.commandClient) return;
     try {
       // Read only the 3 specific fields we need - avoids O(N) on orderdone:* fields
@@ -1723,17 +1803,32 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         'globalConcurrency',
         'rateLimitMax',
         'rateLimitDuration',
+        'paused',
       ]);
       const gcVal = vals?.[0] != null ? String(vals[0]) : null;
       const rlMax = vals?.[1] != null ? String(vals[1]) : null;
       const rlDur = vals?.[2] != null ? String(vals[2]) : null;
+      const pausedVal = vals?.[3] != null ? String(vals[3]) : null;
       this.globalConcurrencyEnabled = gcVal != null && Number(gcVal) > 0;
       this.globalRateLimitEnabled = rlMax != null && Number(rlMax) > 0;
       this.cachedRateLimitMax = Number(rlMax) || 0;
       this.cachedRateLimitDuration = Number(rlDur) || 0;
+      this.queuePaused = pausedVal === '1';
     } catch {
       // Transient error - next tick will retry
     }
+  }
+
+  /**
+   * If the queue is paused, refresh meta and wait briefly.
+   * Returns true when the caller should skip this poll iteration.
+   */
+  protected async waitIfQueuePaused(): Promise<boolean> {
+    if (!this.queuePaused) return false;
+    await this.refreshMetaFlags();
+    if (!this.queuePaused) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    return true;
   }
 
   /**

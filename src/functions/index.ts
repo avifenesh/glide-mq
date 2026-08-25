@@ -1,3 +1,4 @@
+import { RequestError } from '@glidemq/speedkey';
 import type { GlideReturnType } from '@glidemq/speedkey';
 import type { Client } from '../types';
 import { librarySourceFrom, loadLibraryFile } from './load-library-source';
@@ -54,10 +55,40 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 91: Stalled-recovery redispatches under-threshold jobs back to the stream / lifo / priority list so a healthy worker can pick them up; jobs only fail once stalledCount > maxStalledCount. Aligns with the at-least-once redelivery promise in DURABILITY.md and matches BullMQ semantics (#242).
 // Version 92: Replace DEL with UNLINK on every multi-key / large-collection delete (job hashes, retention purge, glidemq_clean batches, glidemq_drain stream/zset/lifo/priority sweeps). UNLINK keeps in-script atomicity - the keyspace removal is still synchronous from the script's view - but defers memory reclamation to the bio thread, so obliterate / retention / drain stop blocking the server thread on MB-sized job hashes. Small-key DELs (lockKey) kept as DEL (#243).
 // Version 93: glidemq_completeAndFetchNext always SMEMBERS the child parents SET. The previous hasParents gate sourced its truth from the worker's snapshot of the job hash, which is stale when DAG wiring (hset parentIds + registerParent) lands between the worker's job fetch and the completion FCALL. The SMEMBERS cost on an empty set is negligible; the dropped optimization was unsound (#246).
+// Version 94: glidemq_reclaimStalled persists a per-group XAUTOCLAIM cursor and bounds each reclaim batch to 100 entries so repeated scheduler ticks progress through large PELs.
+// Version 96: Honor queue pause in activation paths (moveToActive, completeAndFetchNext next-fetch, popLists, rpopAndReserve) so Queue.pause() stops workers from claiming new jobs. Pause-race defer restores list jobs in their original dispatch order, and broadcast claims stay in the subscription PEL (no XADD duplicate).
+// Version 97: Preserve batch pause-race list claim order and skip stalled reclaim while the queue is paused so parked PEL/list claims survive until resume.
+// Version 97: completion and per-job batch failures refuse jobs revoked while their processor was running.
+// Version 98: glidemq_popListsReserve reserves list-active in the same FCALL as the list pop, closing the worker crash window between pop and INCRBY; legacy glidemq_popLists remains non-reserving for rolling compatibility.
 // Version 102: rate-limited token-bucket promotion skips bounded tombstones and re-registers the group when more cleanup remains.
 // Version 103: ordered rate-limited promotion advances nextSeq past missing head tombstones.
 // Version 104: ordered tombstone cleanup also advances the worker orderdone frontier.
-export const LIBRARY_VERSION = '104';
+// Version 105: Terminal stalled recovery atomically advances repeatAfterComplete schedulers without lossy scheduler JSON reserialization.
+// Version 106: Terminal TTL expiry atomically advances repeatAfterComplete schedulers through the shared expireJob path.
+// Version 107: Terminal suspend timeout, capacity rejection, and group-rate failure atomically advance repeatAfterComplete schedulers.
+// Version 99: closeOrderingHole wakes parked groupq successors after debounce/remove/TTL of an unrun seq; rateLimitGroup keeps the ordered slot on requeue; CAF priority path applies token-bucket and rate-limit gates.
+// Version 100: rateLimitGroup fail pauses before promote; promoteRateLimited finds returning ordered jobs requeued at the back; CAF oversized priority jobs close the ordering hole and count as failed.
+// Version 107: ordered rate-limit returns use an explicit marker so retained-slot jobs are promoted beyond bounded scans; oversized token failures advance ordering state.
+// Version 108: revoke/remove delete list-backed waiting entries so getJobs pagination cannot expose or count stale jobs.
+// Version 110: derive list keys in remove/revoke and remove waiting FIFO stream entries.
+// Version 111: skip the FIFO stream scan when removing list-backed waiting jobs.
+// Version 112: route remove/revoke FIFO cleanup by actual waiting-list membership.
+// Version 112: ordered terminal paths resolve group-key ordering metadata before waking successors.
+// Version 113: ordered rate-limit returns track every retained slot; terminal paths release retained slots; oversized-head cleanup is iterative and bounded.
+// Version 114: ordered retry, delay, suspend, and waiting-children transitions mark their retained group slot.
+// Version 115: token-bucket gate each ordered rate-limit returner before it resumes.
+// Version 116: retained ordered-return slots use a namespace that cannot alias user group hashes.
+// Version 117: migrate retained-return slots from the v115 namespace before consuming them.
+// Version 101: complete/CAF enqueue cross-queue parent notifies on a same-slot pending set so a later scheduler tick can retry if the worker dies between complete and completeChild.
+// Version 102: completeChild ignores stale notifications for deleted parent hashes.
+// Version 104: encode cross-queue notifications as JSON and reconcile deleted children without recreating hashes.
+// Version 107: extract the final queue hash tag for cross-queue DAG notifications so custom prefixes may contain braces.
+// Version 108: all parent dependency completion paths ignore deleted parent hashes.
+// Version 109: completion replies carry cross-queue parent notifications for eager delivery.
+// Version 110: dedupe overlapping tree and DAG parent notifications per completion.
+// Version 119: integrate the reviewed correctness queue and preserve Queue.pause in the reservation-aware list pop.
+// Version 120: removeJob acknowledges a claimed FIFO entry in every stream consumer group before deleting it.
+export const LIBRARY_VERSION = '120';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -298,6 +329,22 @@ export async function renewLock(client: Client, lockKey: string, token: string, 
  */
 const RETENTION_NONE = { mode: '0', count: 0, age: 0 } as const;
 const RETENTION_TRUE = { mode: 'true', count: 0, age: 0 } as const;
+const PARENT_NOTIFICATIONS_MARKER = '__glidemq_parent_notifications__';
+const COMPLETE_REVOKED_MARKER = '__glidemq_complete_revoked__';
+
+function parseParentNotifications(raw: unknown): string[] {
+  if (typeof raw !== 'string' || raw === '') return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.every((member) => typeof member === 'string') ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function isCompleteJobRevoked(result: string[]): boolean {
+  return result.length === 1 && result[0] === COMPLETE_REVOKED_MARKER;
+}
 
 function encodeRetention(opt?: boolean | number | { age: number; count: number }): {
   mode: string;
@@ -333,7 +380,7 @@ export async function completeJob(
   removeOnComplete?: boolean | number | { age: number; count: number },
   parentInfo?: { depsMember: string; parentId: string; parentKeys: QueueKeys },
   broadcastMode?: boolean,
-): Promise<GlideReturnType> {
+): Promise<string[]> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
   const keys: string[] = [k.stream, k.completed, k.events, k.job(jobId), k.metricsCompleted];
@@ -358,7 +405,8 @@ export async function completeJob(
 
   if (broadcastMode) args.push('1');
 
-  return client.fcall('glidemq_complete', keys, args);
+  const raw = await client.fcall('glidemq_complete', keys, args);
+  return String(raw) === 'REVOKED' ? [COMPLETE_REVOKED_MARKER] : parseParentNotifications(raw);
 }
 
 /**
@@ -372,9 +420,11 @@ export async function completeJob(
  */
 export interface CompleteAndFetchResult {
   completed: string;
-  next: false | 'REVOKED' | Record<string, string>;
+  next: false | 'REVOKED' | 'CURRENT_REVOKED' | Record<string, string>;
   nextJobId?: string;
   nextEntryId?: string;
+  /** Retryable cross-queue parent notifications recorded by the completion FCALL. */
+  parentNotifications: string[];
 }
 
 export interface CompleteAndFetchHints {
@@ -442,9 +492,19 @@ export async function completeAndFetchNext(
 
   // Fast path: array protocol from Lua function
   if (Array.isArray(raw)) {
+    const notificationOffset =
+      raw.length >= 2 && String(raw.at(-2)) === PARENT_NOTIFICATIONS_MARKER ? raw.length - 2 : raw.length;
+    const parentNotifications = notificationOffset < raw.length ? parseParentNotifications(raw.at(-1)) : [];
     const tag = String(raw[0]);
     if (tag === 'NEXT_NONE') {
-      return { completed: raw[1] != null ? String(raw[1]) : jobId, next: false };
+      return { completed: raw[1] != null ? String(raw[1]) : jobId, next: false, parentNotifications };
+    }
+    if (tag === 'CURRENT_REVOKED') {
+      return {
+        completed: raw[1] != null ? String(raw[1]) : jobId,
+        next: 'CURRENT_REVOKED',
+        parentNotifications: [],
+      };
     }
     if (tag === 'NEXT_REVOKED') {
       return {
@@ -452,11 +512,12 @@ export async function completeAndFetchNext(
         next: 'REVOKED',
         nextJobId: String(raw[2]),
         nextEntryId: String(raw[3]),
+        parentNotifications,
       };
     }
     if (tag === 'NEXT_HASH') {
       const hash: Record<string, string> = Object.create(null);
-      for (let i = 4; i + 1 < raw.length; i += 2) {
+      for (let i = 4; i + 1 < notificationOffset; i += 2) {
         hash[String(raw[i])] = String(raw[i + 1]);
       }
       return {
@@ -464,6 +525,7 @@ export async function completeAndFetchNext(
         next: hash,
         nextJobId: String(raw[2]),
         nextEntryId: String(raw[3]),
+        parentNotifications,
       };
     }
     throw new Error(`Unexpected glidemq_completeAndFetchNext tag: ${tag}`);
@@ -472,7 +534,7 @@ export async function completeAndFetchNext(
   // Backward compatibility: JSON protocol (older library versions)
   const parsed = JSON.parse(String(raw));
   if (!parsed.next || parsed.next === false) {
-    return { completed: parsed.completed, next: false };
+    return { completed: parsed.completed, next: false, parentNotifications: [] };
   }
   if (parsed.next === 'REVOKED') {
     return {
@@ -480,6 +542,7 @@ export async function completeAndFetchNext(
       next: 'REVOKED',
       nextJobId: parsed.nextJobId,
       nextEntryId: parsed.nextEntryId,
+      parentNotifications: [],
     };
   }
   const parsedHash = parsed.next as string[];
@@ -492,6 +555,7 @@ export async function completeAndFetchNext(
     next: hash,
     nextJobId: parsed.nextJobId,
     nextEntryId: parsed.nextEntryId,
+    parentNotifications: [],
   };
 }
 
@@ -652,11 +716,21 @@ export async function rpopAndReserve(
 }
 
 /**
- * Pop from priority and LIFO lists in a single FCALL (1 RTT instead of 2).
+ * Pop from priority and LIFO lists, reserving list-active atomically when the
+ * reservation-aware function is available. During rolling upgrades, fall back
+ * to the legacy pop and typed counter increment if that function is missing.
  * Returns job IDs popped, or empty array if both lists are empty.
  */
 export async function popLists(client: Client, k: QueueKeys, count: number): Promise<string[]> {
-  const result = await client.fcall('glidemq_popLists', [k.priority, k.lifo], [count.toString()]);
+  const safeCount = Math.max(1, Math.min(Math.floor(count) || 1, 1000));
+  let result: GlideReturnType;
+  try {
+    result = await client.fcall('glidemq_popListsReserve', [k.priority, k.lifo, k.listActive], [safeCount.toString()]);
+  } catch (error) {
+    if (!(error instanceof RequestError) || !/function\s+not\s+found/i.test(error.message)) throw error;
+    result = await client.fcall('glidemq_popLists', [k.priority, k.lifo, k.listActive], [safeCount.toString()]);
+    if (Array.isArray(result) && result.length > 0) await client.incrBy(k.listActive, result.length);
+  }
   if (!Array.isArray(result) || result.length === 0) return [];
   return result.map((v) => String(v));
 }
@@ -670,6 +744,7 @@ export async function popLists(client: Client, k: QueueKeys, count: number): Pro
  * Returns:
  * - null if job hash doesn't exist
  * - 'REVOKED' if the job's revoked flag is set
+ * - 'PAUSED' if the queue is paused (job was not activated)
  * - 'GROUP_FULL' if the job's group is at max concurrency (job was parked)
  * - 'GROUP_RATE_LIMITED' if the job's group exceeded its rate limit (job was parked)
  * - 'GROUP_TOKEN_LIMITED' if the job's group has insufficient tokens (job was parked)
@@ -688,6 +763,7 @@ export async function moveToActive(
 ): Promise<
   | Record<string, string>
   | 'REVOKED'
+  | 'PAUSED'
   | 'EXPIRED'
   | 'GROUP_FULL'
   | 'GROUP_RATE_LIMITED'
@@ -717,6 +793,7 @@ export async function moveToActive(
   const str = String(result);
   if (str === '' || str === 'null') return null;
   if (str === 'REVOKED') return 'REVOKED';
+  if (str === 'PAUSED') return 'PAUSED';
   if (str === 'EXPIRED') return 'EXPIRED';
   if (str === 'GROUP_FULL') return 'GROUP_FULL';
   if (str === 'GROUP_RATE_LIMITED') return 'GROUP_RATE_LIMITED';
@@ -802,7 +879,8 @@ export async function rateLimitGroupExternal(
 
 /**
  * Defers an active job back to waiting by acknowledging + deleting the current
- * stream entry and re-enqueuing the same jobId to the stream tail.
+ * stream entry and re-enqueuing the same jobId. Pause-race list jobs are restored
+ * to their original priority/LIFO list, and broadcast claims remain in the PEL.
  * If the job hash no longer exists, it only removes the stream entry.
  */
 export async function deferActive(
@@ -812,9 +890,11 @@ export async function deferActive(
   entryId: string,
   group: string = CONSUMER_GROUP,
   broadcastMode?: boolean,
+  pausedRestore?: boolean,
 ): Promise<void> {
   const args = [jobId, entryId, group];
-  if (broadcastMode) args.push('1');
+  args.push(broadcastMode ? '1' : '0');
+  if (pausedRestore) args.push('1');
   await client.fcall('glidemq_deferActive', [k.stream, k.job(jobId), k.listActive], args);
 }
 

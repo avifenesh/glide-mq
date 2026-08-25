@@ -11,6 +11,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **Reconnect rebuilt Scheduler without lockDuration**: after a connection error, stall reclaim fell back to 30s while heartbeats still used the worker lock, so healthy long jobs were redispatched.
+- **Atomic list reservation**: priority/LIFO workers now increment `list-active` in `glidemq_popListsReserve`, while legacy `glidemq_popLists` remains non-reserving for rolling compatibility. New workers fall back to the legacy pop plus typed `INCRBY` when the reservation function is unavailable.
+- **`Queue.pause()` did not stop workers**: pause only wrote `meta.paused=1`. Activation paths (`moveToActive`, `completeAndFetchNext`, `popLists`, `rpopAndReserve`) never read it, so workers kept claiming jobs. Pause-race claims restore LIFO/priority lists in their original dispatch order; batch restores preserve claim order; broadcast claims stay in the subscription PEL, and stalled reclaim skips paused queues.
+- **Revoked active jobs could complete**: the Lua source library now rejects completion after a revoke, workers abort the affected processor, and batch workers keep each job's abort signal isolated. Batch processor failures for revoked jobs are terminal, while batch timeouts still retry according to job attempts.
+- **Stalled recovery cursor**: `glidemq_reclaimStalled` now persists a per-consumer-group `XAUTOCLAIM` cursor in queue metadata and bounds each reclaim batch. Schedulers follow full pages with a guarded yielding continuation instead of waiting another stalled interval.
+- `getJobs('waiting')` now follows worker dispatch order across priority, LIFO, and FIFO sources, excludes pending stream entries, and does not expose revoked or removed list jobs.
+- Job removal and revocation scan the FIFO stream only when the waiting job was absent from both list-backed sources, avoiding unnecessary O(stream-length) work without orphaning stream entries whose legacy source fields are stale.
+- **Queue pause now expires suspended jobs**: `Queue.pause()` immediately sweeps suspended jobs whose timeouts have elapsed, so pausing does not leave expired human-in-the-loop jobs pending until the background sweep.
+- **Nested and DAG cross-queue parents could remain in `waiting-children`**: parent wiring now avoids cross-slot FCALLs, preserves nested parent hash fields, retries idempotent notifications from the child slot, reconciles removed children without recreating hashes, and ignores stale notifications for deleted parents. Completion returns newly queued cross-queue edges for eager delivery while deduplicating overlapping tree and DAG metadata.
 
 ---
 
@@ -19,8 +27,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **Rate-limited group tombstones**: promotion now skips deleted token-bucket waitlist entries, advances both ordering frontiers, and continues to the next valid job. Cleanup is bounded and re-registers the group when more entries remain.
+- **Stalled repeat-after-complete jobs**: terminal stalled recovery now advances the linked scheduler atomically instead of leaving it stuck at `nextRun=0`.
+- **Ordered-group holes after pre-activation removal**: debounce replacement, explicit removal, and TTL expiry now mark never-run ordered jobs as skipped and wake parked successors. Group rate-limit requeues retain their ordered slot, and priority-list fast fetches apply the same token-bucket and rate gates as stream fetches.
+- **`rateLimitGroup({ currentJob: 'fail' })` promoted successors before the pause**: the fail path decremented `active` and promoted the next sequence before recording `ratelimited`. Promotion now waits for `promoteRateLimited`; returning jobs requeued at the back are found past the waitlist head, and oversized priority jobs close their ordering hole and count toward failed metrics.
+- **Rejected token-bucket jobs consumed IDs and ordering sequences**: add, dedup replacement, and flow creation now validate cost before mutating queue state. Revoking an ordered job before activation also closes its sequence hole so successors can run.
 - **Interval scheduler drift accumulation**: `every` schedulers now advance from the previous due slot instead of the late worker tick timestamp, so CI/event-loop jitter does not accumulate drift over repeated firings. Missed slots are skipped rather than replayed.
 - **Release test command**: `npm test` now passes the fuzzer exclusion as a single Vitest argument, so the release gate runs the intended non-fuzzer suite.
+- **Ordered-group rate-limit recovery**: every retained-slot job is tracked independently, so concurrent requeues resume before successors. Terminal paths release retained slots, and oversized token-bucket head cleanup is iterative and bounded.
 
 ### Changed
 

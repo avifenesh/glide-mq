@@ -1,6 +1,14 @@
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
-import { InfBoundary, Batch, ClusterBatch, ClusterScanCursor, GlideFt, SortOrder } from '@glidemq/speedkey';
+import {
+  InfBoundary,
+  Batch,
+  ClusterBatch,
+  ClusterScanCursor,
+  GlideFt,
+  RequestError,
+  SortOrder,
+} from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient, Field, FtCreateOptions } from '@glidemq/speedkey';
 import type {
   QueueOptions,
@@ -95,6 +103,7 @@ const SCHEDULER_LOCK_MAX_ATTEMPTS = Math.ceil(SCHEDULER_LOCK_TTL_MS / SCHEDULER_
 const SUSPEND_SWEEP_INTERVAL_MS = 1000;
 const SUSPEND_SWEEP_IDLE_POLL_MS = 5000;
 const SUSPEND_SWEEP_LOCK_TTL_MS = 5000;
+const SUSPEND_SWEEP_BATCH_SIZE = 100;
 const SUSPEND_NO_TIMEOUT_SCORE = 9_999_999_999_999;
 const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
 const MAX_USAGE_SUMMARY_KEY_READS = 100_000;
@@ -371,6 +380,81 @@ export class Queue<D = any, R = any> extends EventEmitter {
     return jobIds;
   }
 
+  /** @internal Read list-backed waiting jobs in the same order workers RPOP them. */
+  private async getWaitingListJobIds(client: Client, key: string, limit: number): Promise<string[]> {
+    if (limit === 0) return [];
+    const ids = await client.lrange(key, limit < 0 ? 0 : -limit, -1);
+    return ids.map(String).reverse();
+  }
+
+  /** @internal Read every pending entry ID in an inclusive stream range. */
+  private async getPendingEntryIds(client: Client, firstEntryId: string, lastEntryId: string): Promise<Set<string>> {
+    const pendingEntryIds = new Set<string>();
+    try {
+      let pendingStart: { value: string; isInclusive?: boolean } = { value: firstEntryId };
+      while (true) {
+        const pendingEntries = await client.xpendingWithOptions(this.keys.stream, CONSUMER_GROUP, {
+          start: pendingStart,
+          end: { value: lastEntryId },
+          count: PIPELINE_CHUNK_SIZE,
+        });
+        for (const [entryId] of pendingEntries) pendingEntryIds.add(String(entryId));
+        if (pendingEntries.length < PIPELINE_CHUNK_SIZE) return pendingEntryIds;
+        pendingStart = { value: String(pendingEntries.at(-1)![0]), isInclusive: false };
+      }
+    } catch (err) {
+      // The stream can legitimately have no consumer group before any worker starts.
+      if (err instanceof RequestError && err.message.startsWith('NOGROUP')) return pendingEntryIds;
+      throw err;
+    }
+  }
+
+  /** @internal Read FIFO waiting jobs while excluding entries in the consumer-group PEL. */
+  private async getWaitingStreamJobIds(client: Client, limit: number): Promise<string[]> {
+    if (limit === 0) return [];
+
+    const jobIds: string[] = [];
+    let streamStart: typeof InfBoundary.NegativeInfinity | { value: string; isInclusive: false } =
+      InfBoundary.NegativeInfinity;
+
+    while (limit < 0 || jobIds.length < limit) {
+      // Read a full chunk even for limited pages so a run of PEL entries does
+      // not turn into one XRANGE/XPENDING round trip per in-flight job.
+      const count = PIPELINE_CHUNK_SIZE;
+      const entries = await client.xrange(this.keys.stream, streamStart, InfBoundary.PositiveInfinity, { count });
+      if (!entries) break;
+
+      const entryIds = Object.keys(entries);
+      if (entryIds.length === 0) break;
+
+      const firstEntryId = entryIds[0]!;
+      const lastEntryId = entryIds.at(-1)!;
+      const pendingEntryIds = await this.getPendingEntryIds(client, firstEntryId, lastEntryId);
+
+      const waitingEntries: Record<string, [unknown, unknown][]> = {};
+      for (const entryId of entryIds) {
+        if (!pendingEntryIds.has(entryId)) waitingEntries[entryId] = entries[entryId]!;
+      }
+      const waitingIds = extractJobIdsFromStreamEntries(waitingEntries);
+      jobIds.push(...(limit < 0 ? waitingIds : waitingIds.slice(0, limit - jobIds.length)));
+
+      if (entryIds.length < count) break;
+      streamStart = { value: lastEntryId, isInclusive: false };
+    }
+
+    return jobIds;
+  }
+
+  /** @internal Read waiting jobs in worker dispatch order across all backing structures. */
+  private async getWaitingJobIds(client: Client, limit: number): Promise<string[]> {
+    const priorityJobIds = await this.getWaitingListJobIds(client, this.keys.priority, limit);
+    const lifoLimit = limit < 0 ? -1 : Math.max(0, limit - priorityJobIds.length);
+    const lifoJobIds = await this.getWaitingListJobIds(client, this.keys.lifo, lifoLimit);
+    const fifoLimit = limit < 0 ? -1 : Math.max(0, lifoLimit - lifoJobIds.length);
+    const fifoJobIds = await this.getWaitingStreamJobIds(client, fifoLimit);
+    return priorityJobIds.concat(lifoJobIds, fifoJobIds);
+  }
+
   private suspendSweepLockKey(): string {
     return `${this.keys.suspended}:lock:__sweep__`;
   }
@@ -505,15 +589,27 @@ export class Queue<D = any, R = any> extends EventEmitter {
     );
   }
 
-  private async sweepExpiredSuspended(client: Client): Promise<boolean> {
+  private async sweepExpiredSuspended(client: Client, timestamp = Date.now()): Promise<boolean> {
     const lockKey = this.suspendSweepLockKey();
     const token = randomBytes(8).toString('hex');
     const acquired = await tryLock(client, lockKey, token, SUSPEND_SWEEP_LOCK_TTL_MS);
     if (!acquired) return false;
 
     try {
+      // glidemq_sweepSuspended processes at most 100 members per invocation.
+      // Bound the repeated calls to the number of jobs that were expired at
+      // this sweep's timestamp. Jobs suspended while the sweep runs have a
+      // later deadline and are intentionally left for a future sweep.
+      const expiredCount = await client.zcount(
+        this.keys.suspended,
+        { value: 0, isInclusive: true },
+        { value: timestamp, isInclusive: true },
+      );
+      const batches = Math.ceil(expiredCount / SUSPEND_SWEEP_BATCH_SIZE);
       const keyPrefix = this.keys.id.slice(0, -2);
-      await sweepSuspended(client, this.keys, Date.now(), keyPrefix);
+      for (let i = 0; i < batches; i++) {
+        await sweepSuspended(client, this.keys, timestamp, keyPrefix);
+      }
       return true;
     } finally {
       try {
@@ -1286,7 +1382,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
    */
   async pause(): Promise<void> {
     const client = await this.getClient();
+    const timestamp = Date.now();
     await pause(client, this.keys);
+    await this.sweepExpiredSuspended(client, timestamp);
   }
 
   /**
@@ -1690,6 +1788,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       this.keys.schedulers,
       this.keys.ordering,
       this.keys.ratelimited,
+      this.keys.xqPending,
       this.keys.metricsCompleted,
       this.keys.metricsFailed,
       this.keys.lifo,
@@ -1782,18 +1881,10 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     switch (type) {
       case 'waiting': {
-        // Note: stream pagination reads from start to end+1, then slices.
-        // For large offsets this is O(end) rather than O(end-start).
-        // Consider cursor-based pagination for better performance at scale.
-        const entries = await client.xrange(
-          this.keys.stream,
-          InfBoundary.NegativeInfinity,
-          InfBoundary.PositiveInfinity,
-          end >= 0 ? { count: end + 1 } : undefined,
-        );
-        if (!entries) return [];
-        const allIds = extractJobIdsFromStreamEntries(entries);
-        jobIds = allIds.slice(start, end >= 0 ? end + 1 : undefined);
+        // Workers dispatch priority, then LIFO, then FIFO jobs. Read each source
+        // only through the requested inclusive end index before applying start.
+        const limit = end >= 0 ? end + 1 : -1;
+        jobIds = (await this.getWaitingJobIds(client, limit)).slice(start, end >= 0 ? end + 1 : undefined);
         break;
       }
       case 'active': {
@@ -1862,21 +1953,22 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const client = await this.getClient();
     const limit = opts.limit ?? 100;
     const pfx = keyPrefix(this.opts.prefix ?? 'glide', this.name);
+    const hasDataFilter = opts.data && Object.keys(opts.data).length > 0;
+    const filterWaitingInJs = opts.state === 'waiting' && (Boolean(opts.name) || hasDataFilter);
 
     let jobIds: string[];
 
-    if (opts.state && opts.name) {
+    if (opts.state && opts.name && opts.state !== 'waiting') {
       // Use Lua function for name-based filtering within a state
       jobIds = await this.searchByNameInState(client, opts.state, opts.name, limit, pfx);
     } else if (opts.state) {
       // Get all IDs from the state, will filter by data below
-      jobIds = await this.getJobIdsForState(client, opts.state, limit);
+      jobIds = await this.getJobIdsForState(client, opts.state, filterWaitingInJs ? -1 : limit);
     } else {
       // No state: SCAN all job hashes
       jobIds = await this.scanJobIds(client, pfx, opts.name, limit);
     }
 
-    const hasDataFilter = opts.data && Object.keys(opts.data).length > 0;
     const excludeData = opts.excludeData === true && !hasDataFilter;
     const jobs: Job<D, R>[] = [];
     const CHUNK = 100;
@@ -1900,7 +1992,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const job = Job.fromHash<D, R>(client, this.keys, chunk[i], hash, this.serializer, excludeData);
 
         // Apply name filter if we used a non-Lua path
-        if (opts.name && !opts.state && job.name !== opts.name) continue;
+        if (opts.name && (!opts.state || opts.state === 'waiting') && job.name !== opts.name) continue;
 
         // Apply data filter (shallow key-value match)
         if (opts.data && !matchesData(job.data as Record<string, unknown>, opts.data)) continue;
@@ -1938,14 +2030,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   ): Promise<string[]> {
     switch (state) {
       case 'waiting': {
-        const entries = await client.xrange(
-          this.keys.stream,
-          InfBoundary.NegativeInfinity,
-          InfBoundary.PositiveInfinity,
-          { count: limit },
-        );
-        if (!entries) return [];
-        return extractJobIdsFromStreamEntries(entries);
+        return this.getWaitingJobIds(client, limit);
       }
       case 'active': {
         try {
@@ -1972,7 +2057,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   /** @internal Use Lua searchByName within a specific state. */
   private async searchByNameInState(
     client: Client,
-    state: 'waiting' | 'active' | 'delayed' | 'completed' | 'failed',
+    state: 'active' | 'delayed' | 'completed' | 'failed',
     name: string,
     limit: number,
     pfx: string,
@@ -1988,10 +2073,6 @@ export class Queue<D = any, R = any> extends EventEmitter {
         if (String(names?.[i]) === name) matched.push(allIds[i]);
       }
       return matched;
-    }
-
-    if (state === 'waiting') {
-      return searchByName(client, this.keys.stream, 'stream', name, limit, pfx + ':');
     }
 
     return searchByName(client, this.zsetKeyForState(state), 'zset', name, limit, pfx + ':');

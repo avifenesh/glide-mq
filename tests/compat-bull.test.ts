@@ -457,6 +457,7 @@ describeEachMode('Bull compat: Stalled job recovery', (CONNECTION) => {
 
     // Wait for the reclaim cycle to redispatch the job and worker2 to process it.
     await waitFor(() => recovered, 15000);
+    await waitFor(async () => String(await cleanupClient.hget(k.job(job!.id), 'state')) === 'completed', 15000);
     await worker2.close(true);
 
     // Verify the job was re-enqueued by stalled recovery and ran to completion.

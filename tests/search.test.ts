@@ -7,6 +7,8 @@ import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './he
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
+const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+const { CONSUMER_GROUP, promote } = require('../dist/functions/index') as typeof import('../src/functions/index');
 
 describeEachMode('Queue.searchJobs', (CONNECTION) => {
   let cleanupClient: any;
@@ -55,6 +57,29 @@ describeEachMode('Queue.searchJobs', (CONNECTION) => {
     for (const job of results) {
       expect((job.data as any).userId).toBe('123');
     }
+
+    await q.close();
+    await flushQueue(cleanupClient, qName);
+  });
+
+  it('searches every waiting source and excludes FIFO jobs in the PEL', async () => {
+    const qName = Q + '-waiting-sources';
+    const q = new Queue(qName, { connection: CONNECTION });
+    const keys = buildKeys(qName);
+
+    const active = await q.add('target', { group: 'match', source: 'active' });
+    const fifo = await q.add('target', { group: 'match', source: 'fifo' });
+    const lifo = await q.add('target', { group: 'match', source: 'lifo' }, { lifo: true });
+    const priority = await q.add('target', { group: 'match', source: 'priority' }, { priority: 1 });
+
+    await promote(cleanupClient, keys, Number.MAX_SAFE_INTEGER);
+    await cleanupClient.xgroupCreate(keys.stream, CONSUMER_GROUP, '0');
+    await cleanupClient.xreadgroup(CONSUMER_GROUP, 'search-waiting-test', { [keys.stream]: '>' }, { count: 1 });
+
+    const expected = [priority.id, lifo.id, fifo.id];
+    expect((await q.searchJobs({ state: 'waiting', name: 'target' })).map((job) => job.id)).toEqual(expected);
+    expect((await q.searchJobs({ state: 'waiting', data: { group: 'match' } })).map((job) => job.id)).toEqual(expected);
+    expect(expected).not.toContain(active.id);
 
     await q.close();
     await flushQueue(cleanupClient, qName);
