@@ -9,9 +9,10 @@ import { it, expect, beforeAll, afterAll } from 'vitest';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
+const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -148,6 +149,320 @@ describeEachMode('Token bucket', (CONNECTION) => {
     await q.close();
     await flushQueue(cleanupClient, QN);
   }, 10000);
+
+  it('continues ordered work after an accepted job exceeds a reduced bucket capacity during activation', async () => {
+    const QN = uq('-activation-hole');
+    const q = new Queue(QN, { connection: CONNECTION });
+    const keys = buildKeys(QN);
+    const groupKey = 'activation-hole';
+    const processed: number[] = [];
+
+    const oversized = await q.add(
+      'oversized',
+      { seq: 1 },
+      { ordering: { key: groupKey, concurrency: 1, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 5 },
+    );
+    const successor = await q.add(
+      'successor',
+      { seq: 2 },
+      { ordering: { key: groupKey, concurrency: 1, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 1 },
+    );
+    expect(oversized).not.toBeNull();
+    expect(successor).not.toBeNull();
+
+    await cleanupClient.hset(keys.group(groupKey), {
+      tbCapacity: '1000',
+      tbTokens: '1000',
+      tbRefillRate: '1000',
+      tbLastRefill: String(Date.now()),
+    });
+
+    const worker = new Worker(
+      QN,
+      async (job: any) => {
+        processed.push(job.data.seq);
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 100, stalledInterval: 60000 },
+    );
+    worker.on('error', () => {});
+
+    await waitFor(() => processed.includes(2), 8000);
+    expect(String(await cleanupClient.hget(keys.job(oversized!.id), 'state'))).toBe('failed');
+
+    await worker.close(true);
+    await q.close();
+    await flushQueue(cleanupClient, QN);
+  }, 15000);
+
+  it('continues ordered work after completeAndFetchNext rejects an oversized stream job', async () => {
+    const QN = uq('-fetch-hole');
+    const q = new Queue(QN, { connection: CONNECTION });
+    const keys = buildKeys(QN);
+    const groupKey = 'fetch-hole';
+    const processed: string[] = [];
+
+    await q.add('current', { seq: 0 });
+    const oversized = await q.add(
+      'oversized',
+      { seq: 1 },
+      { ordering: { key: groupKey, concurrency: 1, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 5 },
+    );
+    const successor = await q.add(
+      'successor',
+      { seq: 2 },
+      { ordering: { key: groupKey, concurrency: 1, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 1 },
+    );
+    expect(oversized).not.toBeNull();
+    expect(successor).not.toBeNull();
+
+    await cleanupClient.hset(keys.group(groupKey), {
+      tbCapacity: '1000',
+      tbTokens: '1000',
+      tbRefillRate: '1000',
+      tbLastRefill: String(Date.now()),
+    });
+
+    const worker = new Worker(
+      QN,
+      async (job: any) => {
+        processed.push(job.id);
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 100, stalledInterval: 60000 },
+    );
+    worker.on('error', () => {});
+
+    await waitFor(() => processed.includes(successor!.id), 8000);
+    expect(String(await cleanupClient.hget(keys.job(oversized!.id), 'state'))).toBe('failed');
+
+    await worker.close(true);
+    await q.close();
+    await flushQueue(cleanupClient, QN);
+  }, 15000);
+
+  it('continues ordered work when completion finds an oversized job in groupq', async () => {
+    const QN = uq('-release-hole');
+    const q = new Queue(QN, { connection: CONNECTION });
+    const keys = buildKeys(QN);
+    const groupKey = 'release-hole';
+    const processed: number[] = [];
+    let releaseCurrent!: () => void;
+    const currentCanFinish = new Promise<void>((resolve) => {
+      releaseCurrent = resolve;
+    });
+    let currentStarted!: () => void;
+    const currentStartedPromise = new Promise<void>((resolve) => {
+      currentStarted = resolve;
+    });
+
+    await q.add(
+      'current',
+      { seq: 1 },
+      { ordering: { key: groupKey, concurrency: 1, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 1 },
+    );
+    const oversized = await q.add(
+      'oversized',
+      { seq: 2 },
+      { ordering: { key: groupKey, concurrency: 1, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 5 },
+    );
+    const successor = await q.add(
+      'successor',
+      { seq: 3 },
+      { ordering: { key: groupKey, concurrency: 1, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 1 },
+    );
+    expect(oversized).not.toBeNull();
+    expect(successor).not.toBeNull();
+
+    const worker = new Worker(
+      QN,
+      async (job: any) => {
+        if (job.data.seq === 1) {
+          currentStarted();
+          await currentCanFinish;
+        }
+        processed.push(job.data.seq);
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 100, stalledInterval: 60000 },
+    );
+    worker.on('error', () => {});
+
+    await currentStartedPromise;
+    await cleanupClient.hset(keys.group(groupKey), {
+      tbCapacity: '1000',
+      tbTokens: '1000',
+      tbRefillRate: '1000',
+      tbLastRefill: String(Date.now()),
+    });
+    releaseCurrent();
+
+    await waitFor(() => processed.includes(3), 8000);
+    expect(String(await cleanupClient.hget(keys.job(oversized!.id), 'state'))).toBe('failed');
+
+    await worker.close(true);
+    await q.close();
+    await flushQueue(cleanupClient, QN);
+  }, 15000);
+
+  it('continues ordered work when rate-limit promotion finds an oversized groupq job', async () => {
+    const QN = uq('-promote-hole');
+    const q = new Queue(QN, { connection: CONNECTION });
+    const keys = buildKeys(QN);
+    const groupKey = 'promote-hole';
+
+    const oversized = await q.add(
+      'oversized',
+      { seq: 1 },
+      { ordering: { key: groupKey, concurrency: 1, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 5 },
+    );
+    const successor = await q.add(
+      'successor',
+      { seq: 2 },
+      { ordering: { key: groupKey, concurrency: 1, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 1 },
+    );
+    expect(oversized).not.toBeNull();
+    expect(successor).not.toBeNull();
+
+    const now = Date.now();
+    await cleanupClient.hset(keys.job(oversized!.id), { state: 'group-waiting' });
+    await cleanupClient.zadd(keys.groupq(groupKey), [{ element: oversized!.id, score: 1 }]);
+    await cleanupClient.hset(keys.group(groupKey), {
+      nextSeq: '1',
+      tbCapacity: '1000',
+      tbTokens: '1000',
+      tbRefillRate: '1000',
+      tbLastRefill: String(now),
+    });
+    await cleanupClient.zadd(keys.ratelimited, [{ element: groupKey, score: now }]);
+
+    await cleanupClient.fcall('glidemq_promoteRateLimited', [keys.ratelimited, keys.stream], [String(now)]);
+
+    expect(String(await cleanupClient.hget(keys.job(oversized!.id), 'state'))).toBe('failed');
+    expect(String(await cleanupClient.hget(keys.job(successor!.id), 'state'))).toBe('waiting');
+
+    await q.close();
+    await flushQueue(cleanupClient, QN);
+  }, 10000);
+
+  it('rejects an oversized add before consuming the job ID or ordering sequence', async () => {
+    const QN = uq('-cost-atomic-add');
+    const q = new Queue(QN, { connection: CONNECTION });
+    const k = buildKeys(QN);
+    const ordering = { key: 'atomic-add', tokenBucket: { capacity: 3, refillRate: 1 } };
+
+    await expect(q.add('invalid', {}, { ordering, cost: 5 })).rejects.toThrow('cost exceeds token bucket capacity');
+    expect(await cleanupClient.get(k.id)).toBeNull();
+    expect(await cleanupClient.hget(k.ordering, ordering.key)).toBeNull();
+
+    const valid = await q.add('valid', {}, { ordering, cost: 1 });
+    expect(valid!.id).toBe('1');
+    expect(String(await cleanupClient.hget(k.job(valid!.id), 'orderingSeq'))).toBe('1');
+
+    await q.close();
+    await flushQueue(cleanupClient, QN);
+  }, 10000);
+
+  it('rejects an oversized debounce replacement without deleting or advancing the existing job', async () => {
+    const QN = uq('-cost-atomic-dedup');
+    const q = new Queue(QN, { connection: CONNECTION });
+    const k = buildKeys(QN);
+    const ordering = { key: 'atomic-dedup', tokenBucket: { capacity: 3, refillRate: 1 } };
+    const deduplication = { id: 'replace', mode: 'debounce' as const };
+    const existing = await q.add('existing', {}, { delay: 60000, ordering, cost: 1, deduplication });
+
+    await expect(q.add('invalid', {}, { delay: 60000, ordering, cost: 5, deduplication })).rejects.toThrow(
+      'cost exceeds token bucket capacity',
+    );
+    expect(String(await cleanupClient.hget(k.job(existing!.id), 'state'))).toBe('delayed');
+    expect(String(await cleanupClient.get(k.id))).toBe('1');
+    expect(String(await cleanupClient.hget(k.ordering, ordering.key))).toBe('1');
+
+    await q.close();
+    await flushQueue(cleanupClient, QN);
+  }, 10000);
+
+  it('rejects oversized flow jobs before allocating parent or child IDs', async () => {
+    const parentQueue = uq('-cost-atomic-flow');
+    const childQueue = parentQueue;
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const parentKeys = buildKeys(parentQueue);
+    const childKeys = buildKeys(childQueue);
+
+    await expect(
+      flow.add({
+        name: 'parent',
+        queueName: parentQueue,
+        data: {},
+        opts: { ordering: { key: 'parent', tokenBucket: { capacity: 3, refillRate: 1 } }, cost: 5 },
+        children: [{ name: 'child', queueName: childQueue, data: {} }],
+      }),
+    ).rejects.toThrow('cost exceeds token bucket capacity');
+    expect(await cleanupClient.get(parentKeys.id)).toBeNull();
+    expect(await cleanupClient.get(childKeys.id)).toBeNull();
+    expect(await cleanupClient.hget(parentKeys.ordering, 'parent')).toBeNull();
+
+    await expect(
+      flow.add({
+        name: 'parent',
+        queueName: parentQueue,
+        data: {},
+        children: [
+          {
+            name: 'child',
+            queueName: childQueue,
+            data: {},
+            opts: { ordering: { key: 'child', tokenBucket: { capacity: 3, refillRate: 1 } }, cost: 5 },
+          },
+        ],
+      }),
+    ).rejects.toThrow('cost exceeds token bucket capacity');
+    expect(await cleanupClient.get(parentKeys.id)).toBeNull();
+    expect(await cleanupClient.get(childKeys.id)).toBeNull();
+    expect(await cleanupClient.hget(childKeys.ordering, 'child')).toBeNull();
+
+    await flow.close();
+    await flushQueue(cleanupClient, parentQueue);
+  }, 10000);
+
+  it('bounds oversized ordered-head cleanup without recursive Lua overflow', async () => {
+    const QN = uq('-oversized-bounded');
+    const q = new Queue(QN, { connection: CONNECTION });
+    const k = buildKeys(QN);
+    const groupKey = 'oversized-bounded';
+    const jobCount = 220;
+    const now = Date.now();
+    const jobs = await q.addBulk(
+      Array.from({ length: jobCount }, (_, index) => ({
+        name: 'oversized',
+        data: { index },
+        opts: { ordering: { key: groupKey, concurrency: 1, tokenBucket: { capacity: 10, refillRate: 10 } }, cost: 5 },
+      })),
+    );
+
+    for (const job of jobs) {
+      await cleanupClient.hset(k.job(job!.id), { state: 'group-waiting' });
+    }
+    await cleanupClient.zadd(
+      k.groupq(groupKey),
+      jobs.map((job, index) => ({ element: job!.id, score: index + 1 })),
+    );
+    await cleanupClient.hset(k.group(groupKey), {
+      active: '0',
+      nextSeq: '1',
+      tbCapacity: '1',
+      tbTokens: '1',
+      tbRefillRate: '1',
+      tbLastRefill: String(now),
+    });
+    await cleanupClient.zadd(k.ratelimited, [{ element: groupKey, score: now }]);
+
+    await expect(
+      cleanupClient.fcall('glidemq_promoteRateLimited', [k.ratelimited, k.stream], [String(now)]),
+    ).resolves.toBeTypeOf('number');
+    expect(Number(await cleanupClient.zcard(k.failed))).toBeGreaterThan(0);
+    expect(Number(await cleanupClient.zcard(k.failed))).toBeLessThanOrEqual(11);
+
+    await q.close();
+    await flushQueue(cleanupClient, QN);
+  }, 15000);
 
   // --- Default cost (1 token) ---
 

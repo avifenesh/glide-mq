@@ -20,8 +20,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Rate-limited group tombstones**: promotion now skips deleted token-bucket waitlist entries, advances both ordering frontiers, and continues to the next valid job. Cleanup is bounded and re-registers the group when more entries remain.
 - **Stalled repeat-after-complete jobs**: terminal stalled recovery now advances the linked scheduler atomically instead of leaving it stuck at `nextRun=0`.
+- **Ordered-group holes after pre-activation removal**: debounce replacement, explicit removal, and TTL expiry now mark never-run ordered jobs as skipped and wake parked successors. Group rate-limit requeues retain their ordered slot, and priority-list fast fetches apply the same token-bucket and rate gates as stream fetches.
+- **`rateLimitGroup({ currentJob: 'fail' })` promoted successors before the pause**: the fail path decremented `active` and promoted the next sequence before recording `ratelimited`. Promotion now waits for `promoteRateLimited`; returning jobs requeued at the back are found past the waitlist head, and oversized priority jobs close their ordering hole and count toward failed metrics.
+- **Rejected token-bucket jobs consumed IDs and ordering sequences**: add, dedup replacement, and flow creation now validate cost before mutating queue state. Revoking an ordered job before activation also closes its sequence hole so successors can run.
 - **Interval scheduler drift accumulation**: `every` schedulers now advance from the previous due slot instead of the late worker tick timestamp, so CI/event-loop jitter does not accumulate drift over repeated firings. Missed slots are skipped rather than replayed.
 - **Release test command**: `npm test` now passes the fuzzer exclusion as a single Vitest argument, so the release gate runs the intended non-fuzzer suite.
+- **Ordered-group rate-limit recovery**: every retained-slot job is tracked independently, so concurrent requeues resume before successors. Terminal paths release retained slots, and oversized token-bucket head cleanup is iterative and bounded.
 
 ### Changed
 

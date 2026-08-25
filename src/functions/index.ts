@@ -60,7 +60,16 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 105: Terminal stalled recovery atomically advances repeatAfterComplete schedulers without lossy scheduler JSON reserialization.
 // Version 106: Terminal TTL expiry atomically advances repeatAfterComplete schedulers through the shared expireJob path.
 // Version 107: Terminal suspend timeout, capacity rejection, and group-rate failure atomically advance repeatAfterComplete schedulers.
-export const LIBRARY_VERSION = '107';
+// Version 99: closeOrderingHole wakes parked groupq successors after debounce/remove/TTL of an unrun seq; rateLimitGroup keeps the ordered slot on requeue; CAF priority path applies token-bucket and rate-limit gates.
+// Version 100: rateLimitGroup fail pauses before promote; promoteRateLimited finds returning ordered jobs requeued at the back; CAF oversized priority jobs close the ordering hole and count as failed.
+// Version 107: ordered rate-limit returns use an explicit marker so retained-slot jobs are promoted beyond bounded scans; oversized token failures advance ordering state.
+// Version 112: ordered terminal paths resolve group-key ordering metadata before waking successors.
+// Version 113: ordered rate-limit returns track every retained slot; terminal paths release retained slots; oversized-head cleanup is iterative and bounded.
+// Version 114: ordered retry, delay, suspend, and waiting-children transitions mark their retained group slot.
+// Version 115: token-bucket gate each ordered rate-limit returner before it resumes.
+// Version 116: retained ordered-return slots use a namespace that cannot alias user group hashes.
+// Version 117: migrate retained-return slots from the v115 namespace before consuming them.
+export const LIBRARY_VERSION = '117';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';

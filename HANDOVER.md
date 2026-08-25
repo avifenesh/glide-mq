@@ -4,9 +4,10 @@
 
 - **In flight**: rate-limited token-bucket promotion skips bounded tombstones and advances both ordered frontiers without stranding successors.
 - **Audit fix**: `fix/repeat-after-stalled` atomically advances repeat-after-complete schedulers during terminal stalled recovery.
-- **Branch**: `ci/lua-coverage`, top of the coverage stack.
+- **Branch**: `automation/cover-open-fixes-20260825` consolidates the reviewed correctness queue.
 - **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
 - **CI**: green across all six fork/upstream stack PRs after the 2026-08-22 packaging update.
+- **Ordered-group recovery**: retained rate-limit slots are tracked per job and released on terminal paths; oversized token-bucket heads are cleaned iteratively through bounded sweeps.
 - **Local branches**: `refactor/extract-lua-library` -> `ci/ts-coverage` -> `ci/lua-coverage`.
 - **Review gate**: automatic Claude review is retired; the Revuto GitHub App check reviews pull requests.
 - **Dependency security**: the lockfile carries protobufjs 7.6.5, brace-expansion 5.0.9, PostCSS 8.5.25, and body-parser 2.3.0.
@@ -35,6 +36,7 @@ See CHANGELOG.md `0.15.4` for the full list. Highlights:
 
 ## Open Threads
 
+- **Ordered groups**: pre-activation removal, revoke, and expiry close ordering holes; rejected token-bucket enqueue operations do not consume IDs or sequences; rate-limit requeues preserve their slot and use explicit returning-job markers; priority-list fast fetches apply token-bucket and fixed-window gates; oversized token failures close holes across activation, completion, and promotion paths. `LIBRARY_VERSION` 117.
 - **Bun/Deno NAPI compatibility testing**: still pending from 0.14.0 handover.
 - **Valkey CI images**: CI is off release candidates. Standalone and cluster coverage use stable `valkey/valkey:9.1.0`; search coverage uses stable `valkey/valkey-bundle:9.1.0`, which carries Valkey Search 1.2.x and keeps the Search 1.1+ option tests active.
 - **Coverage**: stacked fork PRs. Extract Lua (`refactor/extract-lua-library`) -> TS V8 coverage (`ci/ts-coverage`) -> Lua line probes (`ci/lua-coverage`). Codecov project status is informational; patch target 80%. Integration and lua are separate flags. `npm run build:lua-cov` instruments dist Lua and stamps dist `LIBRARY_VERSION` as `93-cov`; Vitest aliases `src/functions` to `dist/functions` so src-imported clients cannot REPLACE the probed library. CI dumps LCOV with `node scripts/dump-lua-coverage.cjs` after the suite. The build now copies both `glidemq.lua` and `glidemq.embedded.json` to `dist/functions`, and npm CD smoke-loads `dist` before publishing.
