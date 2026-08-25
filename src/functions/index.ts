@@ -57,7 +57,10 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 102: rate-limited token-bucket promotion skips bounded tombstones and re-registers the group when more cleanup remains.
 // Version 103: ordered rate-limited promotion advances nextSeq past missing head tombstones.
 // Version 104: ordered tombstone cleanup also advances the worker orderdone frontier.
-export const LIBRARY_VERSION = '104';
+// Version 105: Terminal stalled recovery atomically advances repeatAfterComplete schedulers without lossy scheduler JSON reserialization.
+// Version 106: Terminal TTL expiry atomically advances repeatAfterComplete schedulers through the shared expireJob path.
+// Version 107: Terminal suspend timeout, capacity rejection, and group-rate failure atomically advance repeatAfterComplete schedulers.
+export const LIBRARY_VERSION = '107';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';

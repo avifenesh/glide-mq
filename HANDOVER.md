@@ -3,6 +3,7 @@
 ## Current State
 
 - **In flight**: rate-limited token-bucket promotion skips bounded tombstones and advances both ordered frontiers without stranding successors.
+- **Audit fix**: `fix/repeat-after-stalled` atomically advances repeat-after-complete schedulers during terminal stalled recovery.
 - **Branch**: `ci/lua-coverage`, top of the coverage stack.
 - **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
 - **CI**: green across all six fork/upstream stack PRs after the 2026-08-22 packaging update.
