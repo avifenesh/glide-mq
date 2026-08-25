@@ -242,6 +242,28 @@ describeEachMode('Queue.getJobs waiting sources', (CONNECTION) => {
     await flushQueue(cleanupClient, isolatedName);
   });
 
+  it('removing a claimed FIFO entry clears every consumer-group PEL reference', async () => {
+    const isolatedName = `${queueName}-remove-pel-groups`;
+    const isolatedQueue = new Queue(isolatedName, { connection: CONNECTION });
+    const removed = await isolatedQueue.add('claimed-fifo', {});
+    const keys = buildKeys(isolatedName);
+
+    for (const group of ['workers', 'broadcast-a']) {
+      await cleanupClient.xgroupCreate(keys.stream, group, '0');
+      await cleanupClient.xreadgroup(group, `${group}-consumer`, { [keys.stream]: '>' }, { count: 1 });
+      expect(Number((await cleanupClient.xpending(keys.stream, group))[0])).toBe(1);
+    }
+
+    await removed!.remove();
+
+    expect(Number((await cleanupClient.xpending(keys.stream, 'workers'))[0])).toBe(0);
+    expect(Number((await cleanupClient.xpending(keys.stream, 'broadcast-a'))[0])).toBe(0);
+    expect(Number(await cleanupClient.xlen(keys.stream))).toBe(0);
+
+    await isolatedQueue.close();
+    await flushQueue(cleanupClient, isolatedName);
+  });
+
   it('paginates both the stream and PEL when the first 1000 entries are pending', async () => {
     const isolatedName = `${queueName}-paged-pel`;
     const isolatedQueue = new Queue(isolatedName, { connection: CONNECTION });

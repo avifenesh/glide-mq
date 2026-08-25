@@ -3129,6 +3129,24 @@ redis.register_function('glidemq_removeJob', function(keys, args)
         local fields = entries[i][2]
         for j = 1, #fields, 2 do
           if fields[j] == 'jobId' and fields[j + 1] == jobId then
+            -- A stream entry can be pending in the default worker group or in
+            -- multiple BroadcastWorker subscription groups. Job.remove() does
+            -- not carry a consumer-group identity, so clear this entry from
+            -- every group before deleting it from the stream.
+            local groupsOk, groups = pcall(redis.call, 'XINFO', 'GROUPS', streamKey)
+            if groupsOk and type(groups) == 'table' then
+              for gi = 1, #groups do
+                local groupInfo = groups[gi]
+                if type(groupInfo) == 'table' then
+                  for gf = 1, #groupInfo, 2 do
+                    if groupInfo[gf] == 'name' and groupInfo[gf + 1] then
+                      redis.call('XACK', streamKey, groupInfo[gf + 1], entryId)
+                      break
+                    end
+                  end
+                end
+              end
+            end
             redis.call('XDEL', streamKey, entryId)
             found = true
             break
