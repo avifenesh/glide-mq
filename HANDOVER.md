@@ -14,6 +14,7 @@
 - **Coverage**: CI-included internal pause-worker regressions cover worker/broadcast pause guards, pending-read reset, and batch-refill stops. Standalone TS coverage and focused Lua coverage were verified on an isolated Valkey instance; changed executable lines are hit.
 - **Broadcast pause recovery**: a queue-pause activation race records only its parked PEL IDs. Resume uses targeted `XCLAIM`; it never rewinds `XREADGROUP` to `0`, which could redeliver live work from the same consumer's PEL.
 - **Stalled recovery**: `XAUTOCLAIM` persists a per-group cursor. Full 100-entry pages continue on a guarded zero-delay timer, yielding to I/O between pages without waiting another stalled interval.
+- **Unreleased**: `getJobs('waiting')` reads priority, LIFO, and non-pending FIFO sources; revoke/remove clean list entries. Removal and revocation route FIFO cleanup by actual list membership so list-backed jobs skip the scan while stale source fields cannot orphan stream entries. Server-function library identity is `112`.
 - **Review gate**: automatic Claude review is retired; the Revuto GitHub App check reviews pull requests.
 - **Dependency security**: the lockfile carries protobufjs 7.6.5, brace-expansion 5.0.9, PostCSS 8.5.25, and body-parser 2.3.0.
 
@@ -58,3 +59,4 @@ See CHANGELOG.md `0.15.4` for the full list. Highlights:
 - streamChunk: thin wrapper over stream(), not new infrastructure.
 - Search 1.1+ options: forward-compatible types, graceful skip on older servers.
 - Plugins: AI endpoints under `/flows/:id/usage`, `/flows/:id/budget`, `/jobs/:id/stream`.
+- **In flight**: `Queue.getJobs('waiting')` follows worker dispatch order across priority, LIFO, and FIFO sources; it pages FIFO stream reads and excludes entries in the consumer-group PEL.

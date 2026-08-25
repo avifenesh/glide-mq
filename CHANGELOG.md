@@ -15,6 +15,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`Queue.pause()` did not stop workers**: pause only wrote `meta.paused=1`. Activation paths (`moveToActive`, `completeAndFetchNext`, `popLists`, `rpopAndReserve`) never read it, so workers kept claiming jobs. Pause-race claims restore LIFO/priority lists in their original dispatch order; batch restores preserve claim order; broadcast claims stay in the subscription PEL, and stalled reclaim skips paused queues.
 - **Revoked active jobs could complete**: the Lua source library now rejects completion after a revoke, workers abort the affected processor, and batch workers keep each job's abort signal isolated. Batch processor failures for revoked jobs are terminal, while batch timeouts still retry according to job attempts.
 - **Stalled recovery cursor**: `glidemq_reclaimStalled` now persists a per-consumer-group `XAUTOCLAIM` cursor in queue metadata and bounds each reclaim batch. Schedulers follow full pages with a guarded yielding continuation instead of waiting another stalled interval.
+- `getJobs('waiting')` now follows worker dispatch order across priority, LIFO, and FIFO sources, excludes pending stream entries, and does not expose revoked or removed list jobs.
+- Job removal and revocation scan the FIFO stream only when the waiting job was absent from both list-backed sources, avoiding unnecessary O(stream-length) work without orphaning stream entries whose legacy source fields are stale.
 
 ---
 

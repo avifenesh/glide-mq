@@ -3059,14 +3059,14 @@ redis.register_function('glidemq_removeJob', function(keys, args)
     return 0
   end
   local state = redis.call('HGET', jobKey, 'state')
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   local groupKey = redis.call('HGET', jobKey, 'groupKey')
   if groupKey and groupKey ~= '' then
     if state == 'active' then
       releaseGroupSlotAndPromote(jobKey, jobId, 0)
     else
       if state == 'group-waiting' then
-        local prefix_g = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-        redis.call('ZREM', prefix_g .. 'groupq:' .. groupKey, jobId)
+        redis.call('ZREM', prefix .. 'groupq:' .. groupKey, jobId)
       end
       closeOrderingHoleAndPromote(jobKey, jobId, 0)
     end
@@ -3083,7 +3083,36 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   redis.call('ZREM', scheduledKey, jobId)
   redis.call('ZREM', completedKey, jobId)
   redis.call('ZREM', failedKey, jobId)
+  -- Derive list keys from the job key so the pre-108 seven-key call shape
+  -- remains valid during rolling upgrades.
+  local removedLifo = redis.call('LREM', prefix .. 'lifo', 0, jobId)
+  local removedPriority = redis.call('LREM', prefix .. 'priority', 0, jobId)
   markOrderingDone(jobKey, jobId)
+  if state == 'waiting' and removedLifo == 0 and removedPriority == 0 then
+    local cursor = '-'
+    local found = false
+    while not found do
+      local entries = redis.call('XRANGE', streamKey, cursor, '+', 'COUNT', 1000)
+      if #entries == 0 then break end
+      for i = 1, #entries do
+        local entryId = entries[i][1]
+        local fields = entries[i][2]
+        for j = 1, #fields, 2 do
+          if fields[j] == 'jobId' and fields[j + 1] == jobId then
+            redis.call('XDEL', streamKey, entryId)
+            found = true
+            break
+          end
+        end
+        if found then break end
+      end
+      if not found then
+        local lastId = entries[#entries][1]
+        local dashPos = lastId:find('-')
+        cursor = lastId:sub(1, dashPos) .. tostring(tonumber(lastId:sub(dashPos + 1)) + 1)
+      end
+    end
+  end
   -- Clean up DAG parents SET, per-job streaming channel, and signals.
   -- Job hash + log can be MB-sized; parents/jstream/signals carry per-step
   -- data. Use UNLINK so the server reclaims memory off the main thread.
@@ -3135,10 +3164,10 @@ redis.register_function('glidemq_revoke', function(keys, args)
   end
   redis.call('HSET', jobKey, 'revoked', '1')
   local state = redis.call('HGET', jobKey, 'state')
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   if state == 'group-waiting' then
     local gk = redis.call('HGET', jobKey, 'groupKey')
     if gk and gk ~= '' then
-      local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
       local waitListKey = prefix .. 'groupq:' .. gk
       redis.call('ZREM', waitListKey, jobId)
     end
@@ -3155,28 +3184,32 @@ redis.register_function('glidemq_revoke', function(keys, args)
   end
   if state == 'waiting' or state == 'delayed' or state == 'prioritized' then
     redis.call('ZREM', scheduledKey, jobId)
-    local cursor = '-'
-    local found = false
-    while not found do
-      local entries = redis.call('XRANGE', streamKey, cursor, '+', 'COUNT', 1000)
-      if #entries == 0 then break end
-      for i = 1, #entries do
-        local entryId = entries[i][1]
-        local fields = entries[i][2]
-        for j = 1, #fields, 2 do
-          if fields[j] == 'jobId' and fields[j+1] == jobId then
-            if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
-            if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
-            found = true
-            break
+    local removedLifo = redis.call('LREM', prefix .. 'lifo', 0, jobId)
+    local removedPriority = redis.call('LREM', prefix .. 'priority', 0, jobId)
+    if state == 'waiting' and removedLifo == 0 and removedPriority == 0 then
+      local cursor = '-'
+      local found = false
+      while not found do
+        local entries = redis.call('XRANGE', streamKey, cursor, '+', 'COUNT', 1000)
+        if #entries == 0 then break end
+        for i = 1, #entries do
+          local entryId = entries[i][1]
+          local fields = entries[i][2]
+          for j = 1, #fields, 2 do
+            if fields[j] == 'jobId' and fields[j+1] == jobId then
+              if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
+              if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
+              found = true
+              break
+            end
           end
+          if found then break end
         end
-        if found then break end
-      end
-      if not found then
-        local lastId = entries[#entries][1]
-        local dashPos = lastId:find('-')
-        cursor = lastId:sub(1, dashPos) .. tostring(tonumber(lastId:sub(dashPos + 1)) + 1)
+        if not found then
+          local lastId = entries[#entries][1]
+          local dashPos = lastId:find('-')
+          cursor = lastId:sub(1, dashPos) .. tostring(tonumber(lastId:sub(dashPos + 1)) + 1)
+        end
       end
     end
     redis.call('ZADD', failedKey, timestamp, jobId)

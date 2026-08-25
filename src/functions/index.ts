@@ -69,6 +69,10 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 99: closeOrderingHole wakes parked groupq successors after debounce/remove/TTL of an unrun seq; rateLimitGroup keeps the ordered slot on requeue; CAF priority path applies token-bucket and rate-limit gates.
 // Version 100: rateLimitGroup fail pauses before promote; promoteRateLimited finds returning ordered jobs requeued at the back; CAF oversized priority jobs close the ordering hole and count as failed.
 // Version 107: ordered rate-limit returns use an explicit marker so retained-slot jobs are promoted beyond bounded scans; oversized token failures advance ordering state.
+// Version 108: revoke/remove delete list-backed waiting entries so getJobs pagination cannot expose or count stale jobs.
+// Version 110: derive list keys in remove/revoke and remove waiting FIFO stream entries.
+// Version 111: skip the FIFO stream scan when removing list-backed waiting jobs.
+// Version 112: route remove/revoke FIFO cleanup by actual waiting-list membership.
 // Version 112: ordered terminal paths resolve group-key ordering metadata before waking successors.
 // Version 113: ordered rate-limit returns track every retained slot; terminal paths release retained slots; oversized-head cleanup is iterative and bounded.
 // Version 114: ordered retry, delay, suspend, and waiting-children transitions mark their retained group slot.
