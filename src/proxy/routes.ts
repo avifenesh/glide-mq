@@ -226,6 +226,18 @@ function writeSse(res: Response, data: unknown, opts?: { event?: string; id?: st
   res.write(chunk);
 }
 
+function writeStreamEntries(
+  res: Response,
+  entries: { id: string; fields: Record<string, string> }[],
+): string | undefined {
+  let lastId: string | undefined;
+  for (const entry of entries) {
+    writeSse(res, entry.fields, { id: entry.id });
+    lastId = entry.id;
+  }
+  return lastId;
+}
+
 function writeSseComment(res: Response, comment = 'keepalive'): void {
   res.write(`: ${comment}\n\n`);
 }
@@ -1276,19 +1288,15 @@ export function createRoutes(
 
       while (!connectionClosed && !draining) {
         const entries = await queue.readStream(jobId, { count: 100, lastId });
-        for (const entry of entries) {
-          writeSse(res, entry.fields, { id: entry.id });
-          lastId = entry.id;
-        }
+        const latest = writeStreamEntries(res, entries);
+        if (latest) lastId = latest;
 
         const job = await queue.getJob(jobId);
         if (!job) break;
         const state = await job.getState();
         if (state === 'completed' || state === 'failed') {
           const trailing = await queue.readStream(jobId, { count: 100, lastId });
-          for (const entry of trailing) {
-            writeSse(res, entry.fields, { id: entry.id });
-          }
+          writeStreamEntries(res, trailing);
           break;
         }
 
