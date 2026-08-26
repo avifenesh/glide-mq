@@ -606,8 +606,8 @@ describeEachMode('AI Metadata integration', (CONNECTION) => {
     await expect(queue.getUsageSummary({ endTime: -1 })).rejects.toThrow('endTime');
     await expect(queue.getUsageSummary({ windowMs: 0 })).rejects.toThrow('windowMs');
     await expect(queue.getUsageSummary({ startTime: -1 })).rejects.toThrow('startTime');
-    await expect(
-      queue.getUsageSummary({ startTime: Date.now() + 10_000, endTime: Date.now() }),
-    ).rejects.toThrow('less than or equal');
+    await expect(queue.getUsageSummary({ startTime: Date.now() + 10_000, endTime: Date.now() })).rejects.toThrow(
+      'less than or equal',
+    );
   });
 });
