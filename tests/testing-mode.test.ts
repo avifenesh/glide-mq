@@ -1253,6 +1253,94 @@ describe('TestWorker batch mode', () => {
     expect((await queue.getJobs('waiting')).length).toBe(0);
   });
 
+  it('flushes leftover pending jobs after a full batch takes only part of them', async () => {
+    queue = new TestQueue('batch-remainder');
+    const batchSizes: number[] = [];
+
+    await queue.addBulk([
+      { name: 'a', data: { i: 1 } },
+      { name: 'b', data: { i: 2 } },
+      { name: 'c', data: { i: 3 } },
+      { name: 'd', data: { i: 4 } },
+    ]);
+
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        batchSizes.push(jobs.length);
+        return jobs.map(() => 'ok');
+      },
+      { batch: { size: 5, timeout: 50 } },
+    );
+
+    await waitFor(async () => (await queue.getJobCounts()).waiting === 4, 500, 10);
+    await queue.addBulk([
+      { name: 'e', data: { i: 5 } },
+      { name: 'f', data: { i: 6 } },
+      { name: 'g', data: { i: 7 } },
+      { name: 'h', data: { i: 8 } },
+    ]);
+
+    await waitFor(async () => (await queue.getJobCounts()).completed === 8, 2000, 20);
+    expect(batchSizes).toEqual([5, 3]);
+  });
+
+  it('does not process a pending batch after drain()', async () => {
+    queue = new TestQueue('batch-drain');
+    const batchSizes: number[] = [];
+
+    await queue.add('a', { i: 1 });
+    await queue.add('b', { i: 2 });
+
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        batchSizes.push(jobs.length);
+        return jobs.map(() => 'ok');
+      },
+      { batch: { size: 5, timeout: 80 } },
+    );
+
+    await waitFor(async () => (await queue.getJobCounts()).waiting === 2, 500, 10);
+    await queue.drain();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(batchSizes).toEqual([]);
+    expect((await queue.getJobCounts()).completed).toBe(0);
+  });
+
+  it('hands a closing worker pending batch to remaining workers', async () => {
+    queue = new TestQueue('batch-close-handoff');
+    const batchSizes: number[] = [];
+
+    await queue.add('a', { i: 1 });
+    await queue.add('b', { i: 2 });
+
+    worker = new TestWorker(
+      queue,
+      async () => {
+        throw new Error('closing worker should not flush');
+      },
+      { batch: { size: 5, timeout: 5000 } },
+    );
+
+    await waitFor(async () => (await queue.getJobCounts()).waiting === 2, 500, 10);
+
+    const peer = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        batchSizes.push(jobs.length);
+        return jobs.map(() => 'ok');
+      },
+      { batch: { size: 5, timeout: 50 } },
+    );
+
+    await worker.close();
+    worker = peer;
+
+    await waitFor(async () => (await queue.getJobCounts()).completed === 2, 2000, 20);
+    expect(batchSizes).toEqual([2]);
+  });
+
   it('emits active and completed events per job', async () => {
     queue = new TestQueue('batch-events');
     const activeIds: string[] = [];
