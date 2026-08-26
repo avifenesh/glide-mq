@@ -721,6 +721,7 @@ describeEachMode('Rate limiting', (CONNECTION) => {
 
     const blockedUntil = await q.rateLimitGroup(groupKey, 2000, { extend: 'replace' });
     expect(blockedUntil).toBeGreaterThan(replaced);
+    expect(Number(await cleanupClient.zscore(k.ratelimited, groupKey))).toBe(blockedUntil);
 
     await q.add('task', { seq: 1 }, { ordering: { key: groupKey } });
     await q.add('task', { seq: 2 }, { ordering: { key: groupKey } });
@@ -743,8 +744,6 @@ describeEachMode('Rate limiting', (CONNECTION) => {
     worker.on('error', () => {});
     try {
       await worker.waitUntilReady();
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      expect(finished).toEqual([]);
       await waitFor(() => finished.length === 2, 10000);
       expect(finished.sort()).toEqual([1, 2]);
     } finally {

@@ -983,7 +983,9 @@ export class Job<D = any, R = any> {
       hash['usage:costs'] ||
       hash['usage:totalTokens'] ||
       hash['usage:totalCost'] ||
-      hash['usage:costUnit']
+      hash['usage:costUnit'] ||
+      hash['usage:cached'] ||
+      hash['usage:latencyMs']
     ) {
       let cached: boolean | undefined;
       if (hash['usage:cached'] === '1') cached = true;
