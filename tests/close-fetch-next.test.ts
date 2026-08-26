@@ -12,6 +12,7 @@ import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './he
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
+const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 describeEachMode('close(false) vs completeAndFetchNext', (CONNECTION) => {
   let cleanupClient: any;
@@ -98,5 +99,120 @@ describeEachMode('close(false) vs completeAndFetchNext', (CONNECTION) => {
       await worker2.close(true);
       await queue.close();
     }
+  }, 15000);
+
+  it('releases a grouped CAF claim so close(false) does not park the next job', async () => {
+    const Q = uniqueQueue('close-caf-group');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const group = { key: 'g', concurrency: 1 };
+
+    const jobA = await queue.add('task', { n: 1 }, { ordering: group });
+    const jobB = await queue.add('task', { n: 2 }, { ordering: group });
+
+    let releaseA!: () => void;
+    const holdA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    let aStarted = false;
+
+    const worker = new Worker(
+      Q,
+      async (job: { data: { n: number } }) => {
+        if (job.data.n === 1) {
+          aStarted = true;
+          await holdA;
+        }
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 50,
+        stalledInterval: 60_000,
+      },
+    );
+    worker.on('error', () => {});
+
+    await waitFor(() => aStarted);
+    const closePromise = worker.close(false);
+    releaseA();
+    await closePromise;
+
+    expect(await jobA.getState()).toBe('completed');
+    expect(await jobB.getState()).not.toBe('group-waiting');
+    expect(await jobB.getState()).not.toBe('active');
+
+    const recovered: number[] = [];
+    const worker2 = new Worker(
+      Q,
+      async (job: { data: { n: number } }) => {
+        recovered.push(job.data.n);
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 50,
+        stalledInterval: 60_000,
+      },
+    );
+    worker2.on('error', () => {});
+
+    try {
+      await waitFor(() => recovered.includes(2), 4000, 50);
+      expect(await jobB.getState()).toBe('completed');
+    } finally {
+      await worker2.close(true);
+      await queue.close();
+    }
+  }, 15000);
+
+  it('does not write completion events when events are disabled during close', async () => {
+    const Q = uniqueQueue('close-caf-events');
+    const queue = new Queue(Q, { connection: CONNECTION, events: false });
+    const jobA = await queue.add('task', { n: 1 });
+    await queue.add('task', { n: 2 });
+
+    let releaseA!: () => void;
+    const holdA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    let aStarted = false;
+
+    const worker = new Worker(
+      Q,
+      async (job: { data: { n: number } }) => {
+        if (job.data.n === 1) {
+          aStarted = true;
+          await holdA;
+        }
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 50,
+        stalledInterval: 60_000,
+        events: false,
+      },
+    );
+    worker.on('error', () => {});
+
+    await waitFor(() => aStarted);
+    const closePromise = worker.close(false);
+    releaseA();
+    await closePromise;
+
+    const keys = buildKeys(Q);
+    const entries = (await cleanupClient.xrange(keys.events, '-', '+')) as Record<string, [string, string][]>;
+    const types: string[] = [];
+    for (const fields of Object.values(entries ?? {})) {
+      for (const [f, v] of fields) {
+        if (String(f) === 'event') types.push(String(v));
+      }
+    }
+    expect(types).not.toContain('completed');
+    expect(await jobA.getState()).toBe('completed');
+    await queue.close();
   }, 15000);
 });

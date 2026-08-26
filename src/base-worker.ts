@@ -750,6 +750,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           entry.job.opts.removeOnComplete,
           undefined,
           this.broadcastMode ? true : undefined,
+          this.skipEvents,
+          this.skipMetrics,
         );
         if (isCompleteJobRevoked(completeResult)) {
           await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
@@ -816,6 +818,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             entry.job.opts.removeOnComplete,
             undefined,
             this.broadcastMode ? true : undefined,
+            this.skipEvents,
+            this.skipMetrics,
           );
           if (isCompleteJobRevoked(completeResult)) {
             await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
@@ -883,6 +887,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           undefined,
           undefined,
           this.broadcastMode ? true : undefined,
+          this.skipEvents,
+          this.skipMetrics,
         );
       } catch (err) {
         this.emit('error', err);
@@ -943,7 +949,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     return false;
   }
 
-  private async deferPausedActivation(entry: { jobId: string; entryId: string }): Promise<void> {
+  private async deferPausedActivation(entry: {
+    jobId: string;
+    entryId: string;
+    undoGroupClaim?: boolean;
+  }): Promise<void> {
     if (!this.commandClient) return;
     try {
       await deferActive(
@@ -954,6 +964,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.consumerGroup,
         this.broadcastMode ? true : undefined,
         true,
+        entry.undoGroupClaim,
       );
       if (this.broadcastMode && entry.entryId !== '') {
         this.pausedBroadcastEntries.add(entry.entryId);
@@ -1561,6 +1572,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           job.opts.removeOnComplete,
           undefined,
           this.broadcastMode ? true : undefined,
+          this.skipEvents,
+          this.skipMetrics,
         );
         if (isCompleteJobRevoked(notifications)) {
           await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
@@ -1655,6 +1668,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         await this.deferPausedActivation({
           jobId: fetchResult.nextJobId,
           entryId: fetchResult.nextEntryId,
+          undoGroupClaim: true,
         });
         return;
       }
