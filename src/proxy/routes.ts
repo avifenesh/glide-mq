@@ -473,6 +473,7 @@ function validateJobOpts(
     'ordering',
     'cost',
     'lifo',
+    'lockDuration',
     ...(options?.allowWaitTimeout ? (['waitTimeout'] as const) : []),
   ]);
   for (const key of Object.keys(optsIn)) {
@@ -896,7 +897,7 @@ export function createRoutes(
           }
         }
         stream.clients.clear();
-        await stream.worker.close();
+        await stream.worker.close(true);
       },
     };
 
@@ -1273,7 +1274,7 @@ export function createRoutes(
         connectionClosed = true;
       });
 
-      while (!connectionClosed) {
+      while (!connectionClosed && !draining) {
         const entries = await queue.readStream(jobId, { count: 100, lastId });
         for (const entry of entries) {
           writeSse(res, entry.fields, { id: entry.id });
@@ -1343,7 +1344,7 @@ export function createRoutes(
       startSse(res);
       writeSseComment(res, 'connected');
 
-      while (!connectionClosed) {
+      while (!connectionClosed && !draining) {
         let result;
         try {
           result = await client.xread({ [keys.events]: lastId }, { block: SSE_BLOCK_MS, count: 100 });
@@ -1441,7 +1442,7 @@ export function createRoutes(
       startSse(res);
       writeSseComment(res, 'connected');
 
-      while (!connectionClosed) {
+      while (!connectionClosed && !draining) {
         let result;
         try {
           result = await client.xread({ [keys.events]: lastId }, { block: SSE_BLOCK_MS, count: 100 });
@@ -2146,18 +2147,22 @@ export function createRoutes(
       closeConnection();
     }
 
-    await Promise.allSettled(Array.from(queueInitMap.values()));
-    await Promise.allSettled(Array.from(broadcastInitMap.values()));
-    await Promise.allSettled(Array.from(broadcastStreams.values()).map((stream) => stream.close()));
-    await Promise.allSettled(Array.from(queueCache.values()).map((queue) => queue.close()));
-    await Promise.allSettled(Array.from(broadcastCache.values()).map((broadcast) => broadcast.close()));
-    if (sharedClientOwned && sharedClient) {
-      try {
-        sharedClient.close();
-      } catch {
-        /* ignore close errors on shutdown */
+    const shutdown = async () => {
+      await Promise.allSettled(Array.from(queueInitMap.values()));
+      await Promise.allSettled(Array.from(broadcastInitMap.values()));
+      await Promise.allSettled(Array.from(broadcastStreams.values()).map((stream) => stream.close()));
+      await Promise.allSettled(Array.from(queueCache.values()).map((queue) => queue.close()));
+      await Promise.allSettled(Array.from(broadcastCache.values()).map((broadcast) => broadcast.close()));
+      if (sharedClientOwned && sharedClient) {
+        try {
+          sharedClient.close();
+        } catch {
+          /* ignore close errors on shutdown */
+        }
       }
-    }
+    };
+
+    await Promise.race([shutdown(), new Promise<void>((resolve) => setTimeout(resolve, 3000))]);
 
     queueCache.clear();
     broadcastCache.clear();
