@@ -46,6 +46,7 @@ import {
   completeJob,
   isCompleteJobRevoked,
   completeAndFetchNext,
+  type CompleteAndFetchResult,
   completeChild,
   failJob,
   addJob,
@@ -104,6 +105,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected paused = false;
   protected closing = false;
   protected closed = false;
+  private closePromise: Promise<void> | null = null;
   protected queueKeys: ReturnType<typeof buildKeys>;
   protected consumerId: string;
   protected activeCount = 0;
@@ -1544,28 +1546,47 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         }
       }
       const now = Date.now();
-      const fetchResult = await completeAndFetchNext(
-        this.commandClient,
-        this.queueKeys,
-        currentJobId,
-        currentEntryId,
-        returnvalue,
-        now,
-        this.consumerGroup,
-        this.consumerId,
-        job.opts.removeOnComplete,
-        undefined,
-        completionHints,
-        this.broadcastMode ? true : undefined,
-        job.processedOn,
-        !!job.parentIds,
-        this.skipEvents,
-        this.skipMetrics,
-      );
+      // close() sets closing before waitForActiveJobs. Completing without
+      // fetch-next avoids claiming a job that this worker will not process.
+      let fetchResult: CompleteAndFetchResult;
+      if (this.closing) {
+        const notifications = await completeJob(
+          this.commandClient,
+          this.queueKeys,
+          currentJobId,
+          currentEntryId,
+          returnvalue,
+          now,
+          this.consumerGroup,
+          job.opts.removeOnComplete,
+          undefined,
+          this.broadcastMode ? true : undefined,
+        );
+        fetchResult = { completed: currentJobId, next: false as const, parentNotifications: notifications };
+      } else {
+        fetchResult = await completeAndFetchNext(
+          this.commandClient,
+          this.queueKeys,
+          currentJobId,
+          currentEntryId,
+          returnvalue,
+          now,
+          this.consumerGroup,
+          this.consumerId,
+          job.opts.removeOnComplete,
+          undefined,
+          completionHints,
+          this.broadcastMode ? true : undefined,
+          job.processedOn,
+          !!job.parentIds,
+          this.skipEvents,
+          this.skipMetrics,
+        );
 
-      if (fetchResult.next === 'CURRENT_REVOKED') {
-        await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
-        return;
+        if (fetchResult.next === 'CURRENT_REVOKED') {
+          await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
+          return;
+        }
       }
       await this.notifyCrossQueueParents(fetchResult.parentNotifications);
       job.returnvalue = processResult;
@@ -1617,6 +1638,21 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       if (job.schedulerName) {
         await this.updateSchedulerAfterComplete(job.schedulerName, now);
+      }
+
+      // CAF raced with close(): the next job is already claimed. Defer it
+      // so another worker can take it without waiting for stall reclaim.
+      if (
+        this.closing &&
+        typeof fetchResult.next === 'object' &&
+        fetchResult.nextJobId &&
+        fetchResult.nextEntryId != null
+      ) {
+        await this.deferPausedActivation({
+          jobId: fetchResult.nextJobId,
+          entryId: fetchResult.nextEntryId,
+        });
+        return;
       }
 
       // No next job - return to poll loop
@@ -2014,12 +2050,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    */
   async close(force?: boolean): Promise<void> {
     if (this.closed) return;
-    if (this.closing) {
-      // Already closing - wait for init to settle, then return
-      await this.initPromise.catch(() => {});
-      return;
-    }
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = this.performClose(force);
+    return this.closePromise;
+  }
 
+  private async performClose(force?: boolean): Promise<void> {
     this.closing = true;
     this.running = false;
     this.emit('closing');
