@@ -205,6 +205,15 @@ export class Job<D = any, R = any> {
    */
   movedToFailed = false;
 
+  /** @internal `failed` or `retrying` from the moveToFailed Lua call. */
+  movedToFailedResult?: string;
+
+  /** @internal Set while a worker is processing so failJob can pass group/broadcast. */
+  failContext?: { group: string; broadcastMode?: boolean };
+
+  /** @internal Worker already ran DLQ / failed-event / scheduler bookkeeping. */
+  movedToFailedFinalized = false;
+
   /** @internal Request captured by moveToDelayed() while inside the worker. */
   moveToDelayedRequest?: { delayedUntil: number; serializedData?: string; nextData?: D };
 
@@ -652,9 +661,13 @@ export class Job<D = any, R = any> {
       Date.now(),
       maxAttempts,
       backoffDelay,
+      this.failContext?.group,
+      this.opts.removeOnFail,
+      this.failContext?.broadcastMode,
     );
     this.failedReason = err.message;
     this.movedToFailed = true;
+    this.movedToFailedResult = result;
     if (result === 'retrying') {
       this.attemptsMade += 1;
     }

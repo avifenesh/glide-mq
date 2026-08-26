@@ -10,6 +10,7 @@ import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './he
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
+const { BatchError } = require('../dist/errors') as typeof import('../src/errors');
 
 const DELAY_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/move-to-delayed-future.js');
 
@@ -122,6 +123,144 @@ describeEachMode('list-job worker methods', (CONNECTION) => {
         50,
       );
       expect(await job.getState()).toBe('failed');
+    } finally {
+      await worker.close(true);
+      await queue.close();
+    }
+  }, 15000);
+
+  it('emits failed and does not complete after moveToFailed plus a later throw', async () => {
+    const Q = uniqueQueue('list-entryid-fail-throw');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const job = await queue.add('task', { n: 1 }, { priority: 1 });
+    const failed: Error[] = [];
+
+    const worker = new Worker(
+      Q,
+      async (active) => {
+        await active.moveToFailed(new Error('nope'));
+        throw new Error('cleanup');
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 50, stalledInterval: 60_000 },
+    );
+    worker.on('error', () => {});
+    worker.on('failed', (_job: unknown, err: Error) => failed.push(err));
+    worker.on('completed', () => {
+      throw new Error('should not complete');
+    });
+
+    try {
+      await waitFor(async () => (await job.getState()) === 'failed', 4000, 50);
+      expect(await job.getState()).toBe('failed');
+      expect(failed.map((e) => e.message)).toEqual(['nope']);
+    } finally {
+      await worker.close(true);
+      await queue.close();
+    }
+  }, 15000);
+
+  it('routes a terminal moveToFailed job to the dead-letter queue', async () => {
+    const Q = uniqueQueue('list-entryid-fail-dlq');
+    const DLQ = `${Q}-dead`;
+    const queue = new Queue(Q, { connection: CONNECTION, deadLetterQueue: { name: DLQ } });
+    const job = await queue.add('task', { n: 1 }, { priority: 1 });
+
+    const worker = new Worker(
+      Q,
+      async (active) => {
+        await active.moveToFailed(new Error('nope'));
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 50,
+        stalledInterval: 60_000,
+        deadLetterQueue: { name: DLQ },
+      },
+    );
+    worker.on('error', () => {});
+
+    try {
+      await waitFor(async () => (await queue.getDeadLetterJobs()).length > 0, 4000, 50);
+      const dlqJobs = await queue.getDeadLetterJobs();
+      expect(dlqJobs[0]?.data?.originalJobId).toBe(job.id);
+      expect(dlqJobs[0]?.data?.failedReason).toBe('nope');
+    } finally {
+      await worker.close(true);
+      await queue.close();
+      await flushQueue(cleanupClient, DLQ);
+    }
+  }, 15000);
+
+  it('advances repeatAfterComplete after an explicit moveToFailed', async () => {
+    const Q = uniqueQueue('list-entryid-fail-rac');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    await queue.upsertJobScheduler('rac-mtf', { repeatAfterComplete: 200 }, { name: 'task', data: { n: 1 } });
+
+    let jobCount = 0;
+    const worker = new Worker(
+      Q,
+      async (active) => {
+        jobCount++;
+        if (jobCount === 1) {
+          await active.moveToFailed(new Error('nope'));
+          return;
+        }
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 50,
+        stalledInterval: 60_000,
+        promotionInterval: 100,
+      },
+    );
+    worker.on('error', () => {});
+
+    try {
+      await waitFor(() => jobCount >= 2, 6000, 50);
+      expect(jobCount).toBeGreaterThanOrEqual(2);
+    } finally {
+      await worker.close(true);
+      await queue.close();
+    }
+  }, 15000);
+
+  it('does not complete a batch job that already called moveToFailed', async () => {
+    const Q = uniqueQueue('list-entryid-fail-batch');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const [a, b] = await queue.addBulk([
+      { name: 'task', data: { n: 1 }, opts: { priority: 1 } },
+      { name: 'task', data: { n: 2 }, opts: { priority: 1 } },
+    ]);
+    const failedIds: string[] = [];
+    const completedIds: string[] = [];
+
+    const worker = new Worker(
+      Q,
+      async (jobs: Array<{ id: string; moveToFailed: (err: Error) => Promise<void> }>) => {
+        await jobs[0].moveToFailed(new Error('nope'));
+        throw new BatchError([new Error('other'), 'should-not-complete-first']);
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 50,
+        stalledInterval: 60_000,
+        batch: { size: 2 },
+      },
+    );
+    worker.on('error', () => {});
+    worker.on('failed', (job: { id: string }) => failedIds.push(job.id));
+    worker.on('completed', (job: { id: string }) => completedIds.push(job.id));
+
+    try {
+      await waitFor(async () => (await a.getState()) === 'failed', 4000, 50);
+      expect(await a.getState()).toBe('failed');
+      expect(failedIds).toContain(a.id);
+      expect(completedIds).not.toContain(a.id);
+      expect(completedIds.concat(failedIds)).toContain(b.id);
     } finally {
       await worker.close(true);
       await queue.close();

@@ -561,6 +561,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       const hash = moveResult as Record<string, string>;
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, entry.jobId, hash, this.serializer);
       job.entryId = entry.entryId;
+      job.failContext = { group: this.consumerGroup, broadcastMode: this.broadcastMode ? true : undefined };
 
       // Check ordering - if not ready, defer and skip
       const orderingReady = await this.isOrderingTurn(job);
@@ -688,6 +689,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         const len = Array.isArray(results) ? results.length : 'non-array';
         const err = new Error(`Batch processor returned ${len} results but batch had ${batch.length} jobs`);
         for (const entry of batch) {
+          if (await this.skipMovedToFailed(entry.job)) continue;
           await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
         }
         return;
@@ -696,7 +698,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       for (let i = 0; i < batch.length; i++) {
         const entry = batch[i];
         const result = results[i];
-        if (entry.job.movedToFailed) continue;
+        if (await this.skipMovedToFailed(entry.job)) continue;
 
         let returnvalue: string;
         try {
@@ -758,6 +760,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       for (let i = 0; i < batch.length; i++) {
         const entry = batch[i];
         const result = i < batchResults.length ? batchResults[i] : new Error('No result in BatchError');
+        if (await this.skipMovedToFailed(entry.job)) continue;
 
         if (result instanceof Error) {
           const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : result;
@@ -822,6 +825,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       // A timeout is retryable. Revocation is terminal only when completion or
       // an explicit state check positively identifies the revoked job.
       for (const entry of batch) {
+        if (await this.skipMovedToFailed(entry.job)) continue;
         const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : thrownError;
         await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
       }
@@ -1101,6 +1105,29 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Job.moveToFailed already ran failJob. Finish DLQ, failed events, and
+   * repeatAfterComplete scheduling without transitioning the job again.
+   */
+  protected async finalizeMovedToFailed(job: Job<D, R>, error: Error): Promise<void> {
+    if (job.movedToFailedFinalized) return;
+    job.movedToFailedFinalized = true;
+    const terminal = job.movedToFailedResult === 'failed';
+    if (terminal && this.opts.deadLetterQueue && this.commandClient) {
+      await this.moveToDLQ(job, error);
+    }
+    if (this.hasFailedListeners) this.emit('failed', job, error);
+    if (terminal && job.schedulerName) {
+      await this.updateSchedulerAfterComplete(job.schedulerName, Date.now());
+    }
+  }
+
+  protected async skipMovedToFailed(job: Job<D, R>): Promise<boolean> {
+    if (!job.movedToFailed) return false;
+    await this.finalizeMovedToFailed(job, new Error(job.failedReason || 'failed'));
+    return true;
+  }
+
+  /**
    * Move an active job back into delayed state after the processor requests a pause.
    */
   protected async handleMoveToDelayed(
@@ -1267,6 +1294,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash, this.serializer);
       job.entryId = currentEntryId;
+      job.failContext = { group: this.consumerGroup, broadcastMode: this.broadcastMode ? true : undefined };
 
       // Fast path: skip async isOrderingTurn when no ordering configured
       if (this.orderingMetaField(job)) {
@@ -1443,6 +1471,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
 
       if (processError || aborted) {
+        if (await this.skipMovedToFailed(job)) return;
         const confirmedRevoked = aborted && (await this.isJobRevoked(currentJobId));
         await this.handleJobFailure(
           job,
@@ -1453,7 +1482,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         return;
       }
 
-      if (job.movedToFailed) return;
+      if (await this.skipMovedToFailed(job)) return;
 
       if (!this.commandClient) return;
 
