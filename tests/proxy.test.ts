@@ -255,6 +255,20 @@ describe('HTTP Proxy', () => {
     });
     expect(dagRes.status).toBe(400);
     expect((await dagRes.json()).error).toContain('opts.lockDuration must be a finite number between');
+
+    const fallbacksRes = await fetch(`${baseUrl}/flows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        flow: {
+          data: {},
+          name: 'root',
+          opts: { fallbacks: [{ model: 'gpt-4o-mini' }] },
+          queueName,
+        },
+      }),
+    });
+    expect(fallbacksRes.status).toBe(201);
   });
 
   it('POST /queues/:name/jobs - dedup returns 200 with skipped', async () => {

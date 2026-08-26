@@ -486,6 +486,7 @@ function validateJobOpts(
     'cost',
     'lifo',
     'lockDuration',
+    'fallbacks',
     ...(options?.allowWaitTimeout ? (['waitTimeout'] as const) : []),
   ]);
   for (const key of Object.keys(optsIn)) {
