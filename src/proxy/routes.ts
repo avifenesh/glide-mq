@@ -676,14 +676,6 @@ export function createRoutes(
         }
         throw httpError(503, 'Proxy is shutting down');
       }
-      if (sharedClient) {
-        try {
-          client.close();
-        } catch {
-          /* ignore close errors on shutdown */
-        }
-        return sharedClient;
-      }
       sharedClient = client;
       sharedClientOwned = true;
       return sharedClient;

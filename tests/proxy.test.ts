@@ -289,6 +289,32 @@ describe('HTTP Proxy', () => {
     expect(badDag.status).toBe(400);
     expect((await badDag.json()).error).toContain('dag.nodes must be an array');
 
+    const badChildrenType = await fetch(`${baseUrl}/flows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        flow: { children: { not: 'array' }, data: {}, name: 'root', queueName },
+      }),
+    });
+    expect(badChildrenType.status).toBe(400);
+    expect((await badChildrenType.json()).error).toContain('children must be an array');
+
+    const badDagNode = await fetch(`${baseUrl}/flows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dag: { nodes: [null] } }),
+    });
+    expect(badDagNode.status).toBe(400);
+    expect((await badDagNode.json()).error).toContain('must be an object');
+
+    const dagArray = await fetch(`${baseUrl}/flows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dag: [] }),
+    });
+    expect(dagArray.status).toBe(400);
+    expect((await dagArray.json()).error).toContain('dag must be an object');
+
     const fallbacksRes = await fetch(`${baseUrl}/flows`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
