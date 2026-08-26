@@ -615,6 +615,9 @@ export function createRoutes(
   }
 
   async function getSharedClient(): Promise<Client> {
+    if (draining || closed) {
+      throw httpError(503, 'Proxy is shutting down');
+    }
     if (sharedClient) return sharedClient;
     if (opts.client) {
       sharedClient = opts.client;
@@ -624,7 +627,16 @@ export function createRoutes(
     if (!opts.connection) {
       throw httpError(500, 'Proxy requires either `client` or `connection`');
     }
-    sharedClient = await createClient(opts.connection);
+    const client = await createClient(opts.connection);
+    if (draining || closed) {
+      try {
+        client.close();
+      } catch {
+        /* ignore close errors on shutdown */
+      }
+      throw httpError(503, 'Proxy is shutting down');
+    }
+    sharedClient = client;
     sharedClientOwned = true;
     return sharedClient;
   }
@@ -2148,8 +2160,21 @@ export function createRoutes(
     });
   });
 
+  function closeOwnedSharedClient(): void {
+    if (!sharedClientOwned || !sharedClient) return;
+    const client = sharedClient;
+    sharedClient = null;
+    sharedClientOwned = false;
+    try {
+      client.close();
+    } catch {
+      /* ignore close errors on shutdown */
+    }
+  }
+
   async function closeQueues(): Promise<void> {
     draining = true;
+    closed = true;
 
     for (const closeConnection of Array.from(activeQueueEventClosers)) {
       closeConnection();
@@ -2159,41 +2184,34 @@ export function createRoutes(
     const streams = [...broadcastStreams.values()];
     const queues = [...queueCache.values()];
     const broadcasts = [...broadcastCache.values()];
-    const client = sharedClient;
-    const clientOwned = sharedClientOwned;
 
     queueCache.clear();
     broadcastCache.clear();
     broadcastStreams.clear();
-    sharedClient = null;
-    sharedClientOwned = false;
-    closed = true;
 
     const shutdown = async () => {
       await Promise.allSettled(pendingInits);
       await Promise.allSettled(streams.map((stream) => stream.close()));
       await Promise.allSettled(queues.map((queue) => queue.close()));
       await Promise.allSettled(broadcasts.map((broadcast) => broadcast.close()));
-      if (clientOwned && client) {
-        try {
-          client.close();
-        } catch {
-          /* ignore close errors on shutdown */
-        }
-      }
+      closeOwnedSharedClient();
     };
 
     let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        shutdown(),
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, 3000);
-          timer.unref();
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
+    const winner = await Promise.race([
+      shutdown().then(() => 'done' as const),
+      new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), 3000);
+        timer.unref();
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+
+    if (winner === 'timeout') {
+      for (const stream of streams) void stream.close();
+      for (const queue of queues) void queue.close();
+      for (const broadcast of broadcasts) void broadcast.close();
+      closeOwnedSharedClient();
     }
   }
 
