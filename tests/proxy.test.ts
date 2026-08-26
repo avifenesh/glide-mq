@@ -271,6 +271,24 @@ describe('HTTP Proxy', () => {
     });
     expect(okTree.status).toBe(201);
 
+    const badChild = await fetch(`${baseUrl}/flows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        flow: { children: [null], data: {}, name: 'root', queueName },
+      }),
+    });
+    expect(badChild.status).toBe(400);
+    expect((await badChild.json()).error).toContain('must be an object');
+
+    const badDag = await fetch(`${baseUrl}/flows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dag: {} }),
+    });
+    expect(badDag.status).toBe(400);
+    expect((await badDag.json()).error).toContain('dag.nodes must be an array');
+
     const fallbacksRes = await fetch(`${baseUrl}/flows`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

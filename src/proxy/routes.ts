@@ -575,9 +575,15 @@ function validateJobOpts(
 }
 
 function validateFlowJobOpts(flow: FlowJob, path = 'flow'): string | null {
+  if (!flow || typeof flow !== 'object' || Array.isArray(flow)) {
+    return `${path} must be an object`;
+  }
   const error = validateJobOpts(flow.opts as Record<string, unknown> | undefined, `${path}.`);
   if (error) return error;
   const children = flow.children ?? [];
+  if (!Array.isArray(children)) {
+    return `${path}.children must be an array`;
+  }
   for (let i = 0; i < children.length; i++) {
     const childError = validateFlowJobOpts(children[i], `${path}.children[${i}]`);
     if (childError) return childError;
@@ -586,8 +592,18 @@ function validateFlowJobOpts(flow: FlowJob, path = 'flow'): string | null {
 }
 
 function validateDagJobOpts(dag: DAGFlow): string | null {
+  if (!dag || typeof dag !== 'object' || Array.isArray(dag)) {
+    return 'dag must be an object';
+  }
+  if (!Array.isArray(dag.nodes)) {
+    return 'dag.nodes must be an array';
+  }
   for (let i = 0; i < dag.nodes.length; i++) {
-    const error = validateJobOpts(dag.nodes[i].opts as Record<string, unknown> | undefined, `dag.nodes[${i}].`);
+    const node = dag.nodes[i];
+    if (!node || typeof node !== 'object' || Array.isArray(node)) {
+      return `dag.nodes[${i}] must be an object`;
+    }
+    const error = validateJobOpts(node.opts as Record<string, unknown> | undefined, `dag.nodes[${i}].`);
     if (error) return error;
   }
   return null;
@@ -626,6 +642,7 @@ export function createRoutes(
   let closed = false;
   let sharedClient: Client | null = null;
   let sharedClientOwned = false;
+  let sharedClientInit: Promise<Client> | null = null;
 
   function requireConnection(feature: string) {
     if (!opts.connection) {
@@ -647,18 +664,36 @@ export function createRoutes(
     if (!opts.connection) {
       throw httpError(500, 'Proxy requires either `client` or `connection`');
     }
-    const client = await createClient(opts.connection);
-    if (draining || closed) {
-      try {
-        client.close();
-      } catch {
-        /* ignore close errors on shutdown */
+    if (sharedClientInit) return sharedClientInit;
+
+    sharedClientInit = (async () => {
+      const client = await createClient(opts.connection!);
+      if (draining || closed) {
+        try {
+          client.close();
+        } catch {
+          /* ignore close errors on shutdown */
+        }
+        throw httpError(503, 'Proxy is shutting down');
       }
-      throw httpError(503, 'Proxy is shutting down');
+      if (sharedClient) {
+        try {
+          client.close();
+        } catch {
+          /* ignore close errors on shutdown */
+        }
+        return sharedClient;
+      }
+      sharedClient = client;
+      sharedClientOwned = true;
+      return sharedClient;
+    })();
+
+    try {
+      return await sharedClientInit;
+    } finally {
+      sharedClientInit = null;
     }
-    sharedClient = client;
-    sharedClientOwned = true;
-    return sharedClient;
   }
 
   function assertAllowedFlowQueues(queueNames: Iterable<string>): void {

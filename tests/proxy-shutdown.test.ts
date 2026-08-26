@@ -60,6 +60,14 @@ describe('HTTP proxy shutdown', () => {
       const inspectBefore = await fetch(`${baseUrl}/flows/missing-id`);
       expect([200, 404]).toContain(inspectBefore.status);
 
+      const concurrentLookups = await Promise.all([
+        fetch(`${baseUrl}/flows/missing-a`),
+        fetch(`${baseUrl}/flows/missing-b`),
+      ]);
+      for (const res of concurrentLookups) {
+        expect([200, 404]).toContain(res.status);
+      }
+
       await proxy.close();
 
       const lateJob = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
