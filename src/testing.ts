@@ -1380,6 +1380,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private readonly batchTimeout: number;
   private readonly batchProcessor: ((jobs: TestJob<D, R>[]) => Promise<R[]>) | null;
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingBatch: TestJobRecord<D, R>[] = [];
   private readonly tokenLimiter: TestWorkerOptions['tokenLimiter'];
   private tpmLocalCounter = 0;
   private tpmWindowStart = 0;
@@ -1681,7 +1682,15 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
 
     if (this.batchTimeout > 0) {
-      // Start a timer to flush the partial batch after timeout
+      this.pendingBatch.push(...records);
+      if (this.pendingBatch.length >= this.batchSize) {
+        if (this.batchTimer) {
+          clearTimeout(this.batchTimer);
+          this.batchTimer = null;
+        }
+        this.executeBatch(this.pendingBatch.splice(0, this.batchSize));
+        return;
+      }
       if (!this.batchTimer) {
         this.batchTimer = setTimeout(() => {
           this.batchTimer = null;
@@ -1697,8 +1706,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
   private flushBatch(): void {
     if (!this.running) return;
-    // Re-collect from waitingQueue, skipping stale entries
-    const records: TestJobRecord<D, R>[] = [];
+    const records = this.pendingBatch.splice(0, this.batchSize);
     while (this.queue.waitingQueue.length > 0 && records.length < this.batchSize) {
       const record = this.queue.waitingQueue[0];
       if (record.state !== 'waiting') {
@@ -1871,6 +1879,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     if (this.batchTimer) {
       clearTimeout(this.batchTimer);
       this.batchTimer = null;
+    }
+    if (this.pendingBatch.length > 0) {
+      this.queue.waitingQueue.unshift(...this.pendingBatch);
+      this.pendingBatch = [];
     }
     this.queue.workers.delete(this);
     this.queue.onWorkerDetached();
