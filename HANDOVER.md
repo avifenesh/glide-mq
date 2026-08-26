@@ -2,7 +2,7 @@
 
 ## Current State
 
-- **In flight**: rate-limited token-bucket promotion skips bounded tombstones and advances both ordered frontiers without stranding successors.
+- **In flight**: `fix/close-fetch-next` (fork #18 / upstream #282) — close() must not strand CAF or poll claims; grouped CAF undo is covered by a `'completed'`-handler race test. Lua library 121 on this branch (clash with #281/#285).
 - **Audit fix**: `fix/repeat-after-stalled` atomically advances repeat-after-complete schedulers during terminal stalled recovery.
 - **Branch**: `automation/cover-open-fixes-20260825` consolidates the reviewed correctness queue.
 - **Revoke/timeout safety**: revoked active jobs cannot complete; each batch job owns its abort signal, and timeouts remain retryable.

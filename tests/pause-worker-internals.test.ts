@@ -81,6 +81,23 @@ describe('pause worker internals', () => {
     const completeArgs = fcall.mock.calls.at(-1)[2] as string[];
     expect(fcall.mock.calls.at(-1)[0]).toBe('glidemq_complete');
     expect(completeArgs.slice(-3)).toEqual(['0', '1', '1']);
+
+    const closingWorker = {
+      commandClient: { fcall },
+      queueKeys: keys,
+      consumerGroup: 'workers',
+      broadcastMode: false,
+      closing: true,
+      emit: vi.fn(),
+    };
+    (closingWorker as any).deferPausedActivation = (entry: { jobId: string; entryId: string }) =>
+      (BaseWorker.prototype as any).deferPausedActivation.call(closingWorker, entry);
+    await (BaseWorker.prototype as any).processJob.call(closingWorker, 'job-poll', '9-0');
+    expect(fcall).toHaveBeenLastCalledWith(
+      'glidemq_deferActive',
+      [keys.stream, keys.job('job-poll'), keys.listActive],
+      ['job-poll', '9-0', 'workers', '0', '1', '0'],
+    );
   });
 
   it('waits while paused without rewinding broadcast pending reads after resume', async () => {

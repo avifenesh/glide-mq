@@ -1295,6 +1295,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected async processJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
 
+    // close() can land while XREADGROUP/list-pop is in flight. The poll loop
+    // still delivers that claim, but the while-guard below would otherwise
+    // drop it in this consumer's PEL until stall reclaim.
+    if (this.closing) {
+      await this.deferPausedActivation({ jobId, entryId });
+      return;
+    }
+
     let currentJobId = jobId;
     let currentEntryId = entryId;
     let currentHash: Record<string, string> | null = null;

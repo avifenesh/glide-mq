@@ -101,7 +101,7 @@ describeEachMode('close(false) vs completeAndFetchNext', (CONNECTION) => {
     }
   }, 15000);
 
-  it('releases a grouped CAF claim so close(false) does not park the next job', async () => {
+  it('completes the current grouped job without fetching next when already closing', async () => {
     const Q = uniqueQueue('close-caf-group');
     const queue = new Queue(Q, { connection: CONNECTION });
     const group = { key: 'g', concurrency: 1 };
@@ -141,6 +141,84 @@ describeEachMode('close(false) vs completeAndFetchNext', (CONNECTION) => {
     expect(await jobA.getState()).toBe('completed');
     expect(await jobB.getState()).not.toBe('group-waiting');
     expect(await jobB.getState()).not.toBe('active');
+
+    const recovered: number[] = [];
+    const worker2 = new Worker(
+      Q,
+      async (job: { data: { n: number } }) => {
+        recovered.push(job.data.n);
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 50,
+        stalledInterval: 60_000,
+      },
+    );
+    worker2.on('error', () => {});
+
+    try {
+      await waitFor(() => recovered.includes(2), 4000, 50);
+      expect(await jobB.getState()).toBe('completed');
+    } finally {
+      await worker2.close(true);
+      await queue.close();
+    }
+  }, 15000);
+
+  it('undoes a grouped CAF claim when close races with completeAndFetchNext', async () => {
+    const Q = uniqueQueue('close-caf-undo');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const group = {
+      key: 'g',
+      concurrency: 1,
+      tokenBucket: { capacity: 10, refillRate: 0.001 },
+      rateLimit: { max: 10, duration: 60_000 },
+    };
+
+    const jobA = await queue.add('task', { n: 1 }, { ordering: group, cost: 1 });
+    const jobB = await queue.add('task', { n: 2 }, { ordering: group, cost: 1 });
+
+    const processed: number[] = [];
+    const worker = new Worker(
+      Q,
+      async (job: { data: { n: number } }) => {
+        processed.push(job.data.n);
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 50,
+        stalledInterval: 60_000,
+      },
+    );
+    worker.on('error', () => {});
+    // 'completed' fires after CAF has claimed job B and before the close-defer.
+    worker.once('completed', () => {
+      void worker.close(false);
+    });
+
+    await waitFor(() => processed.includes(1), 4000, 50);
+    await worker.close(false);
+
+    expect(processed).toEqual([1]);
+    expect(await jobA.getState()).toBe('completed');
+    expect(await jobB.getState()).not.toBe('active');
+    expect(await jobB.getState()).not.toBe('group-waiting');
+
+    const keys = buildKeys(Q);
+    const grpFields = await cleanupClient.hgetall(keys.group('g'));
+    const grp: Record<string, string> = {};
+    if (grpFields) {
+      for (const f of grpFields) grp[String(f.field)] = String(f.value);
+    }
+    const bSeq = Number(await cleanupClient.hget(keys.job(jobB.id), 'orderingSeq'));
+    expect(Number(grp.active ?? 0)).toBe(0);
+    expect(Number(grp.nextSeq)).toBe(bSeq);
+    expect(Number(grp.tbTokens)).toBeGreaterThanOrEqual(9000);
+    expect(Number(grp.rateCount ?? 0)).toBe(1);
 
     const recovered: number[] = [];
     const worker2 = new Worker(
