@@ -38,7 +38,7 @@ describe('pause worker internals', () => {
     expect(fcall).toHaveBeenCalledWith(
       'glidemq_deferActive',
       [keys.stream, keys.job('job-1'), keys.listActive],
-      ['job-1', '', 'workers', '0', '1'],
+      ['job-1', '', 'workers', '0', '1', '0'],
     );
 
     const pausedClient = { fcall: vi.fn().mockResolvedValue('PAUSED') } as any;
@@ -50,7 +50,7 @@ describe('pause worker internals', () => {
     expect(fcall).toHaveBeenLastCalledWith(
       'glidemq_deferActive',
       [keys.stream, keys.job('job-3'), keys.listActive],
-      ['job-3', '1-0', 'workers', '1', '1'],
+      ['job-3', '1-0', 'workers', '1', '1', '0'],
     );
   });
 
