@@ -12,6 +12,7 @@ import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './he
 
 import { Queue } from '../src/queue';
 import { Worker } from '../src/worker';
+import { deferActive } from '../src/functions';
 import { buildKeys } from '../src/utils';
 
 describeEachMode('close(false) vs completeAndFetchNext', (CONNECTION) => {
@@ -293,4 +294,44 @@ describeEachMode('close(false) vs completeAndFetchNext', (CONNECTION) => {
     expect(await jobA.getState()).toBe('completed');
     await queue.close();
   }, 15000);
+
+  it('does not decrement group.active when undoing a retained-slot returning claim', async () => {
+    const Q = uniqueQueue('close-caf-retained');
+    const keys = buildKeys(Q);
+    const jobId = '1';
+    await cleanupClient.hset(keys.job(jobId), {
+      state: 'active',
+      name: 'task',
+      groupKey: 'g',
+      orderingSeq: '1',
+      retainedSlot: '1',
+      cost: '1000',
+    });
+    await cleanupClient.hset(keys.group('g'), {
+      active: '1',
+      nextSeq: '2',
+      tbCapacity: '10000',
+      tbTokens: '8000',
+      rateCount: '1',
+    });
+    const entryId = String(
+      await cleanupClient.xadd(keys.stream, [
+        ['jobId', jobId],
+        ['name', 'task'],
+      ]),
+    );
+    await cleanupClient.xgroupCreate(keys.stream, 'workers', '0');
+
+    await deferActive(cleanupClient, keys, jobId, entryId, 'workers', false, true, true);
+
+    const grpFields = await cleanupClient.hgetall(keys.group('g'));
+    const grp: Record<string, string> = {};
+    if (grpFields) {
+      for (const f of grpFields) grp[String(f.field)] = String(f.value);
+    }
+    expect(Number(grp.active)).toBe(1);
+    expect(Number(grp.nextSeq)).toBe(2);
+    expect(Number(grp.tbTokens)).toBe(9000);
+    expect(Number(grp.rateCount)).toBe(0);
+  });
 });

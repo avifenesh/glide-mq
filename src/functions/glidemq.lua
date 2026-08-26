@@ -2783,7 +2783,9 @@ redis.register_function('glidemq_deferActive', function(keys, args)
       local seq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
       local nextSeq = tonumber(redis.call('HGET', ghk, 'nextSeq')) or 0
       local returning = seq > 0 and nextSeq > 0 and seq < nextSeq and nextSeq ~= seq + 1
-      if not returning then
+      -- retainedSlot jobs already hold the group slot; CAF skipped the increment.
+      local retainedSlot = redis.call('HGET', jobKey, 'retainedSlot') == '1'
+      if not returning and not retainedSlot then
         local active = tonumber(redis.call('HGET', ghk, 'active')) or 0
         if active > 0 then redis.call('HSET', ghk, 'active', tostring(active - 1)) end
         if seq > 0 and nextSeq == seq + 1 then

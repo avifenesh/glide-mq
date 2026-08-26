@@ -88,11 +88,11 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 110: dedupe overlapping tree and DAG parent notifications per completion.
 // Version 119: integrate the reviewed correctness queue and preserve Queue.pause in the reservation-aware list pop.
 // Version 120: removeJob acknowledges a claimed FIFO entry in every stream consumer group before deleting it.
-<<<<<<< HEAD
 // Version 121: tbRefill uses Redis server time and stamps capacity so idle-full time is not later granted as extra tokens.
 // Version 122: moveToWaitingChildren unparks immediately when no child deps exist.
 // Version 123: glidemq_complete honors skipEvents/skipMetrics; deferActive can undo a CAF group reservation.
-export const LIBRARY_VERSION = '123';
+// Version 124: undoGroupClaim skips active/nextSeq rewind when the job holds retainedSlot.
+export const LIBRARY_VERSION = '124';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
