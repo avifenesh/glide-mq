@@ -1650,9 +1650,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private processAvailableBatch(): void {
     if (this.activeCount >= this.concurrency * this.batchSize) return;
 
-    while (this.queue.waitingQueue.length > 0 && this.pendingBatch.length < this.batchSize) {
-      const record = this.queue.waitingQueue.shift()!;
-      if (record.state !== 'waiting') continue;
+    this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+    while (this.pendingBatch.length < this.batchSize) {
+      const record = this.takeWaitingRecord();
+      if (!record) break;
       this.pendingBatch.push(record);
     }
 
@@ -1668,7 +1669,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       this.clearBatchTimer();
       this.executeBatch(this.pendingBatch.splice(0, this.batchSize));
       if (this.pendingBatch.length > 0) this.scheduleBatchFlush();
-      else if (this.queue.waitingQueue.length > 0) queueMicrotask(() => this.processAvailableBatch());
+      else if (this.queue.waitingQueue.length > 0) queueMicrotask(() => this.processAvailable());
       return;
     }
 
@@ -1695,17 +1696,25 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }, this.batchTimeout);
   }
 
+  private takeWaitingRecord(): TestJobRecord<D, R> | undefined {
+    while (this.queue.waitingQueue.length > 0) {
+      const record = this.queue.waitingQueue.shift()!;
+      if (record.state !== 'waiting') continue;
+      if (!this.queue.jobs.has(record.id)) continue;
+      return record;
+    }
+    return undefined;
+  }
+
   private flushBatch(): void {
     if (!this.running) return;
     this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
-    while (this.queue.waitingQueue.length > 0 && this.pendingBatch.length < this.batchSize) {
-      const record = this.queue.waitingQueue[0];
-      if (record.state !== 'waiting') {
-        this.queue.waitingQueue.shift();
-        continue;
+    if (!this.queue.isPaused()) {
+      while (this.pendingBatch.length < this.batchSize) {
+        const record = this.takeWaitingRecord();
+        if (!record) break;
+        this.pendingBatch.push(record);
       }
-      this.queue.waitingQueue.shift();
-      this.pendingBatch.push(record);
     }
     if (this.pendingBatch.length === 0) return;
     this.executeBatch(this.pendingBatch.splice(0, this.batchSize));
@@ -1869,8 +1878,9 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     this.running = false;
     this.clearBatchTimer();
     if (this.pendingBatch.length > 0) {
-      this.queue.waitingQueue.unshift(...this.pendingBatch);
+      const handoff = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
       this.pendingBatch = [];
+      if (handoff.length > 0) this.queue.waitingQueue.unshift(...handoff);
     }
     this.queue.workers.delete(this);
     this.queue.onWorkerDetached();
