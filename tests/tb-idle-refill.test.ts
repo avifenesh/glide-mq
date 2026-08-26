@@ -12,6 +12,8 @@ import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './he
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
+const { moveToActive } = require('../dist/functions/index') as typeof import('../src/functions/index');
+const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 describeEachMode('token bucket idle-at-capacity refill', (CONNECTION) => {
   let cleanupClient: any;
@@ -61,5 +63,25 @@ describeEachMode('token bucket idle-at-capacity refill', (CONNECTION) => {
       await worker.close(true);
       await queue.close();
     }
+  }, 15000);
+
+  it('does not persist an ahead caller clock as tbLastRefill at capacity', async () => {
+    const Q = uniqueQueue('tb-idle-clock');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const tb = { key: 'clock-group', concurrency: 10, tokenBucket: { capacity: 1, refillRate: 1 } };
+    const job = await queue.add('a', { n: 1 }, { ordering: tb, cost: 1 });
+    const keys = buildKeys(Q);
+    const streamEntries = (await cleanupClient.xrange(keys.stream, '-', '+')) as Record<string, [string, string][]>;
+    const entryId = Object.keys(streamEntries)[0];
+    expect(entryId).toBeTruthy();
+    await cleanupClient.xgroupCreate(keys.stream, 'workers', '0', { mkStream: true }).catch(() => {});
+
+    const future = Date.now() + 3_600_000;
+    await moveToActive(cleanupClient, keys, job.id, future, keys.stream, entryId, 'workers');
+    const last = Number(await cleanupClient.hget(keys.group(tb.key), 'tbLastRefill'));
+    expect(last).toBeGreaterThan(0);
+    expect(last).toBeLessThan(Date.now() + 5_000);
+
+    await queue.close();
   }, 15000);
 });

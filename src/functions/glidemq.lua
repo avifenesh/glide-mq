@@ -109,6 +109,11 @@ end
 -- Refill token bucket using remainder accumulator for precision.
 -- tbRefillRate is in millitokens/second. Returns current millitokens after refill.
 -- Side effect: updates tbTokens, tbLastRefill, tbRefillRemainder on the group hash.
+local function redisNowMs()
+  local t = redis.call('TIME')
+  return tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+end
+
 local function tbRefill(groupHashKey, g, now)
   local tbCapacity = tonumber(g.tbCapacity) or 0
   if tbCapacity <= 0 then return 0 end
@@ -116,10 +121,14 @@ local function tbRefill(groupHashKey, g, now)
   if tbTokens >= tbCapacity then
     -- Sitting at capacity must not accumulate idle time as later refill credit.
     -- Keep lastRefill monotonic so a slow-clock replica cannot rewind it.
+    -- Cap the stamp to server time so an ahead worker cannot stall refill.
     local tbLastRefill = tonumber(g.tbLastRefill) or 0
-    if now > tbLastRefill then
-      redis.call('HSET', groupHashKey, 'tbLastRefill', tostring(now))
-      g.tbLastRefill = tostring(now)
+    local stamp = now
+    local serverNow = redisNowMs()
+    if serverNow < stamp then stamp = serverNow end
+    if stamp > tbLastRefill then
+      redis.call('HSET', groupHashKey, 'tbLastRefill', tostring(stamp))
+      g.tbLastRefill = tostring(stamp)
     end
     return tbCapacity
   end
