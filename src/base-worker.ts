@@ -411,10 +411,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
               await this.commandClient.ping();
               await ensureFunctionLibrary(this.commandClient, undefined, this.opts.connection!.clusterMode ?? false);
             } catch (err) {
-              this.emit(
-                'error',
-                new ConnectionError('Command client is unreachable while jobs are in flight.'),
-              );
+              this.emit('error', new ConnectionError('Command client is unreachable while jobs are in flight.'));
               throw err;
             }
           }
