@@ -269,7 +269,7 @@ export class SandboxPool {
           if (!Number.isFinite(timestamp) || timestamp < 0) {
             throw new Error('Timestamp must be a finite Unix millisecond value >= 0');
           }
-          if (!job.entryId) {
+          if (job.entryId == null) {
             throw new Error('moveToDelayed() can only be used while the job is active in a Worker');
           }
           const nextStep = msg.args[1];

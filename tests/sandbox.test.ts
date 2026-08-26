@@ -315,6 +315,32 @@ describe('SandboxPool', () => {
     await pool.close();
   });
 
+  it('should proxy moveToDelayed for list jobs with empty entryId', async () => {
+    const pool = new SandboxPool(MOVE_TO_DELAYED_PROCESSOR, true, 1, RUNNER_PATH);
+
+    const fakeJob: any = {
+      id: 'job-delay-list',
+      name: 'test',
+      data: { step: 'send' },
+      opts: {},
+      attemptsMade: 0,
+      timestamp: Date.now(),
+      progress: 0,
+      entryId: '',
+      log: vi.fn(),
+      updateProgress: vi.fn(),
+      requestMoveToDelayed: vi.fn(),
+    };
+    fakeJob.updateData = vi.fn().mockImplementation(async (data: any) => {
+      fakeJob.data = data;
+    });
+
+    await expect(pool.run(fakeJob as Job)).rejects.toBeInstanceOf(DelayedError);
+    expect(fakeJob.requestMoveToDelayed).toHaveBeenCalledWith(123456, { step: 'next' });
+
+    await pool.close();
+  });
+
   it('should preserve DelayedError metadata from sandboxed processors', async () => {
     const pool = new SandboxPool(THROW_DELAYED_ERROR_PROCESSOR, true, 1, RUNNER_PATH);
 

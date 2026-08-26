@@ -696,6 +696,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       for (let i = 0; i < batch.length; i++) {
         const entry = batch[i];
         const result = results[i];
+        if (entry.job.movedToFailed) continue;
 
         let returnvalue: string;
         try {
@@ -1451,6 +1452,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         );
         return;
       }
+
+      if (job.movedToFailed) return;
 
       if (!this.commandClient) return;
 

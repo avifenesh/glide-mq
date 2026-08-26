@@ -198,6 +198,13 @@ export class Job<D = any, R = any> {
    */
   discarded = false;
 
+  /**
+   * When true, moveToFailed already transitioned the job. The worker must not
+   * completeAndFetchNext / completeJob afterward.
+   * @internal
+   */
+  movedToFailed = false;
+
   /** @internal Request captured by moveToDelayed() while inside the worker. */
   moveToDelayedRequest?: { delayedUntil: number; serializedData?: string; nextData?: D };
 
@@ -647,6 +654,7 @@ export class Job<D = any, R = any> {
       backoffDelay,
     );
     this.failedReason = err.message;
+    this.movedToFailed = true;
     if (result === 'retrying') {
       this.attemptsMade += 1;
     }
