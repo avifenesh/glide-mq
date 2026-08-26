@@ -4,11 +4,14 @@
  *
  * Run: npx vitest run tests/list-entryid-guard.test.ts
  */
+import path from 'path';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
+
+const DELAY_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/move-to-delayed-future.js');
 
 describeEachMode('list-job worker methods', (CONNECTION) => {
   let cleanupClient: any;
@@ -94,4 +97,66 @@ describeEachMode('list-job worker methods', (CONNECTION) => {
       await queue.close();
     }
   }, 15000);
+
+  it('keeps a priority job failed after moveToFailed returns normally', async () => {
+    const Q = uniqueQueue('list-entryid-fail');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const job = await queue.add('task', { n: 1 }, { priority: 1 });
+
+    const worker = new Worker(
+      Q,
+      async (active) => {
+        await active.moveToFailed(new Error('nope'));
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 50, stalledInterval: 60_000 },
+    );
+    worker.on('error', () => {});
+
+    try {
+      await waitFor(
+        async () => {
+          const state = await job.getState();
+          return state === 'failed' || state === 'completed';
+        },
+        4000,
+        50,
+      );
+      expect(await job.getState()).toBe('failed');
+    } finally {
+      await worker.close(true);
+      await queue.close();
+    }
+  }, 15000);
+
+  it('lets a sandboxed priority job call moveToDelayed', async () => {
+    const Q = uniqueQueue('list-entryid-sandbox-delay');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const job = await queue.add('task', { n: 1 }, { priority: 1 });
+
+    const errors: Error[] = [];
+    const worker = new Worker(Q, DELAY_PROCESSOR, {
+      connection: CONNECTION,
+      concurrency: 1,
+      blockTimeout: 50,
+      stalledInterval: 60_000,
+    });
+    worker.on('error', () => {});
+    worker.on('failed', (_job: unknown, err: Error) => errors.push(err));
+
+    try {
+      await waitFor(
+        async () => {
+          const state = await job.getState();
+          return state === 'delayed' || state === 'failed';
+        },
+        8000,
+        50,
+      );
+      expect(await job.getState()).toBe('delayed');
+      expect(errors).toEqual([]);
+    } finally {
+      await worker.close(true);
+      await queue.close();
+    }
+  }, 20000);
 });
