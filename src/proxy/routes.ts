@@ -1514,6 +1514,8 @@ export function createRoutes(
           }
         }
       }
+
+      closeConnection();
     } catch (err) {
       closeConnection?.();
       if (!res.headersSent) {
