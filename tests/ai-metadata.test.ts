@@ -328,6 +328,19 @@ describe('Job.fromHash usage parsing', () => {
     });
   });
 
+  it('parses usage when only latencyMs is present', () => {
+    const hash: Record<string, string> = {
+      name: 'llm-call',
+      data: '{}',
+      opts: '{}',
+      'usage:latencyMs': '42',
+    };
+
+    const job = Job.fromHash(mockClient as any, keys, '1', hash);
+    expect(job.usage?.latencyMs).toBe(42);
+    expect(job.usage?.cached).toBeUndefined();
+  });
+
   it('returns undefined usage when no usage fields present', () => {
     const hash: Record<string, string> = {
       name: 'llm-call',

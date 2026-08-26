@@ -256,6 +256,21 @@ describe('HTTP Proxy', () => {
     expect(dagRes.status).toBe(400);
     expect((await dagRes.json()).error).toContain('opts.lockDuration must be a finite number between');
 
+    const okTree = await fetch(`${baseUrl}/flows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        flow: {
+          children: [{ data: {}, name: 'child', opts: { lockDuration: 5000 }, queueName }],
+          data: {},
+          name: 'root',
+          opts: { lockDuration: 5000 },
+          queueName,
+        },
+      }),
+    });
+    expect(okTree.status).toBe(201);
+
     const fallbacksRes = await fetch(`${baseUrl}/flows`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
