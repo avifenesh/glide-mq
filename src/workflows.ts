@@ -62,8 +62,9 @@ export async function chain(
     }
 
     return await flow.add(flowJob);
-  } finally {
+  } catch (err) {
     await flow.close();
+    throw err;
   }
 }
 
@@ -101,8 +102,9 @@ export async function group(
       data: {},
       children,
     });
-  } finally {
+  } catch (err) {
     await flow.close();
+    throw err;
   }
 }
 
@@ -140,8 +142,9 @@ export async function chord(
       opts: callback.opts,
       children,
     });
-  } finally {
+  } catch (err) {
     await flow.close();
+    throw err;
   }
 }
 
@@ -171,7 +174,8 @@ export async function dag(nodes: DAGNode[], connection: ConnectionOptions, prefi
 
   try {
     return await flow.addDAG({ nodes });
-  } finally {
+  } catch (err) {
     await flow.close();
+    throw err;
   }
 }
