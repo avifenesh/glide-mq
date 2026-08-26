@@ -1232,6 +1232,27 @@ describe('TestWorker batch mode', () => {
     expect(returnValues).toEqual([2, 4, 6]);
   });
 
+  it('flushes a partial batch after batch.timeout', async () => {
+    queue = new TestQueue('batch-timeout');
+    const batchSizes: number[] = [];
+
+    await queue.add('a', { i: 1 });
+    await queue.add('b', { i: 2 });
+
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        batchSizes.push(jobs.length);
+        return jobs.map(() => 'ok');
+      },
+      { batch: { size: 5, timeout: 50 } },
+    );
+
+    await waitFor(async () => (await queue.getJobCounts()).completed === 2, 2000, 20);
+    expect(batchSizes).toEqual([2]);
+    expect((await queue.getJobs('waiting')).length).toBe(0);
+  });
+
   it('emits active and completed events per job', async () => {
     queue = new TestQueue('batch-events');
     const activeIds: string[] = [];
