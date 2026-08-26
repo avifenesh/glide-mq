@@ -51,10 +51,14 @@ describeEachMode('moveToWaitingChildren with zero deps', (CONNECTION) => {
     worker.on('error', () => {});
 
     try {
-      await waitFor(async () => {
-        const state = await job.getState();
-        return state === 'completed' || state === 'failed' || state === 'waiting-children';
-      }, 4000, 50);
+      await waitFor(
+        async () => {
+          const state = await job.getState();
+          return state === 'completed' || state === 'failed' || state === 'waiting-children';
+        },
+        4000,
+        50,
+      );
       expect(await job.getState()).toBe('completed');
     } finally {
       await worker.close(true);
