@@ -113,7 +113,12 @@ local function tbRefill(groupHashKey, g, now)
   local tbCapacity = tonumber(g.tbCapacity) or 0
   if tbCapacity <= 0 then return 0 end
   local tbTokens = tonumber(g.tbTokens) or tbCapacity
-  if tbTokens >= tbCapacity then return tbCapacity end
+  if tbTokens >= tbCapacity then
+    -- Sitting at capacity must not accumulate idle time as later refill credit.
+    redis.call('HSET', groupHashKey, 'tbLastRefill', tostring(now))
+    g.tbLastRefill = tostring(now)
+    return tbCapacity
+  end
   local tbRefillRate = tonumber(g.tbRefillRate) or 0
   local tbLastRefill = tonumber(g.tbLastRefill) or now
   local tbRefillRemainder = tonumber(g.tbRefillRemainder) or 0
