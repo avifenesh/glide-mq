@@ -751,4 +751,88 @@ describeEachMode('Suspend/Signal', (CONNECTION) => {
     await worker.close();
     await queue.close();
   }, 20000);
+
+  it('getSuspendedJobs paginates and can omit data', async () => {
+    const qName = uniqueQ();
+    queuesToFlush.push(qName);
+    const queue = new Queue(qName, { connection: CONNECTION });
+
+    expect(await queue.getSuspendedJobs()).toEqual([]);
+
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        if (job.signals.length === 0) {
+          await job.suspend({ reason: `r-${job.data.n}`, timeout: 60000 });
+        }
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 2, blockTimeout: 200 },
+    );
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+
+    const first = await queue.add('s', { n: 1, secret: 'aaa' });
+    const second = await queue.add('s', { n: 2, secret: 'bbb' });
+
+    await waitFor(async () => (await queue.getSuspendedJobs()).length === 2, 8000);
+
+    const all = await queue.getSuspendedJobs();
+    expect(all.map((j) => j.id).sort()).toEqual([first!.id, second!.id].sort());
+    expect(all.every((j) => j.data.secret)).toBe(true);
+
+    const page0 = await queue.getSuspendedJobs(0, 0);
+    expect(page0).toHaveLength(1);
+    const page1 = await queue.getSuspendedJobs(1, -1);
+    expect(page1).toHaveLength(1);
+    expect(new Set([...page0, ...page1].map((j) => j.id))).toEqual(new Set([first!.id, second!.id]));
+
+    const stripped = await queue.getSuspendedJobs(0, -1, { excludeData: true });
+    expect(stripped).toHaveLength(2);
+    expect(stripped.every((j) => j.data === undefined)).toBe(true);
+
+    await worker.close(true);
+    await queue.close();
+  }, 20000);
+
+  it('getSuspendInfo parses nested JSON signal data and ignores corrupt blobs', async () => {
+    const qName = uniqueQ();
+    queuesToFlush.push(qName);
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const k = buildKeys(qName);
+
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        if (job.signals.length === 0) {
+          await job.suspend({ reason: 'parse-signals', timeout: 60000 });
+        }
+        return 'ok';
+      },
+      { connection: CONNECTION },
+    );
+    await worker.waitUntilReady();
+    const added = await queue.add('suspend-parse', {});
+
+    await waitFor(async () => (await queue.getSuspendInfo(added!.id)) !== null, 8000);
+
+    await cleanupClient.hset(k.job(added!.id), {
+      signals: JSON.stringify([
+        { name: 'nested', data: '{"ok":true}' },
+        { name: 'plain', data: 'not-json' },
+      ]),
+    });
+    const parsed = await queue.getSuspendInfo(added!.id);
+    expect(parsed?.signals).toEqual([
+      { name: 'nested', data: { ok: true } },
+      { name: 'plain', data: 'not-json' },
+    ]);
+
+    await cleanupClient.hset(k.job(added!.id), { signals: 'not-json{{{' });
+    const corrupt = await queue.getSuspendInfo(added!.id);
+    expect(corrupt?.signals).toEqual([]);
+
+    await worker.close(true);
+    await queue.close();
+  }, 15000);
 });

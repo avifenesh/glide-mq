@@ -148,6 +148,15 @@ describeEachMode('addBulk batch pipelining', (CONNECTION) => {
     expect(jobs).toHaveLength(2);
     expect(jobs.map((j) => j.name).sort()).toEqual(['dedup-first', 'dedup-second-key']);
   });
+
+  it('addBulk rejects invalid ttl and lockDuration', async () => {
+    await expect(queue.addBulk([{ name: 'ttl', data: {}, opts: { ttl: -1 } }])).rejects.toThrow(
+      'ttl must be a non-negative finite number',
+    );
+    await expect(queue.addBulk([{ name: 'lock', data: {}, opts: { lockDuration: 1 } }])).rejects.toThrow(
+      'lockDuration must be a finite number',
+    );
+  });
 });
 
 describeEachMode('addBulk batch - worker processing', (CONNECTION) => {

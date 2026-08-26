@@ -282,4 +282,42 @@ describeEachMode('Queue.searchJobs', (CONNECTION) => {
     await q.close();
     await flushQueue(cleanupClient, qName);
   }, 15000);
+
+  it('search by name in the active state', async () => {
+    const qName = Q + '-active-name';
+    const q = new Queue(qName, { connection: CONNECTION });
+
+    expect(await q.searchJobs({ state: 'active', name: 'hold-me' })).toEqual([]);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const worker = new Worker(
+      qName,
+      async (job) => {
+        if (job.name === 'hold-me') await gate;
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 200, stalledInterval: 60000 },
+    );
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    await q.add('hold-me', { n: 1 });
+    await q.add('other', { n: 2 });
+
+    await waitFor(async () => {
+      const active = await q.searchJobs({ state: 'active', name: 'hold-me' });
+      return active.length === 1;
+    }, 8000);
+
+    const held = await q.searchJobs({ state: 'active', name: 'hold-me' });
+    expect(held).toHaveLength(1);
+    expect(held[0].name).toBe('hold-me');
+    expect(await q.searchJobs({ state: 'active', name: 'other' })).toHaveLength(0);
+
+    release();
+    await worker.close(true);
+    await q.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
 });

@@ -115,4 +115,21 @@ describeEachMode('Queue.addAndWait', (CONNECTION) => {
     await expect(pending).rejects.toThrow(/Queue is closing/);
     await flushQueue(cleanupClient, qName);
   }, 15000);
+
+  it('rejects in-flight addAndWait when the job is revoked', async () => {
+    const qName = `test-add-and-wait-revoke-${Date.now()}`;
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const jobId = `revoke-wait-${Date.now()}`;
+
+    const pending = expect(queue.addAndWait('slow', { value: 1 }, { waitTimeout: 10000, jobId })).rejects.toThrow(
+      /revoked/,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const status = await queue.revoke(jobId);
+    expect(status).toBe('revoked');
+    await pending;
+
+    await queue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
 });

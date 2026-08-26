@@ -94,6 +94,35 @@ describeEachMode('ServerlessPool - caching', (CONNECTION) => {
     expect(pPlain).not.toBe(pCreds);
     expect(pool.size).toBe(2);
   });
+
+  it('isolates IAM credential fingerprints and reuses identical IAM creds', () => {
+    const iamA = {
+      ...CONNECTION,
+      credentials: {
+        type: 'iam' as const,
+        serviceType: 'elasticache' as const,
+        region: 'us-east-1',
+        userId: 'user-a',
+        clusterName: 'cluster-a',
+      },
+    };
+    const iamB = {
+      ...CONNECTION,
+      credentials: {
+        type: 'iam' as const,
+        serviceType: 'elasticache' as const,
+        region: 'us-east-1',
+        userId: 'user-b',
+        clusterName: 'cluster-b',
+      },
+    };
+    const pA1 = pool.getProducer(Q1, { connection: iamA });
+    const pA2 = pool.getProducer(Q1, { connection: iamA });
+    const pB = pool.getProducer(Q1, { connection: iamB });
+    expect(pA1).toBe(pA2);
+    expect(pA1).not.toBe(pB);
+    expect(pool.size).toBe(2);
+  });
 });
 
 describeEachMode('ServerlessPool - closeAll', (CONNECTION) => {

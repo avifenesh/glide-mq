@@ -89,6 +89,25 @@ describeEachMode('Queue.add + getJob', (CONNECTION) => {
     const result = await queue.getJob('999999');
     expect(result).toBeNull();
   });
+
+  it('getJob survives corrupt data, returnvalue, and parent JSON', async () => {
+    const job = await queue.add('corrupt-hash', { ok: true });
+    const k = buildKeys(Q);
+    await cleanupClient.hset(k.job(job.id), {
+      data: 'not-json{{{',
+      returnvalue: 'not-json{{{',
+      parentIds: 'not-json{{{',
+      parentQueues: 'not-json{{{',
+    });
+
+    const fetched = await queue.getJob(job.id);
+    expect(fetched).not.toBeNull();
+    expect(fetched!.deserializationFailed).toBe(true);
+    expect(fetched!.data).toEqual({});
+    expect(fetched!.returnvalue).toBeUndefined();
+    expect(fetched!.parentIds).toBeUndefined();
+    expect(fetched!.parentQueues).toBeUndefined();
+  });
 });
 
 describeEachMode('Queue pause/resume', (CONNECTION) => {

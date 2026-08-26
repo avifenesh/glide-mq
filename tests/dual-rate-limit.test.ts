@@ -399,6 +399,7 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const completionTimes: number[] = [];
     // Use a 2s window for reliability
     const WINDOW_MS = 2000;
+    await alignToTokenWindowStart(WINDOW_MS);
 
     const worker = new WorkerImpl(
       Q,
@@ -437,6 +438,7 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const queue = new QueueImpl(Q, { connection: CONNECTION });
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
+    await alignToTokenWindowStart(WINDOW_MS);
 
     const worker = new WorkerImpl(
       Q,
@@ -472,6 +474,7 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const queue = new QueueImpl(Q, { connection: CONNECTION });
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
+    await alignToTokenWindowStart(WINDOW_MS);
 
     const worker = new WorkerImpl(
       Q,
@@ -507,6 +510,7 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const queue = new QueueImpl(Q, { connection: CONNECTION });
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
+    await alignToTokenWindowStart(WINDOW_MS);
 
     const worker = new WorkerImpl(
       Q,
@@ -576,6 +580,7 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const queue = new QueueImpl(Q, { connection: CONNECTION });
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
+    await alignToTokenWindowStart(WINDOW_MS);
 
     const worker = new WorkerImpl(
       Q,
@@ -611,6 +616,7 @@ describeEachMode('Dual-axis rate limiting (TPM)', (CONNECTION) => {
     const queue = new QueueImpl(Q, { connection: CONNECTION });
     const completionTimes: number[] = [];
     const WINDOW_MS = 2000;
+    await alignToTokenWindowStart(WINDOW_MS);
 
     const worker = new WorkerImpl(
       Q,

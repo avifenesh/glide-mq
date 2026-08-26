@@ -143,13 +143,12 @@ describe('HTTP Proxy', () => {
   });
 
   afterAll(async () => {
+    server.closeAllConnections?.();
     await proxyClose();
     await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
-    for (const name of queueNames) {
-      await flushQueue(cleanupClient, name);
-    }
+    await Promise.allSettled(queueNames.map((name) => flushQueue(cleanupClient, name)));
     await cleanupClient.close();
-  });
+  }, 30000);
 
   it('POST /queues/:name/jobs - adds a job and returns 201', async () => {
     const queueName = uniqueQueue('add');
@@ -187,6 +186,44 @@ describe('HTTP Proxy', () => {
     const body = await res.json();
     expect(body.id).toBe('custom-123');
     expect(body.name).toBe('process-payment');
+  });
+
+  it('POST /queues/:name/jobs accepts in-range lockDuration and rejects out of range', async () => {
+    const queueName = uniqueQueue('lockdur');
+    const ok = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'locked',
+        data: {},
+        opts: { lockDuration: 5000 },
+      }),
+    });
+    expect(ok.status).toBe(201);
+
+    const tooSmall = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'locked',
+        data: {},
+        opts: { lockDuration: 500 },
+      }),
+    });
+    expect(tooSmall.status).toBe(400);
+    expect((await tooSmall.json()).error).toContain('opts.lockDuration must be a finite number between');
+
+    const tooLarge = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'locked',
+        data: {},
+        opts: { lockDuration: 86_400_001 },
+      }),
+    });
+    expect(tooLarge.status).toBe(400);
+    expect((await tooLarge.json()).error).toContain('opts.lockDuration must be a finite number between');
   });
 
   it('POST /queues/:name/jobs - dedup returns 200 with skipped', async () => {
@@ -558,6 +595,122 @@ describe('HTTP Proxy', () => {
       await revokeQueue.close();
     }
   });
+
+  it('POST /queues/:name/jobs/:id/signal resumes a suspended job', async () => {
+    const queueName = uniqueQueue('signal');
+    const queue = new Queue(queueName, { connection: CONNECTION });
+    const worker = new Worker(
+      queueName,
+      async (job: any) => {
+        if (job.signals.length === 0) {
+          await job.suspend({ reason: 'awaiting-signal', timeout: 60000 });
+        }
+        return { resumed: true, signal: job.signals[0]?.name };
+      },
+      { blockTimeout: 500, concurrency: 1, connection: CONNECTION },
+    );
+
+    try {
+      await worker.waitUntilReady();
+      const job = await queue.add('needs-signal', { step: 1 });
+      await waitFor(async () => (await queue.getSuspendInfo(job.id)) !== null, 10000);
+
+      const missingName = await fetch(`${baseUrl}/queues/${queueName}/jobs/${job.id}/signal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: { ok: true } }),
+      });
+      expect(missingName.status).toBe(400);
+      expect((await missingName.json()).error).toContain('Missing required field: name');
+
+      const missingJob = await fetch(`${baseUrl}/queues/${queueName}/jobs/not-a-job/signal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'approve' }),
+      });
+      expect(missingJob.status).toBe(200);
+      expect((await missingJob.json()).resumed).toBe(false);
+
+      const completed = waitFor(async () => {
+        const fetched = await queue.getJob(job.id);
+        return (await fetched?.getState()) === 'completed';
+      }, 10000);
+
+      const signalRes = await fetch(`${baseUrl}/queues/${queueName}/jobs/${job.id}/signal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'approve', data: { by: 'proxy' } }),
+      });
+      expect(signalRes.status).toBe(200);
+      expect((await signalRes.json()).resumed).toBe(true);
+      await completed;
+
+      const fetched = await queue.getJob(job.id);
+      expect(fetched?.returnvalue).toEqual({ resumed: true, signal: 'approve' });
+    } finally {
+      await worker.close(true).catch(() => undefined);
+      await queue.close();
+    }
+  });
+
+  it('GET /queues/:name/jobs/:id/stream emits live chunks and resumes from Last-Event-ID', async () => {
+    const queueName = uniqueQueue('jstream');
+    const queue = new Queue(queueName, { connection: CONNECTION });
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const worker = new Worker(
+      queueName,
+      async (job: any) => {
+        await job.stream({ token: 'one' });
+        await secondGate;
+        await job.stream({ token: 'two' });
+        return 'done';
+      },
+      { blockTimeout: 500, concurrency: 1, connection: CONNECTION },
+    );
+    const ac = new AbortController();
+
+    try {
+      await worker.waitUntilReady();
+      const job = await queue.add('stream-live', {});
+      const streamUrl = `${baseUrl}/queues/${queueName}/jobs/${job.id}/stream`;
+
+      const liveRes = await fetch(streamUrl, { signal: ac.signal });
+      expect(liveRes.status).toBe(200);
+      const liveReader = createSseReader(liveRes);
+      const first = await liveReader.nextEvent(8000);
+      expect(first.data.token).toBe('one');
+      expect(first.id).toBeTruthy();
+
+      const resumeRes = await fetch(streamUrl, {
+        headers: { 'Last-Event-ID': first.id as string },
+        signal: ac.signal,
+      });
+      expect(resumeRes.status).toBe(200);
+      const resumeReader = createSseReader(resumeRes);
+      releaseSecond();
+      const second = await resumeReader.nextEvent(8000);
+      expect(second.data.token).toBe('two');
+
+      await waitFor(async () => (await job.getState()) === 'completed', 8000);
+
+      const lastIdRes = await fetch(`${streamUrl}?lastId=${encodeURIComponent(String(second.id))}`, {
+        signal: ac.signal,
+      });
+      expect(lastIdRes.status).toBe(200);
+      await lastIdRes.body?.cancel().catch(() => undefined);
+
+      await liveReader.close();
+      await resumeReader.close();
+    } finally {
+      ac.abort();
+      releaseSecond();
+      await worker.close(true).catch(() => undefined);
+      await queue.close();
+    }
+  }, 20000);
 
   it('drain, retry, and clean endpoints work', async () => {
     const drainQueueName = uniqueQueue('drain');
@@ -1094,6 +1247,24 @@ describe('HTTP Proxy', () => {
     expect(typeof body.queues).toBe('number');
   });
 
+  it('GET /broadcast/:name/events requires subscription', async () => {
+    const queueName = uniqueQueue('bcast-nosub');
+    const res = await fetch(`${baseUrl}/broadcast/${queueName}/events`);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain('subscription');
+  });
+
+  it('rejects malformed JSON', async () => {
+    const queueName = uniqueQueue('badjson');
+    const malformed = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{not json',
+    });
+    expect(malformed.status).toBe(400);
+    expect((await malformed.json()).error).toBe('Bad request');
+  });
+
   it('missing body fields return 400', async () => {
     const queueName = uniqueQueue('missing');
 
@@ -1331,8 +1502,7 @@ describe('HTTP Proxy - Payload Limits', () => {
       body: JSON.stringify({ name: 'big', data: { payload: largeData } }),
     });
 
-    // Express will return 413 Payload Too Large (express.json limit)
-    // or 500 if glide-mq rejects it - either is acceptable
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(413);
+    expect((await res.json()).error).toBe('Payload too large');
   });
 });
