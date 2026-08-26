@@ -46,10 +46,14 @@ describeEachMode('list-job worker methods', (CONNECTION) => {
     worker.on('failed', (_job: unknown, err: Error) => errors.push(err));
 
     try {
-      await waitFor(async () => {
-        const state = await job.getState();
-        return state === 'delayed' || state === 'failed';
-      }, 4000, 50);
+      await waitFor(
+        async () => {
+          const state = await job.getState();
+          return state === 'delayed' || state === 'failed';
+        },
+        4000,
+        50,
+      );
       expect(await job.getState()).toBe('delayed');
       expect(errors).toEqual([]);
     } finally {
@@ -75,10 +79,14 @@ describeEachMode('list-job worker methods', (CONNECTION) => {
     worker.on('failed', (_job: unknown, err: Error) => errors.push(err));
 
     try {
-      await waitFor(async () => {
-        const state = await job.getState();
-        return state === 'suspended' || state === 'failed';
-      }, 4000, 50);
+      await waitFor(
+        async () => {
+          const state = await job.getState();
+          return state === 'suspended' || state === 'failed';
+        },
+        4000,
+        50,
+      );
       expect(await job.getState()).toBe('suspended');
       expect(errors).toEqual([]);
     } finally {
