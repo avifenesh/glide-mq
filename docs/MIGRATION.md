@@ -1366,6 +1366,9 @@ await chord(
 );
 ```
 
+These helpers close an owned connection after submit (fire-and-forget).
+Pass `{ ...connection, client }` when you need the returned `Job` objects.
+
 ---
 
 ## NestJS

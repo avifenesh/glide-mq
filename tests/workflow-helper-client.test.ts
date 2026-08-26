@@ -25,18 +25,20 @@ describeEachMode('Workflow helper returned jobs', (CONNECTION) => {
 
   it('chain: returned job can getState after the helper returns', async () => {
     const Q = 'wf-helper-chain-' + Date.now();
-    const node = await chain(Q, [{ name: 'only', data: { v: 1 } }], CONNECTION);
+    const conn = { ...CONNECTION, client: cleanupClient };
+    const node = await chain(Q, [{ name: 'only', data: { v: 1 } }], conn);
 
     await expect(node.job.getState()).resolves.toBe('waiting');
     await node.close();
-    await expect(node.job.getState()).rejects.toThrow(/closed/);
+    await expect(node.job.getState()).resolves.toBe('waiting');
 
     await flushQueue(cleanupClient, Q);
   });
 
   it('group: returned jobs can getState after the helper returns', async () => {
     const Q = 'wf-helper-group-' + Date.now();
-    const node = await group(Q, [{ name: 'child', data: { v: 1 } }], CONNECTION);
+    const conn = { ...CONNECTION, client: cleanupClient };
+    const node = await group(Q, [{ name: 'child', data: { v: 1 } }], conn);
 
     await expect(node.job.getState()).resolves.toBe('waiting-children');
     await expect(node.children![0].job.getState()).resolves.toBe('waiting');
@@ -47,7 +49,8 @@ describeEachMode('Workflow helper returned jobs', (CONNECTION) => {
 
   it('chord: returned jobs can getState after the helper returns', async () => {
     const Q = 'wf-helper-chord-' + Date.now();
-    const node = await chord(Q, [{ name: 'member', data: { v: 1 } }], { name: 'callback', data: {} }, CONNECTION);
+    const conn = { ...CONNECTION, client: cleanupClient };
+    const node = await chord(Q, [{ name: 'member', data: { v: 1 } }], { name: 'callback', data: {} }, conn);
 
     await expect(node.job.getState()).resolves.toBe('waiting-children');
     await expect(node.children![0].job.getState()).resolves.toBe('waiting');
@@ -63,7 +66,7 @@ describeEachMode('Workflow helper returned jobs', (CONNECTION) => {
         { name: 'A', queueName: Q, data: { step: 'A' } },
         { name: 'B', queueName: Q, data: { step: 'B' }, deps: ['A'] },
       ],
-      CONNECTION,
+      { ...CONNECTION, client: cleanupClient },
     );
 
     await expect(jobs.get('A')!.getState()).resolves.toBe('waiting');
@@ -84,5 +87,13 @@ describeEachMode('Workflow helper returned jobs', (CONNECTION) => {
         CONNECTION,
       ),
     ).rejects.toThrow(/cycle/);
+  });
+
+  it('chain: fire-and-forget connection closes the owned client', async () => {
+    const Q = 'wf-helper-chain-owned-' + Date.now();
+    const node = await chain(Q, [{ name: 'only', data: { v: 1 } }], CONNECTION);
+    await expect(node.job.getState()).rejects.toThrow(/closed/);
+    await node.close();
+    await flushQueue(cleanupClient, Q);
   });
 });

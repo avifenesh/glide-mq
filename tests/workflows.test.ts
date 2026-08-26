@@ -1,6 +1,6 @@
 /**
- * Unit coverage for workflow helpers: keep the owned client on success,
- * close it on add failure. No Valkey required.
+ * Unit coverage for workflow helpers: auto-close owned clients,
+ * keep injected clients open. No Valkey required.
  *
  * Run: npx vitest run tests/workflows.test.ts
  */
@@ -31,9 +31,18 @@ describe('workflow helpers client ownership', () => {
     close.mockResolvedValue(undefined);
   });
 
-  it('chain attaches close() and does not close the producer on success', async () => {
+  it('chain auto-closes an owned producer on success', async () => {
     add.mockResolvedValue(NODE);
     const node = await chain('q', [{ name: 'only', data: {} }], CONN);
+    expect(close).toHaveBeenCalledTimes(1);
+    await node.close();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('chain keeps a shared client open so returned jobs stay usable', async () => {
+    add.mockResolvedValue(NODE);
+    const client = { close: vi.fn() } as any;
+    const node = await chain('q', [{ name: 'only', data: {} }], { ...CONN, client });
     expect(close).not.toHaveBeenCalled();
     await node.close();
     expect(close).toHaveBeenCalledTimes(1);
@@ -48,10 +57,12 @@ describe('workflow helpers client ownership', () => {
   it('group/chord/dag keep the client on success and close it on failure', async () => {
     add.mockResolvedValue(NODE);
     addDAG.mockResolvedValue(new Map());
+    const client = { close: vi.fn() } as any;
+    const shared = { ...CONN, client };
 
-    const g = await group('q', [{ name: 'c', data: {} }], CONN);
-    const c = await chord('q', [{ name: 'm', data: {} }], { name: 'cb', data: {} }, CONN);
-    const d = await dag([{ name: 'A', queueName: 'q', data: {} }], CONN);
+    const g = await group('q', [{ name: 'c', data: {} }], shared);
+    const c = await chord('q', [{ name: 'm', data: {} }], { name: 'cb', data: {} }, shared);
+    const d = await dag([{ name: 'A', queueName: 'q', data: {} }], shared);
     expect(close).not.toHaveBeenCalled();
     await g.close();
     await c.close();
