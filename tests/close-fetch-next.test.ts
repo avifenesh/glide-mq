@@ -10,9 +10,9 @@
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './helpers/fixture';
 
-const { Queue } = require('../dist/queue') as typeof import('../src/queue');
-const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+import { Queue } from '../src/queue';
+import { Worker } from '../src/worker';
+import { buildKeys } from '../src/utils';
 
 describeEachMode('close(false) vs completeAndFetchNext', (CONNECTION) => {
   let cleanupClient: any;
