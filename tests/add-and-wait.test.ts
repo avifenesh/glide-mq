@@ -1,5 +1,5 @@
 import { it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
@@ -124,7 +124,7 @@ describeEachMode('Queue.addAndWait', (CONNECTION) => {
     const pending = expect(queue.addAndWait('slow', { value: 1 }, { waitTimeout: 10000, jobId })).rejects.toThrow(
       /revoked/,
     );
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await waitFor(async () => (await queue.getJob(jobId)) !== null, 5000);
     const status = await queue.revoke(jobId);
     expect(status).toBe('revoked');
     await pending;

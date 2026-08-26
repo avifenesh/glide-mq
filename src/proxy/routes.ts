@@ -893,10 +893,16 @@ export function createRoutes(
   }
 
   async function getSharedBroadcastStream(name: string, subscription: string): Promise<SharedBroadcastStream> {
+    if (draining || closed) {
+      throw httpError(503, 'Proxy is shutting down');
+    }
     const cacheKey = `${name}\u0000${subscription}`;
     const cached = broadcastStreams.get(cacheKey);
     if (cached) {
       await cached.ready;
+      if (draining || closed) {
+        throw httpError(503, 'Proxy is shutting down');
+      }
       return cached;
     }
 
@@ -955,16 +961,25 @@ export function createRoutes(
       errorHandler(err, name);
     });
 
+    if (draining || closed) {
+      await worker.close(true).catch(() => undefined);
+      throw httpError(503, 'Proxy is shutting down');
+    }
+
     stream.worker = worker;
     stream.ready = worker.waitUntilReady();
     broadcastStreams.set(cacheKey, stream);
 
     try {
       await stream.ready;
+      if (draining || closed) {
+        await stream.close();
+        throw httpError(503, 'Proxy is shutting down');
+      }
       return stream;
     } catch (err) {
       broadcastStreams.delete(cacheKey);
-      await worker.close().catch(() => undefined);
+      await worker.close(true).catch(() => undefined);
       throw err;
     }
   }

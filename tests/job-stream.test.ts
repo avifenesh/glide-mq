@@ -493,6 +493,17 @@ describeEachMode('Job streaming integration', (CONNECTION) => {
       expect(first[0].fields.token).toBe('first');
 
       const pending = queue.readStream(job.id, { lastId: first[0].id, block: 3000, count: 10 });
+      let settled = false;
+      void pending.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(settled).toBe(false);
       releaseSecond();
       const next = await pending;
       expect(next.some((e: { fields: Record<string, string> }) => e.fields.token === 'second')).toBe(true);

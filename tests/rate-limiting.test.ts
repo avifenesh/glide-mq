@@ -719,6 +719,9 @@ describeEachMode('Rate limiting', (CONNECTION) => {
     expect(replaced).toBeLessThan(maxed);
     expect(Number(await cleanupClient.zscore(k.ratelimited, groupKey))).toBe(replaced);
 
+    const blockedUntil = await q.rateLimitGroup(groupKey, 2000, { extend: 'replace' });
+    expect(blockedUntil).toBeGreaterThan(replaced);
+
     await q.add('task', { seq: 1 }, { ordering: { key: groupKey } });
     await q.add('task', { seq: 2 }, { ordering: { key: groupKey } });
 
@@ -738,13 +741,17 @@ describeEachMode('Rate limiting', (CONNECTION) => {
       },
     );
     worker.on('error', () => {});
-    await worker.waitUntilReady();
-    await waitFor(() => finished.length === 2, 8000);
-    expect(finished.sort()).toEqual([1, 2]);
-
-    await worker.close(true);
-    await q.close();
-    await flushQueue(cleanupClient, Qg);
+    try {
+      await worker.waitUntilReady();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(finished).toEqual([]);
+      await waitFor(() => finished.length === 2, 10000);
+      expect(finished.sort()).toEqual([1, 2]);
+    } finally {
+      await worker.close(true);
+      await q.close();
+      await flushQueue(cleanupClient, Qg);
+    }
   }, 20000);
 
   it('job.rateLimitGroup without ordering.key fails the job', async () => {

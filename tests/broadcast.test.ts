@@ -321,7 +321,10 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
     await broadcast.publish('a', { n: 2 });
     await waitFor(() => completed === 2, 8000);
     expect(maxInFlight).toBe(1);
-    await Promise.race([drainedP, new Promise<void>((resolve) => setTimeout(resolve, 2000))]);
+    await Promise.race([
+      drainedP,
+      new Promise<void>((_, reject) => setTimeout(() => reject(new Error('Timed out waiting for drained')), 2000)),
+    ]);
 
     await worker.close(true);
     await broadcast.close();

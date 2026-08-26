@@ -593,7 +593,8 @@ describeEachMode('AI Metadata integration', (CONNECTION) => {
     expect(fetched).not.toBeNull();
 
     await fetched!.reportUsage({ cached: true });
-    expect(fetched!.usage?.cached).toBe(true);
+    const afterCached = await queue.getJob(added.id);
+    expect(afterCached?.usage?.cached).toBe(true);
 
     await Promise.all([
       fetched!.reportUsage({ tokens: { input: 1 } }),
@@ -601,7 +602,8 @@ describeEachMode('AI Metadata integration', (CONNECTION) => {
       fetched!.reportUsage({ tokens: { input: 3 } }),
     ]);
     const after = await queue.getJob(added.id);
-    expect(after?.usage?.tokens?.input).toBeGreaterThan(0);
+    // reportUsage last-write-wins (full hash replace), it does not sum concurrent token fields.
+    expect([1, 2, 3]).toContain(after?.usage?.tokens?.input);
 
     await expect(queue.getUsageSummary({ endTime: -1 })).rejects.toThrow('endTime');
     await expect(queue.getUsageSummary({ windowMs: 0 })).rejects.toThrow('windowMs');

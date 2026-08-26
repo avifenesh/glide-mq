@@ -866,23 +866,25 @@ describeEachMode('Job schedulers', (CONNECTION) => {
       );
       worker.on('error', () => {});
 
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('timeout waiting for scheduler jobs')), 8000);
-        const check = () => {
-          if (processed.length >= 2) {
-            clearTimeout(timeout);
-            resolve();
-          }
-        };
-        worker.on('completed', check);
-      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('timeout waiting for scheduler jobs')), 8000);
+          const check = () => {
+            if (processed.length >= 2) {
+              clearTimeout(timeout);
+              resolve();
+            }
+          };
+          worker.on('completed', check);
+        });
 
-      await worker.close(true);
-
-      const later = await localQueue.getJobScheduler('anchor');
-      expect(later).not.toBeNull();
-      expect(later!.nextRun).toBeGreaterThan(firstNext);
-      expect((later!.nextRun - firstNext) % every).toBe(0);
+        const later = await localQueue.getJobScheduler('anchor');
+        expect(later).not.toBeNull();
+        expect(later!.nextRun).toBeGreaterThan(firstNext);
+        expect((later!.nextRun - firstNext) % every).toBe(0);
+      } finally {
+        await worker.close(true);
+      }
     } finally {
       await localQueue.removeJobScheduler('anchor').catch(() => {});
       await localQueue.close();
