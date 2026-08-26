@@ -226,6 +226,37 @@ describe('HTTP Proxy', () => {
     expect((await tooLarge.json()).error).toContain('opts.lockDuration must be a finite number between');
   });
 
+  it('POST /flows rejects out-of-range lockDuration on nested flow and DAG opts', async () => {
+    const queueName = uniqueQueue('flow-lockdur');
+
+    const treeRes = await fetch(`${baseUrl}/flows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        flow: {
+          children: [{ data: {}, name: 'child', opts: { lockDuration: 500 }, queueName }],
+          data: {},
+          name: 'root',
+          queueName,
+        },
+      }),
+    });
+    expect(treeRes.status).toBe(400);
+    expect((await treeRes.json()).error).toContain('opts.lockDuration must be a finite number between');
+
+    const dagRes = await fetch(`${baseUrl}/flows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        dag: {
+          nodes: [{ data: {}, name: 'n1', opts: { lockDuration: 500 }, queueName }],
+        },
+      }),
+    });
+    expect(dagRes.status).toBe(400);
+    expect((await dagRes.json()).error).toContain('opts.lockDuration must be a finite number between');
+  });
+
   it('POST /queues/:name/jobs - dedup returns 200 with skipped', async () => {
     const queueName = uniqueQueue('dedup');
 

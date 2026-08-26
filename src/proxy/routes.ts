@@ -573,6 +573,25 @@ function validateJobOpts(
   return null;
 }
 
+function validateFlowJobOpts(flow: FlowJob, path = 'flow'): string | null {
+  const error = validateJobOpts(flow.opts as Record<string, unknown> | undefined, `${path}.`);
+  if (error) return error;
+  const children = flow.children ?? [];
+  for (let i = 0; i < children.length; i++) {
+    const childError = validateFlowJobOpts(children[i], `${path}.children[${i}]`);
+    if (childError) return childError;
+  }
+  return null;
+}
+
+function validateDagJobOpts(dag: DAGFlow): string | null {
+  for (let i = 0; i < dag.nodes.length; i++) {
+    const error = validateJobOpts(dag.nodes[i].opts as Record<string, unknown> | undefined, `dag.nodes[${i}].`);
+    if (error) return error;
+  }
+  return null;
+}
+
 /**
  * Create an Express Router with all proxy endpoints.
  *
@@ -1770,6 +1789,11 @@ export function createRoutes(
 
       if (!body || (!!body.flow && !!body.dag) || (!body.flow && !body.dag)) {
         throw httpError(400, 'Body must include exactly one of: flow, dag');
+      }
+
+      const nestedOptsError = body.flow ? validateFlowJobOpts(body.flow) : validateDagJobOpts(body.dag!);
+      if (nestedOptsError) {
+        throw httpError(400, nestedOptsError);
       }
 
       const producer = new FlowProducer({
