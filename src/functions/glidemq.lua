@@ -115,8 +115,12 @@ local function tbRefill(groupHashKey, g, now)
   local tbTokens = tonumber(g.tbTokens) or tbCapacity
   if tbTokens >= tbCapacity then
     -- Sitting at capacity must not accumulate idle time as later refill credit.
-    redis.call('HSET', groupHashKey, 'tbLastRefill', tostring(now))
-    g.tbLastRefill = tostring(now)
+    -- Keep lastRefill monotonic so a slow-clock replica cannot rewind it.
+    local tbLastRefill = tonumber(g.tbLastRefill) or 0
+    if now > tbLastRefill then
+      redis.call('HSET', groupHashKey, 'tbLastRefill', tostring(now))
+      g.tbLastRefill = tostring(now)
+    end
     return tbCapacity
   end
   local tbRefillRate = tonumber(g.tbRefillRate) or 0
