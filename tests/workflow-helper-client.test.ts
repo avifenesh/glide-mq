@@ -28,6 +28,8 @@ describeEachMode('Workflow helper returned jobs', (CONNECTION) => {
     const node = await chain(Q, [{ name: 'only', data: { v: 1 } }], CONNECTION);
 
     await expect(node.job.getState()).resolves.toBe('waiting');
+    await node.close();
+    await expect(node.job.getState()).rejects.toThrow(/closed/);
 
     await flushQueue(cleanupClient, Q);
   });
@@ -38,6 +40,7 @@ describeEachMode('Workflow helper returned jobs', (CONNECTION) => {
 
     await expect(node.job.getState()).resolves.toBe('waiting-children');
     await expect(node.children![0].job.getState()).resolves.toBe('waiting');
+    await node.close();
 
     await flushQueue(cleanupClient, Q);
   });
@@ -48,6 +51,7 @@ describeEachMode('Workflow helper returned jobs', (CONNECTION) => {
 
     await expect(node.job.getState()).resolves.toBe('waiting-children');
     await expect(node.children![0].job.getState()).resolves.toBe('waiting');
+    await node.close();
 
     await flushQueue(cleanupClient, Q);
   });
@@ -64,6 +68,7 @@ describeEachMode('Workflow helper returned jobs', (CONNECTION) => {
 
     await expect(jobs.get('A')!.getState()).resolves.toBe('waiting');
     await expect(jobs.get('B')!.getState()).resolves.toBe('waiting-children');
+    await jobs.close();
 
     await flushQueue(cleanupClient, Q);
   });

@@ -82,7 +82,7 @@ export { gracefulShutdown } from './graceful-shutdown';
 export type { GracefulShutdownHandle } from './graceful-shutdown';
 
 export { chain, group, chord, dag } from './workflows';
-export type { WorkflowJobDef } from './workflows';
+export type { WorkflowJobDef, ClosableWorkflow } from './workflows';
 
 export { validateDAG, topoSort, CycleError } from './dag-utils';
 

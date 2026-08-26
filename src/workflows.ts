@@ -8,21 +8,29 @@ export interface WorkflowJobDef {
   opts?: JobOptions;
 }
 
+/** Returned workflow tree or DAG map plus close() for the owned client. */
+export type ClosableWorkflow<T> = T & { close(): Promise<void> };
+
+function withOwnedFlow<T extends object>(flow: FlowProducer, value: T): ClosableWorkflow<T> {
+  const handle = value as ClosableWorkflow<T>;
+  handle.close = () => flow.close();
+  return handle;
+}
+
 /**
  * Chain: execute jobs sequentially. Each step becomes a child of the next,
  * so step N+1 only runs after step N completes. The last job in the array
  * runs first; the first job in the array runs last and is the top-level parent.
  *
  * Returns the JobNode tree. The top-level job (jobs[0]) is the root.
- * When the chain completes, the root's processor can call getChildrenValues()
- * to access results from children.
+ * Call close() when finished with the returned jobs to release the client.
  */
 export async function chain(
   queueName: string,
   jobs: WorkflowJobDef[],
   connection: ConnectionOptions,
   prefix?: string,
-): Promise<JobNode> {
+): Promise<ClosableWorkflow<JobNode>> {
   if (jobs.length === 0) {
     throw new Error('chain() requires at least one job');
   }
@@ -31,19 +39,17 @@ export async function chain(
 
   try {
     if (jobs.length === 1) {
-      // Single job - just add it directly
-      return await flow.add({
-        name: jobs[0].name,
-        queueName,
-        data: jobs[0].data,
-        opts: jobs[0].opts,
-      });
+      return withOwnedFlow(
+        flow,
+        await flow.add({
+          name: jobs[0].name,
+          queueName,
+          data: jobs[0].data,
+          opts: jobs[0].opts,
+        }),
+      );
     }
 
-    // Build a nested flow: jobs[0] is the root parent, jobs[1] is its child,
-    // jobs[1] is parent of jobs[2], etc.
-    // The deepest job (last in array) runs first.
-    // Build bottom-up: start from the last job and wrap each as parent.
     let flowJob: FlowJob = {
       name: jobs[jobs.length - 1].name,
       queueName,
@@ -61,7 +67,7 @@ export async function chain(
       };
     }
 
-    return await flow.add(flowJob);
+    return withOwnedFlow(flow, await flow.add(flowJob));
   } catch (err) {
     await flow.close();
     throw err;
@@ -75,13 +81,14 @@ export async function chain(
  * via getChildrenValues().
  *
  * Returns the JobNode tree. The root is the group parent.
+ * Call close() when finished with the returned jobs to release the client.
  */
 export async function group(
   queueName: string,
   jobs: WorkflowJobDef[],
   connection: ConnectionOptions,
   prefix?: string,
-): Promise<JobNode> {
+): Promise<ClosableWorkflow<JobNode>> {
   if (jobs.length === 0) {
     throw new Error('group() requires at least one job');
   }
@@ -96,12 +103,15 @@ export async function group(
       opts: j.opts,
     }));
 
-    return await flow.add({
-      name: '__group__',
-      queueName,
-      data: {},
-      children,
-    });
+    return withOwnedFlow(
+      flow,
+      await flow.add({
+        name: '__group__',
+        queueName,
+        data: {},
+        children,
+      }),
+    );
   } catch (err) {
     await flow.close();
     throw err;
@@ -113,6 +123,7 @@ export async function group(
  * with the results. The callback is the parent, the group members are children.
  *
  * Returns the JobNode tree. The root is the callback job.
+ * Call close() when finished with the returned jobs to release the client.
  */
 export async function chord(
   queueName: string,
@@ -120,7 +131,7 @@ export async function chord(
   callback: WorkflowJobDef,
   connection: ConnectionOptions,
   prefix?: string,
-): Promise<JobNode> {
+): Promise<ClosableWorkflow<JobNode>> {
   if (groupJobs.length === 0) {
     throw new Error('chord() requires at least one group job');
   }
@@ -135,13 +146,16 @@ export async function chord(
       opts: j.opts,
     }));
 
-    return await flow.add({
-      name: callback.name,
-      queueName,
-      data: callback.data,
-      opts: callback.opts,
-      children,
-    });
+    return withOwnedFlow(
+      flow,
+      await flow.add({
+        name: callback.name,
+        queueName,
+        data: callback.data,
+        opts: callback.opts,
+        children,
+      }),
+    );
   } catch (err) {
     await flow.close();
     throw err;
@@ -154,18 +168,13 @@ export async function chord(
  * topological order (leaves first).
  *
  * Returns a Map of node name to Job instance.
- *
- * Example - diamond dependency:
- * ```
- * const jobs = await dag([
- *   { name: 'A', queueName: 'q', data: {}, deps: [] },
- *   { name: 'B', queueName: 'q', data: {}, deps: ['A'] },
- *   { name: 'C', queueName: 'q', data: {}, deps: ['A'] },
- *   { name: 'D', queueName: 'q', data: {}, deps: ['B', 'C'] },
- * ], connection);
- * ```
+ * Call close() when finished with the returned jobs to release the client.
  */
-export async function dag(nodes: DAGNode[], connection: ConnectionOptions, prefix?: string): Promise<Map<string, Job>> {
+export async function dag(
+  nodes: DAGNode[],
+  connection: ConnectionOptions,
+  prefix?: string,
+): Promise<ClosableWorkflow<Map<string, Job>>> {
   if (nodes.length === 0) {
     throw new Error('dag() requires at least one node');
   }
@@ -173,7 +182,7 @@ export async function dag(nodes: DAGNode[], connection: ConnectionOptions, prefi
   const flow = new FlowProducer({ connection, prefix });
 
   try {
-    return await flow.addDAG({ nodes });
+    return withOwnedFlow(flow, await flow.addDAG({ nodes }));
   } catch (err) {
     await flow.close();
     throw err;
