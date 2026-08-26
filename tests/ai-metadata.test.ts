@@ -306,6 +306,28 @@ describe('Job.fromHash usage parsing', () => {
     expect(job.usage?.cached).toBe(true);
   });
 
+  it('parses usage when only cached is present', () => {
+    const hash: Record<string, string> = {
+      name: 'llm-call',
+      data: '{}',
+      opts: '{}',
+      'usage:cached': '1',
+    };
+
+    const job = Job.fromHash(mockClient as any, keys, '1', hash);
+    expect(job.usage).toEqual({
+      model: undefined,
+      provider: undefined,
+      tokens: undefined,
+      totalTokens: undefined,
+      costs: undefined,
+      totalCost: undefined,
+      costUnit: undefined,
+      latencyMs: undefined,
+      cached: true,
+    });
+  });
+
   it('returns undefined usage when no usage fields present', () => {
     const hash: Record<string, string> = {
       name: 'llm-call',
