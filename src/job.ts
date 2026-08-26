@@ -50,6 +50,19 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Parents SET members are `prefix:{queueName}:parentId` (Lua last-colon split).
+ * Also accept a plain `queueName:parentId` fallback.
+ */
+function parseParentsSetMember(member: string): { queue: string; id: string } | null {
+  const lastColon = member.lastIndexOf(':');
+  if (lastColon <= 0 || lastColon === member.length - 1) return null;
+  const id = member.substring(lastColon + 1);
+  const queuePart = member.substring(0, lastColon);
+  const tagged = /\{([^{}]+)\}$/.exec(queuePart);
+  return { queue: tagged ? tagged[1] : queuePart, id };
+}
+
 function parseStoredUsage(values: (unknown | null)[]): { bucketTs?: number; usage?: JobUsage } {
   const model = values[0] ? String(values[0]) : undefined;
   const provider = values[1] ? String(values[1]) : undefined;
@@ -609,15 +622,8 @@ export class Job<D = any, R = any> {
     const members = await this.client.smembers(parentsKey);
     if (members && members.size > 0) {
       for (const member of members) {
-        const memberStr = String(member);
-        // Format: "queue:parentId"
-        const sepIdx = memberStr.indexOf(':');
-        if (sepIdx !== -1) {
-          result.push({
-            queue: memberStr.substring(0, sepIdx),
-            id: memberStr.substring(sepIdx + 1),
-          });
-        }
+        const parsed = parseParentsSetMember(String(member));
+        if (parsed) result.push(parsed);
       }
       return result;
     }
