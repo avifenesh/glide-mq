@@ -73,8 +73,15 @@ describe('HTTP proxy shutdown', () => {
       const lateBroadcast = await fetch(`${baseUrl}/broadcast/${queueName}/events?subscription=shut-sub`);
       expect(lateBroadcast.status).toBe(503);
 
-      const lateFlow = await fetch(`${baseUrl}/flows/missing-id`);
+      const lateFlow = await fetch(`${baseUrl}/flows`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flow: { name: 'late', queueName, data: {} } }),
+      });
       expect(lateFlow.status).toBe(503);
+
+      const lateFlowGet = await fetch(`${baseUrl}/flows/missing-id`);
+      expect(lateFlowGet.status).toBe(503);
 
       const latePublish = await fetch(`${baseUrl}/broadcast/${queueName}`, {
         method: 'POST',

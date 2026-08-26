@@ -1763,6 +1763,9 @@ export function createRoutes(
 
   router.post('/flows', async (req: Request, res: Response) => {
     try {
+      if (draining || closed) {
+        throw httpError(503, 'Proxy is shutting down');
+      }
       const body = req.body as { budget?: BudgetOptions; dag?: DAGFlow; flow?: FlowJob } | undefined;
 
       if (!body || (!!body.flow && !!body.dag) || (!body.flow && !body.dag)) {
@@ -2136,6 +2139,9 @@ export function createRoutes(
       }
       const matcher = compileSubjectMatcher(parseCsvQuery(req, 'subjects'));
       const stream = await getSharedBroadcastStream(param(req, 'name'), subscription);
+      if (draining || closed || stream.closing) {
+        throw httpError(503, 'Proxy is shutting down');
+      }
 
       startSse(res);
       writeSseComment(res, 'connected');
