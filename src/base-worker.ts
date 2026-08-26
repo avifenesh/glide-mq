@@ -1562,6 +1562,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           undefined,
           this.broadcastMode ? true : undefined,
         );
+        if (isCompleteJobRevoked(notifications)) {
+          await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
+          return;
+        }
         fetchResult = { completed: currentJobId, next: false as const, parentNotifications: notifications };
       } else {
         fetchResult = await completeAndFetchNext(
@@ -2051,15 +2055,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   async close(force?: boolean): Promise<void> {
     if (this.closed) return;
     if (this.closePromise) return this.closePromise;
-    this.closePromise = this.performClose(force);
+    this.closing = true;
+    this.running = false;
+    this.closePromise = Promise.resolve().then(() => this.performClose(force));
+    this.emit('closing');
     return this.closePromise;
   }
 
   private async performClose(force?: boolean): Promise<void> {
-    this.closing = true;
-    this.running = false;
-    this.emit('closing');
-
     // Wait for init to complete so clients are available for cleanup
     await this.initPromise.catch(() => {});
 
