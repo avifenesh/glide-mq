@@ -2147,22 +2147,12 @@ export function createRoutes(
       closeConnection();
     }
 
-    const shutdown = async () => {
-      await Promise.allSettled(Array.from(queueInitMap.values()));
-      await Promise.allSettled(Array.from(broadcastInitMap.values()));
-      await Promise.allSettled(Array.from(broadcastStreams.values()).map((stream) => stream.close()));
-      await Promise.allSettled(Array.from(queueCache.values()).map((queue) => queue.close()));
-      await Promise.allSettled(Array.from(broadcastCache.values()).map((broadcast) => broadcast.close()));
-      if (sharedClientOwned && sharedClient) {
-        try {
-          sharedClient.close();
-        } catch {
-          /* ignore close errors on shutdown */
-        }
-      }
-    };
-
-    await Promise.race([shutdown(), new Promise<void>((resolve) => setTimeout(resolve, 3000))]);
+    const pendingInits = [...queueInitMap.values(), ...broadcastInitMap.values()];
+    const streams = [...broadcastStreams.values()];
+    const queues = [...queueCache.values()];
+    const broadcasts = [...broadcastCache.values()];
+    const client = sharedClient;
+    const clientOwned = sharedClientOwned;
 
     queueCache.clear();
     broadcastCache.clear();
@@ -2170,6 +2160,33 @@ export function createRoutes(
     sharedClient = null;
     sharedClientOwned = false;
     closed = true;
+
+    const shutdown = async () => {
+      await Promise.allSettled(pendingInits);
+      await Promise.allSettled(streams.map((stream) => stream.close()));
+      await Promise.allSettled(queues.map((queue) => queue.close()));
+      await Promise.allSettled(broadcasts.map((broadcast) => broadcast.close()));
+      if (clientOwned && client) {
+        try {
+          client.close();
+        } catch {
+          /* ignore close errors on shutdown */
+        }
+      }
+    };
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        shutdown(),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, 3000);
+          timer.unref();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   return { router, closeQueues };
