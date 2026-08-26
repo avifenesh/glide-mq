@@ -482,7 +482,7 @@ export class Job<D = any, R = any> {
    * This method must be called from inside a Worker processor.
    */
   async moveToWaitingChildren(): Promise<never> {
-    if (!this.entryId) {
+    if (this.entryId == null) {
       throw new Error('moveToWaitingChildren() can only be used while the job is active in a Worker');
     }
     this.moveToWaitingChildrenRequest = true;
@@ -508,7 +508,7 @@ export class Job<D = any, R = any> {
    * This method must be called from inside a Worker processor.
    */
   async suspend(opts?: SuspendOptions & { onResume?: (signals: SignalEntry[]) => Promise<any> }): Promise<never> {
-    if (!this.entryId) {
+    if (this.entryId == null) {
       throw new Error('suspend() can only be used while the job is active in a Worker');
     }
     this.suspendRequest = {
@@ -632,7 +632,7 @@ export class Job<D = any, R = any> {
         this.opts.backoff.jitter,
       );
     }
-    if (!this.entryId) {
+    if (this.entryId == null) {
       throw new GlideMQError('moveToFailed can only be called while job is active in a Worker');
     }
     const entryId = this.entryId;
@@ -724,7 +724,7 @@ export class Job<D = any, R = any> {
     if (!Number.isFinite(timestamp) || timestamp < 0) {
       throw new Error('Timestamp must be a finite Unix millisecond value >= 0');
     }
-    if (!this.entryId) {
+    if (this.entryId == null) {
       throw new Error('moveToDelayed() can only be used while the job is active in a Worker');
     }
 
