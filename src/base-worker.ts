@@ -390,18 +390,31 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         }
 
         if (this.commandClientOwned) {
-          // Close and recreate owned command client
-          if (this.commandClient) {
-            try {
-              this.commandClient.close();
-            } catch {
-              /* ignore */
+          const jobsInFlight = this.activePromises.size > 0;
+          if (!jobsInFlight) {
+            if (this.commandClient) {
+              try {
+                this.commandClient.close();
+              } catch {
+                /* ignore */
+              }
+              this.commandClient = null;
             }
-            this.commandClient = null;
+            const client = await createClient(this.opts.connection!);
+            await ensureFunctionLibrary(client, undefined, this.opts.connection!.clusterMode ?? false);
+            this.commandClient = client;
+          } else if (this.commandClient) {
+            // Keep the live command client so in-flight completions and
+            // heartbeats continue. Closing it here freezes lastActive and
+            // lets stalled reclaim double-run the processor.
+            try {
+              await this.commandClient.ping();
+              await ensureFunctionLibrary(this.commandClient, undefined, this.opts.connection!.clusterMode ?? false);
+            } catch (err) {
+              this.emit('error', new ConnectionError('Command client is unreachable while jobs are in flight.'));
+              throw err;
+            }
           }
-          const client = await createClient(this.opts.connection!);
-          await ensureFunctionLibrary(client, undefined, this.opts.connection!.clusterMode ?? false);
-          this.commandClient = client;
         } else {
           // Injected command client - verify liveness and re-ensure library
           try {
