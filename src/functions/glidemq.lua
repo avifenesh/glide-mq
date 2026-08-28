@@ -118,24 +118,26 @@ local function tbRefill(groupHashKey, g, now)
   local tbCapacity = tonumber(g.tbCapacity) or 0
   if tbCapacity <= 0 then return 0 end
   local tbTokens = tonumber(g.tbTokens) or tbCapacity
+  local refillNow = redisNowMs()
   if tbTokens >= tbCapacity then
     -- Sitting at capacity must not accumulate idle time as later refill credit.
-    -- Keep lastRefill monotonic so a slow-clock replica cannot rewind it.
-    -- Cap the stamp to server time so an ahead worker cannot stall refill.
+    -- Keep the refill timeline entirely in Redis server-clock domain.
     local tbLastRefill = tonumber(g.tbLastRefill) or 0
-    local stamp = now
-    local serverNow = redisNowMs()
-    if serverNow < stamp then stamp = serverNow end
-    if stamp > tbLastRefill then
-      redis.call('HSET', groupHashKey, 'tbLastRefill', tostring(stamp))
-      g.tbLastRefill = tostring(stamp)
+    if refillNow > tbLastRefill then
+      redis.call('HSET', groupHashKey, 'tbLastRefill', tostring(refillNow))
+      g.tbLastRefill = tostring(refillNow)
     end
     return tbCapacity
   end
   local tbRefillRate = tonumber(g.tbRefillRate) or 0
-  local tbLastRefill = tonumber(g.tbLastRefill) or now
+  local tbLastRefill = tonumber(g.tbLastRefill) or refillNow
+  if tbLastRefill > refillNow then
+    -- Normalize timestamps written by older caller-clock implementations.
+    tbLastRefill = refillNow
+    redis.call('HSET', groupHashKey, 'tbLastRefill', tostring(refillNow))
+  end
   local tbRefillRemainder = tonumber(g.tbRefillRemainder) or 0
-  local elapsed = now - tbLastRefill
+  local elapsed = refillNow - tbLastRefill
   if elapsed <= 0 or tbRefillRate <= 0 then return tbTokens end
   -- Cap elapsed to prevent overflow in long-idle buckets
   local maxElapsed = math.ceil(tbCapacity * 1000 / tbRefillRate)
@@ -146,7 +148,7 @@ local function tbRefill(groupHashKey, g, now)
   local newTokens = math.min(tbCapacity, tbTokens + added)
   redis.call('HSET', groupHashKey,
     'tbTokens', tostring(newTokens),
-    'tbLastRefill', tostring(now),
+    'tbLastRefill', tostring(refillNow),
     'tbRefillRemainder', tostring(newRemainder))
   return newTokens
 end
