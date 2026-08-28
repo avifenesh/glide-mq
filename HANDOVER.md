@@ -8,7 +8,7 @@
 - **Revoke/timeout safety**: revoked active jobs cannot complete; each batch job owns its abort signal, and timeouts remain retryable.
 - **Coverage CI**: fuzzer exclusion is quoted and integration/Lua uploads use Codecov OIDC (`id-token: write`, `use_oidc: true`).
 - **Pause sweep**: `Queue.pause()` immediately expires suspended jobs whose timeouts elapsed.
-- **Version**: 0.15.4 tagged and released on GitHub; npm publish is pending npm auth.
+- **Version**: 0.15.5 release candidate on `release/v0.15.5`; GitHub tag and npm publish pending merge.
 - **CI**: green across all six fork/upstream stack PRs after the 2026-08-22 packaging update.
 - **Ordered-group recovery**: retained rate-limit slots are tracked per job and released on terminal paths; oversized token-bucket heads are cleaned iteratively through bounded sweeps.
 - **Local branches**: `refactor/extract-lua-library` -> `ci/ts-coverage` -> `ci/lua-coverage`.
@@ -22,6 +22,8 @@
 ## What Was Done (0.15.x series since 0.14.0)
 
 ### Released
+
+- **0.15.5**: queue correctness and lifecycle fixes accumulated since 0.15.4, including pause/revoke/reclaim behavior, cross-queue parent completion, reconnect client lifetime, list-job resume semantics, token-bucket clock consistency, partial test-worker batch flushing, and empty-dependency waiting-children handling. `LIBRARY_VERSION` 122.
 
 - **0.15.0** (#192, #205): HTTP proxy parity expansion (queue events SSE, per-job lifecycle SSE, `jobs/wait`, workers, metrics, scheduler CRUD, rolling usage summary, broadcast publish/SSE, DLQ inspection/replay, suspended-job inspection, revoke, queue global rate-limit HTTP management). Flow HTTP API: `POST /flows`, `GET /flows/:id`, `GET /flows/:id/tree`, `DELETE /flows/:id` for tree flows and DAGs. `queue.getUsageSummary()` plus `/usage/summary`.
 - **0.15.1** (#206): debounce + ordering.key deadlock fix via lightweight skip markers. `LIBRARY_VERSION` 81.

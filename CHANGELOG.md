@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.15.5] - 2026-08-29
+
 ### Fixed
 
 - **Reconnect rebuilt Scheduler without lockDuration**: after a connection error, stall reclaim fell back to 30s while heartbeats still used the worker lock, so healthy long jobs were redispatched.
@@ -19,6 +23,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Job removal and revocation scan the FIFO stream only when the waiting job was absent from both list-backed sources, avoiding unnecessary O(stream-length) work without orphaning stream entries whose legacy source fields are stale.
 - **Queue pause now expires suspended jobs**: `Queue.pause()` immediately sweeps suspended jobs whose timeouts have elapsed, so pausing does not leave expired human-in-the-loop jobs pending until the background sweep.
 - **Nested and DAG cross-queue parents could remain in `waiting-children`**: parent wiring now avoids cross-slot FCALLs, preserves nested parent hash fields, retries idempotent notifications from the child slot, reconciles removed children without recreating hashes, and ignores stale notifications for deleted parents. Completion returns newly queued cross-queue edges for eager delivery while deduplicating overlapping tree and DAG metadata.
+- Reconnected workers and workflow helpers retain live clients for the lifetime of returned jobs without leaking helper-owned connections.
+- List-job delay, suspend, resume, discard, explicit failure, and unrecoverable-error transitions now preserve terminal intent and the correct claim identity across chained resumes.
+- Token-bucket refill uses the Redis server clock consistently and normalizes legacy future timestamps, preventing idle buckets from remaining underfilled after caller-clock skew.
+- `TestWorker` partial batches flush after their timeout even when the batch never reaches its configured size.
+- Empty dependency sets no longer leave jobs stranded in `waiting-children`.
 
 ---
 
