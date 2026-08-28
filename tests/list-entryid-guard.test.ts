@@ -246,7 +246,7 @@ describeEachMode('list-job worker methods', (CONNECTION) => {
         }
         return 'completed';
       },
-      { connection: CONNECTION, concurrency: 1, blockTimeout: 50, stalledInterval: 60_000 },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 50, stalledInterval: 100, lockDuration: 100 },
     );
     worker.on('error', () => {});
 
@@ -254,6 +254,7 @@ describeEachMode('list-job worker methods', (CONNECTION) => {
       await waitFor(async () => (await queue.getSuspendInfo(job.id)) !== null, 4000, 50);
       await queue.signal(job.id, 'resume');
       await waitFor(async () => ['failed', 'completed'].includes(await job.getState()), 4000, 50);
+      await new Promise((resolve) => setTimeout(resolve, 500));
       expect(await job.getState()).toBe('failed');
     } finally {
       await worker.close(true);

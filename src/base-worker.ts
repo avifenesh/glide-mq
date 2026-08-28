@@ -1373,6 +1373,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.activeAbortControllers.set(currentJobId, ac);
         job.abortSignal = ac.signal;
         continuation.job.abortSignal = ac.signal;
+        continuation.job.entryId = currentEntryId;
         this.startHeartbeat(currentJobId, job.opts.lockDuration);
         try {
           processResult = await continuation.onResume(job.signals);
