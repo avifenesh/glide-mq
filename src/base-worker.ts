@@ -1383,6 +1383,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           this.stopHeartbeat(currentJobId);
           this.activeAbortControllers.delete(currentJobId);
         }
+        if (continuation.job.movedToFailed) {
+          job.movedToFailed = true;
+          job.movedToFailedResult = continuation.job.movedToFailedResult;
+          job.failedReason = continuation.job.failedReason;
+        }
         aborted = ac.signal.aborted;
       } else {
         this.suspendContinuations.delete(currentJobId);
