@@ -308,6 +308,9 @@ await chain(
   ],
   connection,
 );
+
+// Pass a shared `client` when you need the returned jobs (getState, waitUntilFinished).
+// Without it, chain/group/chord/dag close their owned connection after submit.
 ```
 
 - The **last** element in the array is the leaf — it runs first.

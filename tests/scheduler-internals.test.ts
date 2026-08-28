@@ -5,6 +5,7 @@ import { buildKeys } from '../src/utils';
 describe('Scheduler internals', () => {
   it('abandons scheduler writes when the tick lock is lost before commit', async () => {
     const exec = vi.fn(async () => undefined);
+    const dueAt = Date.now() - 1_000;
     const client = {
       fcall: vi.fn(async (name: string) => {
         if (name === 'glidemq_tryLock') return 1;
@@ -17,7 +18,7 @@ describe('Scheduler internals', () => {
           field: 'due-scheduler',
           value: JSON.stringify({
             every: 1_000,
-            nextRun: Date.now() - 1,
+            nextRun: dueAt,
             template: { name: 'tick', data: { ok: true } },
           }),
         },

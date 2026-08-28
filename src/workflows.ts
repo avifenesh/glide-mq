@@ -1,5 +1,5 @@
 import { FlowProducer, JobNode } from './flow-producer';
-import type { ConnectionOptions, FlowJob, JobOptions, DAGNode } from './types';
+import type { Client, ConnectionOptions, FlowJob, JobOptions, DAGNode } from './types';
 import type { Job } from './job';
 
 export interface WorkflowJobDef {
@@ -8,31 +8,62 @@ export interface WorkflowJobDef {
   opts?: JobOptions;
 }
 
+/** Connection for helpers. Pass `client` to keep returned jobs usable. */
+export type WorkflowConnection = ConnectionOptions & { client?: Client };
+
+/** Returned workflow tree or DAG map plus close() for an injected client. */
+export type ClosableWorkflow<T> = T & { close(): Promise<void> };
+
+function withOwnedFlow<T extends object>(flow: FlowProducer, value: T): ClosableWorkflow<T> {
+  const handle = value as ClosableWorkflow<T>;
+  handle.close = () => flow.close();
+  return handle;
+}
+
+async function withFlow<T extends object>(
+  connection: WorkflowConnection,
+  prefix: string | undefined,
+  run: (flow: FlowProducer) => Promise<T>,
+): Promise<ClosableWorkflow<T>> {
+  const { client, ...conn } = connection;
+  const flow = new FlowProducer({ connection: conn, client, prefix });
+  const owned = !client;
+  try {
+    const value = await run(flow);
+    if (owned) {
+      await flow.close();
+      (value as ClosableWorkflow<T>).close = async () => {};
+      return value as ClosableWorkflow<T>;
+    }
+    return withOwnedFlow(flow, value);
+  } catch (err) {
+    await flow.close();
+    throw err;
+  }
+}
+
 /**
  * Chain: execute jobs sequentially. Each step becomes a child of the next,
  * so step N+1 only runs after step N completes. The last job in the array
  * runs first; the first job in the array runs last and is the top-level parent.
  *
  * Returns the JobNode tree. The top-level job (jobs[0]) is the root.
- * When the chain completes, the root's processor can call getChildrenValues()
- * to access results from children.
+ * Pass `{ client }` on the connection to keep returned jobs usable; otherwise
+ * the owned client is closed after submit. Call close() when using a shared client.
  */
 export async function chain(
   queueName: string,
   jobs: WorkflowJobDef[],
-  connection: ConnectionOptions,
+  connection: WorkflowConnection,
   prefix?: string,
-): Promise<JobNode> {
+): Promise<ClosableWorkflow<JobNode>> {
   if (jobs.length === 0) {
     throw new Error('chain() requires at least one job');
   }
 
-  const flow = new FlowProducer({ connection, prefix });
-
-  try {
+  return withFlow(connection, prefix, async (flow) => {
     if (jobs.length === 1) {
-      // Single job - just add it directly
-      return await flow.add({
+      return flow.add({
         name: jobs[0].name,
         queueName,
         data: jobs[0].data,
@@ -40,10 +71,6 @@ export async function chain(
       });
     }
 
-    // Build a nested flow: jobs[0] is the root parent, jobs[1] is its child,
-    // jobs[1] is parent of jobs[2], etc.
-    // The deepest job (last in array) runs first.
-    // Build bottom-up: start from the last job and wrap each as parent.
     let flowJob: FlowJob = {
       name: jobs[jobs.length - 1].name,
       queueName,
@@ -61,10 +88,8 @@ export async function chain(
       };
     }
 
-    return await flow.add(flowJob);
-  } finally {
-    await flow.close();
-  }
+    return flow.add(flowJob);
+  });
 }
 
 /**
@@ -74,20 +99,19 @@ export async function chain(
  * via getChildrenValues().
  *
  * Returns the JobNode tree. The root is the group parent.
+ * Pass `{ client }` on the connection to keep returned jobs usable.
  */
 export async function group(
   queueName: string,
   jobs: WorkflowJobDef[],
-  connection: ConnectionOptions,
+  connection: WorkflowConnection,
   prefix?: string,
-): Promise<JobNode> {
+): Promise<ClosableWorkflow<JobNode>> {
   if (jobs.length === 0) {
     throw new Error('group() requires at least one job');
   }
 
-  const flow = new FlowProducer({ connection, prefix });
-
-  try {
+  return withFlow(connection, prefix, (flow) => {
     const children: FlowJob[] = jobs.map((j) => ({
       name: j.name,
       queueName,
@@ -95,15 +119,13 @@ export async function group(
       opts: j.opts,
     }));
 
-    return await flow.add({
+    return flow.add({
       name: '__group__',
       queueName,
       data: {},
       children,
     });
-  } finally {
-    await flow.close();
-  }
+  });
 }
 
 /**
@@ -111,21 +133,20 @@ export async function group(
  * with the results. The callback is the parent, the group members are children.
  *
  * Returns the JobNode tree. The root is the callback job.
+ * Pass `{ client }` on the connection to keep returned jobs usable.
  */
 export async function chord(
   queueName: string,
   groupJobs: WorkflowJobDef[],
   callback: WorkflowJobDef,
-  connection: ConnectionOptions,
+  connection: WorkflowConnection,
   prefix?: string,
-): Promise<JobNode> {
+): Promise<ClosableWorkflow<JobNode>> {
   if (groupJobs.length === 0) {
     throw new Error('chord() requires at least one group job');
   }
 
-  const flow = new FlowProducer({ connection, prefix });
-
-  try {
+  return withFlow(connection, prefix, (flow) => {
     const children: FlowJob[] = groupJobs.map((j) => ({
       name: j.name,
       queueName,
@@ -133,16 +154,14 @@ export async function chord(
       opts: j.opts,
     }));
 
-    return await flow.add({
+    return flow.add({
       name: callback.name,
       queueName,
       data: callback.data,
       opts: callback.opts,
       children,
     });
-  } finally {
-    await flow.close();
-  }
+  });
 }
 
 /**
@@ -151,27 +170,16 @@ export async function chord(
  * topological order (leaves first).
  *
  * Returns a Map of node name to Job instance.
- *
- * Example - diamond dependency:
- * ```
- * const jobs = await dag([
- *   { name: 'A', queueName: 'q', data: {}, deps: [] },
- *   { name: 'B', queueName: 'q', data: {}, deps: ['A'] },
- *   { name: 'C', queueName: 'q', data: {}, deps: ['A'] },
- *   { name: 'D', queueName: 'q', data: {}, deps: ['B', 'C'] },
- * ], connection);
- * ```
+ * Pass `{ client }` on the connection to keep returned jobs usable.
  */
-export async function dag(nodes: DAGNode[], connection: ConnectionOptions, prefix?: string): Promise<Map<string, Job>> {
+export async function dag(
+  nodes: DAGNode[],
+  connection: WorkflowConnection,
+  prefix?: string,
+): Promise<ClosableWorkflow<Map<string, Job>>> {
   if (nodes.length === 0) {
     throw new Error('dag() requires at least one node');
   }
 
-  const flow = new FlowProducer({ connection, prefix });
-
-  try {
-    return await flow.addDAG({ nodes });
-  } finally {
-    await flow.close();
-  }
+  return withFlow(connection, prefix, (flow) => flow.addDAG({ nodes }));
 }

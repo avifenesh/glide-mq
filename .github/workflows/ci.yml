@@ -72,6 +72,7 @@ jobs:
           tests/worker.test.ts
           tests/library-source.test.ts
           tests/lua-instrument.test.ts
+          tests/workflows.test.ts
 
   test-integration:
     needs: quality
