@@ -374,6 +374,46 @@ describeEachMode('list-job worker methods', (CONNECTION) => {
     }
   }, 15000);
 
+  it('preserves explicit failure from a second chained onResume', async () => {
+    const Q = uniqueQueue('list-entryid-resume-chain-fail');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const job = await queue.add('task', { n: 1 }, { priority: 1 });
+    let captured: any;
+
+    const worker = new Worker(
+      Q,
+      async (active) => {
+        if (active.signals.length === 0) {
+          captured = active;
+          await active.suspend({
+            onResume: async () =>
+              captured.suspend({
+                reason: 'second',
+                onResume: async () => {
+                  await captured.moveToFailed(new Error('second-resume-failed'));
+                },
+              }),
+          });
+        }
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 50, stalledInterval: 100, lockDuration: 100 },
+    );
+    worker.on('error', () => {});
+
+    try {
+      await waitFor(async () => (await queue.getSuspendInfo(job.id)) !== null, 4000, 50);
+      await queue.signal(job.id, 'first');
+      await waitFor(async () => (await queue.getSuspendInfo(job.id))?.reason === 'second', 4000, 50);
+      await queue.signal(job.id, 'second');
+      await waitFor(async () => ['failed', 'completed'].includes(await job.getState()), 4000, 50);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(await job.getState()).toBe('failed');
+    } finally {
+      await worker.close(true);
+      await queue.close();
+    }
+  }, 15000);
+
   it('does not complete a batch job that already called moveToFailed', async () => {
     const Q = uniqueQueue('list-entryid-fail-batch');
     const queue = new Queue(Q, { connection: CONNECTION });

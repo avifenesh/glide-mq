@@ -1365,9 +1365,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       let processResult: R | undefined;
       let processError: Error | undefined;
       let aborted: boolean;
+      let continuationJob = job;
       const hasContinuation = job.signals.length > 0 && this.suspendContinuations.has(currentJobId);
       if (hasContinuation) {
         const continuation = this.suspendContinuations.get(currentJobId)!;
+        continuationJob = continuation.job;
         this.suspendContinuations.delete(currentJobId);
         const ac = new AbortController();
         this.activeAbortControllers.set(currentJobId, ac);
@@ -1474,7 +1476,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         if (!this.commandClient) return;
         try {
           if (suspendReq?.onResume) {
-            this.suspendContinuations.set(currentJobId, { job, onResume: suspendReq.onResume });
+            this.suspendContinuations.set(currentJobId, { job: continuationJob, onResume: suspendReq.onResume });
           }
           const suspResult = await suspendJob(
             this.commandClient,
