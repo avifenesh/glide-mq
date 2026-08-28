@@ -10,7 +10,7 @@ import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './he
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { BatchError } = require('../dist/errors') as typeof import('../src/errors');
+const { BatchError, UnrecoverableError } = require('../dist/errors') as typeof import('../src/errors');
 
 const DELAY_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/move-to-delayed-future.js');
 
@@ -153,6 +153,45 @@ describeEachMode('list-job worker methods', (CONNECTION) => {
       await waitFor(async () => (await job.getState()) === 'failed', 4000, 50);
       expect(await job.getState()).toBe('failed');
       expect(failed.map((e) => e.message)).toEqual(['nope']);
+    } finally {
+      await worker.close(true);
+      await queue.close();
+    }
+  }, 15000);
+
+  it('does not retry explicit discarded or unrecoverable failures', async () => {
+    const Q = uniqueQueue('list-entryid-no-retry');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const [discarded, unrecoverable] = await queue.addBulk([
+      { name: 'task', data: { mode: 'discard' }, opts: { priority: 1, attempts: 3, backoff: 10 } },
+      { name: 'task', data: { mode: 'unrecoverable' }, opts: { priority: 1, attempts: 3, backoff: 10 } },
+    ]);
+    const calls = new Map<string, number>();
+
+    const worker = new Worker(
+      Q,
+      async (active) => {
+        calls.set(active.id, (calls.get(active.id) ?? 0) + 1);
+        if (active.data.mode === 'discard') {
+          active.discard();
+          await active.moveToFailed(new Error('discarded'));
+        } else {
+          await active.moveToFailed(new UnrecoverableError('unrecoverable'));
+        }
+      },
+      { connection: CONNECTION, concurrency: 2, blockTimeout: 50, stalledInterval: 100, lockDuration: 100 },
+    );
+    worker.on('error', () => {});
+
+    try {
+      await waitFor(
+        async () => (await discarded.getState()) === 'failed' && (await unrecoverable.getState()) === 'failed',
+        4000,
+        50,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(calls.get(discarded.id)).toBe(1);
+      expect(calls.get(unrecoverable.id)).toBe(1);
     } finally {
       await worker.close(true);
       await queue.close();
