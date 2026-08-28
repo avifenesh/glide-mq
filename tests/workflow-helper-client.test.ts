@@ -76,7 +76,7 @@ describeEachMode('Workflow helper returned jobs', (CONNECTION) => {
     await flushQueue(cleanupClient, Q);
   });
 
-  it('dag: closes the owned client when addDAG fails', async () => {
+  it('dag: rejects a cyclic graph', async () => {
     const Q = 'wf-helper-dag-cycle-' + Date.now();
     await expect(
       dag(
