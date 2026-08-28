@@ -88,7 +88,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 110: dedupe overlapping tree and DAG parent notifications per completion.
 // Version 119: integrate the reviewed correctness queue and preserve Queue.pause in the reservation-aware list pop.
 // Version 120: removeJob acknowledges a claimed FIFO entry in every stream consumer group before deleting it.
-export const LIBRARY_VERSION = '120';
+// Version 121: tbRefill uses Redis server time and stamps capacity so idle-full time is not later granted as extra tokens.
+export const LIBRARY_VERSION = '121';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
