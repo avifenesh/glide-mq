@@ -5,7 +5,14 @@ import type { JobOptions, JobUsage, Client, Serializer, SuspendOptions, SignalEn
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
 import { changeDelay, changePriority, failJob, promoteJob, removeJob, tryLock, unlock } from './functions/index';
-import { GlideMQError, DelayedError, WaitingChildrenError, GroupRateLimitError, SuspendError } from './errors';
+import {
+  GlideMQError,
+  DelayedError,
+  WaitingChildrenError,
+  GroupRateLimitError,
+  SuspendError,
+  UnrecoverableError,
+} from './errors';
 import type { GroupRateLimitOptions } from './errors';
 import {
   calculateBackoff,
@@ -197,6 +204,22 @@ export class Job<D = any, R = any> {
    * Set by calling `discard()` inside the processor.
    */
   discarded = false;
+
+  /**
+   * When true, moveToFailed already transitioned the job. The worker must not
+   * completeAndFetchNext / completeJob afterward.
+   * @internal
+   */
+  movedToFailed = false;
+
+  /** @internal `failed` or `retrying` from the moveToFailed Lua call. */
+  movedToFailedResult?: string;
+
+  /** @internal Set while a worker is processing so failJob can pass group/broadcast. */
+  failContext?: { group: string; broadcastMode?: boolean };
+
+  /** @internal Worker already ran DLQ / failed-event / scheduler bookkeeping. */
+  movedToFailedFinalized = false;
 
   /** @internal Request captured by moveToDelayed() while inside the worker. */
   moveToDelayedRequest?: { delayedUntil: number; serializedData?: string; nextData?: D };
@@ -482,7 +505,7 @@ export class Job<D = any, R = any> {
    * This method must be called from inside a Worker processor.
    */
   async moveToWaitingChildren(): Promise<never> {
-    if (!this.entryId) {
+    if (this.entryId == null) {
       throw new Error('moveToWaitingChildren() can only be used while the job is active in a Worker');
     }
     this.moveToWaitingChildrenRequest = true;
@@ -508,7 +531,7 @@ export class Job<D = any, R = any> {
    * This method must be called from inside a Worker processor.
    */
   async suspend(opts?: SuspendOptions & { onResume?: (signals: SignalEntry[]) => Promise<any> }): Promise<never> {
-    if (!this.entryId) {
+    if (this.entryId == null) {
       throw new Error('suspend() can only be used while the job is active in a Worker');
     }
     this.suspendRequest = {
@@ -622,7 +645,7 @@ export class Job<D = any, R = any> {
    * Requires entryId to be set (set by Worker when processing).
    */
   async moveToFailed(err: Error): Promise<void> {
-    const maxAttempts = this.opts.attempts ?? 0;
+    const maxAttempts = this.discarded || err instanceof UnrecoverableError ? 0 : (this.opts.attempts ?? 0);
     let backoffDelay = 0;
     if (this.opts.backoff) {
       backoffDelay = calculateBackoff(
@@ -632,7 +655,7 @@ export class Job<D = any, R = any> {
         this.opts.backoff.jitter,
       );
     }
-    if (!this.entryId) {
+    if (this.entryId == null) {
       throw new GlideMQError('moveToFailed can only be called while job is active in a Worker');
     }
     const entryId = this.entryId;
@@ -645,8 +668,13 @@ export class Job<D = any, R = any> {
       Date.now(),
       maxAttempts,
       backoffDelay,
+      this.failContext?.group,
+      this.opts.removeOnFail,
+      this.failContext?.broadcastMode,
     );
     this.failedReason = err.message;
+    this.movedToFailed = true;
+    this.movedToFailedResult = result;
     if (result === 'retrying') {
       this.attemptsMade += 1;
     }
@@ -724,7 +752,7 @@ export class Job<D = any, R = any> {
     if (!Number.isFinite(timestamp) || timestamp < 0) {
       throw new Error('Timestamp must be a finite Unix millisecond value >= 0');
     }
-    if (!this.entryId) {
+    if (this.entryId == null) {
       throw new Error('moveToDelayed() can only be used while the job is active in a Worker');
     }
 

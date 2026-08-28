@@ -574,6 +574,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       const hash = moveResult as Record<string, string>;
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, entry.jobId, hash, this.serializer);
       job.entryId = entry.entryId;
+      job.failContext = { group: this.consumerGroup, broadcastMode: this.broadcastMode ? true : undefined };
 
       // Check ordering - if not ready, defer and skip
       const orderingReady = await this.isOrderingTurn(job);
@@ -701,6 +702,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         const len = Array.isArray(results) ? results.length : 'non-array';
         const err = new Error(`Batch processor returned ${len} results but batch had ${batch.length} jobs`);
         for (const entry of batch) {
+          if (await this.skipMovedToFailed(entry.job)) continue;
           await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
         }
         return;
@@ -709,6 +711,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       for (let i = 0; i < batch.length; i++) {
         const entry = batch[i];
         const result = results[i];
+        if (await this.skipMovedToFailed(entry.job)) continue;
 
         let returnvalue: string;
         try {
@@ -770,6 +773,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       for (let i = 0; i < batch.length; i++) {
         const entry = batch[i];
         const result = i < batchResults.length ? batchResults[i] : new Error('No result in BatchError');
+        if (await this.skipMovedToFailed(entry.job)) continue;
 
         if (result instanceof Error) {
           const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : result;
@@ -834,6 +838,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       // A timeout is retryable. Revocation is terminal only when completion or
       // an explicit state check positively identifies the revoked job.
       for (const entry of batch) {
+        if (await this.skipMovedToFailed(entry.job)) continue;
         const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : thrownError;
         await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
       }
@@ -1113,6 +1118,29 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Job.moveToFailed already ran failJob. Finish DLQ, failed events, and
+   * repeatAfterComplete scheduling without transitioning the job again.
+   */
+  protected async finalizeMovedToFailed(job: Job<D, R>, error: Error): Promise<void> {
+    if (job.movedToFailedFinalized) return;
+    job.movedToFailedFinalized = true;
+    const terminal = job.movedToFailedResult === 'failed';
+    if (terminal && this.opts.deadLetterQueue && this.commandClient) {
+      await this.moveToDLQ(job, error);
+    }
+    if (this.hasFailedListeners) this.emit('failed', job, error);
+    if (terminal && job.schedulerName) {
+      await this.updateSchedulerAfterComplete(job.schedulerName, Date.now());
+    }
+  }
+
+  protected async skipMovedToFailed(job: Job<D, R>): Promise<boolean> {
+    if (!job.movedToFailed) return false;
+    await this.finalizeMovedToFailed(job, new Error(job.failedReason || 'failed'));
+    return true;
+  }
+
+  /**
    * Move an active job back into delayed state after the processor requests a pause.
    */
   protected async handleMoveToDelayed(
@@ -1279,6 +1307,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, currentJobId, currentHash, this.serializer);
       job.entryId = currentEntryId;
+      job.failContext = { group: this.consumerGroup, broadcastMode: this.broadcastMode ? true : undefined };
 
       // Fast path: skip async isOrderingTurn when no ordering configured
       if (this.orderingMetaField(job)) {
@@ -1336,14 +1365,17 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       let processResult: R | undefined;
       let processError: Error | undefined;
       let aborted: boolean;
+      let continuationJob = job;
       const hasContinuation = job.signals.length > 0 && this.suspendContinuations.has(currentJobId);
       if (hasContinuation) {
         const continuation = this.suspendContinuations.get(currentJobId)!;
+        continuationJob = continuation.job;
         this.suspendContinuations.delete(currentJobId);
         const ac = new AbortController();
         this.activeAbortControllers.set(currentJobId, ac);
         job.abortSignal = ac.signal;
         continuation.job.abortSignal = ac.signal;
+        continuation.job.entryId = currentEntryId;
         this.startHeartbeat(currentJobId, job.opts.lockDuration);
         try {
           processResult = await continuation.onResume(job.signals);
@@ -1354,11 +1386,24 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           this.stopHeartbeat(currentJobId);
           this.activeAbortControllers.delete(currentJobId);
         }
+        if (continuation.job.movedToFailed) {
+          job.movedToFailed = true;
+          job.movedToFailedResult = continuation.job.movedToFailedResult;
+          job.failedReason = continuation.job.failedReason;
+        }
+        if (continuation.job.discarded) job.discarded = true;
+        const resumedDelayedRequest = continuation.job.consumeMoveToDelayedRequest();
+        if (resumedDelayedRequest) job.moveToDelayedRequest = resumedDelayedRequest;
+        if (continuation.job.consumeMoveToWaitingChildrenRequest()) job.moveToWaitingChildrenRequest = true;
+        const resumedSuspendRequest = continuation.job.consumeSuspendRequest();
+        if (resumedSuspendRequest) job.suspendRequest = resumedSuspendRequest;
         aborted = ac.signal.aborted;
       } else {
         this.suspendContinuations.delete(currentJobId);
         ({ result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId));
       }
+
+      if (await this.skipMovedToFailed(job)) return;
 
       const delayedRequest = job.consumeMoveToDelayedRequest();
       const delayedError = processError instanceof DelayedError ? processError : undefined;
@@ -1431,7 +1476,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         if (!this.commandClient) return;
         try {
           if (suspendReq?.onResume) {
-            this.suspendContinuations.set(currentJobId, { job, onResume: suspendReq.onResume });
+            this.suspendContinuations.set(currentJobId, { job: continuationJob, onResume: suspendReq.onResume });
           }
           const suspResult = await suspendJob(
             this.commandClient,
@@ -1455,6 +1500,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
 
       if (processError || aborted) {
+        if (await this.skipMovedToFailed(job)) return;
         const confirmedRevoked = aborted && (await this.isJobRevoked(currentJobId));
         await this.handleJobFailure(
           job,
@@ -1464,6 +1510,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         );
         return;
       }
+
+      if (await this.skipMovedToFailed(job)) return;
 
       if (!this.commandClient) return;
 
