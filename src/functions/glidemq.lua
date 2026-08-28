@@ -3590,15 +3590,14 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   local depsKey = prefix .. 'deps:' .. jobId
   local totalDeps = redis.call('SCARD', depsKey)
-  if totalDeps > 0 then
-    local depsCompleted = tonumber(redis.call('HGET', jobKey, 'depsCompleted')) or 0
-    if depsCompleted >= totalDeps then
-      redis.call('HSET', jobKey, 'state', 'waiting')
-      xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
-      emitEvent(eventsKey, 'active', jobId, nil)
-      if entryId == '' then decrListActive(prefix .. 'list-active') end
-      return 'completed'
-    end
+  local depsCompleted = tonumber(redis.call('HGET', jobKey, 'depsCompleted')) or 0
+  -- totalDeps == 0 is already complete: do not park with no children to wait on.
+  if depsCompleted >= totalDeps then
+    redis.call('HSET', jobKey, 'state', 'waiting')
+    xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
+    emitEvent(eventsKey, 'active', jobId, nil)
+    if entryId == '' then decrListActive(prefix .. 'list-active') end
+    return 'completed'
   end
 
   if entryId == '' then decrListActive(prefix .. 'list-active') end
