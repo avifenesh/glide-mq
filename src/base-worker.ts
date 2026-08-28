@@ -1389,11 +1389,18 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           job.movedToFailedResult = continuation.job.movedToFailedResult;
           job.failedReason = continuation.job.failedReason;
         }
+        const resumedDelayedRequest = continuation.job.consumeMoveToDelayedRequest();
+        if (resumedDelayedRequest) job.moveToDelayedRequest = resumedDelayedRequest;
+        if (continuation.job.consumeMoveToWaitingChildrenRequest()) job.moveToWaitingChildrenRequest = true;
+        const resumedSuspendRequest = continuation.job.consumeSuspendRequest();
+        if (resumedSuspendRequest) job.suspendRequest = resumedSuspendRequest;
         aborted = ac.signal.aborted;
       } else {
         this.suspendContinuations.delete(currentJobId);
         ({ result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId));
       }
+
+      if (await this.skipMovedToFailed(job)) return;
 
       const delayedRequest = job.consumeMoveToDelayedRequest();
       const delayedError = processError instanceof DelayedError ? processError : undefined;
