@@ -1389,6 +1389,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           job.movedToFailedResult = continuation.job.movedToFailedResult;
           job.failedReason = continuation.job.failedReason;
         }
+        if (continuation.job.discarded) job.discarded = true;
         const resumedDelayedRequest = continuation.job.consumeMoveToDelayedRequest();
         if (resumedDelayedRequest) job.moveToDelayedRequest = resumedDelayedRequest;
         if (continuation.job.consumeMoveToWaitingChildrenRequest()) job.moveToWaitingChildrenRequest = true;

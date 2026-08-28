@@ -336,6 +336,44 @@ describeEachMode('list-job worker methods', (CONNECTION) => {
     }
   }, 15000);
 
+  it('preserves discard requested from onResume', async () => {
+    const Q = uniqueQueue('list-entryid-resume-discard');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const job = await queue.add('task', { n: 1 }, { priority: 1, attempts: 3, backoff: 10 });
+    let captured: any;
+    let processorCalls = 0;
+
+    const worker = new Worker(
+      Q,
+      async (active) => {
+        processorCalls++;
+        if (active.signals.length === 0) {
+          captured = active;
+          await active.suspend({
+            onResume: async () => {
+              captured.discard();
+              throw new Error('discarded-resume');
+            },
+          });
+        }
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 50, stalledInterval: 100, lockDuration: 100 },
+    );
+    worker.on('error', () => {});
+
+    try {
+      await waitFor(async () => (await queue.getSuspendInfo(job.id)) !== null, 4000, 50);
+      await queue.signal(job.id, 'resume');
+      await waitFor(async () => (await job.getState()) === 'failed', 4000, 50);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(await job.getState()).toBe('failed');
+      expect(processorCalls).toBe(1);
+    } finally {
+      await worker.close(true);
+      await queue.close();
+    }
+  }, 15000);
+
   it('does not complete a batch job that already called moveToFailed', async () => {
     const Q = uniqueQueue('list-entryid-fail-batch');
     const queue = new Queue(Q, { connection: CONNECTION });
