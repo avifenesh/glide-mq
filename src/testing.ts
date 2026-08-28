@@ -1380,6 +1380,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private readonly batchTimeout: number;
   private readonly batchProcessor: ((jobs: TestJob<D, R>[]) => Promise<R[]>) | null;
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingBatch: TestJobRecord<D, R>[] = [];
   private readonly tokenLimiter: TestWorkerOptions['tokenLimiter'];
   private tpmLocalCounter = 0;
   private tpmWindowStart = 0;
@@ -1647,22 +1648,16 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   // ---- Batch processing ----
 
   private processAvailableBatch(): void {
-    // Respect concurrency: don't start a new batch if at capacity
     if (this.activeCount >= this.concurrency * this.batchSize) return;
 
-    // Collect up to batchSize waiting jobs from the waitingQueue
-    const records: TestJobRecord<D, R>[] = [];
-    while (this.queue.waitingQueue.length > 0 && records.length < this.batchSize) {
-      const record = this.queue.waitingQueue[0];
-      if (record.state !== 'waiting') {
-        this.queue.waitingQueue.shift();
-        continue;
-      }
-      this.queue.waitingQueue.shift();
-      records.push(record);
+    this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+    while (this.pendingBatch.length < this.batchSize) {
+      const record = this.takeWaitingRecord();
+      if (!record) break;
+      this.pendingBatch.push(record);
     }
 
-    if (records.length === 0) {
+    if (this.pendingBatch.length === 0) {
       if (this.activeCount === 0 && !this.isDrained) {
         this.isDrained = true;
         this.emit('drained');
@@ -1670,47 +1665,60 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       return;
     }
 
-    // Batch is full - process immediately even if timer is running
-    if (records.length >= this.batchSize) {
-      if (this.batchTimer) {
-        clearTimeout(this.batchTimer);
-        this.batchTimer = null;
-      }
-      this.executeBatch(records);
+    if (this.pendingBatch.length >= this.batchSize) {
+      this.clearBatchTimer();
+      this.executeBatch(this.pendingBatch.splice(0, this.batchSize));
+      if (this.pendingBatch.length > 0) this.scheduleBatchFlush();
+      else if (this.queue.waitingQueue.length > 0) queueMicrotask(() => this.processAvailable());
       return;
     }
 
     if (this.batchTimeout > 0) {
-      // Start a timer to flush the partial batch after timeout
-      if (!this.batchTimer) {
-        this.batchTimer = setTimeout(() => {
-          this.batchTimer = null;
-          this.flushBatch();
-        }, this.batchTimeout);
-      }
+      this.scheduleBatchFlush();
       return;
     }
 
-    // No timeout - process partial batch immediately
-    this.executeBatch(records);
+    this.executeBatch(this.pendingBatch.splice(0, this.pendingBatch.length));
+  }
+
+  private clearBatchTimer(): void {
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer);
+      this.batchTimer = null;
+    }
+  }
+
+  private scheduleBatchFlush(): void {
+    if (this.batchTimer || this.batchTimeout <= 0 || this.pendingBatch.length === 0) return;
+    this.batchTimer = setTimeout(() => {
+      this.batchTimer = null;
+      this.flushBatch();
+    }, this.batchTimeout);
+  }
+
+  private takeWaitingRecord(): TestJobRecord<D, R> | undefined {
+    while (this.queue.waitingQueue.length > 0) {
+      const record = this.queue.waitingQueue.shift()!;
+      if (record.state !== 'waiting') continue;
+      if (!this.queue.jobs.has(record.id)) continue;
+      return record;
+    }
+    return undefined;
   }
 
   private flushBatch(): void {
     if (!this.running) return;
-    // Re-collect from waitingQueue, skipping stale entries
-    const records: TestJobRecord<D, R>[] = [];
-    while (this.queue.waitingQueue.length > 0 && records.length < this.batchSize) {
-      const record = this.queue.waitingQueue[0];
-      if (record.state !== 'waiting') {
-        this.queue.waitingQueue.shift();
-        continue;
+    this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+    if (!this.queue.isPaused()) {
+      while (this.pendingBatch.length < this.batchSize) {
+        const record = this.takeWaitingRecord();
+        if (!record) break;
+        this.pendingBatch.push(record);
       }
-      this.queue.waitingQueue.shift();
-      records.push(record);
     }
-    if (records.length > 0) {
-      this.executeBatch(records);
-    }
+    if (this.pendingBatch.length === 0) return;
+    this.executeBatch(this.pendingBatch.splice(0, this.batchSize));
+    if (this.pendingBatch.length > 0) this.scheduleBatchFlush();
   }
 
   private executeBatch(records: TestJobRecord<D, R>[]): void {
@@ -1868,12 +1876,17 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   /** Stop processing and detach from the queue. */
   async close(): Promise<void> {
     this.running = false;
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer);
-      this.batchTimer = null;
+    this.clearBatchTimer();
+    if (this.pendingBatch.length > 0) {
+      const handoff = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+      this.pendingBatch = [];
+      if (handoff.length > 0) this.queue.waitingQueue.unshift(...handoff);
     }
     this.queue.workers.delete(this);
     this.queue.onWorkerDetached();
+    for (const peer of this.queue.workers) {
+      peer.onJobAdded();
+    }
     this.removeAllListeners();
   }
 }
