@@ -63,7 +63,15 @@ import {
 import { Scheduler } from './scheduler';
 
 export type WorkerEvent =
-  'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained' | 'budget-exceeded';
+  | 'completed'
+  | 'failed'
+  | 'error'
+  | 'stalled'
+  | 'closing'
+  | 'closed'
+  | 'active'
+  | 'drained'
+  | 'budget-exceeded';
 
 /**
  * Configuration that differs between Worker and BroadcastWorker.
