@@ -409,9 +409,7 @@ export async function completeJob(
     args.push('', '');
   }
 
-  args.push(broadcastMode ? '1' : '0');
-  args.push(skipEvents ? '1' : '0');
-  args.push(skipMetrics ? '1' : '0');
+  args.push(broadcastMode ? '1' : '0', skipEvents ? '1' : '0', skipMetrics ? '1' : '0');
 
   const raw = await client.fcall('glidemq_complete', keys, args);
   return String(raw) === 'REVOKED' ? [COMPLETE_REVOKED_MARKER] : parseParentNotifications(raw);
@@ -898,14 +896,20 @@ export async function deferActive(
   entryId: string,
   group: string = CONSUMER_GROUP,
   broadcastMode?: boolean,
-  pausedRestore?: boolean,
-  undoGroupClaim?: boolean,
+  opts?: { pausedRestore?: boolean; undoGroupClaim?: boolean },
 ): Promise<void> {
-  const args = [jobId, entryId, group];
-  args.push(broadcastMode ? '1' : '0');
-  args.push(pausedRestore ? '1' : '0');
-  args.push(undoGroupClaim ? '1' : '0');
-  await client.fcall('glidemq_deferActive', [k.stream, k.job(jobId), k.listActive], args);
+  await client.fcall(
+    'glidemq_deferActive',
+    [k.stream, k.job(jobId), k.listActive],
+    [
+      jobId,
+      entryId,
+      group,
+      broadcastMode ? '1' : '0',
+      opts?.pausedRestore ? '1' : '0',
+      opts?.undoGroupClaim ? '1' : '0',
+    ],
+  );
 }
 
 /**

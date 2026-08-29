@@ -63,15 +63,7 @@ import {
 import { Scheduler } from './scheduler';
 
 export type WorkerEvent =
-  | 'completed'
-  | 'failed'
-  | 'error'
-  | 'stalled'
-  | 'closing'
-  | 'closed'
-  | 'active'
-  | 'drained'
-  | 'budget-exceeded';
+  'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'closed' | 'active' | 'drained' | 'budget-exceeded';
 
 /**
  * Configuration that differs between Worker and BroadcastWorker.
@@ -963,8 +955,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         entry.entryId,
         this.consumerGroup,
         this.broadcastMode ? true : undefined,
-        true,
-        entry.undoGroupClaim,
+        { pausedRestore: true, undoGroupClaim: entry.undoGroupClaim },
       );
       if (this.broadcastMode && entry.entryId !== '') {
         this.pausedBroadcastEntries.add(entry.entryId);
@@ -2084,23 +2075,37 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     return this.closePromise;
   }
 
+  private async stopSchedulerOnClose(force?: boolean): Promise<void> {
+    if (!this.scheduler) return;
+    this.scheduler.stop();
+    if (!force) {
+      await this.scheduler.waitForIdle();
+    }
+    this.scheduler = null;
+  }
+
+  private async deregisterWorker(): Promise<void> {
+    if (this.workerHeartbeatTimer) {
+      clearInterval(this.workerHeartbeatTimer);
+      this.workerHeartbeatTimer = null;
+    }
+    if (!this.commandClient) return;
+    try {
+      await this.commandClient.del([this.queueKeys.worker(this.consumerId)]);
+    } catch {
+      // Ignore - TTL will clean up
+    }
+  }
+
   private async performClose(force?: boolean): Promise<void> {
     // Wait for init to complete so clients are available for cleanup
     await this.initPromise.catch(() => {});
-
-    if (this.scheduler) {
-      this.scheduler.stop();
-      if (!force) {
-        await this.scheduler.waitForIdle();
-      }
-      this.scheduler = null;
-    }
+    await this.stopSchedulerOnClose(force);
 
     if (!force) {
       await this.waitForActiveJobs();
     }
 
-    // Shut down sandbox worker pool
     if (this.sandboxClose) {
       try {
         await this.sandboxClose(force);
@@ -2109,21 +2114,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
     }
 
-    // Clear worker registration heartbeat
-    if (this.workerHeartbeatTimer) {
-      clearInterval(this.workerHeartbeatTimer);
-      this.workerHeartbeatTimer = null;
-    }
-    // Best-effort deregistration
-    if (this.commandClient) {
-      try {
-        await this.commandClient.del([this.queueKeys.worker(this.consumerId)]);
-      } catch {
-        // Ignore - TTL will clean up
-      }
-    }
+    await this.deregisterWorker();
 
-    // Clear all active heartbeats
     for (const [, timer] of this.heartbeatIntervals) {
       clearInterval(timer);
     }

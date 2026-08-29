@@ -46,7 +46,7 @@ describe('pause worker internals', () => {
       'PAUSED',
     );
 
-    await deferActive({ fcall } as any, keys, 'job-3', '1-0', 'workers', true, true);
+    await deferActive({ fcall } as any, keys, 'job-3', '1-0', 'workers', true, { pausedRestore: true });
     expect(fcall).toHaveBeenLastCalledWith(
       'glidemq_deferActive',
       [keys.stream, keys.job('job-3'), keys.listActive],
