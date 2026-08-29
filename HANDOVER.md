@@ -2,7 +2,7 @@
 
 ## Current State
 
-- **In flight**: `fix/close-fetch-next` (fork #18 / upstream #282) — rebased onto v0.15.5. close() must not strand CAF or poll claims; grouped CAF undo skips `retainedSlot` active rewind. Lua library 124. Sonar new-code duplication and performClose complexity are being cleaned on this branch.
+- **In flight**: `fix/close-fetch-next` (fork #18 / upstream #282) — rebased onto v0.15.5. close() must not strand CAF or poll claims; grouped CAF undo skips `retainedSlot` active rewind. Lua library 124. Close-fetch tests share helpers so Sonar new-code duplication stays under the 3% gate.
 - **Audit fix**: `fix/repeat-after-stalled` atomically advances repeat-after-complete schedulers during terminal stalled recovery.
 - **Branch**: `automation/cover-open-fixes-20260825` consolidates the reviewed correctness queue.
 - **Revoke/timeout safety**: revoked active jobs cannot complete; each batch job owns its abort signal, and timeouts remain retryable.
