@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { BaseWorker } from '../src/base-worker';
 import { BroadcastWorker } from '../src/broadcast-worker';
-import { deferActive, moveToActive } from '../src/functions';
+import { deferActive, moveToActive, completeJob } from '../src/functions';
 import { buildKeys } from '../src/utils';
 import { Worker } from '../src/worker';
 
@@ -38,7 +38,7 @@ describe('pause worker internals', () => {
     expect(fcall).toHaveBeenCalledWith(
       'glidemq_deferActive',
       [keys.stream, keys.job('job-1'), keys.listActive],
-      ['job-1', '', 'workers', '0', '1'],
+      ['job-1', '', 'workers', '0', '1', '0'],
     );
 
     const pausedClient = { fcall: vi.fn().mockResolvedValue('PAUSED') } as any;
@@ -46,11 +46,57 @@ describe('pause worker internals', () => {
       'PAUSED',
     );
 
-    await deferActive({ fcall } as any, keys, 'job-3', '1-0', 'workers', true, true);
+    await deferActive({ fcall } as any, keys, 'job-3', '1-0', 'workers', true, { pausedRestore: true });
     expect(fcall).toHaveBeenLastCalledWith(
       'glidemq_deferActive',
       [keys.stream, keys.job('job-3'), keys.listActive],
-      ['job-3', '1-0', 'workers', '1', '1'],
+      ['job-3', '1-0', 'workers', '1', '1', '0'],
+    );
+
+    await (BaseWorker.prototype as any).deferPausedActivation.call(worker, {
+      jobId: 'job-4',
+      entryId: '2-0',
+      undoGroupClaim: true,
+    });
+    expect(fcall).toHaveBeenLastCalledWith(
+      'glidemq_deferActive',
+      [keys.stream, keys.job('job-4'), keys.listActive],
+      ['job-4', '2-0', 'workers', '0', '1', '1'],
+    );
+
+    await completeJob(
+      { fcall } as any,
+      keys,
+      'job-5',
+      '3-0',
+      'null',
+      1,
+      'workers',
+      undefined,
+      undefined,
+      false,
+      true,
+      true,
+    );
+    const completeArgs = fcall.mock.calls.at(-1)[2] as string[];
+    expect(fcall.mock.calls.at(-1)[0]).toBe('glidemq_complete');
+    expect(completeArgs.slice(-3)).toEqual(['0', '1', '1']);
+
+    const closingWorker = {
+      commandClient: { fcall },
+      queueKeys: keys,
+      consumerGroup: 'workers',
+      broadcastMode: false,
+      closing: true,
+      emit: vi.fn(),
+    };
+    (closingWorker as any).deferPausedActivation = (entry: { jobId: string; entryId: string }) =>
+      (BaseWorker.prototype as any).deferPausedActivation.call(closingWorker, entry);
+    await (BaseWorker.prototype as any).processJob.call(closingWorker, 'job-poll', '9-0');
+    expect(fcall).toHaveBeenLastCalledWith(
+      'glidemq_deferActive',
+      [keys.stream, keys.job('job-poll'), keys.listActive],
+      ['job-poll', '9-0', 'workers', '0', '1', '0'],
     );
   });
 
