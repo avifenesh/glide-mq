@@ -871,4 +871,66 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await flow.close();
     }
   });
+
+  it('getParents returns queue name and id for tree, diamond, and root jobs', async () => {
+    const qName = Q + '-parents';
+    const flow = new FlowProducer({ connection: CONNECTION });
+
+    try {
+      const tree = await flow.add({
+        name: 'parent',
+        queueName: qName,
+        data: { kind: 'tree-parent' },
+        children: [{ name: 'child', queueName: qName, data: { kind: 'tree-child' } }],
+      });
+      const treeChild = tree.children[0].job;
+      const treeParents = await treeChild.getParents();
+      expect(treeParents).toEqual([{ queue: qName, id: tree.job.id }]);
+      expect(await tree.job.getParents()).toEqual([]);
+
+      const jobs = await flow.addDAG({
+        nodes: [
+          { name: 'A', queueName: qName, data: { step: 'A' } },
+          { name: 'B', queueName: qName, data: { step: 'B' }, deps: ['A'] },
+          { name: 'C', queueName: qName, data: { step: 'C' }, deps: ['A'] },
+          { name: 'D', queueName: qName, data: { step: 'D' }, deps: ['B', 'C'] },
+        ],
+      });
+
+      const sourceParents = await jobs.get('A')!.getParents();
+      expect(sourceParents).toHaveLength(2);
+      expect(new Set(sourceParents.map((p) => p.queue))).toEqual(new Set([qName]));
+      expect(new Set(sourceParents.map((p) => p.id))).toEqual(new Set([jobs.get('B')!.id, jobs.get('C')!.id]));
+
+      expect(await jobs.get('D')!.getParents()).toEqual([]);
+    } finally {
+      await flow.close();
+      await flushQueue(cleanupClient, qName);
+    }
+  });
+
+  it('addDAG throws Duplicate job ID in DAG and does not overwrite the first job', async () => {
+    const qName = Q + '-dup-id';
+    const flow = new FlowProducer({ connection: CONNECTION });
+
+    try {
+      await expect(
+        flow.addDAG({
+          nodes: [
+            { name: 'A', queueName: qName, data: { n: 1 }, opts: { jobId: 'shared-dag-id' } },
+            { name: 'B', queueName: qName, data: { n: 2 }, opts: { jobId: 'shared-dag-id' } },
+          ],
+        }),
+      ).rejects.toThrow('Duplicate job ID in DAG');
+
+      const k = buildKeys(qName);
+      const raw = await cleanupClient.hget(k.job('shared-dag-id'), 'data');
+      if (raw != null) {
+        expect(JSON.parse(String(raw))).toEqual({ n: 1 });
+      }
+    } finally {
+      await flow.close();
+      await flushQueue(cleanupClient, qName);
+    }
+  });
 });

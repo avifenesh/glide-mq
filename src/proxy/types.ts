@@ -56,6 +56,8 @@ export interface AddJobRequest {
     | 'ordering'
     | 'cost'
     | 'lifo'
+    | 'lockDuration'
+    | 'fallbacks'
   >;
 }
 

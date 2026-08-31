@@ -188,6 +188,49 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
     await flushQueue(cleanupClient, Q + '-independent');
   });
 
+  it('a retrying subscriber does not redeliver to a subscriber that already completed', async () => {
+    const qName = Q + '-retry-iso';
+    const broadcast = new Broadcast(qName, { connection: CONNECTION });
+    const received = { success: [] as any[], failing: [] as any[] };
+    let failAttempts = 0;
+
+    const successWorker = new BroadcastWorker(
+      qName,
+      async (job) => {
+        received.success.push(job.data);
+      },
+      { connection: CONNECTION, subscription: 'ok', blockTimeout: 300, attempts: 1, promotionInterval: 100 },
+    );
+    const failingWorker = new BroadcastWorker(
+      qName,
+      async (job) => {
+        received.failing.push(job.data);
+        failAttempts += 1;
+        if (failAttempts < 3) throw new Error('retry-me');
+      },
+      {
+        connection: CONNECTION,
+        subscription: 'flaky',
+        blockTimeout: 300,
+        attempts: 3,
+        backoff: { type: 'fixed', delay: 50 },
+        promotionInterval: 100,
+      },
+    );
+
+    await Promise.all([successWorker.waitUntilReady(), failingWorker.waitUntilReady()]);
+    await broadcast.publish('message', { event: 'retry-iso' }, { attempts: 3, backoff: { type: 'fixed', delay: 50 } });
+
+    await waitFor(() => received.success.length === 1 && received.failing.length >= 3, 8000);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(received.success).toHaveLength(1);
+
+    await successWorker.close(true);
+    await failingWorker.close(true);
+    await broadcast.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
   it('respects maxMessages retention limit', async () => {
     const broadcast = new Broadcast(Q + '-retention', { connection: CONNECTION, maxMessages: 5 });
 
@@ -209,6 +252,85 @@ describeEachMode('Broadcast fan-out', (CONNECTION) => {
       new BroadcastWorker(Q + '-invalid', async () => {}, { connection: CONNECTION, subscription: '' } as any);
     }).toThrow(/subscription/);
   });
+
+  it('pause, resume, setGlobalRateLimit, and getClient round-trip on a live subscription', async () => {
+    const qName = Q + '-ctl';
+    const broadcast = new Broadcast(qName, { connection: CONNECTION });
+    const received: unknown[] = [];
+    const worker = new BroadcastWorker(
+      qName,
+      async (job) => {
+        received.push(job.data);
+      },
+      {
+        connection: CONNECTION,
+        subscription: 'ctl-sub',
+        blockTimeout: 100,
+      },
+    );
+
+    await worker.waitUntilReady();
+    const client = await broadcast.getClient();
+    expect(typeof client.xlen).toBe('function');
+
+    await broadcast.setGlobalRateLimit({ max: 50, duration: 1000 });
+    await broadcast.pause();
+    await broadcast.resume();
+    await broadcast.setGlobalRateLimit(null);
+
+    await broadcast.publish('msg', { n: 1 });
+    await waitFor(() => received.length === 1, 8000);
+    expect(received[0]).toEqual({ n: 1 });
+
+    await worker.close(true);
+    await broadcast.close();
+    await flushQueue(cleanupClient, qName);
+  }, 20000);
+
+  it('BroadcastWorker honors queue global concurrency and emits drained', async () => {
+    const qName = Q + '-gc';
+    const queue = new Queue(qName, { connection: CONNECTION });
+    await queue.setGlobalConcurrency(1);
+    const broadcast = new Broadcast(qName, { connection: CONNECTION });
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let completed = 0;
+
+    const worker = new BroadcastWorker(
+      qName,
+      async () => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise<void>((resolve) => setTimeout(resolve, 150));
+        inFlight--;
+        completed++;
+      },
+      {
+        connection: CONNECTION,
+        subscription: 'gc-sub',
+        concurrency: 4,
+        blockTimeout: 100,
+      },
+    );
+    const drainedP = new Promise<void>((resolve) => {
+      worker.once('drained', () => resolve());
+    });
+
+    await worker.waitUntilReady();
+    await broadcast.publish('a', { n: 1 });
+    await broadcast.publish('a', { n: 2 });
+    await waitFor(() => completed === 2, 8000);
+    expect(maxInFlight).toBe(1);
+    await Promise.race([
+      drainedP,
+      new Promise<void>((_, reject) => setTimeout(() => reject(new Error('Timed out waiting for drained')), 2000)),
+    ]);
+
+    await worker.close(true);
+    await broadcast.close();
+    await queue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
 });
 
 describeEachMode('Broadcast with scheduler integration', (CONNECTION) => {

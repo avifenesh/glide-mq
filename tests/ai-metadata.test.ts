@@ -306,6 +306,41 @@ describe('Job.fromHash usage parsing', () => {
     expect(job.usage?.cached).toBe(true);
   });
 
+  it('parses usage when only cached is present', () => {
+    const hash: Record<string, string> = {
+      name: 'llm-call',
+      data: '{}',
+      opts: '{}',
+      'usage:cached': '1',
+    };
+
+    const job = Job.fromHash(mockClient as any, keys, '1', hash);
+    expect(job.usage).toEqual({
+      model: undefined,
+      provider: undefined,
+      tokens: undefined,
+      totalTokens: undefined,
+      costs: undefined,
+      totalCost: undefined,
+      costUnit: undefined,
+      latencyMs: undefined,
+      cached: true,
+    });
+  });
+
+  it('parses usage when only latencyMs is present', () => {
+    const hash: Record<string, string> = {
+      name: 'llm-call',
+      data: '{}',
+      opts: '{}',
+      'usage:latencyMs': '42',
+    };
+
+    const job = Job.fromHash(mockClient as any, keys, '1', hash);
+    expect(job.usage?.latencyMs).toBe(42);
+    expect(job.usage?.cached).toBeUndefined();
+  });
+
   it('returns undefined usage when no usage fields present', () => {
     const hash: Record<string, string> = {
       name: 'llm-call',
@@ -557,11 +592,59 @@ describeEachMode('AI Metadata integration', (CONNECTION) => {
           windowMs: 30 * 24 * 60 * 60 * 1000,
         }),
       ).rejects.toThrow('usage summary request exceeds maximum bucket reads');
+
+      const discovered = await summaryQueue.getUsageSummary({ windowMs: 5 * 60 * 1000 });
+      expect(discovered.queues).toEqual(expect.arrayContaining([summaryQueueName, summaryOtherQueueName]));
+      expect(discovered.jobCount).toBeGreaterThanOrEqual(2);
+      expect(discovered.totalTokens).toBeGreaterThanOrEqual(75);
+
+      const staticSummary = await QueueImpl.getUsageSummary({
+        connection: CONNECTION,
+        queues: [summaryQueueName],
+        windowMs: 5 * 60 * 1000,
+      });
+      expect(staticSummary.queues).toEqual([summaryQueueName]);
+      expect(staticSummary.jobCount).toBe(1);
+      expect(staticSummary.totalTokens).toBe(50);
+
+      const futureWindow = await summaryQueue.getUsageSummary({
+        queues: [summaryQueueName],
+        startTime: Date.now() + 60_000,
+        endTime: Date.now() + 120_000,
+      });
+      expect(futureWindow.jobCount).toBe(0);
+      expect(futureWindow.totalTokens).toBe(0);
     } finally {
       await summaryQueue.close();
       await summaryOtherQueue.close();
       await flushQueue(cleanupClient, summaryQueueName);
       await flushQueue(cleanupClient, summaryOtherQueueName);
     }
+  });
+
+  it('reportUsage with only cached and concurrent updates round-trip', async () => {
+    const added = await queue.add('cached-only', { prompt: 'x' });
+    const fetched = await queue.getJob(added.id);
+    expect(fetched).not.toBeNull();
+
+    await fetched!.reportUsage({ cached: true });
+    const afterCached = await queue.getJob(added.id);
+    expect(afterCached?.usage?.cached).toBe(true);
+
+    await Promise.all([
+      fetched!.reportUsage({ tokens: { input: 1 } }),
+      fetched!.reportUsage({ tokens: { input: 2 } }),
+      fetched!.reportUsage({ tokens: { input: 3 } }),
+    ]);
+    const after = await queue.getJob(added.id);
+    // reportUsage last-write-wins (full hash replace), it does not sum concurrent token fields.
+    expect([1, 2, 3]).toContain(after?.usage?.tokens?.input);
+
+    await expect(queue.getUsageSummary({ endTime: -1 })).rejects.toThrow('endTime');
+    await expect(queue.getUsageSummary({ windowMs: 0 })).rejects.toThrow('windowMs');
+    await expect(queue.getUsageSummary({ startTime: -1 })).rejects.toThrow('startTime');
+    await expect(queue.getUsageSummary({ startTime: Date.now() + 10_000, endTime: Date.now() })).rejects.toThrow(
+      'less than or equal',
+    );
   });
 });

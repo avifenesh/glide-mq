@@ -226,6 +226,18 @@ function writeSse(res: Response, data: unknown, opts?: { event?: string; id?: st
   res.write(chunk);
 }
 
+function writeStreamEntries(
+  res: Response,
+  entries: { id: string; fields: Record<string, string> }[],
+): string | undefined {
+  let lastId: string | undefined;
+  for (const entry of entries) {
+    writeSse(res, entry.fields, { id: entry.id });
+    lastId = entry.id;
+  }
+  return lastId;
+}
+
 function writeSseComment(res: Response, comment = 'keepalive'): void {
   res.write(`: ${comment}\n\n`);
 }
@@ -473,6 +485,8 @@ function validateJobOpts(
     'ordering',
     'cost',
     'lifo',
+    'lockDuration',
+    'fallbacks',
     ...(options?.allowWaitTimeout ? (['waitTimeout'] as const) : []),
   ]);
   for (const key of Object.keys(optsIn)) {
@@ -560,6 +574,41 @@ function validateJobOpts(
   return null;
 }
 
+function validateFlowJobOpts(flow: FlowJob, path = 'flow'): string | null {
+  if (!flow || typeof flow !== 'object' || Array.isArray(flow)) {
+    return `${path} must be an object`;
+  }
+  const error = validateJobOpts(flow.opts as Record<string, unknown> | undefined, `${path}.`);
+  if (error) return error;
+  const children = flow.children ?? [];
+  if (!Array.isArray(children)) {
+    return `${path}.children must be an array`;
+  }
+  for (let i = 0; i < children.length; i++) {
+    const childError = validateFlowJobOpts(children[i], `${path}.children[${i}]`);
+    if (childError) return childError;
+  }
+  return null;
+}
+
+function validateDagJobOpts(dag: DAGFlow): string | null {
+  if (!dag || typeof dag !== 'object' || Array.isArray(dag)) {
+    return 'dag must be an object';
+  }
+  if (!Array.isArray(dag.nodes)) {
+    return 'dag.nodes must be an array';
+  }
+  for (let i = 0; i < dag.nodes.length; i++) {
+    const node = dag.nodes[i];
+    if (!node || typeof node !== 'object' || Array.isArray(node)) {
+      return `dag.nodes[${i}] must be an object`;
+    }
+    const error = validateJobOpts(node.opts as Record<string, unknown> | undefined, `dag.nodes[${i}].`);
+    if (error) return error;
+  }
+  return null;
+}
+
 /**
  * Create an Express Router with all proxy endpoints.
  *
@@ -593,6 +642,7 @@ export function createRoutes(
   let closed = false;
   let sharedClient: Client | null = null;
   let sharedClientOwned = false;
+  let sharedClientInit: Promise<Client> | null = null;
 
   function requireConnection(feature: string) {
     if (!opts.connection) {
@@ -602,6 +652,9 @@ export function createRoutes(
   }
 
   async function getSharedClient(): Promise<Client> {
+    if (draining || closed) {
+      throw httpError(503, 'Proxy is shutting down');
+    }
     if (sharedClient) return sharedClient;
     if (opts.client) {
       sharedClient = opts.client;
@@ -611,9 +664,28 @@ export function createRoutes(
     if (!opts.connection) {
       throw httpError(500, 'Proxy requires either `client` or `connection`');
     }
-    sharedClient = await createClient(opts.connection);
-    sharedClientOwned = true;
-    return sharedClient;
+    if (sharedClientInit) return sharedClientInit;
+
+    sharedClientInit = (async () => {
+      const client = await createClient(opts.connection!);
+      if (draining || closed) {
+        try {
+          client.close();
+        } catch {
+          /* ignore close errors on shutdown */
+        }
+        throw httpError(503, 'Proxy is shutting down');
+      }
+      sharedClient = client;
+      sharedClientOwned = true;
+      return sharedClient;
+    })();
+
+    try {
+      return await sharedClientInit;
+    } finally {
+      sharedClientInit = null;
+    }
   }
 
   function assertAllowedFlowQueues(queueNames: Iterable<string>): void {
@@ -868,10 +940,16 @@ export function createRoutes(
   }
 
   async function getSharedBroadcastStream(name: string, subscription: string): Promise<SharedBroadcastStream> {
+    if (draining || closed) {
+      throw httpError(503, 'Proxy is shutting down');
+    }
     const cacheKey = `${name}\u0000${subscription}`;
     const cached = broadcastStreams.get(cacheKey);
     if (cached) {
       await cached.ready;
+      if (draining || closed) {
+        throw httpError(503, 'Proxy is shutting down');
+      }
       return cached;
     }
 
@@ -896,7 +974,7 @@ export function createRoutes(
           }
         }
         stream.clients.clear();
-        await stream.worker.close();
+        await stream.worker.close(true);
       },
     };
 
@@ -930,16 +1008,25 @@ export function createRoutes(
       errorHandler(err, name);
     });
 
+    if (draining || closed) {
+      await worker.close(true).catch(() => undefined);
+      throw httpError(503, 'Proxy is shutting down');
+    }
+
     stream.worker = worker;
     stream.ready = worker.waitUntilReady();
     broadcastStreams.set(cacheKey, stream);
 
     try {
       await stream.ready;
+      if (draining || closed) {
+        await stream.close();
+        throw httpError(503, 'Proxy is shutting down');
+      }
       return stream;
     } catch (err) {
       broadcastStreams.delete(cacheKey);
-      await worker.close().catch(() => undefined);
+      await worker.close(true).catch(() => undefined);
       throw err;
     }
   }
@@ -1273,21 +1360,17 @@ export function createRoutes(
         connectionClosed = true;
       });
 
-      while (!connectionClosed) {
+      while (!connectionClosed && !draining) {
         const entries = await queue.readStream(jobId, { count: 100, lastId });
-        for (const entry of entries) {
-          writeSse(res, entry.fields, { id: entry.id });
-          lastId = entry.id;
-        }
+        const latest = writeStreamEntries(res, entries);
+        if (latest) lastId = latest;
 
         const job = await queue.getJob(jobId);
         if (!job) break;
         const state = await job.getState();
         if (state === 'completed' || state === 'failed') {
           const trailing = await queue.readStream(jobId, { count: 100, lastId });
-          for (const entry of trailing) {
-            writeSse(res, entry.fields, { id: entry.id });
-          }
+          writeStreamEntries(res, trailing);
           break;
         }
 
@@ -1343,7 +1426,7 @@ export function createRoutes(
       startSse(res);
       writeSseComment(res, 'connected');
 
-      while (!connectionClosed) {
+      while (!connectionClosed && !draining) {
         let result;
         try {
           result = await client.xread({ [keys.events]: lastId }, { block: SSE_BLOCK_MS, count: 100 });
@@ -1441,7 +1524,7 @@ export function createRoutes(
       startSse(res);
       writeSseComment(res, 'connected');
 
-      while (!connectionClosed) {
+      while (!connectionClosed && !draining) {
         let result;
         try {
           result = await client.xread({ [keys.events]: lastId }, { block: SSE_BLOCK_MS, count: 100 });
@@ -1478,6 +1561,8 @@ export function createRoutes(
           }
         }
       }
+
+      closeConnection();
     } catch (err) {
       closeConnection?.();
       if (!res.headersSent) {
@@ -1725,10 +1810,18 @@ export function createRoutes(
 
   router.post('/flows', async (req: Request, res: Response) => {
     try {
+      if (draining || closed) {
+        throw httpError(503, 'Proxy is shutting down');
+      }
       const body = req.body as { budget?: BudgetOptions; dag?: DAGFlow; flow?: FlowJob } | undefined;
 
       if (!body || (!!body.flow && !!body.dag) || (!body.flow && !body.dag)) {
         throw httpError(400, 'Body must include exactly one of: flow, dag');
+      }
+
+      const nestedOptsError = body.flow ? validateFlowJobOpts(body.flow) : validateDagJobOpts(body.dag!);
+      if (nestedOptsError) {
+        throw httpError(400, nestedOptsError);
       }
 
       const producer = new FlowProducer({
@@ -2098,6 +2191,9 @@ export function createRoutes(
       }
       const matcher = compileSubjectMatcher(parseCsvQuery(req, 'subjects'));
       const stream = await getSharedBroadcastStream(param(req, 'name'), subscription);
+      if (draining || closed || stream.closing) {
+        throw httpError(503, 'Proxy is shutting down');
+      }
 
       startSse(res);
       writeSseComment(res, 'connected');
@@ -2139,32 +2235,59 @@ export function createRoutes(
     });
   });
 
+  function closeOwnedSharedClient(): void {
+    if (!sharedClientOwned || !sharedClient) return;
+    const client = sharedClient;
+    sharedClient = null;
+    sharedClientOwned = false;
+    try {
+      client.close();
+    } catch {
+      /* ignore close errors on shutdown */
+    }
+  }
+
   async function closeQueues(): Promise<void> {
     draining = true;
+    closed = true;
 
     for (const closeConnection of Array.from(activeQueueEventClosers)) {
       closeConnection();
     }
 
-    await Promise.allSettled(Array.from(queueInitMap.values()));
-    await Promise.allSettled(Array.from(broadcastInitMap.values()));
-    await Promise.allSettled(Array.from(broadcastStreams.values()).map((stream) => stream.close()));
-    await Promise.allSettled(Array.from(queueCache.values()).map((queue) => queue.close()));
-    await Promise.allSettled(Array.from(broadcastCache.values()).map((broadcast) => broadcast.close()));
-    if (sharedClientOwned && sharedClient) {
-      try {
-        sharedClient.close();
-      } catch {
-        /* ignore close errors on shutdown */
-      }
-    }
+    const pendingInits = [...queueInitMap.values(), ...broadcastInitMap.values()];
+    const streams = [...broadcastStreams.values()];
+    const queues = [...queueCache.values()];
+    const broadcasts = [...broadcastCache.values()];
 
     queueCache.clear();
     broadcastCache.clear();
     broadcastStreams.clear();
-    sharedClient = null;
-    sharedClientOwned = false;
-    closed = true;
+
+    const shutdown = async () => {
+      await Promise.allSettled(pendingInits);
+      await Promise.allSettled(streams.map((stream) => stream.close()));
+      await Promise.allSettled(queues.map((queue) => queue.close()));
+      await Promise.allSettled(broadcasts.map((broadcast) => broadcast.close()));
+      closeOwnedSharedClient();
+    };
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const winner = await Promise.race([
+      shutdown().then(() => 'done' as const),
+      new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), 3000);
+        timer.unref();
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+
+    if (winner === 'timeout') {
+      for (const stream of streams) void stream.close();
+      for (const queue of queues) void queue.close();
+      for (const broadcast of broadcasts) void broadcast.close();
+      closeOwnedSharedClient();
+    }
   }
 
   return { router, closeQueues };

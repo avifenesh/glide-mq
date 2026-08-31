@@ -837,4 +837,58 @@ describeEachMode('Job schedulers', (CONNECTION) => {
       queue.upsertJobScheduler('bad-combo-2', { pattern: '* * * * *', repeatAfterComplete: 500 } as any),
     ).rejects.toThrow('mutually exclusive');
   });
+
+  it('every scheduler nextRun stays on the interval grid after a late tick', async () => {
+    const qName = Q + '-anchor-' + Date.now();
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const every = 500;
+    const processed: string[] = [];
+
+    try {
+      await localQueue.upsertJobScheduler('anchor', { every }, { name: 'anchored', data: { n: 1 } });
+      const initial = await localQueue.getJobScheduler('anchor');
+      expect(initial).not.toBeNull();
+      const firstNext = initial!.nextRun;
+      expect(firstNext).toBeGreaterThan(0);
+
+      const worker = new Worker(
+        qName,
+        async () => {
+          processed.push('ok');
+        },
+        {
+          connection: CONNECTION,
+          concurrency: 1,
+          blockTimeout: 200,
+          promotionInterval: 200,
+          stalledInterval: 60000,
+        },
+      );
+      worker.on('error', () => {});
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('timeout waiting for scheduler jobs')), 8000);
+          const check = () => {
+            if (processed.length >= 2) {
+              clearTimeout(timeout);
+              resolve();
+            }
+          };
+          worker.on('completed', check);
+        });
+
+        const later = await localQueue.getJobScheduler('anchor');
+        expect(later).not.toBeNull();
+        expect(later!.nextRun).toBeGreaterThan(firstNext);
+        expect((later!.nextRun - firstNext) % every).toBe(0);
+      } finally {
+        await worker.close(true);
+      }
+    } finally {
+      await localQueue.removeJobScheduler('anchor').catch(() => {});
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    }
+  }, 15000);
 });

@@ -465,4 +465,56 @@ describeEachMode('Job streaming integration', (CONNECTION) => {
       await flushQueue(cleanupClient, Q);
     }
   });
+
+  it('readStream({ block }) waits for a late chunk and times out when idle', async () => {
+    const Q = 'test-jstream-block-' + Date.now();
+    const queue = new QueueImpl(Q, { connection: CONNECTION });
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+
+    const worker = new WorkerImpl(
+      Q,
+      async (job: any) => {
+        await job.stream({ token: 'first' });
+        await secondGate;
+        await job.stream({ token: 'second' });
+        return 'done';
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 200 },
+    );
+
+    try {
+      const job = await queue.add('block-stream', {});
+      await waitFor(async () => (await queue.readStream(job.id)).length >= 1, 5000);
+
+      const first = await queue.readStream(job.id);
+      expect(first[0].fields.token).toBe('first');
+
+      const pending = queue.readStream(job.id, { lastId: first[0].id, block: 3000, count: 10 });
+      let settled = false;
+      void pending.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(settled).toBe(false);
+      releaseSecond();
+      const next = await pending;
+      expect(next.some((e: { fields: Record<string, string> }) => e.fields.token === 'second')).toBe(true);
+
+      const idle = await queue.readStream(job.id, { lastId: next[next.length - 1]?.id ?? first[0].id, block: 200 });
+      expect(idle).toEqual([]);
+    } finally {
+      releaseSecond();
+      await worker.close();
+      await queue.close();
+      await flushQueue(cleanupClient, Q);
+    }
+  }, 15000);
 });

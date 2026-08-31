@@ -225,6 +225,49 @@ describeEachMode('Producer - addBulk()', (CONNECTION) => {
     }
   });
 
+  it('addBulk honors deduplication and same-queue parents', async () => {
+    const parentId = await producer.add('parent', { kind: 'root' });
+    expect(parentId).not.toBeNull();
+
+    const ids = await producer.addBulk([
+      {
+        name: 'child',
+        data: { i: 1 },
+        opts: { parent: { id: parentId!, queue: Q }, deduplication: { id: 'prod-bulk-dedup' } },
+      },
+      {
+        name: 'child-dup',
+        data: { i: 2 },
+        opts: { deduplication: { id: 'prod-bulk-dedup' } },
+      },
+    ]);
+    expect(ids[0]).toBeTruthy();
+    expect(ids[1]).toBeNull();
+
+    const keys = buildKeys(Q);
+    const deps = await cleanupClient.smembers(keys.deps(parentId!));
+    expect([...deps].some((member: unknown) => String(member).includes(String(ids[0])))).toBe(true);
+  });
+
+  it('addBulk registers cross-queue parent deps', async () => {
+    const parentQ = Q + '-xq-parent';
+    const parentProducer = new Producer(parentQ, { connection: CONNECTION });
+    const parentId = await parentProducer.add('parent', { kind: 'xq' });
+    expect(parentId).not.toBeNull();
+
+    const ids = await producer.addBulk([
+      { name: 'xq-child', data: { i: 1 }, opts: { parent: { id: parentId!, queue: parentQ } } },
+    ]);
+    expect(ids[0]).toBeTruthy();
+
+    const parentKeys = buildKeys(parentQ);
+    const deps = await cleanupClient.smembers(parentKeys.deps(parentId!));
+    expect([...deps].some((member: unknown) => String(member).includes(String(ids[0])))).toBe(true);
+
+    await parentProducer.close();
+    await flushQueue(cleanupClient, parentQ);
+  });
+
   it('stores all jobs in Valkey', async () => {
     const ids = await producer.addBulk([
       { name: 'verify-1', data: { v: 'one' } },

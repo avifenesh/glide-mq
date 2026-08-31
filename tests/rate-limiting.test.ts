@@ -13,7 +13,7 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -700,5 +700,84 @@ describeEachMode('Rate limiting', (CONNECTION) => {
 
     await q.close();
     await flushQueue(cleanupClient, Q);
+  }, 15000);
+
+  it('queue.rateLimitGroup records resumeAt and honors extend max vs replace', async () => {
+    const Qg = uniqueQueueName('-ext-rlg');
+    const q = new Queue(Qg, { connection: CONNECTION });
+    const groupKey = 'ext-group';
+    const k = buildKeys(Qg);
+
+    const resumeAt = await q.rateLimitGroup(groupKey, 800, { extend: 'replace' });
+    expect(resumeAt).toBeGreaterThan(Date.now() - 50);
+    expect(Number(await cleanupClient.zscore(k.ratelimited, groupKey))).toBe(resumeAt);
+
+    const maxed = await q.rateLimitGroup(groupKey, 200, { extend: 'max' });
+    expect(maxed).toBe(resumeAt);
+
+    const replaced = await q.rateLimitGroup(groupKey, 150, { extend: 'replace' });
+    expect(replaced).toBeLessThan(maxed);
+    expect(Number(await cleanupClient.zscore(k.ratelimited, groupKey))).toBe(replaced);
+
+    const blockedUntil = await q.rateLimitGroup(groupKey, 2000, { extend: 'replace' });
+    expect(blockedUntil).toBeGreaterThan(replaced);
+    expect(Number(await cleanupClient.zscore(k.ratelimited, groupKey))).toBe(blockedUntil);
+
+    await q.add('task', { seq: 1 }, { ordering: { key: groupKey } });
+    await q.add('task', { seq: 2 }, { ordering: { key: groupKey } });
+
+    const finished: number[] = [];
+    const worker = new Worker(
+      Qg,
+      async (job: any) => {
+        finished.push(job.data.seq);
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        concurrency: 1,
+        blockTimeout: 100,
+        stalledInterval: 60000,
+        promotionInterval: 100,
+      },
+    );
+    worker.on('error', () => {});
+    try {
+      await worker.waitUntilReady();
+      await waitFor(() => finished.length === 2, 10000);
+      expect(finished.sort()).toEqual([1, 2]);
+    } finally {
+      await worker.close(true);
+      await q.close();
+      await flushQueue(cleanupClient, Qg);
+    }
+  }, 20000);
+
+  it('job.rateLimitGroup without ordering.key fails the job', async () => {
+    const Qg = uniqueQueueName('-nongroup-rlg');
+    const q = new Queue(Qg, { connection: CONNECTION });
+    let caught: Error | undefined;
+
+    const worker = new Worker(
+      Qg,
+      async (job: any) => {
+        try {
+          await job.rateLimitGroup(250);
+        } catch (err) {
+          caught = err as Error;
+          throw err;
+        }
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 200 },
+    );
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    const job = await q.add('ungrouped', {});
+    await waitFor(async () => (await job.getState()) === 'failed', 8000);
+    expect(caught?.message).toMatch(/group key/);
+
+    await worker.close(true);
+    await q.close();
+    await flushQueue(cleanupClient, Qg);
   }, 15000);
 });
