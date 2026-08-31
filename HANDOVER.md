@@ -3,7 +3,7 @@
 ## Current State
 
 - **Coverage PR**: `test/integration-coverage-gaps` (fork #25 / upstream #280) — rebased onto v0.15.5. Live Valkey/proxy integration tests only. Source fixes: proxy `lockDuration` allowlist, `Job.getParents()` last-colon parse, proxy SSE loops exit on `draining`, `getSharedClient` gated on drain.
-- **In flight**: rate-limited token-bucket promotion skips bounded tombstones and advances both ordered frontiers without stranding successors.
+- **In flight**: `fix/close-fetch-next` (fork #18 / upstream #282) — rebased onto v0.15.5. close() must not strand CAF or poll claims; grouped CAF undo skips `retainedSlot` active rewind. Lua library 124. Close-fetch tests share helpers so Sonar new-code duplication stays under the 3% gate. tb-idle-refill now uses a 250ms promotion interval and 12s waitFor so the default 5s promotion ceiling cannot starve the second job.
 - **Audit fix**: `fix/repeat-after-stalled` atomically advances repeat-after-complete schedulers during terminal stalled recovery.
 - **Branch**: `automation/cover-open-fixes-20260825` consolidates the reviewed correctness queue.
 - **Revoke/timeout safety**: revoked active jobs cannot complete; each batch job owns its abort signal, and timeouts remain retryable.

@@ -51,19 +51,19 @@ describeEachMode('token bucket idle-at-capacity refill', (CONNECTION) => {
       async () => {
         completed.push(Date.now());
       },
-      { connection: CONNECTION, concurrency: 4, blockTimeout: 50 },
+      { connection: CONNECTION, concurrency: 4, blockTimeout: 50, promotionInterval: 250 },
     );
     worker.on('error', () => {});
 
     try {
-      await waitFor(() => completed.length === 2, 5000, 50);
+      await waitFor(() => completed.length === 2, 12000, 50);
       completed.sort((a, b) => a - b);
       expect(completed[1]! - completed[0]!).toBeGreaterThanOrEqual(700);
     } finally {
       await worker.close(true);
       await queue.close();
     }
-  }, 15000);
+  }, 20000);
 
   it('does not persist an ahead caller clock as tbLastRefill at capacity', async () => {
     const Q = uniqueQueue('tb-idle-clock');

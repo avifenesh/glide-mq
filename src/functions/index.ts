@@ -90,7 +90,9 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 120: removeJob acknowledges a claimed FIFO entry in every stream consumer group before deleting it.
 // Version 121: tbRefill uses Redis server time and stamps capacity so idle-full time is not later granted as extra tokens.
 // Version 122: moveToWaitingChildren unparks immediately when no child deps exist.
-export const LIBRARY_VERSION = '122';
+// Version 123: glidemq_complete honors skipEvents/skipMetrics; deferActive can undo a CAF group reservation.
+// Version 124: undoGroupClaim skips active/nextSeq rewind when the job holds retainedSlot.
+export const LIBRARY_VERSION = '124';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -382,6 +384,8 @@ export async function completeJob(
   removeOnComplete?: boolean | number | { age: number; count: number },
   parentInfo?: { depsMember: string; parentId: string; parentKeys: QueueKeys },
   broadcastMode?: boolean,
+  skipEvents?: boolean,
+  skipMetrics?: boolean,
 ): Promise<string[]> {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
@@ -405,7 +409,7 @@ export async function completeJob(
     args.push('', '');
   }
 
-  if (broadcastMode) args.push('1');
+  args.push(broadcastMode ? '1' : '0', skipEvents ? '1' : '0', skipMetrics ? '1' : '0');
 
   const raw = await client.fcall('glidemq_complete', keys, args);
   return String(raw) === 'REVOKED' ? [COMPLETE_REVOKED_MARKER] : parseParentNotifications(raw);
@@ -892,12 +896,20 @@ export async function deferActive(
   entryId: string,
   group: string = CONSUMER_GROUP,
   broadcastMode?: boolean,
-  pausedRestore?: boolean,
+  opts?: { pausedRestore?: boolean; undoGroupClaim?: boolean },
 ): Promise<void> {
-  const args = [jobId, entryId, group];
-  args.push(broadcastMode ? '1' : '0');
-  if (pausedRestore) args.push('1');
-  await client.fcall('glidemq_deferActive', [k.stream, k.job(jobId), k.listActive], args);
+  await client.fcall(
+    'glidemq_deferActive',
+    [k.stream, k.job(jobId), k.listActive],
+    [
+      jobId,
+      entryId,
+      group,
+      broadcastMode ? '1' : '0',
+      opts?.pausedRestore ? '1' : '0',
+      opts?.undoGroupClaim ? '1' : '0',
+    ],
+  );
 }
 
 /**

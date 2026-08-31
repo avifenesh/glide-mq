@@ -46,6 +46,7 @@ import {
   completeJob,
   isCompleteJobRevoked,
   completeAndFetchNext,
+  type CompleteAndFetchResult,
   completeChild,
   failJob,
   addJob,
@@ -104,6 +105,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected paused = false;
   protected closing = false;
   protected closed = false;
+  private closePromise: Promise<void> | null = null;
   protected queueKeys: ReturnType<typeof buildKeys>;
   protected consumerId: string;
   protected activeCount = 0;
@@ -748,6 +750,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           entry.job.opts.removeOnComplete,
           undefined,
           this.broadcastMode ? true : undefined,
+          this.skipEvents,
+          this.skipMetrics,
         );
         if (isCompleteJobRevoked(completeResult)) {
           await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
@@ -814,6 +818,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             entry.job.opts.removeOnComplete,
             undefined,
             this.broadcastMode ? true : undefined,
+            this.skipEvents,
+            this.skipMetrics,
           );
           if (isCompleteJobRevoked(completeResult)) {
             await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
@@ -881,6 +887,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           undefined,
           undefined,
           this.broadcastMode ? true : undefined,
+          this.skipEvents,
+          this.skipMetrics,
         );
       } catch (err) {
         this.emit('error', err);
@@ -941,7 +949,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     return false;
   }
 
-  private async deferPausedActivation(entry: { jobId: string; entryId: string }): Promise<void> {
+  private async deferPausedActivation(entry: {
+    jobId: string;
+    entryId: string;
+    undoGroupClaim?: boolean;
+  }): Promise<void> {
     if (!this.commandClient) return;
     try {
       await deferActive(
@@ -951,7 +963,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         entry.entryId,
         this.consumerGroup,
         this.broadcastMode ? true : undefined,
-        true,
+        { pausedRestore: true, undoGroupClaim: entry.undoGroupClaim },
       );
       if (this.broadcastMode && entry.entryId !== '') {
         this.pausedBroadcastEntries.add(entry.entryId);
@@ -1282,6 +1294,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected async processJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
 
+    // close() can land while XREADGROUP/list-pop is in flight. The poll loop
+    // still delivers that claim, but the while-guard below would otherwise
+    // drop it in this consumer's PEL until stall reclaim.
+    if (this.closing) {
+      await this.deferPausedActivation({ jobId, entryId });
+      return;
+    }
+
     let currentJobId = jobId;
     let currentEntryId = entryId;
     let currentHash: Record<string, string> | null = null;
@@ -1544,28 +1564,53 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         }
       }
       const now = Date.now();
-      const fetchResult = await completeAndFetchNext(
-        this.commandClient,
-        this.queueKeys,
-        currentJobId,
-        currentEntryId,
-        returnvalue,
-        now,
-        this.consumerGroup,
-        this.consumerId,
-        job.opts.removeOnComplete,
-        undefined,
-        completionHints,
-        this.broadcastMode ? true : undefined,
-        job.processedOn,
-        !!job.parentIds,
-        this.skipEvents,
-        this.skipMetrics,
-      );
+      // close() sets closing before waitForActiveJobs. Completing without
+      // fetch-next avoids claiming a job that this worker will not process.
+      let fetchResult: CompleteAndFetchResult;
+      if (this.closing) {
+        const notifications = await completeJob(
+          this.commandClient,
+          this.queueKeys,
+          currentJobId,
+          currentEntryId,
+          returnvalue,
+          now,
+          this.consumerGroup,
+          job.opts.removeOnComplete,
+          undefined,
+          this.broadcastMode ? true : undefined,
+          this.skipEvents,
+          this.skipMetrics,
+        );
+        if (isCompleteJobRevoked(notifications)) {
+          await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
+          return;
+        }
+        fetchResult = { completed: currentJobId, next: false as const, parentNotifications: notifications };
+      } else {
+        fetchResult = await completeAndFetchNext(
+          this.commandClient,
+          this.queueKeys,
+          currentJobId,
+          currentEntryId,
+          returnvalue,
+          now,
+          this.consumerGroup,
+          this.consumerId,
+          job.opts.removeOnComplete,
+          undefined,
+          completionHints,
+          this.broadcastMode ? true : undefined,
+          job.processedOn,
+          !!job.parentIds,
+          this.skipEvents,
+          this.skipMetrics,
+        );
 
-      if (fetchResult.next === 'CURRENT_REVOKED') {
-        await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
-        return;
+        if (fetchResult.next === 'CURRENT_REVOKED') {
+          await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
+          return;
+        }
       }
       await this.notifyCrossQueueParents(fetchResult.parentNotifications);
       job.returnvalue = processResult;
@@ -1617,6 +1662,22 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       if (job.schedulerName) {
         await this.updateSchedulerAfterComplete(job.schedulerName, now);
+      }
+
+      // CAF raced with close(): the next job is already claimed. Defer it
+      // so another worker can take it without waiting for stall reclaim.
+      if (
+        this.closing &&
+        typeof fetchResult.next === 'object' &&
+        fetchResult.nextJobId &&
+        fetchResult.nextEntryId != null
+      ) {
+        await this.deferPausedActivation({
+          jobId: fetchResult.nextJobId,
+          entryId: fetchResult.nextEntryId,
+          undoGroupClaim: true,
+        });
+        return;
       }
 
       // No next job - return to poll loop
@@ -2014,32 +2075,45 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    */
   async close(force?: boolean): Promise<void> {
     if (this.closed) return;
-    if (this.closing) {
-      // Already closing - wait for init to settle, then return
-      await this.initPromise.catch(() => {});
-      return;
-    }
-
+    if (this.closePromise) return this.closePromise;
     this.closing = true;
     this.running = false;
+    this.closePromise = Promise.resolve().then(() => this.performClose(force));
     this.emit('closing');
+    return this.closePromise;
+  }
 
+  private async stopSchedulerOnClose(force?: boolean): Promise<void> {
+    if (!this.scheduler) return;
+    this.scheduler.stop();
+    if (!force) {
+      await this.scheduler.waitForIdle();
+    }
+    this.scheduler = null;
+  }
+
+  private async deregisterWorker(): Promise<void> {
+    if (this.workerHeartbeatTimer) {
+      clearInterval(this.workerHeartbeatTimer);
+      this.workerHeartbeatTimer = null;
+    }
+    if (!this.commandClient) return;
+    try {
+      await this.commandClient.del([this.queueKeys.worker(this.consumerId)]);
+    } catch {
+      // Ignore - TTL will clean up
+    }
+  }
+
+  private async performClose(force?: boolean): Promise<void> {
     // Wait for init to complete so clients are available for cleanup
     await this.initPromise.catch(() => {});
-
-    if (this.scheduler) {
-      this.scheduler.stop();
-      if (!force) {
-        await this.scheduler.waitForIdle();
-      }
-      this.scheduler = null;
-    }
+    await this.stopSchedulerOnClose(force);
 
     if (!force) {
       await this.waitForActiveJobs();
     }
 
-    // Shut down sandbox worker pool
     if (this.sandboxClose) {
       try {
         await this.sandboxClose(force);
@@ -2048,21 +2122,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
     }
 
-    // Clear worker registration heartbeat
-    if (this.workerHeartbeatTimer) {
-      clearInterval(this.workerHeartbeatTimer);
-      this.workerHeartbeatTimer = null;
-    }
-    // Best-effort deregistration
-    if (this.commandClient) {
-      try {
-        await this.commandClient.del([this.queueKeys.worker(this.consumerId)]);
-      } catch {
-        // Ignore - TTL will clean up
-      }
-    }
+    await this.deregisterWorker();
 
-    // Clear all active heartbeats
     for (const [, timer] of this.heartbeatIntervals) {
       clearInterval(timer);
     }

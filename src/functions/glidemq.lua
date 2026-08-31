@@ -1070,6 +1070,8 @@ redis.register_function('glidemq_complete', function(keys, args)
   local depsMember = args[9] or ''
   local parentId = args[10] or ''
   local broadcastMode = args[11] or '0'
+  local skipEvents = args[12] or '0'
+  local skipMetrics = args[13] or '0'
   local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
   if redis.call('HGET', jobKey, 'revoked') == '1' then
     return 'REVOKED'
@@ -1084,8 +1086,8 @@ redis.register_function('glidemq_complete', function(keys, args)
   )
   markOrderingDone(jobKey, jobId)
   releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
-  emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue})
-  recordMetrics(metricsKey, timestamp, timestamp - processedOn)
+  if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
+  if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
   local storedParentId = redis.call('HGET', jobKey, 'parentId')
@@ -2772,6 +2774,34 @@ redis.register_function('glidemq_deferActive', function(keys, args)
     xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
   end
   redis.call('HSET', jobKey, 'state', 'waiting')
+  local undoGroupClaim = args[6] or '0'
+  if undoGroupClaim == '1' then
+    local gk = redis.call('HGET', jobKey, 'groupKey')
+    if gk and gk ~= '' then
+      local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+      local ghk = prefix .. 'group:' .. gk
+      local seq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+      local nextSeq = tonumber(redis.call('HGET', ghk, 'nextSeq')) or 0
+      local returning = seq > 0 and nextSeq > 0 and seq < nextSeq and nextSeq ~= seq + 1
+      -- retainedSlot jobs already hold the group slot; CAF skipped the increment.
+      local retainedSlot = redis.call('HGET', jobKey, 'retainedSlot') == '1'
+      if not returning and not retainedSlot then
+        local active = tonumber(redis.call('HGET', ghk, 'active')) or 0
+        if active > 0 then redis.call('HSET', ghk, 'active', tostring(active - 1)) end
+        if seq > 0 and nextSeq == seq + 1 then
+          redis.call('HSET', ghk, 'nextSeq', tostring(seq))
+        end
+      end
+      local tbCap = tonumber(redis.call('HGET', ghk, 'tbCapacity')) or 0
+      if tbCap > 0 then
+        local cost = tonumber(redis.call('HGET', jobKey, 'cost')) or 1000
+        local tokens = tonumber(redis.call('HGET', ghk, 'tbTokens')) or 0
+        redis.call('HSET', ghk, 'tbTokens', tostring(math.min(tbCap, tokens + cost)))
+      end
+      local rateCount = tonumber(redis.call('HGET', ghk, 'rateCount')) or 0
+      if rateCount > 0 then redis.call('HSET', ghk, 'rateCount', tostring(rateCount - 1)) end
+    end
+  end
   return 1
 end)
 
