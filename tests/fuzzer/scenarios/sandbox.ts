@@ -28,7 +28,8 @@ export async function sandbox(ctx: ScenarioContext): Promise<ScenarioResult> {
   const totalJobs = 10;
 
   // Write a temporary processor file
-  const tmpFile = path.join(os.tmpdir(), `fuzz-processor-${Date.now()}.cjs`);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'glide-mq-fuzz-'));
+  const tmpFile = path.join(tmpDir, 'processor.cjs');
   fs.writeFileSync(tmpFile, 'module.exports = async (job) => ({ processed: job.name, ok: true });\n');
 
   try {
@@ -88,7 +89,7 @@ export async function sandbox(ctx: ScenarioContext): Promise<ScenarioResult> {
   } finally {
     // Clean up temp file
     try {
-      fs.unlinkSync(tmpFile);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch {
       // Ignore cleanup errors
     }

@@ -4,7 +4,11 @@
  * Caches Producer instances by queue name + connection fingerprint so that
  * warm invocations reuse existing connections instead of creating new ones.
  */
-import { createHash } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
+
+// Per-process secret so pool keys are unguessable and cannot be used to brute-force
+// credentials offline (CodeQL js/insufficient-password-hash). Keys never leave memory.
+const POOL_KEY_SECRET = randomBytes(32);
 import { Producer } from './producer';
 import type { ProducerOptions } from './producer';
 import type { ConnectionOptions } from './types';
@@ -16,7 +20,7 @@ import type { ConnectionOptions } from './types';
  */
 function credentialsFingerprint(creds: ConnectionOptions['credentials']): string {
   if (!creds) return 'none';
-  const h = createHash('sha256');
+  const h = createHmac('sha256', POOL_KEY_SECRET);
   if ('type' in creds && creds.type === 'iam') {
     h.update('iam');
     h.update('\0');
