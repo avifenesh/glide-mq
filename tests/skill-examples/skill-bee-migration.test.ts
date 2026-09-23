@@ -103,14 +103,17 @@ describe('Bee SKILL.md - connection and basic usage', () => {
       ),
     );
 
-    worker.on('completed', (job) => {
-      // Verify returnValue is accessible
+    const results: any[] = [];
+    worker.on('completed', (job, result) => {
+      // The skill logs the second argument; job.returnValue does not exist.
       expect(job).toBeTruthy();
+      results.push(result);
     });
 
     await queue.add('task', { x: 1 });
-    await waitFor(() => processed.length > 0);
+    await waitFor(() => results.length > 0);
     expect(processed[0]).toEqual({ processed: true });
+    expect(results[0]).toEqual({ processed: true });
   }, 15000);
 
   it('Step 4: Batch save -> addBulk (SKILL.md:183)', async () => {

@@ -1,28 +1,21 @@
 ---
 name: glide-mq
 description: >-
-  Creates message queues, workers, job workflows, and fan-out broadcasts using
-  glide-mq on Valkey/Redis Streams. Provides API reference, code patterns, and
-  configuration for queues, workers, delayed/priority jobs, schedulers, batch
-  processing, DAG workflows, request-reply, serverless producers, and AI-native
-  primitives (usage tracking, token streaming, suspend/resume, budget caps,
-  fallback chains, dual-axis rate limiting, rolling usage summaries, vector search, HTTP proxy/SSE). Triggers on
-  "glide-mq", "glidemq", "job queue valkey", "background tasks valkey",
-  "message queue redis streams", "glide-mq LLM queue",
-  "glide-mq AI orchestration queue", "glide-mq token rate limiting",
-  "glide-mq model fallback", "glide-mq human-in-the-loop queue",
-  "glide-mq vector search", "glide-mq AI pipeline".
+  Use when building or changing code that uses glide-mq, the Node.js job queue on
+  Valkey/Redis Streams: queues, workers, retries, schedulers, workflows,
+  broadcast, serverless producers, HTTP proxy, or its AI primitives (usage,
+  streaming, suspend/resume, budgets, fallbacks, vector search).
 license: Apache-2.0
 metadata:
   author: glide-mq
-  version: '0.14.0'
+  version: '0.15.5'
   tags: glide-mq, message-queue, valkey, redis, job-queue, worker, streams, ai-native, llm, vector-search
   sources: docs/USAGE.md, docs/ADVANCED.md, docs/WORKFLOWS.md, docs/BROADCAST.md, docs/SERVERLESS.md, docs/TESTING.md, docs/OBSERVABILITY.md
 ---
 
 # glide-mq
 
-High-performance AI-native message queue for Node.js on Valkey/Redis Streams with a Rust NAPI core.
+Job queue for Node.js on Valkey/Redis Streams, with a Rust NAPI client and all queue logic in Valkey Server Functions (one `FCALL` per job operation). The API is close to BullMQ; the differences that bite are in connection config and a few method signatures.
 
 ## Quick Start
 
@@ -47,44 +40,24 @@ worker.on('completed', (job) => console.log(`Done: ${job.id}`));
 worker.on('failed', (job, err) => console.error(`Failed: ${job.id}`, err.message));
 ```
 
-## When to Apply
+## References
 
-Use this skill when:
+Read the file that matches the task; each holds the options, defaults and edge cases for its area.
 
-- Creating or configuring queues, workers, or producers
-- Adding jobs (single, bulk, delayed, priority)
-- Setting up retries, backoff, or dead-letter queues
-- Building job workflows (parent-child, DAGs, chains)
-- Implementing fan-out broadcast patterns
-- Configuring cron/interval schedulers
-- Setting up connection options (TLS, IAM, AZ-affinity)
-- Working with batch processing or rate limiting
-- Tracking AI/LLM usage (tokens, cost, model) per job or flow
-- Streaming LLM output tokens in real-time
-- Implementing human-in-the-loop approval with suspend/resume
-- Setting budget caps (tokens, cost) on workflow flows
-- Configuring fallback chains for model/provider failover
-- Dual-axis rate limiting (RPM + TPM) for LLM API compliance
-- Aggregating rolling usage/cost summaries across queues
-- Searching jobs by vector similarity (KNN) with Valkey Search
-- Exposing queues or broadcasts over the HTTP proxy, including SSE endpoints
-- Integrating with frameworks (Hono, Fastify, NestJS, Hapi)
-- Deploying in serverless environments (Lambda, Vercel Edge)
+| Area | File |
+| --- | --- |
+| Queues, adding jobs, retries, dedup, rate limits, job lookup | [references/queue.md](references/queue.md) |
+| Workers, concurrency, batch mode, stalled jobs, sandboxing | [references/worker.md](references/worker.md) |
+| Connection options, TLS, IAM, cluster, AZ affinity | [references/connection.md](references/connection.md) |
+| Parent-child flows, DAGs, `chain` / `group` / `chord` | [references/workflows.md](references/workflows.md) |
+| Fan-out with `Broadcast` / `BroadcastWorker` | [references/broadcast.md](references/broadcast.md) |
+| Cron and interval schedulers | [references/schedulers.md](references/schedulers.md) |
+| `QueueEvents`, metrics, OpenTelemetry | [references/observability.md](references/observability.md) |
+| LLM usage, token streaming, suspend/resume, budgets, fallbacks, token rate limits | [references/ai-native.md](references/ai-native.md) |
+| Vector search over jobs | [references/search.md](references/search.md) |
+| Serverless producers, HTTP proxy and SSE, in-memory testing | [references/serverless.md](references/serverless.md) |
 
-## Core API by Priority
-
-| Priority | Category                   | Impact   | Reference                                                  |
-| -------- | -------------------------- | -------- | ---------------------------------------------------------- |
-| 1        | Queue & Job Operations     | CRITICAL | [references/queue.md](references/queue.md)                 |
-| 2        | Worker & Processing        | CRITICAL | [references/worker.md](references/worker.md)               |
-| 3        | Connection & Config        | HIGH     | [references/connection.md](references/connection.md)       |
-| 4        | Workflows & FlowProducer   | HIGH     | [references/workflows.md](references/workflows.md)         |
-| 5        | Broadcast (Fan-Out)        | MEDIUM   | [references/broadcast.md](references/broadcast.md)         |
-| 6        | Schedulers (Cron/Interval) | MEDIUM   | [references/schedulers.md](references/schedulers.md)       |
-| 7        | Observability & Events     | MEDIUM   | [references/observability.md](references/observability.md) |
-| 8        | AI-Native Primitives       | HIGH     | [references/ai-native.md](references/ai-native.md)         |
-| 9        | Vector Search              | MEDIUM   | [references/search.md](references/search.md)               |
-| 10       | Serverless & Testing       | LOW      | [references/serverless.md](references/serverless.md)       |
+Framework adapters (Hono, Fastify, NestJS, Hapi) are documented at https://www.glidemq.dev/integrations/.
 
 ## Key Patterns
 
@@ -105,7 +78,7 @@ await queue.add('webhook', data, {
 });
 ```
 
-### Bulk Ingestion (10,000 jobs in ~350ms)
+### Bulk Ingestion
 
 ```typescript
 const jobs = items.map((item) => ({
@@ -164,8 +137,8 @@ await producer.close();
 ```typescript
 import { gracefulShutdown } from 'glide-mq';
 
-// Registers SIGTERM/SIGINT handlers and returns a handle.
-// await blocks until a signal fires - use as last line of your program.
+// Registers SIGTERM/SIGINT handlers. The handle is also a promise:
+// `await handle` resolves once a signal-triggered or manual shutdown finishes.
 const handle = gracefulShutdown([worker1, worker2, queue, events]);
 
 // For programmatic shutdown (e.g., in tests):
@@ -185,47 +158,16 @@ const worker = new TestWorker(queue, processor);
 await worker.run();
 ```
 
-## Problem-to-Reference Mapping
+## Things that differ from what you might expect
 
-| Problem                                       | Start With                                                                   |
-| --------------------------------------------- | ---------------------------------------------------------------------------- |
-| Need to create a queue and add jobs           | [references/queue.md](references/queue.md)                                   |
-| Need to process jobs with workers             | [references/worker.md](references/worker.md)                                 |
-| Jobs failing, need retries/backoff            | [references/queue.md](references/queue.md) - Retry section                   |
-| Need parent-child job dependencies            | [references/workflows.md](references/workflows.md)                           |
-| Need fan-out to multiple consumers            | [references/broadcast.md](references/broadcast.md)                           |
-| Need cron or repeating jobs                   | [references/schedulers.md](references/schedulers.md)                         |
-| Connection errors or TLS/IAM setup            | [references/connection.md](references/connection.md)                         |
-| Stalled jobs or lock issues                   | [references/worker.md](references/worker.md) - Stalled Jobs                  |
-| Need real-time job events                     | [references/observability.md](references/observability.md)                   |
-| Integrating with Fastify/NestJS/Hono          | [Framework Integrations](https://www.glidemq.dev/integrations/)              |
-| Deploying to Lambda/Vercel Edge               | [references/serverless.md](references/serverless.md)                         |
-| Need deduplication or idempotent jobs         | [references/queue.md](references/queue.md) - Dedup                           |
-| Need rate limiting                            | [references/queue.md](references/queue.md) - Rate Limit                      |
-| Running tests without Valkey                  | [references/serverless.md](references/serverless.md) - Testing               |
-| Need to track LLM tokens/cost per job         | [references/ai-native.md](references/ai-native.md) - Usage Metadata          |
-| Need to stream LLM output tokens              | [references/ai-native.md](references/ai-native.md) - Token Streaming         |
-| Need human approval before proceeding         | [references/ai-native.md](references/ai-native.md) - Suspend/Resume          |
-| Need to cap token/cost budget on a flow       | [references/ai-native.md](references/ai-native.md) - Budget                  |
-| Need model fallback on failure                | [references/ai-native.md](references/ai-native.md) - Fallback Chains         |
-| Need RPM + TPM rate limiting for LLM APIs     | [references/ai-native.md](references/ai-native.md) - Dual-Axis Rate Limiting |
-| Need rolling usage/cost summary across queues | [references/ai-native.md](references/ai-native.md) - Usage Metadata          |
-| Need vector similarity search over jobs       | [references/search.md](references/search.md)                                 |
-| Need to aggregate usage across a flow         | [references/ai-native.md](references/ai-native.md) - Flow Usage              |
-| Need to create or inspect flows over HTTP     | [references/serverless.md](references/serverless.md) - HTTP Proxy            |
-| Need cross-language HTTP or SSE access        | [references/serverless.md](references/serverless.md) - HTTP Proxy            |
+- Requires Node.js 20+ and Valkey 7.0+ (or Redis 7.0+).
+- Connections are `{ addresses: [{ host, port }] }`, not `{ host, port }`; TLS is `useTLS: true`, passwords go in `credentials`, and cluster needs `clusterMode: true`. The BullMQ shape fails at connect time with a `ConnectionError`.
+- Delivery is at least once, so processors should be idempotent.
+- Priority: a lower number runs first, 0 (the default) is the highest, and values above 2048 throw.
+- Keys are hash-tagged (`glide:{queueName}:*`), so cluster mode needs no extra setup.
+- `queue.add()` with a `jobId` that already exists returns `null` instead of adding a duplicate.
 
-## Critical Notes
-
-- **Node.js 20+** and **Valkey 7.0+** (or Redis 7.0+) required
-- **At-least-once delivery** - make processors idempotent
-- **Priority**: lower number = higher priority (0 is default, highest)
-- **Cluster-native** - hash-tagged keys (`glide:{queueName}:*`) work out of the box
-- All queue logic runs as a single Valkey Server Function (FCALL) - 1 round-trip per job
-- Connection format uses `addresses: [{ host, port }]` array, NOT `{ host, port }` object
-- **Never use `customCommand`** - use typed API methods with dummy keys for cluster routing
-
-## Done When
+## Done
 
 - `npm test` or the project-equivalent test command passes
 - `await queue.getJobCounts()` matches the expected queue state

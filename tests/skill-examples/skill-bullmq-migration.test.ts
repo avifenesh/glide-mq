@@ -240,6 +240,18 @@ describe('BullMQ SKILL.md - connection conversion', () => {
     expect(jobs.length).toBeGreaterThanOrEqual(2);
   }, 15000);
 
+  it('Step 12: waitUntilFinished resolves to the final state', async () => {
+    const qName = uid('bmq-wait');
+    const queue = track(new Queue(qName, { connection }));
+    track(new Worker(qName, async () => ({ ok: true }), { connection }));
+
+    const job = await queue.add('compute', { input: 1 });
+    const state = await job!.waitUntilFinished(100, 10000);
+    expect(state).toBe('completed');
+    const done = await queue.getJob(job!.id);
+    expect(done!.returnvalue).toEqual({ ok: true });
+  }, 15000);
+
   it('Step 13: BullMQ Pro groups to ordering keys (SKILL.md:277)', async () => {
     const qName = uid('bmq-ordering');
     const queue = track(new Queue(qName, { connection }));
