@@ -1,32 +1,20 @@
 ---
 name: glide-mq-migrate-bullmq
 description: >-
-  Migrates Node.js applications from BullMQ to glide-mq. Covers connection
-  config conversion, API mapping, breaking changes, and new features available
-  after migration. Use when converting BullMQ queues and workers to glide-mq,
-  replacing bullmq with glide-mq, or comparing BullMQ vs glide-mq APIs.
-  Triggers on "bullmq to glide-mq", "replace bullmq with glide-mq",
-  "migrate from bullmq", "switch from bullmq to glide-mq",
-  "convert bullmq to glide-mq", "bullmq migration glide-mq".
+  Use when moving a Node.js project from BullMQ (or BullMQ Pro groups) to
+  glide-mq, or comparing the two APIs: connection format, changed signatures,
+  removed options, and what replaces them.
 license: Apache-2.0
 metadata:
   author: glide-mq
-  version: "0.14.0"
+  version: "0.15.5"
   tags: glide-mq, bullmq, migration, queue, valkey, redis
   sources: docs/MIGRATION.md
 ---
 
 # Migrate from BullMQ to glide-mq
 
-The glide-mq API is intentionally similar to BullMQ. Most changes are connection format and imports.
-
-## When to Apply
-
-Use this skill when:
-- Replacing BullMQ with glide-mq in an existing project
-- Converting BullMQ Queue/Worker/FlowProducer code
-- Updating connection configuration from ioredis to valkey-glide format
-- Comparing API differences between BullMQ and glide-mq
+The glide-mq API is intentionally similar to BullMQ. Most of a migration is the connection format and imports; the table below lists every change that breaks code, and the steps show each conversion. Work through them in order, then run the project's tests.
 
 ## Prerequisites
 
@@ -64,7 +52,7 @@ import { Queue, Worker, Job, QueueEvents, FlowProducer } from 'glide-mq';
 | **`queue.getJobCounts()`** | Variadic type list | Always returns all states |
 | **`settings.backoffStrategy`** | Single function | `backoffStrategies` named map on WorkerOptions |
 | **`worker.on('active')`** | Emits `(job, prev)` | Emits `(job, jobId)` |
-| **`job.waitUntilFinished()`** | `(queueEvents, ttl)` | `(pollIntervalMs, timeoutMs)` - no QueueEvents needed |
+| **`job.waitUntilFinished()`** | `(queueEvents, ttl)`, resolves to the result | `(pollIntervalMs, timeoutMs)`, resolves to `'completed'` or `'failed'` |
 | **Sandboxed processor** | `useWorkerThreads: true` | `sandbox: { useWorkerThreads: true }` |
 | **`QueueScheduler`** | Required in v1, optional in v2+ | Does not exist - promotion runs inside Worker |
 | **`opts.repeat`** | On `queue.add()` | Removed - use `queue.upsertJobScheduler()` |
@@ -259,8 +247,10 @@ const result = await job.waitUntilFinished(qe, 30000);
 
 ```ts
 // AFTER - no QueueEvents needed
-const result = await job.waitUntilFinished(500, 30000);
+const state = await job.waitUntilFinished(500, 30000);
 // args: pollIntervalMs (default 500), timeoutMs (default 30000)
+// resolves to 'completed' or 'failed'; read the result with queue.getJob(job.id)
+// or use queue.addAndWait() when you need the return value
 ```
 
 ### 13. BullMQ Pro groups to ordering keys
@@ -306,7 +296,7 @@ await queue.add('job', data, {
 | Job TTL | `opts.ttl` | Auto-expire jobs after N ms |
 | repeatAfterComplete | `upsertJobScheduler('name', { repeatAfterComplete: 5000 })` | No-overlap scheduling (ms delay after completion) |
 | LIFO mode | `lifo: true` | Last-in-first-out processing |
-| Job search | `queue.searchJobs(opts)` | Full-text search over job data |
+| Job search | `queue.searchJobs({ state, name, data })` | Filter by state, exact name and shallow data fields |
 | excludeData | `queue.getJobs(type, start, end, { excludeData: true })` | Lightweight listings |
 | `globalConcurrency` | On WorkerOptions | Set queue-wide cap at worker startup |
 | **AI usage tracking** | `job.reportUsage({ model, tokens, costs, ... })` | Per-job LLM usage metadata |
@@ -376,19 +366,21 @@ Most production deployments run c=5 to c=20, where glide-mq's 1-RTT architecture
 
 ## Troubleshooting
 
-| Error | Cause | Fix |
+TypeScript catches most leftovers at compile time: `defaultJobOptions`, `settings.backoffStrategy`, `opts.repeat`, an array passed to `getJobs()`, and `QueueScheduler` are not part of glide-mq's types. In plain JavaScript they fail or are ignored at runtime, as below.
+
+| Symptom | Cause | Fix |
 |-------|-------|-----|
-| `TypeError: connection.host is not defined` | Using BullMQ `{ host, port }` format | Change to `{ addresses: [{ host, port }] }` |
-| `Cannot read properties of undefined (reading 'backoffStrategy')` | Using `settings.backoffStrategy` | Move to `backoffStrategies` map on WorkerOptions |
-| `defaultJobOptions is not a valid option` | glide-mq removed `defaultJobOptions` | Wrap `queue.add()` with a helper that spreads defaults |
-| `getJobs expects a string, got array` | Passing array of types to `getJobs()` | Call `getJobs()` once per type, combine results |
-| `QueueScheduler is not exported` | glide-mq has no QueueScheduler | Remove it - promotion runs inside the Worker |
-| `opts.repeat is not supported` | glide-mq uses upsertJobScheduler | Replace `opts.repeat` with `queue.upsertJobScheduler()` |
-| `waitUntilFinished expects number` | API changed from `(qe, ttl)` to `(pollMs, ttl)` | Pass `(500, 30000)` instead of `(queueEvents, 30000)` |
-| Job stuck in `active` forever | Worker crashed without completing | Stall detection auto-recovers stream jobs. For LIFO/priority, reset: `DEL glide:{queueName}:list-active` |
-| `retries-exhausted` listener never fires | Event renamed | Listen to `'failed'` and check `attemptsMade >= opts.attempts` |
-| `FlowProducer.add` throws on missing data | `data` is required in glide-mq FlowJob | Always pass `data` field (use `{}` if empty) |
-| Duplicate custom jobId returns null | Expected behavior | `queue.add()` returns `null` for duplicate IDs (silent skip) |
+| `ConnectionError: Failed to create standalone client: ...` on startup | BullMQ `{ host, port }` connection | `{ addresses: [{ host, port }] }` |
+| Queue-level defaults (attempts, backoff) silently not applied | `defaultJobOptions` is not a glide-mq option | Wrap `queue.add()` with a helper that spreads defaults |
+| Custom backoff ignored | `settings.backoffStrategy` | `backoffStrategies` map on WorkerOptions |
+| `TypeError` reading `length` from `getJobs()` | Array of types passed | One `getJobs()` call per type, then combine |
+| Import of `QueueScheduler` fails | glide-mq has no QueueScheduler | Remove it; the Worker promotes delayed jobs |
+| Repeatable job never repeats | `opts.repeat` on `queue.add()` | `queue.upsertJobScheduler()` |
+| `waitUntilFinished` times out or returns a state instead of a result | New `(pollMs, timeoutMs)` signature | Pass numbers; use `addAndWait()` for the return value |
+| Job stuck in `active` | Worker crashed mid-job | Stall detection recovers stream jobs; for LIFO/priority jobs, `DEL glide:{queueName}:list-active` |
+| `retries-exhausted` listener never fires | No such event | Listen to `'failed'` and check `attemptsMade >= opts.attempts` |
+| `FlowProducer.add` throws `The "string" argument must be of type string ... Received undefined` | A FlowJob without `data` | Pass `data` on every node (use `{}` if empty) |
+| `queue.add()` returned `null` | A job with that `jobId` already exists | Expected: duplicates are skipped |
 
 ## Full Documentation
 

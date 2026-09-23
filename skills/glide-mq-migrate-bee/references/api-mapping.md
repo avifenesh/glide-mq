@@ -433,9 +433,9 @@ new Queue('tasks', { redis: { host: 'redis.example.com', port: 6380 } });
 // BEFORE - URL string
 new Queue('tasks', { redis: 'redis://user:pass@host:6379/0' });
 
-// BEFORE - existing ioredis client
-const Redis = require('ioredis');
-new Queue('tasks', { redis: new Redis() });
+// BEFORE - existing node-redis (v3) client, which Bee-Queue uses internally
+const redis = require('redis');
+new Queue('tasks', { redis: redis.createClient() });
 
 // AFTER - always addresses array
 const connection = { addresses: [{ host: 'redis.example.com', port: 6380 }] };

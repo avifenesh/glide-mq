@@ -1,42 +1,22 @@
 ---
 name: glide-mq-migrate-bee
 description: >-
-  Migrates Node.js applications from Bee-Queue to glide-mq. Covers the chained
-  builder-to-options API conversion, Queue/Worker separation, and event mapping.
-  Use when converting bee-queue projects to glide-mq, replacing bee-queue with
-  glide-mq, or planning a bee-queue migration. Triggers on
-  "bee-queue to glide-mq", "replace bee-queue with glide-mq",
-  "migrate from bee-queue", "beequeue migration glide-mq".
+  Use when moving a Node.js project from Bee-Queue to glide-mq: converting the
+  chained job builder to options, splitting Queue and Worker, and mapping
+  settings, methods and events.
 license: Apache-2.0
 metadata:
   author: glide-mq
-  version: "0.14.0"
+  version: "0.15.5"
   tags: bee-queue, migration, glide-mq, valkey, redis, job-queue
   sources: docs/USAGE.md
 ---
 
 # Migrate from Bee-Queue to glide-mq
 
-## When to Apply
+Bee-Queue uses one `Queue` class for producing and consuming, a chained job builder, and unnamed jobs. glide-mq separates `Queue` (or `Producer`) from `Worker`, takes job options as an object, and requires a job name. The tables below map every setting, method and event; the steps show each conversion. Work through them, then run the project's tests.
 
-Use this skill when:
-- Replacing bee-queue with glide-mq in an existing project
-- Converting Bee-Queue's chained job API to glide-mq's options API
-- Updating connection configuration from ioredis to valkey-glide
-- Upgrading from bee-queue due to Node.js compatibility or maintenance issues
-
-Step-by-step guide for converting Bee-Queue projects to glide-mq. Bee-Queue uses a chained job builder pattern - this migration requires rewriting job creation and separating producer/consumer concerns.
-
-## Why Migrate
-
-- **Unmaintained** - last release 2021, accumulating Node.js compatibility issues
-- **No cluster support** - cannot scale beyond a single Redis instance
-- **No TLS** - requires manual ioredis workarounds for encrypted connections
-- **No native TypeScript** - community `@types/bee-queue` only, often outdated
-- **No priority queues** - workaround is multiple queues
-- **No workflows** - no parent-child jobs, no DAGs, no repeatable/cron jobs
-- **No rate limiting, batch processing, or broadcast**
-- glide-mq provides all Bee-Queue features plus 35%+ higher throughput
+The payoff is what Bee-Queue does not have: priorities, flows and DAGs, schedulers, rate limiting, batch workers, broadcast, cluster mode and IAM auth (see [What You Gain](#what-you-gain)).
 
 ## Breaking Changes Summary
 
@@ -48,7 +28,7 @@ Step-by-step guide for converting Bee-Queue projects to glide-mq. Bee-Queue uses
 | Job options | Chained: `.timeout(ms).retries(n)` | Options object: `{ attempts, backoff, delay }` |
 | Retries | `.retries(n)` | `{ attempts: n }` (different name!) |
 | Processing | `queue.process(concurrency, handler)` | `new Worker(name, handler, { concurrency })` |
-| Connection | `{ host, port }` or redis URL | `{ addresses: [{ host, port }] }` |
+| Connection | `redis: { host, port }` or a redis URL | `connection: { addresses: [{ host, port }] }` |
 | Progress | `job.reportProgress(anyJSON)` | `job.updateProgress(number \| object)` (number 0-100 or object) |
 | Per-job events | `job.on('succeeded', ...)` | `QueueEvents` class (centralized) |
 | Stall detection | Manual `checkStalledJobs()` | Automatic on Worker |
@@ -98,7 +78,7 @@ Step-by-step guide for converting Bee-Queue projects to glide-mq. Bee-Queue uses
 |-----------------|--------|---------------------|--------|
 | `queue.on('ready')` | Queue | `worker.waitUntilReady()` | Worker |
 | `queue.on('error', err)` | Queue | `worker.on('error', err)` | Worker |
-| `queue.on('succeeded', job, result)` | Queue (local) | `worker.on('completed', job)` | Worker |
+| `queue.on('succeeded', job, result)` | Queue (local) | `worker.on('completed', job, result)` | Worker |
 | `queue.on('retrying', job, err)` | Queue (local) | `worker.on('failed', job, err)` | Worker (with retries remaining) |
 | `queue.on('failed', job, err)` | Queue (local) | `worker.on('failed', job, err)` | Worker |
 | `queue.on('stalled', jobId)` | Queue | `worker.on('stalled', jobId)` | Worker |
@@ -167,7 +147,7 @@ queue.on('succeeded', (job, result) => console.log('Done:', result));
 const worker = new Worker('tasks', async (job) => {
   return { processed: true };
 }, { connection, concurrency: 10 });
-worker.on('completed', (job) => console.log('Done:', job.returnValue));
+worker.on('completed', (job, result) => console.log('Done:', result));
 ```
 
 ### 4. Batch Save
@@ -292,7 +272,7 @@ Features Bee-Queue does not have that are available after migration:
 ## Migration Checklist
 
 ```
-- [ ] Install glide-mq, uninstall bee-queue and @types/bee-queue
+- [ ] Install glide-mq, uninstall bee-queue (and @types/bee-queue if the project added it)
 - [ ] Create connection config (addresses array format)
 - [ ] Convert queue.createJob().save() to queue.add(name, data, opts)
 - [ ] Add job names to every queue.add() call (Bee-Queue had none)
@@ -334,7 +314,7 @@ Features Bee-Queue does not have that are available after migration:
 ## Quick Start Commands
 
 ```bash
-npm uninstall bee-queue @types/bee-queue
+npm uninstall bee-queue   # plus @types/bee-queue if present
 npm install glide-mq
 ```
 
