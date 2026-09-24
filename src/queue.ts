@@ -64,6 +64,7 @@ import {
   usageQueuesKey,
   USAGE_BUCKET_MS,
   USAGE_RETENTION_MS,
+  assertSafePropertyKey,
 } from './utils';
 import {
   createBlockingClient,
@@ -1589,6 +1590,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         nextRun,
       };
 
+      assertSafePropertyKey(name, 'scheduler name');
       await client.hset(this.keys.schedulers, { [name]: JSON.stringify(entry) });
     } finally {
       await this.releaseSchedulerMutationLock(client, lock);
@@ -2419,6 +2421,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             if (!fields || !hasUsageBucketData(fields)) continue;
 
             if (!queueSummary) {
+              assertSafePropertyKey(queueName, 'queue name');
               queueSummary = createUsageQueueSummary();
               summary.perQueue[queueName] = queueSummary;
             }
