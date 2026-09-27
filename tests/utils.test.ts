@@ -9,7 +9,29 @@ import {
   JOB_METADATA_FIELDS,
   encodeScore,
   validateQueueName,
+  assertSafePropertyKey,
+  sanitizeForLog,
 } from '../src/utils';
+
+describe('assertSafePropertyKey', () => {
+  it.each(['__proto__', 'constructor', 'prototype', ''])('rejects unsafe property key %j', (key) => {
+    expect(() => assertSafePropertyKey(key, 'scheduler name')).toThrow('invalid scheduler name');
+  });
+
+  it('accepts an ordinary property key', () => {
+    expect(() => assertSafePropertyKey('daily-report', 'scheduler name')).not.toThrow();
+  });
+});
+
+describe('sanitizeForLog', () => {
+  it('removes control characters that could forge a log line', () => {
+    expect(sanitizeForLog('queue\n[ERROR] forged\r\t')).toBe('queue[ERROR] forged');
+  });
+
+  it('caps caller-supplied text', () => {
+    expect(sanitizeForLog('abcdef', 4)).toBe('abcd…');
+  });
+});
 
 describe('decompress', () => {
   it('rejects decompression bombs exceeding MAX_JOB_DATA_SIZE', () => {
