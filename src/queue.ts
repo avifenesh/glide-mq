@@ -1589,13 +1589,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         nextRun,
       };
 
-      const schedulerFields = Object.create(null) as Record<string, string>;
-      Object.defineProperty(schedulerFields, name, {
-        value: JSON.stringify(entry),
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      });
+      const schedulerFields = Object.fromEntries([[name, JSON.stringify(entry)]]);
       await client.hset(this.keys.schedulers, schedulerFields);
     } finally {
       await this.releaseSchedulerMutationLock(client, lock);
@@ -2407,6 +2401,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         );
       }
 
+      const perQueue = new Map<string, UsageQueueSummary>();
       for (const queueName of queues) {
         const queueKeys = buildKeys(queueName, prefix);
         let queueSummary: UsageQueueSummary | undefined;
@@ -2427,12 +2422,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
             if (!queueSummary) {
               queueSummary = createUsageQueueSummary();
-              Object.defineProperty(summary.perQueue, queueName, {
-                value: queueSummary,
-                enumerable: true,
-                writable: true,
-                configurable: true,
-              });
+              perQueue.set(queueName, queueSummary);
             }
 
             mergeUsageBucketFields(summary, fields);
@@ -2441,7 +2431,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
         }
       }
 
-      summary.queues = Object.keys(summary.perQueue).sort();
+      summary.perQueue = Object.setPrototypeOf(Object.fromEntries(perQueue), null);
+      summary.queues = Array.from(perQueue.keys()).sort();
       return summary;
     } finally {
       if (clientOwned) {
