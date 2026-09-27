@@ -971,18 +971,6 @@ export function validateAndResolveUsage(usage: JobUsage): JobUsage {
   return resolved;
 }
 
-const UNSAFE_PROPERTY_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-
-/**
- * Reject names that would collide with object prototype machinery when used as
- * a dynamic property key (CodeQL js/remote-property-injection).
- */
-export function assertSafePropertyKey(key: string, what: string): void {
-  if (typeof key !== 'string' || key.length === 0 || UNSAFE_PROPERTY_KEYS.has(key)) {
-    throw new Error(`invalid ${what}: ${JSON.stringify(key)}`);
-  }
-}
-
 /**
  * Strip control characters and cap length so caller-supplied strings cannot
  * forge log lines (CodeQL js/log-injection, js/tainted-format-string).
