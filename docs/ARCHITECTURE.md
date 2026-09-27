@@ -531,7 +531,7 @@ glide-mq/
 ├── eslint.config.mjs
 ├── CHANGELOG.md
 ├── LICENSE
-├── CLAUDE.md
+├── AGENTS.md
 └── README.md
 ```
 

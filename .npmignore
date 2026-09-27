@@ -14,4 +14,4 @@ demo/
 tsconfig.json
 vitest.config.ts
 HANDOVER.md
-CLAUDE.md
+AGENTS.md
