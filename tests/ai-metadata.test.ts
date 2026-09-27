@@ -382,6 +382,27 @@ describe('TestJob.reportUsage', () => {
       "Token count for 'input' must be a finite non-negative number",
     );
   });
+
+  it('keeps reserved-looking queue names in in-memory usage summaries', async () => {
+    const names = ['__proto__', 'constructor', 'prototype'];
+    const queues = names.map((name) => new TestQueue(name));
+    try {
+      for (const testQueue of queues) {
+        const job = await testQueue.add('usage', {});
+        await job!.reportUsage({ tokens: { input: 1 } });
+      }
+      const summary = await queues[0].getUsageSummary({ queues: names, windowMs: 5 * 60 * 1000 });
+      expect(summary.queues).toEqual([...names].sort());
+      expect(summary.jobCount).toBe(3);
+      expect(Object.getPrototypeOf(summary.perQueue)).toBeNull();
+      for (const name of names) {
+        expect(Object.hasOwn(summary.perQueue, name)).toBe(true);
+        expect(summary.perQueue[name].totalTokens).toBe(1);
+      }
+    } finally {
+      await Promise.all(queues.map((testQueue) => testQueue.close()));
+    }
+  });
 });
 
 // ---- Integration tests (require Valkey) ----
@@ -619,6 +640,32 @@ describeEachMode('AI Metadata integration', (CONNECTION) => {
       await summaryOtherQueue.close();
       await flushQueue(cleanupClient, summaryQueueName);
       await flushQueue(cleanupClient, summaryOtherQueueName);
+    }
+  });
+
+  it('discovers reserved-looking queue names without losing any usage', async () => {
+    const names = ['__proto__', 'constructor', 'prototype', `ordinary-${Date.now()}`];
+    const prefix = `test-usage-reserved-${Date.now()}-${process.pid}`;
+    const queues = names.map((name) => new QueueImpl(name, { connection: CONNECTION, prefix }));
+
+    try {
+      for (const usageQueue of queues) {
+        const added = await usageQueue.add('usage', {});
+        const job = await usageQueue.getJob(added.id);
+        await job!.reportUsage({ tokens: { input: 1 } });
+      }
+
+      const summary = await queues[0].getUsageSummary({ windowMs: 5 * 60 * 1000 });
+      expect(summary.queues).toEqual([...names].sort());
+      expect(summary.jobCount).toBe(names.length);
+      expect(Object.getPrototypeOf(summary.perQueue)).toBeNull();
+      for (const name of names) {
+        expect(Object.hasOwn(summary.perQueue, name)).toBe(true);
+        expect(summary.perQueue[name].totalTokens).toBe(1);
+      }
+    } finally {
+      await Promise.all(queues.map((usageQueue) => usageQueue.close()));
+      for (const name of names) await flushQueue(cleanupClient, name, prefix);
     }
   });
 
