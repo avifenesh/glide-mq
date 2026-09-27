@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- **Agent skills rewritten for current models**: short intent-based trigger descriptions, no trigger-phrase lists or impact-priority tables, one references table, and notes on the behavior that differs from expectations. Skill metadata versions now match the package (0.15.5).
+- **Skill fixes found against the code**: the Bee-Queue guide logged `job.returnValue`, which does not exist (the completed event passes the result as its second argument); the BullMQ guide implied `waitUntilFinished()` returns the job result (it resolves to `'completed'` or `'failed'`), called `searchJobs()` full-text search (it filters by state, exact name and shallow data fields), and listed error messages glide-mq never emits; the Bee-Queue guide called Bee-Queue unmaintained since 2021 and untyped (2.0.0 shipped in December 2025 with bundled types) and showed an ioredis client (Bee-Queue uses node-redis). The glide-mq skill no longer carries the contributor-only `customCommand` rule. Skill example tests now assert the completed-event result and cover `waitUntilFinished()`.
+
 ---
 
 ## [0.15.5] - 2026-08-29
