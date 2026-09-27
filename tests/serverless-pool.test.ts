@@ -5,6 +5,7 @@
  * Requires: valkey-server on :6379 and cluster on :7000-7005
  */
 import { it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import type { ConnectionOptions } from '../src/types';
 
 const { ServerlessPool, serverlessPool } =
   require('../dist/serverless-pool') as typeof import('../src/serverless-pool');
@@ -110,6 +111,17 @@ describeEachMode('ServerlessPool - caching', (CONNECTION) => {
     expect(pool.size).toBe(2);
   });
 
+  it('distinguishes an absent username from an explicitly empty username', () => {
+    const pAbsent = pool.getProducer(Q1, {
+      connection: { ...CONNECTION, credentials: { password: 'secret' } },
+    });
+    const pEmpty = pool.getProducer(Q1, {
+      connection: { ...CONNECTION, credentials: { username: '', password: 'secret' } },
+    });
+    expect(pAbsent).not.toBe(pEmpty);
+    expect(pool.size).toBe(2);
+  });
+
   it('isolates IAM credential fingerprints and reuses identical IAM creds', () => {
     const iamA = {
       ...CONNECTION,
@@ -155,6 +167,63 @@ describeEachMode('ServerlessPool - caching', (CONNECTION) => {
       connection: { ...shared, credentials: { ...shared.credentials, region: 'r', userId: 'u\0v' } },
     });
     expect(pA).not.toBe(pB);
+    expect(pool.size).toBe(2);
+  });
+
+  it('distinguishes absent and configured IAM refresh intervals', () => {
+    const credentials = {
+      type: 'iam' as const,
+      serviceType: 'elasticache' as const,
+      region: 'us-east-1',
+      userId: 'user-a',
+      clusterName: 'cluster-a',
+    };
+    const pDefault = pool.getProducer(Q1, { connection: { ...CONNECTION, credentials } });
+    const p300 = pool.getProducer(Q1, {
+      connection: { ...CONNECTION, credentials: { ...credentials, refreshIntervalSeconds: 300 } },
+    });
+    const p600 = pool.getProducer(Q1, {
+      connection: { ...CONNECTION, credentials: { ...credentials, refreshIntervalSeconds: 600 } },
+    });
+    expect(new Set([pDefault, p300, p600]).size).toBe(3);
+    expect(pool.size).toBe(3);
+  });
+
+  const connectionVariants: Array<[string, Partial<ConnectionOptions>, Partial<ConnectionOptions>]> = [
+    ['read routing', { readFrom: 'primary' }, { readFrom: 'preferReplica' }],
+    [
+      'client availability zone',
+      { readFrom: 'AZAffinity', clientAz: 'az-a' },
+      { readFrom: 'AZAffinity', clientAz: 'az-b' },
+    ],
+    ['in-flight request limit', { inflightRequestsLimit: 100 }, { inflightRequestsLimit: 200 }],
+    ['request timeout', { requestTimeout: 500 }, { requestTimeout: 2000 }],
+    ['TLS', { useTLS: false }, { useTLS: true }],
+    ['cluster mode', { clusterMode: false }, { clusterMode: true }],
+  ];
+
+  it.each(connectionVariants)('isolates %s when pooling producers', (_label, first, second) => {
+    const pA = pool.getProducer(Q1, { connection: { ...CONNECTION, ...first } });
+    const pB = pool.getProducer(Q1, { connection: { ...CONNECTION, ...second } });
+    expect(pA).not.toBe(pB);
+    expect(pool.size).toBe(2);
+  });
+
+  it('preserves address order in the connection fingerprint', () => {
+    const addresses = [
+      { host: 'localhost', port: 6379 },
+      { host: 'localhost', port: 6380 },
+    ];
+    const pA = pool.getProducer(Q1, { connection: { ...CONNECTION, addresses } });
+    const pB = pool.getProducer(Q1, { connection: { ...CONNECTION, addresses: [...addresses].reverse() } });
+    expect(pA).not.toBe(pB);
+    expect(pool.size).toBe(2);
+  });
+
+  it('does not reuse a producer with a different event setting', () => {
+    const pEvents = pool.getProducer(Q1, { connection: CONNECTION });
+    const pNoEvents = pool.getProducer(Q1, { connection: CONNECTION, events: false });
+    expect(pEvents).not.toBe(pNoEvents);
     expect(pool.size).toBe(2);
   });
 });
