@@ -32,10 +32,13 @@ function credentialsFingerprint(creds: ConnectionOptions['credentials']): string
     updateField(creds.region);
     updateField(creds.userId);
     updateField(creds.clusterName);
+    updateField(creds.refreshIntervalSeconds == null ? 'refresh-absent' : 'refresh-present');
+    if (creds.refreshIntervalSeconds != null) updateField(String(creds.refreshIntervalSeconds));
   } else {
     const pwd = creds as { username?: string; password: string };
     updateField('password');
-    updateField(pwd.username ?? '');
+    updateField(pwd.username === undefined ? 'username-absent' : 'username-present');
+    if (pwd.username !== undefined) updateField(pwd.username);
     // Frame the password before feeding it to the keyed digest.
     h.update(`${Buffer.byteLength(pwd.password, 'utf8')}:`);
     h.update(pwd.password);
@@ -44,22 +47,23 @@ function credentialsFingerprint(creds: ConnectionOptions['credentials']): string
 }
 
 function fingerprint(name: string, opts: ProducerOptions): string {
-  const addresses = opts.connection?.addresses ?? [];
-  const sorted = [...addresses].sort((a, b) => {
-    const hostCmp = a.host.localeCompare(b.host);
-    return hostCmp !== 0 ? hostCmp : a.port - b.port;
-  });
+  const connection = opts.connection;
   // Use default marker for the built-in JSON serializer only
   const serializerKey = 'json';
   return JSON.stringify({
     name,
     prefix: opts.prefix ?? 'glide',
-    addresses: sorted,
-    clusterMode: opts.connection?.clusterMode ?? false,
+    addresses: connection?.addresses ?? [],
+    clusterMode: connection?.clusterMode ?? false,
     compression: opts.compression ?? 'none',
     serializer: serializerKey,
-    useTLS: opts.connection?.useTLS ?? false,
-    credentials: credentialsFingerprint(opts.connection?.credentials),
+    events: opts.events !== false,
+    useTLS: connection?.useTLS ?? false,
+    readFrom: connection?.readFrom,
+    clientAz: connection?.clientAz,
+    inflightRequestsLimit: connection?.inflightRequestsLimit,
+    requestTimeout: connection?.requestTimeout ?? 500,
+    credentials: credentialsFingerprint(connection?.credentials),
   });
 }
 
