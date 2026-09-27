@@ -15,6 +15,7 @@ import {
 describe('sanitizeForLog', () => {
   it('removes control characters that could forge a log line', () => {
     expect(sanitizeForLog('queue\n[ERROR] forged\r\t')).toBe('queue[ERROR] forged');
+    expect(sanitizeForLog('queue\u2028[ERROR]\u2029 forged\u0085')).toBe('queue[ERROR] forged');
   });
 
   it('caps caller-supplied text', () => {
