@@ -21,17 +21,24 @@ import type { ConnectionOptions } from './types';
 function credentialsFingerprint(creds: ConnectionOptions['credentials']): string {
   if (!creds) return 'none';
   const h = createHmac('sha256', POOL_KEY_SECRET);
-  let fields: string[];
-  if ('type' in creds && creds.type === 'iam') {
-    fields = ['iam', creds.serviceType, creds.region, creds.userId, creds.clusterName];
-  } else {
-    const pwd = creds as { username?: string; password: string };
-    fields = ['password', pwd.username ?? '', pwd.password];
-  }
-  // Length-frame every field: a separator alone collides when credentials contain it.
-  for (const field of fields) {
+  // A separator alone collides when credential fields contain that separator.
+  const updateField = (field: string) => {
     h.update(`${Buffer.byteLength(field, 'utf8')}:`);
     h.update(field);
+  };
+  if ('type' in creds && creds.type === 'iam') {
+    updateField('iam');
+    updateField(creds.serviceType);
+    updateField(creds.region);
+    updateField(creds.userId);
+    updateField(creds.clusterName);
+  } else {
+    const pwd = creds as { username?: string; password: string };
+    updateField('password');
+    updateField(pwd.username ?? '');
+    // Frame the password before feeding it to the keyed digest.
+    h.update(`${Buffer.byteLength(pwd.password, 'utf8')}:`);
+    h.update(pwd.password);
   }
   return h.digest('hex');
 }
