@@ -2,7 +2,7 @@
 
 ## Current State
 
-- **Security hardening**: PR #289 closes six CodeQL alerts with keyed in-memory credential fingerprints, safe object-property keys, sanitized proxy log fields, and a private fuzzer temp directory. Regression tests cover unsafe keys and log controls.
+- **Security hardening**: PR #289 closes six CodeQL alerts with keyed, length-framed in-memory credential fingerprints, safe object-property keys, sanitized proxy log fields, and a private fuzzer temp directory. Regression tests cover credential-field collisions, unsafe keys, and log controls.
 - **Coverage PR**: `test/integration-coverage-gaps` (fork #25 / upstream #280) — rebased onto v0.15.5. Live Valkey/proxy integration tests only. Source fixes: proxy `lockDuration` allowlist, `Job.getParents()` last-colon parse, proxy SSE loops exit on `draining`, `getSharedClient` gated on drain.
 - **In flight**: `fix/close-fetch-next` (fork #18 / upstream #282) — rebased onto v0.15.5. close() must not strand CAF or poll claims; grouped CAF undo skips `retainedSlot` active rewind. Lua library 124. Close-fetch tests share helpers so Sonar new-code duplication stays under the 3% gate. tb-idle-refill now uses a 250ms promotion interval and 12s waitFor so the default 5s promotion ceiling cannot starve the second job.
 - **Audit fix**: `fix/repeat-after-stalled` atomically advances repeat-after-complete schedulers during terminal stalled recovery.

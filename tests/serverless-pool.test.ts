@@ -84,6 +84,21 @@ describeEachMode('ServerlessPool - caching', (CONNECTION) => {
     expect(pool.size).toBe(2);
   });
 
+  it('does not collide when credential fields contain the old separator', () => {
+    const connA = {
+      ...CONNECTION,
+      credentials: { username: 'a\0b', password: 'c' },
+    };
+    const connB = {
+      ...CONNECTION,
+      credentials: { username: 'a', password: 'b\0c' },
+    };
+    const pA = pool.getProducer(Q1, { connection: connA });
+    const pB = pool.getProducer(Q1, { connection: connB });
+    expect(pA).not.toBe(pB);
+    expect(pool.size).toBe(2);
+  });
+
   it('does not collide credentialed and uncredentialed producers on the same queue', () => {
     const connWithCreds = {
       ...CONNECTION,
@@ -121,6 +136,25 @@ describeEachMode('ServerlessPool - caching', (CONNECTION) => {
     const pB = pool.getProducer(Q1, { connection: iamB });
     expect(pA1).toBe(pA2);
     expect(pA1).not.toBe(pB);
+    expect(pool.size).toBe(2);
+  });
+
+  it('does not collide when IAM credential fields contain the old separator', () => {
+    const shared = {
+      ...CONNECTION,
+      credentials: {
+        type: 'iam' as const,
+        serviceType: 'elasticache' as const,
+        clusterName: 'cluster-a',
+      },
+    };
+    const pA = pool.getProducer(Q1, {
+      connection: { ...shared, credentials: { ...shared.credentials, region: 'r\0u', userId: 'v' } },
+    });
+    const pB = pool.getProducer(Q1, {
+      connection: { ...shared, credentials: { ...shared.credentials, region: 'r', userId: 'u\0v' } },
+    });
+    expect(pA).not.toBe(pB);
     expect(pool.size).toBe(2);
   });
 });
