@@ -970,3 +970,13 @@ export function validateAndResolveUsage(usage: JobUsage): JobUsage {
   }
   return resolved;
 }
+
+/**
+ * Strip C0/C1 controls and Unicode line separators, then cap length so
+ * caller-supplied strings cannot forge log lines (CodeQL js/log-injection,
+ * js/tainted-format-string).
+ */
+export function sanitizeForLog(value: unknown, max = 200): string {
+  const s = String(value).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '');
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}

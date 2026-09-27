@@ -6,6 +6,7 @@ import { Broadcast } from '../broadcast';
 import { BroadcastWorker } from '../broadcast-worker';
 import { FlowProducer, type JobNode } from '../flow-producer';
 import { Job } from '../job';
+import { sanitizeForLog } from '../utils';
 import { Queue } from '../queue';
 import type { BudgetOptions, Client, DAGFlow, FlowJob, JobTemplate, ScheduleOpts, WorkerInfo } from '../types';
 import { buildKeys, compileSubjectMatcher, hashDataToRecord, validateJobId, validateQueueName } from '../utils';
@@ -636,7 +637,7 @@ export function createRoutes(
   const errorHandler =
     opts.onError ??
     ((err: Error, queueName: string) => {
-      console.error(`[glide-mq proxy] queue "${queueName}" error:`, err);
+      console.error('[glide-mq proxy] queue error:', { queue: sanitizeForLog(queueName) }, err);
     });
   let draining = false;
   let closed = false;

@@ -39,6 +39,18 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     expect(config.nextRun).toBeGreaterThan(Date.now() - 2000);
   });
 
+  it.each(['__proto__', 'constructor', 'prototype'])('upserts a scheduler named %s', async (name) => {
+    await queue.upsertJobScheduler(name, { every: 1000 });
+    const stored = await queue.getJobScheduler(name);
+    expect(stored?.every).toBe(1000);
+
+    const raw = await cleanupClient.hget(buildKeys(Q).schedulers, name);
+    expect(raw).not.toBeNull();
+
+    await queue.removeJobScheduler(name);
+    expect(await queue.getJobScheduler(name)).toBeNull();
+  });
+
   it('removeJobScheduler deletes the scheduler entry', async () => {
     await queue.upsertJobScheduler('to-remove', { every: 1000 });
 

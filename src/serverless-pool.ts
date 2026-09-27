@@ -4,7 +4,11 @@
  * Caches Producer instances by queue name + connection fingerprint so that
  * warm invocations reuse existing connections instead of creating new ones.
  */
-import { createHash } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
+
+// Per-process secret so pool keys are unguessable and cannot be used to brute-force
+// credentials offline (CodeQL js/insufficient-password-hash). Keys never leave memory.
+const POOL_KEY_SECRET = randomBytes(32);
 import { Producer } from './producer';
 import type { ProducerOptions } from './producer';
 import type { ConnectionOptions } from './types';
@@ -16,45 +20,50 @@ import type { ConnectionOptions } from './types';
  */
 function credentialsFingerprint(creds: ConnectionOptions['credentials']): string {
   if (!creds) return 'none';
-  const h = createHash('sha256');
+  const h = createHmac('sha256', POOL_KEY_SECRET);
+  // A separator alone collides when credential fields contain that separator.
+  const updateField = (field: string) => {
+    h.update(`${Buffer.byteLength(field, 'utf8')}:`);
+    h.update(field);
+  };
   if ('type' in creds && creds.type === 'iam') {
-    h.update('iam');
-    h.update('\0');
-    h.update(creds.serviceType);
-    h.update('\0');
-    h.update(creds.region);
-    h.update('\0');
-    h.update(creds.userId);
-    h.update('\0');
-    h.update(creds.clusterName);
+    updateField('iam');
+    updateField(creds.serviceType);
+    updateField(creds.region);
+    updateField(creds.userId);
+    updateField(creds.clusterName);
+    updateField(creds.refreshIntervalSeconds == null ? 'refresh-absent' : 'refresh-present');
+    if (creds.refreshIntervalSeconds != null) updateField(String(creds.refreshIntervalSeconds));
   } else {
     const pwd = creds as { username?: string; password: string };
-    h.update('password');
-    h.update('\0');
-    h.update(pwd.username ?? '');
-    h.update('\0');
+    updateField('password');
+    updateField(pwd.username === undefined ? 'username-absent' : 'username-present');
+    if (pwd.username !== undefined) updateField(pwd.username);
+    // Frame the password before feeding it to the keyed digest.
+    h.update(`${Buffer.byteLength(pwd.password, 'utf8')}:`);
     h.update(pwd.password);
   }
   return h.digest('hex');
 }
 
 function fingerprint(name: string, opts: ProducerOptions): string {
-  const addresses = opts.connection?.addresses ?? [];
-  const sorted = [...addresses].sort((a, b) => {
-    const hostCmp = a.host.localeCompare(b.host);
-    return hostCmp !== 0 ? hostCmp : a.port - b.port;
-  });
+  const connection = opts.connection;
   // Use default marker for the built-in JSON serializer only
   const serializerKey = 'json';
   return JSON.stringify({
     name,
     prefix: opts.prefix ?? 'glide',
-    addresses: sorted,
-    clusterMode: opts.connection?.clusterMode ?? false,
+    addresses: connection?.addresses ?? [],
+    clusterMode: connection?.clusterMode ?? false,
     compression: opts.compression ?? 'none',
     serializer: serializerKey,
-    useTLS: opts.connection?.useTLS ?? false,
-    credentials: credentialsFingerprint(opts.connection?.credentials),
+    events: opts.events !== false,
+    useTLS: connection?.useTLS ?? false,
+    readFrom: connection?.readFrom,
+    clientAz: connection?.clientAz,
+    inflightRequestsLimit: connection?.inflightRequestsLimit,
+    requestTimeout: connection?.requestTimeout ?? 500,
+    credentials: credentialsFingerprint(connection?.credentials),
   });
 }
 
