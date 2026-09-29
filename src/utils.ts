@@ -997,13 +997,21 @@ function cronWallMatches(cron: CronPattern, p: TzParts): boolean {
 }
 
 /**
- * Compute the next occurrence of a cron pattern after `afterMs` (epoch ms).
- * Supports standard 5-field cron: minute hour dayOfMonth month dayOfWeek, with
- * `*`, numbers, ranges, steps and lists. No seconds field, no names, and
- * dayOfWeek is 0-6 (7 is rejected). When both day fields are restricted, a day
- * matching either one matches.
- * When `tz` is provided, the cron expression is evaluated in that IANA timezone.
- * Returns epoch ms of the next matching time (always in UTC).
+ * Compute the next occurrence of a cron pattern strictly after `afterMs`
+ * (epoch ms), at second granularity.
+ *
+ * Pattern: `minute hour dayOfMonth month dayOfWeek`, or six fields with a
+ * leading `second`. Fields take `*`, numbers, names (JAN-DEC, SUN-SAT,
+ * case-insensitive), ranges, steps (`*\/5`, `1-30/10`, `5/15`) and lists.
+ * dayOfWeek is 0-7 with 0 and 7 both Sunday. Day fields also take `?` (same
+ * as `*`); dayOfMonth takes `L` (last day), `LW` (last weekday) and `<n>W`
+ * (nearest weekday to n); dayOfWeek takes `<d>L` (last such weekday) and
+ * `<d>#<n>` (nth such weekday). When both day fields are restricted, a day
+ * matching either one matches. A superset of cron-parser 4.9 (BullMQ).
+ *
+ * When `tz` is provided, the pattern is evaluated in that IANA timezone with
+ * cronie DST rules (see nextCronOccurrenceTz). Returns epoch ms (UTC).
+ * Throws on a malformed pattern or when nothing matches within 10 years.
  */
 export function nextCronOccurrence(pattern: string, afterMs: number, tz?: string): number {
   if (tz) {
