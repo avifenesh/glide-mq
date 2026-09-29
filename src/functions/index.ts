@@ -116,7 +116,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 131: glidemq_fail takes an optional requeueOnly arg (RateLimitError) that schedules the retry
 //   without counting the attempt or writing failedReason; glidemq_updateFlowBudget changes budget limits
 //   and re-evaluates the exceeded flag; glidemq_failAndFetchNext fails a job and fetches the next one
-//   (the fetch phases of completeAndFetchNext) in one call.
+//   (the fetch phases of completeAndFetchNext) in one call; glidemq_trimBroadcast replies
+//   {trimmed, unread} instead of the trimmed count.
 export const LIBRARY_VERSION = '131';
 
 // Consumer group name used by workers
@@ -771,19 +772,37 @@ export function failJobCall(
   return { keys: [k.stream, k.failed, k.scheduled, k.events, k.job(jobId), k.metricsFailed], args };
 }
 
+export interface TrimBroadcastResult {
+  /** Stream entries trimmed by this call. */
+  trimmed: number;
+  /**
+   * (entry, subscription) pairs dropped before that subscription read them.
+   * 0 on a library older than 131, which reports only the trimmed count.
+   */
+  unread: number;
+}
+
 /**
  * Trim a broadcast stream to `maxLen` entries and delete the job hashes,
  * per-subscription hashes and completed/failed members of trimmed messages.
  * Messages a subscription still has claimed or scheduled for retry are kept
- * until they settle. Returns the number of trimmed entries.
+ * until they settle.
  */
-export async function trimBroadcast(client: Client, k: QueueKeys, maxLen: number, timestamp: number): Promise<number> {
+export async function trimBroadcast(
+  client: Client,
+  k: QueueKeys,
+  maxLen: number,
+  timestamp: number,
+): Promise<TrimBroadcastResult> {
   const result = await client.fcall(
     'glidemq_trimBroadcast',
     [k.stream, k.completed, k.failed, k.scheduled],
     [maxLen.toString(), timestamp.toString()],
   );
-  return Number(result) || 0;
+  if (Array.isArray(result)) {
+    return { trimmed: Number(result[0]) || 0, unread: Number(result[1]) || 0 };
+  }
+  return { trimmed: Number(result) || 0, unread: 0 };
 }
 
 /**

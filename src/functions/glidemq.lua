@@ -3556,22 +3556,37 @@ redis.register_function('glidemq_registerParent', function(keys, args)
 end)
 
 -- Names of the consumer groups of a stream (none if the stream is missing).
+-- Consumer group names of a stream, plus each group's last-delivered-id.
 local function streamGroupNames(streamKey)
   local names = {}
+  local lastDelivered = {}
   local ok, groups = pcall(redis.call, 'XINFO', 'GROUPS', streamKey)
-  if not ok or type(groups) ~= 'table' then return names end
+  if not ok or type(groups) ~= 'table' then return names, lastDelivered end
   for gi = 1, #groups do
     local info = groups[gi]
     if type(info) == 'table' then
+      local name, last = nil, '0-0'
       for f = 1, #info, 2 do
-        if info[f] == 'name' then
-          names[#names + 1] = info[f + 1]
-          break
-        end
+        if info[f] == 'name' then name = info[f + 1] end
+        if info[f] == 'last-delivered-id' then last = info[f + 1] end
+      end
+      if name then
+        names[#names + 1] = name
+        lastDelivered[name] = last
       end
     end
   end
-  return names
+  return names, lastDelivered
+end
+
+-- True when stream id a is newer than b ('ms-seq' strings).
+local function streamIdGreater(a, b)
+  local aMs, aSeq = string.match(a, '^(%d+)%-(%d+)$')
+  local bMs, bSeq = string.match(b, '^(%d+)%-(%d+)$')
+  if not aMs or not bMs then return false end
+  aMs, aSeq, bMs, bSeq = tonumber(aMs), tonumber(aSeq), tonumber(bMs), tonumber(bSeq)
+  if aMs ~= bMs then return aMs > bMs end
+  return aSeq > bSeq
 end
 
 local function entryPendingInAnyGroup(streamKey, groups, entryId)
@@ -3617,7 +3632,8 @@ end
 -- message until that claim settles; later calls re-check those claims.
 -- KEYS: [streamKey, completedKey, failedKey, scheduledKey]
 -- ARGS: [maxLen, timestamp]
--- Returns the number of trimmed entries.
+-- Returns {trimmed, unread}: the number of trimmed entries and the number of
+-- (entry, subscription) pairs dropped before that subscription read them.
 redis.register_function('glidemq_trimBroadcast', function(keys, args)
   local streamKey = keys[1]
   local maxLen = tonumber(args[1]) or 0
@@ -3626,9 +3642,10 @@ redis.register_function('glidemq_trimBroadcast', function(keys, args)
   local heldKey = prefix .. 'bcast-held'
   local excess = redis.call('XLEN', streamKey) - maxLen
   local held = redis.call('ZRANGE', heldKey, 0, 99)
-  if excess <= 0 and #held == 0 then return 0 end
-  local groups = streamGroupNames(streamKey)
+  if excess <= 0 and #held == 0 then return {0, 0} end
+  local groups, lastDelivered = streamGroupNames(streamKey)
   local trimmed = 0
+  local unread = 0
   local candidates = {}
   if excess > 0 then
     -- Bounded per call; each publish trims again, so a backlog converges.
@@ -3644,6 +3661,9 @@ redis.register_function('glidemq_trimBroadcast', function(keys, args)
     for i = 1, last do
       local entryId = entries[i][1]
       local fields = entries[i][2]
+      for g = 1, #groups do
+        if streamIdGreater(entryId, lastDelivered[groups[g]] or '0-0') then unread = unread + 1 end
+      end
       local jobId = nil
       for j = 1, #fields, 2 do
         if fields[j] == 'jobId' then
@@ -3682,7 +3702,7 @@ redis.register_function('glidemq_trimBroadcast', function(keys, args)
   for i = 1, #candidates do
     deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, candidates[i])
   end
-  return trimmed
+  return {trimmed, unread}
 end)
 
 redis.register_function('glidemq_removeJob', function(keys, args)

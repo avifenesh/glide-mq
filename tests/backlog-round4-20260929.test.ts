@@ -402,4 +402,34 @@ describeEachMode('Backlog round 4 2026-09-29', (CONNECTION) => {
       await dlq.close();
     }
   }, 30000);
+
+  it('B5: Broadcast emits trimmed with the (message, subscription) pairs dropped unread', async () => {
+    const Q = uniqueQueue('r4-bcast-trim');
+    const k = buildKeys(Q);
+    const broadcast = new Broadcast(Q, { connection: CONNECTION, maxMessages: 3 });
+    const events: { trimmed: number; unread: number }[] = [];
+    broadcast.on('trimmed', (e: { trimmed: number; unread: number }) => events.push(e));
+    try {
+      for (let i = 0; i < 3; i++) await broadcast.publish('evt', { i });
+      // No trim while the stream fits.
+      expect(events).toEqual([]);
+      // 'slow' has read nothing; 'caught-up' has read everything published so far.
+      await cleanupClient.xgroupCreate(k.stream, 'slow', '0');
+      await cleanupClient.xgroupCreate(k.stream, 'caught-up', '$');
+
+      for (let i = 3; i < 6; i++) await broadcast.publish('evt', { i });
+      // Each publish trimmed one message that only 'slow' had not read.
+      expect(events).toEqual([
+        { trimmed: 1, unread: 1 },
+        { trimmed: 1, unread: 1 },
+        { trimmed: 1, unread: 1 },
+      ]);
+      await broadcast.publish('evt', { i: 6 });
+      // Message 4 was published after both groups existed: unread by both.
+      expect(events.at(-1)).toEqual({ trimmed: 1, unread: 2 });
+      expect(await cleanupClient.xlen(k.stream)).toBe(3);
+    } finally {
+      await broadcast.close();
+    }
+  }, 20000);
 });
