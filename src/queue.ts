@@ -48,6 +48,7 @@ import {
   parseJsonRecord,
   validateTimezone,
   validateSchedulerEvery,
+  isValidSchedulerEvery,
   normalizeScheduleDate,
   validateSchedulerBounds,
   computeInitialSchedulerNextRun,
@@ -1488,14 +1489,29 @@ export class Queue<D = any, R = any> extends EventEmitter {
       if (existingRaw != null) {
         try {
           const existing = JSON.parse(String(existingRaw)) as SchedulerEntry;
+          const boundsUnchanged =
+            existing.tz === schedule.tz && existing.startDate === startDate && existing.endDate === endDate;
           const scheduleUnchanged =
+            boundsUnchanged &&
             existing.pattern === schedule.pattern &&
             existing.every === schedule.every &&
-            existing.repeatAfterComplete === schedule.repeatAfterComplete &&
-            existing.tz === schedule.tz &&
-            existing.startDate === startDate &&
-            existing.endDate === endDate;
-          if (scheduleUnchanged && existing.nextRun) {
+            existing.repeatAfterComplete === schedule.repeatAfterComplete;
+          // nextRun 0 is the repeatAfterComplete sentinel: a job is in flight and
+          // its completion schedules the next one. Keep waiting for it instead of
+          // firing a second, overlapping chain. A changed interval applies from
+          // that completion on.
+          const awaitingCompletion =
+            existing.nextRun === 0 &&
+            isValidSchedulerEvery(existing.repeatAfterComplete) &&
+            schedule.repeatAfterComplete != null;
+          if (awaitingCompletion) {
+            // Bounds that leave no occurrence still reject the upsert below.
+            if (nextRun != null) nextRun = 0;
+            if (boundsUnchanged) {
+              iterationCount = existing.iterationCount ?? 0;
+              lastRun = existing.lastRun;
+            }
+          } else if (scheduleUnchanged && existing.nextRun) {
             iterationCount = existing.iterationCount ?? 0;
             lastRun = existing.lastRun;
             nextRun = existing.nextRun;

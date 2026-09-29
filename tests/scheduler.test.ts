@@ -903,4 +903,97 @@ describeEachMode('Job schedulers', (CONNECTION) => {
       await flushQueue(cleanupClient, qName);
     }
   }, 15000);
+
+  it('re-upserting a repeatAfterComplete scheduler while its job is in flight keeps the awaiting state', async () => {
+    const k = buildKeys(Q);
+    const name = 'rac-inflight-state';
+    await queue.upsertJobScheduler(name, { repeatAfterComplete: 500, limit: 10 }, { name: 'rac-inflight' });
+    const lastRun = Date.now() - 1000;
+    await cleanupClient.hset(k.schedulers, {
+      [name]: JSON.stringify({
+        repeatAfterComplete: 500,
+        limit: 10,
+        iterationCount: 3,
+        lastRun,
+        nextRun: 0,
+        template: { name: 'rac-inflight' },
+      }),
+    });
+
+    // Same schedule: nothing changes
+    await queue.upsertJobScheduler(name, { repeatAfterComplete: 500, limit: 10 }, { name: 'rac-inflight' });
+    let entry = await queue.getJobScheduler(name);
+    expect(entry!.nextRun).toBe(0);
+    expect(entry!.iterationCount).toBe(3);
+    expect(entry!.lastRun).toBe(lastRun);
+
+    // New interval: still awaiting the in-flight job, interval applies after it completes
+    await queue.upsertJobScheduler(name, { repeatAfterComplete: 2000, limit: 10 }, { name: 'rac-inflight' });
+    entry = await queue.getJobScheduler(name);
+    expect(entry!.nextRun).toBe(0);
+    expect(entry!.repeatAfterComplete).toBe(2000);
+    expect(entry!.iterationCount).toBe(3);
+    expect(entry!.lastRun).toBe(lastRun);
+
+    // Changed bounds restart the count but never fire a second chain
+    await queue.upsertJobScheduler(
+      name,
+      { repeatAfterComplete: 2000, limit: 10, endDate: Date.now() + 60_000 },
+      { name: 'rac-inflight' },
+    );
+    entry = await queue.getJobScheduler(name);
+    expect(entry!.nextRun).toBe(0);
+    expect(entry!.iterationCount).toBe(0);
+
+    // Switching to another mode schedules normally
+    await queue.upsertJobScheduler(name, { every: 1000 }, { name: 'rac-inflight' });
+    entry = await queue.getJobScheduler(name);
+    expect(entry!.nextRun).toBeGreaterThan(0);
+
+    await queue.removeJobScheduler(name);
+  });
+
+  it('repeatAfterComplete scheduler upserted from inside its processor never overlaps', async () => {
+    const qName = Q + '-rac-adaptive';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    await localQueue.upsertJobScheduler('adaptive', { repeatAfterComplete: 100 }, { name: 'adaptive-job' });
+
+    let active = 0;
+    let maxActive = 0;
+    let runs = 0;
+    const worker = new Worker(
+      qName,
+      async () => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        runs++;
+        // Adaptive interval: re-upsert while this job is running
+        await localQueue.upsertJobScheduler(
+          'adaptive',
+          { repeatAfterComplete: 100 + runs * 50 },
+          { name: 'adaptive-job' },
+        );
+        await new Promise((r) => setTimeout(r, 600));
+        active--;
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 5, blockTimeout: 200, promotionInterval: 100, stalledInterval: 60000 },
+    );
+    worker.on('error', () => {});
+
+    try {
+      const deadline = Date.now() + 8000;
+      while (runs < 3 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(runs).toBeGreaterThanOrEqual(3);
+      expect(maxActive).toBe(1);
+      const entry = await localQueue.getJobScheduler('adaptive');
+      expect(entry!.iterationCount).toBeGreaterThanOrEqual(3);
+    } finally {
+      await worker.close(true);
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    }
+  }, 20000);
 });

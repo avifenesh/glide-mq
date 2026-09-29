@@ -220,6 +220,8 @@ This mode is useful for:
 - **Sequential pipelines** — each step must finish before the next begins.
 - **Adaptive intervals** — combine with a custom processor that adjusts `repeatAfterComplete` via `upsertJobScheduler` based on results.
 
+Upserting a `repeatAfterComplete` scheduler while its job is running (for example from inside the processor) keeps waiting for that job: the next run is scheduled when it completes, using the new interval, and `iterationCount` is kept unless `tz`, `startDate` or `endDate` changed. It never starts a second, overlapping chain. To force an immediate run, remove the scheduler and upsert it again.
+
 `repeatAfterComplete` is mutually exclusive with `pattern` and `every`. Bounded options (`startDate`, `endDate`, `limit`) work normally with this mode.
 
 ### Bounded schedulers
