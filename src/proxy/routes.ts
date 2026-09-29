@@ -1530,7 +1530,7 @@ export function createRoutes(
         const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
-        res.end();
+        endSseWithError(err, req, res);
       }
     }
   });
