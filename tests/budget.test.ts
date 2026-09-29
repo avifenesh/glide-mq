@@ -405,6 +405,44 @@ describeEachMode('Budget middleware', (CONNECTION) => {
     expect(budget!.usedTokens).toBe(expected);
   });
 
+  it('charging a failed attempt does not recreate a job removed while active', async () => {
+    queueName = uid();
+    flow = new FlowProducer({ connection: CONNECTION });
+    queue = new Queue(queueName, { connection: CONNECTION });
+
+    const node = await flow.add(
+      {
+        name: 'parent',
+        queueName,
+        data: {},
+        children: [{ name: 'child-1', queueName, data: {}, opts: { attempts: 2 } }],
+      },
+      { budget: { maxTotalTokens: 100000 } },
+    );
+    const childId = node.children![0].job.id;
+
+    let failed = false;
+    worker = new Worker(
+      queueName,
+      async (job: any) => {
+        if (job.name !== 'child-1') return 'ok';
+        await job.reportUsage({ tokens: { input: 40 } });
+        await job.remove();
+        throw new Error('fails after removal');
+      },
+      { connection: CONNECTION, promotionInterval: 100 },
+    );
+    worker.on('failed', (job: any) => {
+      if (job.name === 'child-1') failed = true;
+    });
+    worker.on('error', () => {});
+
+    await waitFor(() => failed, 10000);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await queue.getJob(childId)).toBeNull();
+    expect((await queue.getFlowBudget(node.job.id))!.usedTokens).toBe(40);
+  });
+
   it('budget not checked for jobs without budgetKey', async () => {
     queueName = uid();
     queue = new Queue(queueName, { connection: CONNECTION });

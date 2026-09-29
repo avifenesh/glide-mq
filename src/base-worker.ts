@@ -65,6 +65,7 @@ import {
   deferActive,
   checkBudget,
   recordUsageAndCheckBudget,
+  updateJobFields,
 } from './functions/index';
 import { Scheduler } from './scheduler';
 
@@ -2005,8 +2006,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       maxCosts,
     );
     if (markCharged) {
-      await this.commandClient.hset(this.queueKeys.job(jobId), { [USAGE_BUDGETED_FIELD]: '1' });
-      job.usageBudgeted = true;
+      // Write only if the hash still exists: a job removed while active must not come back.
+      if (await updateJobFields(this.commandClient, this.queueKeys, jobId, { [USAGE_BUDGETED_FIELD]: '1' })) {
+        job.usageBudgeted = true;
+      }
     }
     if (budgetResult === 'exceeded') {
       this.emit('budget-exceeded', job, jobId);
