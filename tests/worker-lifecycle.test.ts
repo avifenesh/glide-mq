@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { GlideClient } from '@glidemq/speedkey';
 import { Worker } from '../src/worker';
+import { BroadcastWorker } from '../src/broadcast-worker';
 import { QueueEvents } from '../src/queue-events';
 import { LIBRARY_VERSION } from '../src/functions/index';
 
@@ -509,6 +510,62 @@ describe('Worker.pause() under backlog', () => {
     expect(deferCalls).toHaveLength(1);
     expect(deferCalls[0][2][0]).toBe('late');
     expect(deferCalls[0][2][1]).toBe('1-0');
+
+    await worker.close(true);
+  });
+});
+
+describe('batch fetch count', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('BroadcastWorker caps the XREADGROUP count at batch.size', async () => {
+    const blocking = makeMockClient();
+    wireClients(makeMockClient(), blocking);
+
+    const worker = new BroadcastWorker('lifecycle-w4', vi.fn().mockResolvedValue([]), {
+      connection,
+      subscription: 'sub-w4',
+      concurrency: 3,
+      batch: { size: 2 },
+      blockTimeout: 100,
+    });
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(blocking.xreadgroup).toHaveBeenCalled();
+    expect(blocking.xreadgroup.mock.calls[0][3]).toEqual({ count: 2, block: 100 });
+
+    await worker.close(true);
+  });
+
+  it.each([
+    ['Worker', (opts: any) => new Worker('lifecycle-w4-gc', vi.fn().mockResolvedValue([]), opts)],
+    [
+      'BroadcastWorker',
+      (opts: any) =>
+        new BroadcastWorker('lifecycle-w4-gc-b', vi.fn().mockResolvedValue([]), { ...opts, subscription: 'sub-w4' }),
+    ],
+  ])('%s keeps the batch cap when global concurrency has more room', async (_name, make) => {
+    const command = makeMockClient({
+      fcall: routeFcall({ glidemq_checkConcurrency: () => 8 }),
+      hmget: vi.fn().mockResolvedValue(['10', null, null, null]),
+    });
+    const blocking = makeMockClient();
+    wireClients(command, blocking);
+
+    const worker = make({ connection, concurrency: 3, batch: { size: 4 }, blockTimeout: 100 });
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(blocking.xreadgroup).toHaveBeenCalled();
+    expect(blocking.xreadgroup.mock.calls[0][3]).toEqual({ count: 4, block: 100 });
 
     await worker.close(true);
   });

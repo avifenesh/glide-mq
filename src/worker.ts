@@ -40,7 +40,7 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
         return;
       }
       if (gcRemaining > 0) {
-        fetchCount = Math.min(available, gcRemaining);
+        fetchCount = Math.min(fetchCount, gcRemaining);
       }
     }
 

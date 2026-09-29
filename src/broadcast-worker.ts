@@ -39,6 +39,11 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
     }
 
     let fetchCount = available;
+    // collectAndProcessBatch keeps at most batchSize entries; anything read
+    // beyond that would sit claimed in the PEL and later fail as stalled.
+    if (this.batchMode) {
+      fetchCount = Math.min(fetchCount, this.batchSize);
+    }
 
     // Only check global concurrency if configured. Skipping this FCALL entirely
     // saves one Valkey round trip per poll cycle (~0.2ms).
@@ -49,7 +54,7 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
         return;
       }
       if (gcRemaining > 0) {
-        fetchCount = Math.min(available, gcRemaining);
+        fetchCount = Math.min(fetchCount, gcRemaining);
       }
     }
 
