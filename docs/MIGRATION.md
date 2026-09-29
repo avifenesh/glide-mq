@@ -743,9 +743,13 @@ const state = await job.waitUntilFinished(qe, 30000);
 
 ```ts
 // glide-mq - no QueueEvents needed
-const state = await job.waitUntilFinished(500, 30000);
+const state = await job.waitUntilFinished(500, 30000); // 'completed' | 'failed'
 // args: pollIntervalMs (default 500), timeoutMs (default 30000)
 ```
+
+BullMQ resolves with the return value and rejects when the job fails. glide-mq resolves with the final state, `'completed'` or `'failed'`, and does not reject on failure. It throws only when `timeoutMs` passes first. Read the result with `(await queue.getJob(job.id))?.returnvalue`, or use `queue.addAndWait(name, data, { waitTimeout })`, which resolves with the return value and rejects on failure.
+
+**`job.retry()` only retries failed jobs.** BullMQ's `retry(state?)` also accepts completed jobs. glide-mq throws `Cannot retry: <reason>` for any state other than `failed`.
 
 **Custom `jobId`** - glide-mq supports custom job IDs, matching BullMQ's `opts.jobId`. Max 256 characters, must not contain control characters, curly braces (`{`, `}`), or colons (`:`). Adding a job with a duplicate custom ID returns `null` (silent skip) from `Queue.add`; `FlowProducer.add` throws on duplicates since flows cannot be partially created:
 
@@ -969,15 +973,15 @@ await queue.add('job', data, {
 ```ts
 // glide-mq - same shape, plus explicit mode
 await queue.add('job', data, {
-  deduplication: { id: 'my-dedup-key', ttl: 60000 },
-  // optional mode:
-  deduplication: { id: 'my-dedup-key', ttl: 60000, mode: 'simple' },
-  //                                                mode: 'throttle'  - drop duplicates
-  //                                                mode: 'debounce'  - reset window on each add
+  deduplication: { id: 'my-dedup-key' }, // mode 'simple' by default
+  // BullMQ { id, ttl } maps to throttle mode:
+  deduplication: { id: 'my-dedup-key', ttl: 60000, mode: 'throttle' },
+  // debounce: replace a still-delayed job with the same ID
+  deduplication: { id: 'my-dedup-key', mode: 'debounce' },
 });
 ```
 
-Default mode is `'simple'` (drop duplicate if a job with that ID already exists in any active state).
+Default mode is `'simple'`: the add is skipped while the job holding the ID is not yet completed or failed, and the ID frees once it finishes. Simple mode ignores `ttl`. To keep BullMQ's `{ id, ttl }` behavior (skip for `ttl` ms), set `mode: 'throttle'`. Debounce ignores `ttl` too and only replaces a job that is still `delayed` or `prioritized`, so give it a `delay`.
 
 ---
 

@@ -566,14 +566,14 @@ const job = await queue.add(
 
 Prevent duplicate jobs from entering the queue using `deduplication.id`. Three modes are supported:
 
-| Mode       | Behaviour                                                                 |
-| ---------- | ------------------------------------------------------------------------- |
-| `simple`   | Skip the new job if any job with the same ID already exists (any state).  |
-| `throttle` | Accept only the first job in a TTL window; later arrivals are dropped.    |
-| `debounce` | Accept only the last job in a TTL window; earlier arrivals are cancelled. |
+| Mode       | Behaviour                                                                                                                    |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `simple`   | Skip the new job while the job holding the ID is not yet completed or failed. `ttl` is ignored.                              |
+| `throttle` | Skip the new job for `ttl` ms after the job that took the ID was added. Without `ttl`, nothing is skipped.                   |
+| `debounce` | Replace the job holding the ID if it is still `delayed` or `prioritized`; skip if it is waiting or active. `ttl` is ignored. |
 
 ```typescript
-// Simple: skip if a job with this ID is already queued / active / completed
+// Simple: skip while a job with this ID is queued or active; the ID frees once it completes or fails
 await queue.add(
   'send-welcome',
   { userId: 99 },
@@ -591,15 +591,18 @@ await queue.add(
   },
 );
 
-// Debounce: only the last "search" job within 500 ms is actually queued
+// Debounce: each add within 500 ms replaces the pending delayed job, so only the last one runs
 await queue.add(
   'search',
   { query: 'hello' },
   {
-    deduplication: { id: 'search-user-1', mode: 'debounce', ttl: 500 },
+    delay: 500,
+    deduplication: { id: 'search-user-1', mode: 'debounce' },
   },
 );
 ```
+
+Debounce needs a `delay` (or a priority job not yet promoted). Once the job is waiting or active, later adds with the same ID are skipped, and once it completes or fails the next add starts a new job.
 
 `queue.add()` returns `null` when a job is skipped by deduplication.
 
