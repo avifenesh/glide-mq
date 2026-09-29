@@ -9,8 +9,8 @@ import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './he
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
-const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { completeAndFetchNext, healListActive, moveToActive, promote, reclaimStalled, CONSUMER_GROUP } =
+const { buildKeys, keyPrefix } = require('../dist/utils') as typeof import('../src/utils');
+const { completeAndFetchNext, healListActive, moveToActive, promote, reclaimStalled, registerParent, CONSUMER_GROUP } =
   require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
@@ -555,6 +555,66 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
       await (await queue.getJob(second!.id!))!.promote();
       const processed = await processedBy(Q, ['c1', 'd', 'parent']);
       expect(processed).toContain('parent');
+    } finally {
+      await flow.close();
+      await queue.close();
+    }
+  });
+  it('debounce replacing a flow child under the same jobId keeps the parent waiting for the replacement', async () => {
+    const Q = uniqueQueue('lc-debounce-same-id');
+    const k = buildKeys(Q);
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      const node = await flow.add({
+        name: 'parent',
+        queueName: Q,
+        data: {},
+        children: [{ name: 'c1', queueName: Q, data: {} }],
+      });
+      const parent = { queue: Q, id: node.job.id };
+      const dedupOpts = {
+        parent,
+        jobId: 'dj',
+        delay: 60_000,
+        deduplication: { id: 'dsame', mode: 'debounce' as const },
+      };
+      await queue.add('d', { v: 1 }, dedupOpts);
+      const second = await queue.add('d', { v: 2 }, dedupOpts);
+      expect(second!.id).toBe('dj');
+      // The replacement carries the same deps member, so nothing may count as done yet.
+      expect(await hget(k.job(node.job.id), 'depsCompleted')).toBeNull();
+      await (await queue.getJob('dj'))!.promote();
+      const processed = await processedBy(Q, ['c1', 'd', 'parent']);
+      expect(processed.indexOf('parent')).toBeGreaterThan(processed.indexOf('d'));
+    } finally {
+      await flow.close();
+      await queue.close();
+    }
+  });
+  it('debounce replacing a DAG child under the same jobId keeps its DAG parent waiting for the replacement', async () => {
+    const Q = uniqueQueue('lc-debounce-same-id-dag');
+    const k = buildKeys(Q);
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      const dedupOpts = { jobId: 'dagA', delay: 60_000, deduplication: { id: 'ddag', mode: 'debounce' as const } };
+      await queue.add('A', { v: 1 }, dedupOpts);
+      const node = await flow.add({
+        name: 'B',
+        queueName: Q,
+        data: {},
+        children: [{ name: 'c1', queueName: Q, data: {} }],
+      });
+      // Second parent edge, wired the way addDAG wires multi-parent children.
+      const member = `${keyPrefix('glide', Q)}:dagA`;
+      expect(await registerParent(cleanupClient, k, 'dagA', node.job.id, keyPrefix('glide', Q), k, member)).toBe('ok');
+      const replaced = await queue.add('A', { v: 2 }, dedupOpts);
+      expect(replaced!.id).toBe('dagA');
+      expect(await hget(k.job(node.job.id), 'depsCompleted')).toBeNull();
+      await (await queue.getJob('dagA'))!.promote();
+      const processed = await processedBy(Q, ['c1', 'A', 'B']);
+      expect(processed.indexOf('B')).toBeGreaterThan(processed.indexOf('A'));
     } finally {
       await flow.close();
       await queue.close();

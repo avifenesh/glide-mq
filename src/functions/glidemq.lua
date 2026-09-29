@@ -2300,6 +2300,19 @@ redis.register_function('glidemq_dedup', function(keys, args)
     redis.call('SADD', parentDepsKey, depsMember)
   end
   if replacedJobId then
+    -- A replacement under the same id and parent reuses the same deps member,
+    -- so that edge now belongs to the new job and must stay pending.
+    if jobIdStr == replacedJobId then
+      if replacedEdges.parentId == parentId and replacedEdges.parentQueue == parentQueue then
+        replacedEdges.parentId = nil
+      end
+      -- DAG parents wait on the same member too: carry their edges over so the
+      -- replacement's completion notifies them.
+      if #replacedEdges.dagParents > 0 then
+        redis.call('SADD', prefix .. 'parents:' .. jobIdStr, unpack(replacedEdges.dagParents))
+        replacedEdges.dagParents = {}
+      end
+    end
     -- Cross-queue parents are delivered by the scheduler from xq-pending.
     resolveRemovedChildParents(prefix, replacedJobId, eventsKey, replacedEdges)
   end
