@@ -1,7 +1,8 @@
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
-import { TimeUnit } from '@glidemq/speedkey';
+import { Batch, ClusterBatch, TimeUnit } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient, GlideReturnType } from '@glidemq/speedkey';
 import type {
   WorkerOptions,
   Processor,
@@ -31,6 +32,7 @@ import {
   ensureFunctionLibrary,
   ensureFunctionLibraryOnce,
   createConsumerGroup,
+  isClusterClient,
 } from './connection';
 import {
   GlideMQError,
@@ -61,6 +63,25 @@ import {
   recordUsageAndCheckBudget,
 } from './functions/index';
 import { Scheduler } from './scheduler';
+
+/**
+ * Send the commands added by `build` as one non-atomic pipeline (1 RTT).
+ * Order is preserved; with raiseOnError=false a failed command comes back as
+ * a RequestError in its slot instead of rejecting the whole batch.
+ */
+async function execPipeline(
+  client: Client,
+  build: (batch: Batch | ClusterBatch) => void,
+): Promise<GlideReturnType[] | null> {
+  if (isClusterClient(client)) {
+    const batch = new ClusterBatch(false);
+    build(batch);
+    return (client as GlideClusterClient).exec(batch, false);
+  }
+  const batch = new Batch(false);
+  build(batch);
+  return (client as GlideClient).exec(batch, false);
+}
 
 export type WorkerEvent =
   | 'completed'
@@ -1912,11 +1933,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
     const timer = setInterval(() => {
-      client
-        .hset(jobKey, { lastActive: Date.now().toString() })
-        .then(async () => {
-          const revoked = await client.hget(jobKey, 'revoked');
-          if (String(revoked) === '1') this.abortJob(jobId);
+      // lastActive refresh and revocation check share one round trip.
+      execPipeline(client, (batch) => {
+        batch.hset(jobKey, { lastActive: Date.now().toString() });
+        batch.hget(jobKey, 'revoked');
+      })
+        .then((results) => {
+          if (String(results?.[1]) === '1') this.abortJob(jobId);
         })
         .catch(() => {});
     }, interval);
