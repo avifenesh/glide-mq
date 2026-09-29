@@ -180,3 +180,46 @@ describe('reconnect racing close()', () => {
     expect((qe as any).reconnectTimer).toBeNull();
   });
 });
+
+describe('poll error backoff', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('backs off before the first reconnect and grows the delay while polls keep failing', async () => {
+    let createCount = 0;
+    const createTimes: number[] = [];
+    vi.mocked(GlideClient.createClient).mockImplementation(async () => {
+      createCount++;
+      createTimes.push(Date.now());
+      // Every blocking client rejects its poll with a non-connection error.
+      return makeMockClient({
+        xreadgroup: vi.fn().mockRejectedValue(new Error('NOPERM this user has no permissions')),
+      }) as any;
+    });
+
+    const worker = new Worker('lifecycle-w9', vi.fn(), { connection, blockTimeout: 100 });
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    const start = Date.now();
+
+    await vi.advanceTimersByTimeAsync(500);
+    // No reconnect before the first backoff elapses.
+    expect(createCount).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(7000);
+    // Reconnects at ~1s, ~3s (1+2), ~7s (1+2+4): 2 clients each.
+    expect(createCount).toBeLessThanOrEqual(2 + 3 * 2);
+    expect(createCount).toBeGreaterThanOrEqual(2 + 2 * 2);
+    const reconnectStarts = createTimes.slice(2).filter((_, i) => i % 2 === 0);
+    expect(reconnectStarts[0] - start).toBeGreaterThanOrEqual(900);
+    expect(reconnectStarts[1] - reconnectStarts[0]).toBeGreaterThanOrEqual(1900);
+
+    await worker.close(true);
+  });
+});

@@ -394,7 +394,9 @@ export interface ReconnectContext {
 
 /**
  * Attempt a reconnect operation with exponential backoff.
- * On success, resets backoff and calls resumeFn.
+ * On success, calls resumeFn. The backoff is left for the caller to reset
+ * after its first successful operation, so an error that survives reconnects
+ * keeps growing the delay instead of retrying at the minimum.
  * On failure, emits error, bumps backoff, and schedules a retry.
  * reconnectFn must dispose what it created and throw when the owner closes
  * during one of its awaits; resumeFn only runs while the owner is active.
@@ -409,7 +411,6 @@ export async function reconnectWithBackoff(
   try {
     await reconnectFn();
     if (!ctx.isActive()) return;
-    ctx.setBackoff(0);
     resumeFn();
   } catch (err) {
     if (!ctx.isActive()) return;

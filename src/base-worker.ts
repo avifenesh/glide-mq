@@ -116,7 +116,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected rateLimitUntil = 0;
   protected isDrained = true;
   protected reconnectBackoff = 0;
-  protected internalEvents = new EventEmitter();
+  protected internalEvents = new EventEmitter().setMaxListeners(0);
 
   // Configurable defaults
   protected concurrency: number;
@@ -350,7 +350,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       } catch (err) {
         if (this.running && !this.closing) {
           this.emit('error', err);
+          // Back off before the first reconnect too: a persistent non-connection
+          // error (NOPERM, WRONGTYPE) would otherwise reconnect in a tight loop.
+          // The delay only resets after a successful poll.
           this.reconnectBackoff = nextReconnectDelay(this.reconnectBackoff);
+          await this.sleepUnlessClosing(this.reconnectBackoff);
           await this.reconnectAndResume();
           return; // reconnectAndResume restarts the loop
         }
@@ -502,6 +506,20 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         return this.pollLoopPromise;
       },
     );
+  }
+
+  /** Sleep for `ms`, waking early when close() starts. */
+  protected sleepUnlessClosing(ms: number): Promise<void> {
+    if (this.closing || ms <= 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.internalEvents.off('closing', done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      this.internalEvents.once('closing', done);
+    });
   }
 
   protected async waitForSlot(): Promise<void> {
@@ -2122,6 +2140,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     this.closing = true;
     this.running = false;
     this.closePromise = Promise.resolve().then(() => this.performClose(force));
+    this.internalEvents.emit('closing');
     this.emit('closing');
     return this.closePromise;
   }
