@@ -2057,3 +2057,54 @@ describe('TestQueue deduplication parity (T10)', () => {
     expect(await queue.add('t', {}, { deduplication: { id: 'd' } })).not.toBeNull();
   });
 });
+
+describe('TestWorker failure paths (coverage)', () => {
+  it('fails a job whose flow budget is already exceeded with onExceeded fail', async () => {
+    const queue = new TestQueue('budget-fail-parity');
+    queue.setBudget('flow-1', { maxTotalTokens: 1, onExceeded: 'fail' });
+    queue.recordBudgetUsage('flow-1', { input: 5 }, {}, 5, 0);
+    await queue.pause();
+    const job = await queue.add('capped', {});
+    queue.jobs.get(job!.id)!.budgetKey = 'flow-1';
+    const failed: string[] = [];
+    const worker = new TestWorker(queue, async () => 'never');
+    worker.on('failed', (_job: TestJob, err: Error) => failed.push(err.message));
+    await queue.resume();
+    await waitFor(() => failed.length === 1, 2000, 2);
+    expect(failed).toEqual(['Budget exceeded']);
+    const final = await queue.getJob(job!.id);
+    expect(final!.failedReason).toBe('Budget exceeded');
+    await worker.close();
+    await queue.close();
+  });
+
+  it('advances the fallback chain on each retry', async () => {
+    const queue = new TestQueue('fallback-retry-parity');
+    const seen: (string | undefined)[] = [];
+    const worker = new TestWorker(queue, async (job: TestJob) => {
+      seen.push(job.currentFallback?.model);
+      if (seen.length < 3) throw new Error('retry');
+      return 'ok';
+    });
+    await queue.add(
+      'fb',
+      {},
+      { attempts: 3, backoff: { type: 'fixed', delay: 1 }, fallbacks: [{ model: 'a' }, { model: 'b' }] },
+    );
+    await waitFor(() => seen.length === 3, 2000, 2);
+    expect(seen).toEqual([undefined, 'a', 'b']);
+    await worker.close();
+    await queue.close();
+  });
+
+  it('rejects the same invalid options as Queue.add', async () => {
+    const queue = new TestQueue('validation-coverage');
+    await expect(queue.add('x', {}, { ordering: { key: 'k'.repeat(257) } })).rejects.toThrow(/Ordering key exceeds/);
+    await expect(queue.add('x', {}, { ordering: { key: '__' } })).rejects.toThrow(/reserved/);
+    await expect(
+      queue.add('x', {}, { ordering: { key: 'k', tokenBucket: { capacity: 1, refillRate: 0 } } }),
+    ).rejects.toThrow(/refillRate/);
+    await expect(queue.add('x', 'a'.repeat(MAX_JOB_DATA_SIZE + 1))).rejects.toThrow(/exceeds maximum size/);
+    await queue.close();
+  });
+});
