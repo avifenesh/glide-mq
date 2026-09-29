@@ -940,6 +940,12 @@ end
 local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp, subKey)
   local stalledCount
   if subKey then
+    -- The previous owner handed the claim back (closed or paused before
+    -- running it): not a stall. Second return value marks the hand-back.
+    if redis.call('HGET', subKey, 'hb') == '1' then
+      redis.call('HDEL', subKey, 'hb')
+      return false, true
+    end
     stalledCount = redis.call('HINCRBY', subKey, 's', 1)
     -- Same retention as the per-subscription retry counter; never shorten a
     -- longer TTL a scheduled retry set.
@@ -2226,6 +2232,14 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       else
       local vals = redis.call('HMGET', jobKey, 'lastActive', 'opts')
       local lastActive = tonumber(vals[1])
+      local subKey = nil
+      if broadcastMode == '1' then
+        subKey = jobKey .. ':sub:' .. group
+        -- Per-subscription heartbeat (library 132); older activations only
+        -- wrote the shared lastActive.
+        local subLastActive = tonumber(redis.call('HGET', subKey, 'la'))
+        if subLastActive then lastActive = subLastActive end
+      end
       local jobLockDuration = extractLockDurationFromOpts(vals[2])
       local effectiveIdle
       if jobLockDuration > 0 then
@@ -2238,10 +2252,8 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       if lastActive and (timestamp - lastActive) < effectiveIdle then
         count = count + 1
       else
-      local subKey = nil
-      if broadcastMode == '1' then subKey = jobKey .. ':sub:' .. group end
-      local failed = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp, subKey)
-      if not failed then stalledIds[#stalledIds + 1] = jobId end
+      local failed, handedBack = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp, subKey)
+      if not failed and not handedBack then stalledIds[#stalledIds + 1] = jobId end
       if failed then
         if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
         if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
@@ -3234,6 +3246,15 @@ local RELEASED_LIST_CLAIM = {
 redis.register_function('glidemq_moveToActive', function(keys, args)
   local result = moveToActiveClaim(keys, args)
   local jobId = args[4] or ''
+  -- Broadcast: the heartbeat is per subscription (job:<id>:sub:<group> 'la'),
+  -- so a stall in one subscription is not masked by another still running
+  -- the same message. Activation also clears the hand-back mark (hb).
+  if type(result) == 'table' and (args[5] or '0') == '1' and (args[3] or '') ~= '' then
+    local subKey = keys[1] .. ':sub:' .. args[3]
+    redis.call('HSET', subKey, 'la', tostring(tonumber(args[1]) or 0))
+    redis.call('HDEL', subKey, 'hb')
+    if redis.call('PTTL', subKey) < 86400000 then redis.call('PEXPIRE', subKey, 86400000) end
+  end
   -- List claims carry no entryId. Activation also tracks claims popped by the
   -- legacy non-reserving glidemq_popLists.
   if (args[2] or '') == '' and jobId ~= '' then
@@ -3258,8 +3279,21 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   local broadcastMode = args[4] or '0'
   local pausedRestore = args[5] or '0'
   -- Broadcast + pause: leave the PEL claim on this subscription. XADD would
-  -- duplicate the message for every other consumer group.
+  -- duplicate the message for every other consumer group. Mark the claim as
+  -- handed back (hb) so the next stalled reclaim does not count a stall; with
+  -- the optional consumer arg only a claim this consumer still owns is marked.
   if pausedRestore == '1' and broadcastMode == '1' then
+    local consumer = args[7] or ''
+    local owned = true
+    if consumer ~= '' and entryId ~= '' then
+      local okP, pend = pcall(redis.call, 'XPENDING', streamKey, group, entryId, entryId, 1)
+      owned = okP and type(pend) == 'table' and #pend > 0 and pend[1][2] == consumer
+    end
+    if owned and redis.call('EXISTS', jobKey) == 1 then
+      local subKey = jobKey .. ':sub:' .. group
+      redis.call('HSET', subKey, 'hb', '1')
+      if redis.call('PTTL', subKey) < 86400000 then redis.call('PEXPIRE', subKey, 86400000) end
+    end
     return 0
   end
   local exists = redis.call('EXISTS', jobKey)
@@ -3317,6 +3351,40 @@ redis.register_function('glidemq_deferActive', function(keys, args)
     end
   end
   return 1
+end)
+
+-- Re-take broadcast entries this worker parked (pause or redispatch) that it
+-- still owns. An entry another consumer reclaimed meanwhile is skipped, so
+-- the message is not run twice in one subscription. Clears the hb mark.
+-- KEYS: [streamKey]  ARGS: [group, consumer, entryId...]
+-- Reply: { {entryId, {field, value, ...}}, ... } for the entries re-taken.
+redis.register_function('glidemq_recoverBroadcastClaims', function(keys, args)
+  local streamKey = keys[1]
+  local group = args[1]
+  local consumer = args[2]
+  local prefix = string.sub(streamKey, 1, #streamKey - 6)
+  local out = {}
+  for i = 3, #args do
+    local entryId = args[i]
+    local okP, pend = pcall(redis.call, 'XPENDING', streamKey, group, entryId, entryId, 1)
+    if okP and type(pend) == 'table' and #pend > 0 and pend[1][2] == consumer then
+      local claimed = redis.call('XCLAIM', streamKey, group, consumer, 0, entryId)
+      for c = 1, #claimed do
+        local entry = claimed[c]
+        if type(entry) == 'table' and entry[2] then
+          out[#out + 1] = entry
+          local fields = entry[2]
+          for f = 1, #fields, 2 do
+            if fields[f] == 'jobId' then
+              redis.call('HDEL', prefix .. 'job:' .. fields[f + 1] .. ':sub:' .. group, 'hb')
+              break
+            end
+          end
+        end
+      end
+    end
+  end
+  return out
 end)
 
 redis.register_function('glidemq_addFlow', function(keys, args)
@@ -3752,12 +3820,44 @@ local TRIM_KEEP_STATES = {
 
 -- Delete a broadcast message whose stream entries are all trimmed, once no
 -- claim (bcastHeld), scheduled retry or newer retry entry still needs it.
+-- A retry entry promoted by a library before 130 was not recorded in
+-- bcastEntry. When some subscription retried this message, look for its
+-- retry entry among the oldest stream entries (bounded) before deleting.
+local function findLegacyRetryEntry(streamKey, jobId, groups, jobKey)
+  local retried = false
+  for i = 1, #groups do
+    if (tonumber(redis.call('HGET', jobKey .. ':sub:' .. groups[i], 'a')) or 0) > 0 then
+      retried = true
+      break
+    end
+  end
+  if not retried then return nil end
+  local entries = redis.call('XRANGE', streamKey, '-', '+', 'COUNT', 1000)
+  for i = 1, #entries do
+    local fields = entries[i][2]
+    local entryJobId, isRetry = nil, false
+    for f = 1, #fields, 2 do
+      if fields[f] == 'jobId' then entryJobId = fields[f + 1] end
+      if fields[f] == 'retryGroup' then isRetry = true end
+    end
+    if isRetry and entryJobId == jobId then return entries[i][1] end
+  end
+  return nil
+end
+
 local function deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, jobId)
   local jobKey = prefix .. 'job:' .. jobId
   local vals = redis.call('HMGET', jobKey, 'state', 'bcastHeld', 'bcastEntry')
   if not vals[1] or TRIM_KEEP_STATES[vals[1]] then return end
   if (tonumber(vals[2]) or 0) > 0 then return end
   if vals[3] and #redis.call('XRANGE', streamKey, vals[3], vals[3]) > 0 then return end
+  if not vals[3] then
+    local legacyRetry = findLegacyRetryEntry(streamKey, jobId, groups, jobKey)
+    if legacyRetry then
+      redis.call('HSET', jobKey, 'bcastEntry', legacyRetry)
+      return
+    end
+  end
   local scheduledKey = keys[4]
   if redis.call('ZSCORE', scheduledKey, jobId) then return end
   local subKeys = {}

@@ -1,7 +1,7 @@
 import type { BroadcastWorkerOptions, Processor, BatchProcessor, Client } from './types';
 import { Job } from './job';
 import { GlideMQError } from './errors';
-import { checkConcurrency } from './functions/index';
+import { checkConcurrency, recoverBroadcastClaims } from './functions/index';
 import { BaseWorker } from './base-worker';
 import { compileSubjectMatcher } from './utils';
 export type { WorkerEvent } from './base-worker';
@@ -83,23 +83,24 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
   }
 
   /**
-   * Recover only broadcast entries parked by this worker during a queue-pause
-   * activation race. XREADGROUP with `0` would redeliver all of this
-   * consumer's PEL, including live processing, so target known IDs with
-   * XCLAIM instead.
+   * Recover only broadcast entries parked by this worker (queue-pause
+   * activation race, worker pause, stalled redispatch). XREADGROUP with `0`
+   * would redeliver all of this consumer's PEL, including live processing, so
+   * target known IDs. An entry another consumer reclaimed while it was parked
+   * is skipped: re-taking it would run the message twice in this subscription.
    */
   private async recoverPausedBroadcastEntries(
     count: number,
   ): Promise<NonNullable<Awaited<ReturnType<Client['xreadgroup']>>> | null> {
     if (!this.commandClient || this.pausedBroadcastEntries.size === 0) return null;
 
-    const entryIds = [...this.pausedBroadcastEntries].slice(0, count);
+    const entryIds = [...this.pausedBroadcastEntries.keys()].slice(0, count);
     try {
-      const entries = await this.commandClient.xclaim(
-        this.queueKeys.stream,
+      const entries = await recoverBroadcastClaims(
+        this.commandClient,
+        this.queueKeys,
         this.consumerGroup,
         this.consumerId,
-        0,
         entryIds,
       );
       for (const entryId of entryIds) this.pausedBroadcastEntries.delete(entryId);

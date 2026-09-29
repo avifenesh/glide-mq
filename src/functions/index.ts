@@ -1328,20 +1328,54 @@ export async function deferActive(
   entryId: string,
   group: string = CONSUMER_GROUP,
   broadcastMode?: boolean,
-  opts?: { pausedRestore?: boolean; undoGroupClaim?: boolean },
+  opts?: { pausedRestore?: boolean; undoGroupClaim?: boolean; consumer?: string },
 ): Promise<void> {
-  await client.fcall(
-    'glidemq_deferActive',
-    [k.stream, k.job(jobId), k.listActive],
-    [
-      jobId,
-      entryId,
-      group,
-      broadcastMode ? '1' : '0',
-      opts?.pausedRestore ? '1' : '0',
-      opts?.undoGroupClaim ? '1' : '0',
-    ],
-  );
+  const args = [
+    jobId,
+    entryId,
+    group,
+    broadcastMode ? '1' : '0',
+    opts?.pausedRestore ? '1' : '0',
+    opts?.undoGroupClaim ? '1' : '0',
+  ];
+  // Broadcast pause: the hand-back mark is written only for a claim this
+  // consumer still owns (appended optional arg, library 132).
+  if (opts?.consumer) args.push(opts.consumer);
+  await client.fcall('glidemq_deferActive', [k.stream, k.job(jobId), k.listActive], args);
+}
+
+/**
+ * Re-take parked broadcast entries this consumer still owns
+ * (glidemq_recoverBroadcastClaims, library 132). Entries another consumer
+ * reclaimed meanwhile are skipped. Falls back to XCLAIM on an older library.
+ * Returns entries as XREADGROUP does: entryId to field pairs.
+ */
+export async function recoverBroadcastClaims(
+  client: Client,
+  k: QueueKeys,
+  group: string,
+  consumer: string,
+  entryIds: string[],
+): Promise<Record<string, [GlideString, GlideString][]>> {
+  let raw: unknown;
+  try {
+    raw = await client.fcall('glidemq_recoverBroadcastClaims', [k.stream], [group, consumer, ...entryIds]);
+  } catch (err) {
+    if (!isFunctionNotFound(err)) throw err;
+    return client.xclaim(k.stream, group, consumer, 0, entryIds);
+  }
+  const out: Record<string, [GlideString, GlideString][]> = Object.create(null);
+  if (!Array.isArray(raw)) return out;
+  for (const entry of raw) {
+    if (!Array.isArray(entry) || !Array.isArray(entry[1])) continue;
+    const fields = entry[1] as unknown[];
+    const pairs: [GlideString, GlideString][] = [];
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      pairs.push([String(fields[i]), String(fields[i + 1])]);
+    }
+    out[String(entry[0])] = pairs;
+  }
+  return out;
 }
 
 /**

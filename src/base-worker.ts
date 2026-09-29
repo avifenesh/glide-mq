@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
-import { Batch, ClusterBatch, TimeUnit } from '@glidemq/speedkey';
+import { Batch, ClusterBatch, ExpireOptions, TimeUnit } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient, GlideReturnType } from '@glidemq/speedkey';
 import type {
   WorkerOptions,
@@ -1248,10 +1248,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         entry.entryId,
         this.consumerGroup,
         this.broadcastMode ? true : undefined,
-        { pausedRestore: true, undoGroupClaim: entry.undoGroupClaim },
+        { pausedRestore: true, undoGroupClaim: entry.undoGroupClaim, consumer: this.consumerId },
       );
       if (this.broadcastMode && entry.entryId !== '') {
-        this.pausedBroadcastEntries.add(entry.entryId);
+        this.pausedBroadcastEntries.set(entry.entryId, entry.jobId);
       }
     } catch (err) {
       this.emit('error', err);
@@ -2264,11 +2264,20 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (interval <= 0) return;
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
+    // Broadcast: stall detection reads the per-subscription heartbeat (sub
+    // hash 'la'), so one subscription's stall is not masked by another still
+    // running the message. The shared lastActive is kept for older reclaimers.
+    const subKey = this.broadcastMode ? `${jobKey}:sub:${this.consumerGroup}` : null;
     const timer = setInterval(() => {
       // lastActive refresh and revocation check share one round trip.
+      const now = Date.now().toString();
       execPipeline(client, (batch) => {
-        batch.hset(jobKey, { lastActive: Date.now().toString() });
+        batch.hset(jobKey, { lastActive: now });
         batch.hget(jobKey, 'revoked');
+        if (subKey) {
+          batch.hset(subKey, { la: now });
+          batch.pexpire(subKey, 86_400_000, { expireOption: ExpireOptions.HasNoExpiry });
+        }
       })
         .then((results) => {
           if (String(results?.[1]) === '1') this.abortJob(jobId);
@@ -2555,6 +2564,28 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (!force) {
       await this.waitForActiveJobs();
     }
+    await this.handBackParkedBroadcastEntries(false);
+  }
+
+  /**
+   * Broadcast entries this consumer parked (pause or stalled redispatch) and
+   * never ran: mark them handed back so a reclaim by another worker does not
+   * count a stall. The claims stay in this consumer's PEL; on resume
+   * recoverBroadcastClaims re-takes the ones still owned.
+   */
+  private async handBackParkedBroadcastEntries(forget: boolean): Promise<void> {
+    if (!this.commandClient || this.pausedBroadcastEntries.size === 0) return;
+    for (const [entryId, jobId] of this.pausedBroadcastEntries) {
+      try {
+        await deferActive(this.commandClient, this.queueKeys, jobId, entryId, this.consumerGroup, true, {
+          pausedRestore: true,
+          consumer: this.consumerId,
+        });
+      } catch (err) {
+        this.emit('error', err);
+      }
+    }
+    if (forget) this.pausedBroadcastEntries.clear();
   }
 
   /**

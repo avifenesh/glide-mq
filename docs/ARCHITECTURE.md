@@ -158,7 +158,7 @@ redis.register_function('glidemq_complete', function(keys, args) ... end)
 | glidemq_promoteRateLimited        | 2    | Move rate-limited jobs back to stream                                                    |
 | glidemq_checkConcurrency          | 3    | Check global concurrency limit before processing                                         |
 | glidemq_rpopAndReserve            | 4    | Atomic RPOP from LIFO/priority list with global concurrency enforcement                  |
-| glidemq_moveToActive              | 2    | Set job state to active, record processedOn timestamp                                    |
+| glidemq_moveToActive              | 2    | Set job state to active, record processedOn timestamp; enforce globalConcurrency (GLOBAL_FULL) |
 | glidemq_deferActive               | 3    | Return active job to stream for reprocessing                                             |
 | glidemq_addFlow                   | N    | Atomic: create parent + children, set deps, add children to stream/scheduled             |
 | glidemq_completeChild             | 4    | Remove from parent deps set, if deps empty -> re-queue parent                            |
