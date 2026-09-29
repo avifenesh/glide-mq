@@ -390,10 +390,10 @@ describe('TestWorker', () => {
     });
 
     await queue.add('exhaust-task', {}, { attempts: 2 });
-    await waitFor(() => failures.length === 1, 5000);
+    await waitFor(() => failures.length === 2, 5000);
 
-    // attempts=2 means max 2 tries. 2 failures = exhausted.
-    expect(failures).toHaveLength(1);
+    // attempts=2 means max 2 tries. The worker emits 'failed' on each attempt, like production.
+    expect(failures).toHaveLength(2);
 
     const record = queue.jobs.get('1')!;
     expect(record.state).toBe('failed');
@@ -1881,6 +1881,95 @@ describe('TestWorker ordering and retention parity (T9)', () => {
     ]);
     await waitFor(() => done === 2, 2000, 5);
     expect((await queue.getJobs('completed')).map((j) => j.name)).toEqual(['b']);
+
+    await worker.close();
+    await queue.close();
+  });
+});
+
+describe('TestWorker retry parity (T8)', () => {
+  it('emits worker failed on every attempt and parks retries in delayed with failedReason', async () => {
+    const queue = new TestQueue('retry-parity');
+    const workerFailed: string[] = [];
+    const queueFailed: string[] = [];
+    const retrying: string[] = [];
+    queue.on('failed', (_job: TestJob, err: Error) => queueFailed.push(err.message));
+    queue.on('retrying', (_job: TestJob, err: Error) => retrying.push(err.message));
+    let calls = 0;
+    const worker = new TestWorker(queue, async () => {
+      calls++;
+      throw new Error(`fail-${calls}`);
+    });
+    worker.on('failed', (job: TestJob, err: Error) => {
+      workerFailed.push(err.message);
+      expect(job.failedReason).toBe(err.message);
+    });
+
+    const job = await queue.add('flaky', {}, { attempts: 3, backoff: { type: 'fixed', delay: 150 } });
+    await waitFor(() => workerFailed.length === 1, 2000, 2);
+
+    const afterFirst = await queue.getJob(job!.id);
+    expect(afterFirst!.failedReason).toBe('fail-1');
+    expect(afterFirst!.attemptsMade).toBe(1);
+    expect((await queue.getJobCounts()).delayed).toBe(1);
+    expect((await queue.getJobs('delayed')).map((j) => j.id)).toEqual([job!.id]);
+
+    // Backoff holds the job in delayed until the delay elapses.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(calls).toBe(1);
+
+    await waitFor(() => workerFailed.length === 3, 3000, 5);
+    expect(workerFailed).toEqual(['fail-1', 'fail-2', 'fail-3']);
+    expect(retrying).toEqual(['fail-1', 'fail-2']);
+    expect(queueFailed).toEqual(['fail-3']);
+    const final = await queue.getJob(job!.id);
+    expect(final!.failedReason).toBe('fail-3');
+    expect((await queue.getJobCounts()).failed).toBe(1);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('uses exponential backoff and custom backoffStrategies', async () => {
+    const queue = new TestQueue('retry-backoff');
+    const delays: number[] = [];
+    const worker = new TestWorker(
+      queue,
+      async () => {
+        throw new Error('x');
+      },
+      { backoffStrategies: { custom: (attemptsMade) => attemptsMade * 7 } },
+    );
+    const origSchedule = queue.scheduleRetry.bind(queue);
+    queue.scheduleRetry = (record, delay) => {
+      delays.push(delay);
+      origSchedule(record, delay);
+    };
+    let failed = 0;
+    worker.on('failed', () => failed++);
+    await queue.add('exp', {}, { attempts: 3, backoff: { type: 'exponential', delay: 10 } });
+    await waitFor(() => failed === 3, 2000, 2);
+    await queue.add('custom', {}, { attempts: 3, backoff: { type: 'custom', delay: 0 } });
+    await waitFor(() => failed === 6, 2000, 2);
+    expect(delays).toEqual([10, 20, 7, 14]);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('drain(true) removes jobs parked in delayed for retry', async () => {
+    const queue = new TestQueue('retry-drain');
+    let calls = 0;
+    const worker = new TestWorker(queue, async () => {
+      calls++;
+      throw new Error('x');
+    });
+    await queue.add('j', {}, { attempts: 2, backoff: { type: 'fixed', delay: 50 } });
+    await waitFor(() => calls === 1, 2000, 2);
+    await queue.drain(true);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(calls).toBe(1);
+    expect(queue.jobs.size).toBe(0);
 
     await worker.close();
     await queue.close();

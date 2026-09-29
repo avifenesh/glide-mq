@@ -132,7 +132,7 @@ describe('email processor', () => {
 | --------------------- | --------------------------------------------------------- |
 | `on('active', fn)`    | Fired when a job starts processing — args: `(job, jobId)` |
 | `on('completed', fn)` | Fired when a job finishes successfully                    |
-| `on('failed', fn)`    | Fired when a job throws                                   |
+| `on('failed', fn)`    | Fired on every failed attempt, including retried ones     |
 | `on('drained', fn)`   | Fired when the queue transitions from non-empty to empty  |
 | `close()`             | Stop the worker                                           |
 
@@ -165,7 +165,7 @@ const byName = await queue.searchJobs({ name: 'send-email' });
 
 ## Retry Behaviour in Tests
 
-Retries work the same as in production. Configure them via job options:
+Retries follow the production state machine. Every failed attempt sets `job.failedReason` and fires the worker `failed` event. A retryable failure parks the job in `delayed` for the backoff delay (`fixed`, `exponential`, `jitter`, or a custom type from the `backoffStrategies` worker option) and the queue emits `retrying`; the job then returns to `waiting`. Only the terminal failure moves the job to `failed` and fires the queue `failed` event. Backoff uses real timers, so keep delays small in unit tests.
 
 ```typescript
 const worker = new TestWorker(queue, async (job) => {
@@ -175,6 +175,7 @@ const worker = new TestWorker(queue, async (job) => {
 
 await queue.add('flaky', {}, { attempts: 3, backoff: { type: 'fixed', delay: 0 } });
 
+await new Promise((r) => worker.once('completed', r));
 const done = await queue.searchJobs({ state: 'completed', name: 'flaky' });
 expect(done[0]?.attemptsMade).toBe(2);
 ```
@@ -394,7 +395,7 @@ Call job.suspend() inside the processor, then queue.signal() from outside. Use g
 - **Processing is synchronous-ish.** `TestWorker` processes jobs immediately when they are added via `queue.add()`. In most tests you can check state right after the `await queue.add(...)` call.
 - **Dispatch order matches the worker.** Jobs with `priority > 0` run first (lower number = higher priority, FIFO within a priority), then `lifo` jobs (newest first), then plain FIFO jobs. A `lifo` job with a priority is dispatched as LIFO, like production. `queue.getJobs('waiting')` still lists jobs in insertion order.
 - **Retention is applied.** `removeOnComplete` / `removeOnFail` accept `true`, a count, or `{ age, count }` (age in seconds) and trim the completed / failed jobs exactly as the server functions do, before the `completed` / `failed` event fires. Jobs failed as `expired` by `ttl` are not removed, same as production.
-- **Delayed jobs are enqueued as waiting.** The `delay` option is accepted but not honoured in test mode — jobs start as `waiting` and are processed immediately.
+- **Delayed jobs are enqueued as waiting.** The `delay` option is accepted but not honoured in test mode — jobs start as `waiting` and are processed immediately. The only jobs in `delayed` are retries waiting out their backoff. Rate-limit errors thrown by a processor are treated as ordinary failures.
 - **Swap without changing processors.** Because `TestQueue` and `TestWorker` share the same interface as `Queue` and `Worker`, you can parameterise your processor code and pass either implementation.
 
 ```typescript

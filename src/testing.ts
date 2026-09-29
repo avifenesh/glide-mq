@@ -40,6 +40,7 @@ import { JSON_SERIALIZER } from './types';
 import { GlideMQError, UnrecoverableError, BatchError, SuspendError } from './errors';
 import {
   MAX_JOB_DATA_SIZE,
+  calculateBackoff,
   computeFollowingSchedulerNextRun,
   computeInitialSchedulerNextRun,
   computeWeightedTotal,
@@ -428,6 +429,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private schedulerRunning = false;
   private nextSchedulerWakeAt: number | null = null;
   private suspendedTimeoutTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private retryTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
   constructor(name: string, opts?: TestQueueOptions) {
     super();
@@ -1184,10 +1186,35 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }));
   }
 
+  /**
+   * @internal Promote a job parked in 'delayed' by a retry back to 'waiting'
+   * once its backoff elapses (the in-memory equivalent of glidemq_promote).
+   */
+  scheduleRetry(record: TestJobRecord<D, R>, delayMs: number): void {
+    const existing = this.retryTimers.get(record.id);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(
+      () => {
+        this.retryTimers.delete(record.id);
+        if (this.jobs.get(record.id) !== record || record.state !== 'delayed') return;
+        record.state = 'waiting';
+        this.waitingQueue.push(record);
+        if (!this.paused) {
+          for (const w of this.workers) w.onJobAdded();
+        }
+      },
+      Math.min(Math.max(0, delayMs), MAX_TIMEOUT_DELAY_MS),
+    );
+    timer.unref?.();
+    this.retryTimers.set(record.id, timer);
+  }
+
   /** Close the queue, clear timers, and detach all workers. */
   async close(): Promise<void> {
     this.clearSchedulerTimer();
     this.clearAllSuspendedTimeouts();
+    for (const timer of this.retryTimers.values()) clearTimeout(timer);
+    this.retryTimers.clear();
     this.removeAllListeners();
     this.workers.clear();
     TestQueue.registry.delete(this.name);
@@ -1457,6 +1484,8 @@ export interface TestWorkerOptions {
     maxTokens: number;
     duration: number;
   };
+  /** Custom backoff strategies keyed by `backoff.type`, same as WorkerOptions.backoffStrategies. */
+  backoffStrategies?: Record<string, (attemptsMade: number, err: Error) => number>;
 }
 
 /** In-memory test double for Worker. Processes jobs from a TestQueue without Valkey. */
@@ -1478,6 +1507,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingBatch: TestJobRecord<D, R>[] = [];
   private readonly tokenLimiter: TestWorkerOptions['tokenLimiter'];
+  private readonly backoffStrategies: TestWorkerOptions['backoffStrategies'];
   private tpmLocalCounter = 0;
   private tpmWindowStart = 0;
 
@@ -1532,6 +1562,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
     this.concurrency = opts?.concurrency ?? 1;
     this.tokenLimiter = opts?.tokenLimiter;
+    this.backoffStrategies = opts?.backoffStrategies;
     this.id = `test-worker-${++TestWorker.idCounter}`;
     this.startedAt = Date.now();
 
@@ -1625,16 +1656,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           }
           return;
         }
-        record.state = 'failed';
-        record.failedReason = 'Budget exceeded';
-        record.finishedOn = Date.now();
-        job.failedReason = 'Budget exceeded';
-        job.finishedOn = record.finishedOn;
-        this.queue.applyRetention(record, 'failed');
-        this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
-        const err = new Error('Budget exceeded');
-        this.emit('failed', job, err);
-        this.queue.emit('failed', job, err);
+        this.handleFailure(record, job, new Error('Budget exceeded'));
         this.activeCount--;
         if (this.running && !this.queue.isPaused()) {
           this.processAvailable();
@@ -1703,31 +1725,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           return;
         }
 
-        record.attemptsMade++;
-        const maxAttempts = record.opts.attempts ?? 0;
-
-        const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
-        if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
-          // Advance fallback chain if configured
-          if (record.opts.fallbacks && record.opts.fallbacks.length > 0) {
-            record.fallbackIndex++;
-          }
-          // Retry: put back to waiting
-          record.state = 'waiting';
-          this.queue.waitingQueue.push(record);
-          // Schedule a re-drain so the retry gets picked up
-          queueMicrotask(() => this.processAvailable());
-        } else {
-          record.state = 'failed';
-          record.failedReason = err.message;
-          record.finishedOn = Date.now();
-          job.failedReason = err.message;
-          job.finishedOn = record.finishedOn;
-          this.queue.applyRetention(record, 'failed');
-          this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
-          this.emit('failed', job, err);
-          this.queue.emit('failed', job, err);
-        }
+        this.handleFailure(record, job, err);
       })
       .finally(() => {
         this.activeCount--;
@@ -1736,6 +1734,50 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           this.processAvailable();
         }
       });
+  }
+
+  /**
+   * Mirror BaseWorker.handleJobFailure + glidemq_fail: every failed attempt sets
+   * failedReason and emits the worker 'failed' event. A retryable failure parks
+   * the job in 'delayed' for the backoff delay (queue emits 'retrying'); a
+   * terminal failure moves it to 'failed', applies removeOnFail and emits the
+   * queue 'failed' event.
+   */
+  private handleFailure(record: TestJobRecord<D, R>, job: TestJob<D, R>, err: Error): void {
+    record.attemptsMade++;
+    const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
+    const maxAttempts = skipRetry ? 0 : (record.opts.attempts ?? 0);
+    const now = Date.now();
+    record.failedReason = err.message;
+    job.failedReason = err.message;
+
+    if (maxAttempts > 0 && record.attemptsMade < maxAttempts) {
+      let backoffDelay = 0;
+      const backoff = record.opts.backoff;
+      if (backoff) {
+        const strategyFn = this.backoffStrategies?.[backoff.type];
+        backoffDelay = strategyFn
+          ? strategyFn(record.attemptsMade, err)
+          : calculateBackoff(backoff.type, backoff.delay, record.attemptsMade, backoff.jitter);
+      }
+      if (record.opts.fallbacks && record.opts.fallbacks.length > 0) {
+        record.fallbackIndex++;
+      }
+      record.state = 'delayed';
+      record.processedOn = now;
+      this.emit('failed', job, err);
+      this.queue.emit('retrying', job, err);
+      this.queue.scheduleRetry(record, backoffDelay);
+      return;
+    }
+
+    record.state = 'failed';
+    record.finishedOn = now;
+    job.finishedOn = now;
+    this.queue.applyRetention(record, 'failed');
+    this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
+    this.emit('failed', job, err);
+    this.queue.emit('failed', job, err);
   }
 
   // ---- Batch processing ----
@@ -1855,28 +1897,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
             const result = i < batchErr.results.length ? batchErr.results[i] : new Error('No result in BatchError');
 
             if (result instanceof Error) {
-              record.attemptsMade++;
-              const maxAttempts = record.opts.attempts ?? 0;
-              const skipRetry =
-                job.discarded || result instanceof UnrecoverableError || result.name === 'UnrecoverableError';
-              if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
-                if (record.opts.fallbacks && record.opts.fallbacks.length > 0) {
-                  record.fallbackIndex++;
-                }
-                record.state = 'waiting';
-                this.queue.waitingQueue.push(record);
-                queueMicrotask(() => this.processAvailable());
-              } else {
-                record.state = 'failed';
-                record.failedReason = result.message;
-                record.finishedOn = Date.now();
-                job.failedReason = result.message;
-                job.finishedOn = record.finishedOn;
-                this.queue.applyRetention(record, 'failed');
-                this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
-                this.emit('failed', job, result);
-                this.queue.emit('failed', job, result);
-              }
+              this.handleFailure(record, job, result);
             } else {
               const s = this.queue.serializer;
               const roundtripped =
@@ -1897,27 +1918,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           for (let i = 0; i < records.length; i++) {
             const record = records[i];
             const job = jobs[i];
-            record.attemptsMade++;
-            const maxAttempts = record.opts.attempts ?? 0;
-            const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
-            if (maxAttempts > 0 && record.attemptsMade < maxAttempts && !skipRetry) {
-              if (record.opts.fallbacks && record.opts.fallbacks.length > 0) {
-                record.fallbackIndex++;
-              }
-              record.state = 'waiting';
-              this.queue.waitingQueue.push(record);
-              queueMicrotask(() => this.processAvailable());
-            } else {
-              record.state = 'failed';
-              record.failedReason = err.message;
-              record.finishedOn = Date.now();
-              job.failedReason = err.message;
-              job.finishedOn = record.finishedOn;
-              this.queue.applyRetention(record, 'failed');
-              this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
-              this.emit('failed', job, err);
-              this.queue.emit('failed', job, err);
-            }
+            this.handleFailure(record, job, err);
           }
         }
       })
