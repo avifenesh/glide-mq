@@ -3394,8 +3394,11 @@ redis.register_function('glidemq_registerChildDep', function(keys, args)
   local parentJobKey = keys[2]
   local depsMember = args[1]
   local parentId = args[2]
-  if redis.call('EXISTS', parentJobKey) == 0 then return -1 end
   redis.call('SADD', depsKey, depsMember)
+  -- A parent that does not exist yet (children added first, parent later
+  -- calling moveToWaitingChildren) keeps the plain registration; early
+  -- completions are only parked on an existing parent hash.
+  if redis.call('EXISTS', parentJobKey) == 0 then return redis.call('SCARD', depsKey) end
   if countEarlyDeps(depsKey, parentJobKey) then
     return releaseParentIfReady(depsKey, parentJobKey, keys[3], keys[4], parentId)
   end
