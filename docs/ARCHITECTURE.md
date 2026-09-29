@@ -92,7 +92,7 @@ Score format: `(priority * 2^42) + timestamp_ms`
 
 - Priority 0 (highest) jobs always sort before priority 1, regardless of timestamp
 - Within same priority, FIFO by timestamp
-- Max priority: 2^21 (matches BullMQ range)
+- Priority must be an integer from 0 to 2048; other values are rejected at enqueue
 - Non-delayed priority jobs get score with timestamp = 0 so they promote immediately
 
 ## Server Functions (not EVAL scripts)

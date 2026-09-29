@@ -1238,7 +1238,7 @@ Beyond BullMQ parity, glide-mq provides:
 
 **1 RTT per job** - `completeAndFetchNext` is a single FCALL that atomically marks the current job complete and fetches the next one. BullMQ uses 2-3 round-trips for the same operation.
 
-**Cluster-native from day one** - All keys use `glide:{queueName}:*` hash tags. Cross-slot operations (flows, global concurrency, ordering) work correctly in Valkey Cluster without any configuration.
+**Cluster-native from day one** - All keys use `glide:{queueName}:*` hash tags. Flows, global concurrency and ordering work in Valkey Cluster without any configuration. A flow whose jobs span queues (and therefore slots) is created in per-slot steps, with cross-slot parent edges wired after the jobs exist.
 
 **AZ-affinity routing** - Pin worker reads to replicas in your availability zone to reduce cross-AZ network cost and latency:
 

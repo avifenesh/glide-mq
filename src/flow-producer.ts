@@ -1,7 +1,14 @@
 import type { FlowProducerOptions, FlowJob, DAGFlow, DAGNode, Client, Serializer, BudgetOptions } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
-import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE, validateJobId, validateQueueName } from './utils';
+import {
+  buildKeys,
+  keyPrefix,
+  MAX_JOB_DATA_SIZE,
+  validateJobId,
+  validateJobScheduleOptions,
+  validateQueueName,
+} from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
 import { LIBRARY_SOURCE, addFlow, addJob, addJobArgs, completeChild, registerParent } from './functions/index';
@@ -14,6 +21,13 @@ export interface JobNode {
   children?: JobNode[];
 }
 
+/** Validate every node of a flow tree before any job is written. */
+function validateFlowTree(flow: FlowJob): void {
+  validateQueueName(flow.queueName);
+  validateJobScheduleOptions(flow.opts);
+  for (const child of flow.children ?? []) validateFlowTree(child);
+}
+
 /**
  * Creates parent-child job flows and DAG workflows.
  * Children are processed first; the parent runs after all children complete.
@@ -23,6 +37,7 @@ export class FlowProducer {
   private client: Client | null = null;
   private clientOwned = true;
   private closing = false;
+  private initPromise: Promise<Client> | null = null;
   private serializer: Serializer;
 
   constructor(opts: FlowProducerOptions) {
@@ -38,26 +53,48 @@ export class FlowProducer {
     if (this.closing) {
       throw new GlideMQError('FlowProducer is closing');
     }
-    if (!this.client) {
-      if (this.opts.client) {
-        const injected = this.opts.client;
-        const clusterMode = this.opts.connection?.clusterMode ?? isClusterClient(injected);
-        await ensureFunctionLibraryOnce(injected, LIBRARY_SOURCE, clusterMode);
-        this.client = injected;
-        this.clientOwned = false;
-      } else {
-        this.client = await createClient(this.opts.connection!);
-        this.clientOwned = true;
-        await ensureFunctionLibrary(this.client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
-      }
+    if (this.client) return this.client;
+    // Share one init across concurrent callers; a failed init is cleared so
+    // the next call retries, and an owned client is never leaked.
+    this.initPromise ??= this.initClient().catch((err) => {
+      this.initPromise = null;
+      throw err;
+    });
+    return this.initPromise;
+  }
+
+  private async initClient(): Promise<Client> {
+    if (this.opts.client) {
+      const injected = this.opts.client;
+      const clusterMode = this.opts.connection?.clusterMode ?? isClusterClient(injected);
+      await ensureFunctionLibraryOnce(injected, LIBRARY_SOURCE, clusterMode);
+      if (this.closing) throw new GlideMQError('FlowProducer is closing');
+      this.clientOwned = false;
+      this.client = injected;
+      return injected;
     }
-    return this.client;
+    const client = await createClient(this.opts.connection!);
+    try {
+      await ensureFunctionLibrary(client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
+    } catch (err) {
+      client.close();
+      throw err;
+    }
+    if (this.closing) {
+      client.close();
+      throw new GlideMQError('FlowProducer is closing');
+    }
+    this.clientOwned = true;
+    this.client = client;
+    return client;
   }
 
   /**
    * Add a flow (parent with children) atomically.
    * Children can have their own children (recursive flows), which are flattened
-   * into multiple addFlow calls (one per level with children).
+   * into multiple addFlow calls (one per level with children). In cluster mode,
+   * leaf children in a different queue than their parent are created first and
+   * then wired to the parent, since their keys live on another slot.
    *
    * When `flowOpts.budget` is provided, a budget hash is created in Valkey and
    * a `budgetKey` field is written to the parent and all child job hashes.
@@ -73,6 +110,7 @@ export class FlowProducer {
         'glide-mq.flow.childCount': flow.children?.length ?? 0,
       },
       async () => {
+        validateFlowTree(flow);
         const client = await this.getClient();
         const result = await this.addFlowRecursive(client, flow);
 
@@ -141,6 +179,7 @@ export class FlowProducer {
    * Add multiple independent flows.
    */
   async addBulk(flows: FlowJob[]): Promise<JobNode[]> {
+    for (const flow of flows) validateFlowTree(flow);
     const client = await this.getClient();
     const results: JobNode[] = [];
     for (const flow of flows) {
@@ -238,10 +277,14 @@ export class FlowProducer {
     }
 
     // Recursively process children that themselves have children (bottom-up).
+    // In cluster mode a leaf child in another queue lives on another slot and
+    // cannot share the parent's addFlow FCALL, so it is pre-created the same
+    // way and wired to the parent below.
+    const isCluster = isClusterClient(client);
     const childNodeMap: Map<number, JobNode> = new Map();
     for (let i = 0; i < flow.children.length; i++) {
       const child = flow.children[i];
-      if (child.children && child.children.length > 0) {
+      if ((child.children && child.children.length > 0) || (isCluster && child.queueName !== parentQueueName)) {
         childNodeMap.set(i, await this.addFlowRecursive(client, child));
       }
     }
@@ -440,6 +483,7 @@ export class FlowProducer {
       async () => {
         // Validate the DAG and get topo order (no-deps first)
         validateDAG(dag.nodes);
+        for (const node of dag.nodes) validateJobScheduleOptions(node.opts);
         const sorted = topoSort(dag.nodes);
 
         const client = await this.getClient();

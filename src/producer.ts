@@ -16,6 +16,7 @@ import {
   MAX_ORDERING_KEY_LENGTH,
   validateQueueName,
   validateJobId,
+  validateJobOptions,
 } from './utils';
 import { createClient, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
@@ -174,7 +175,7 @@ export class Producer<D = any> {
   private prepareJobParams(jobName: string, data: D, opts?: JobOptions): PreparedJob {
     const delay = opts?.delay ?? 0;
     const priority = opts?.priority ?? 0;
-    if (priority > 2048) throw new GlideMQError('priority must be between 0 and 2048');
+    validateJobOptions(opts);
     const parentId = opts?.parent ? opts.parent.id : '';
     const parentQueue = opts?.parent ? opts.parent.queue : '';
     if (parentQueue) {

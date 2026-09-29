@@ -25,9 +25,17 @@ export const MAX_JOB_PRIORITY = 2048;
 export const MIN_JOB_LOCK_DURATION_MS = 1000;
 export const MAX_JOB_LOCK_DURATION_MS = 86_400_000;
 
+/**
+ * Scores encode priority in the high bits, so it must be an integer in
+ * [0, MAX_JOB_PRIORITY]; negative or fractional values corrupt the scheduled
+ * ZSet ordering and score decoding.
+ */
 export function validateJobPriority(priority: number): void {
   if (priority > MAX_JOB_PRIORITY) {
     throw new Error(`Priority must be <= ${MAX_JOB_PRIORITY}`);
+  }
+  if (!Number.isInteger(priority) || priority < 0) {
+    throw new Error(`Priority must be an integer between 0 and ${MAX_JOB_PRIORITY}`);
   }
 }
 
@@ -41,11 +49,39 @@ export function validateOrderingKey(orderingKey: string): void {
 }
 
 /**
- * Validate the per-job options shared by Queue.add and Queue.addBulk:
- * token bucket, cost, ordering key, lifo, jobId, ttl and lockDuration.
- * Priority and payload size are checked separately.
+ * Validate priority, delay, attempts and backoff. Part of validateJobOptions;
+ * FlowProducer and addDAG call it directly for every node before any write.
+ */
+export function validateJobScheduleOptions(
+  opts: Pick<JobOptions, 'priority' | 'delay' | 'attempts' | 'backoff'> | undefined,
+): void {
+  if (opts?.priority != null) validateJobPriority(opts.priority);
+  if (opts?.delay != null && (!Number.isFinite(opts.delay) || opts.delay < 0)) {
+    throw new Error('delay must be a non-negative finite number');
+  }
+  if (opts?.attempts != null && (!Number.isInteger(opts.attempts) || opts.attempts < 0)) {
+    throw new Error('attempts must be a non-negative integer');
+  }
+  if (opts?.backoff != null) {
+    const { delay, jitter } = opts.backoff;
+    // Custom strategies may ignore delay, so only a provided value is checked.
+    if (delay != null && (typeof delay !== 'number' || !Number.isFinite(delay) || delay < 0)) {
+      throw new Error('backoff.delay must be a non-negative finite number');
+    }
+    if (jitter != null && (!Number.isFinite(jitter) || jitter < 0)) {
+      throw new Error('backoff.jitter must be a non-negative finite number');
+    }
+  }
+}
+
+/**
+ * Validate the per-job options shared by Queue.add/addBulk and Producer:
+ * priority, delay, attempts, backoff, token bucket, cost, ordering key, lifo,
+ * jobId, ttl and lockDuration.
+ * Payload size is checked separately.
  */
 export function validateJobOptions(opts: JobOptions | undefined): void {
+  validateJobScheduleOptions(opts);
   const tb = opts?.ordering?.tokenBucket;
   if (tb) {
     if (!Number.isFinite(tb.capacity) || tb.capacity <= 0)
@@ -237,9 +273,7 @@ export function floorUsageBucket(timestampMs: number): number {
 const PRIORITY_SHIFT = 2 ** 42;
 
 export function encodeScore(priority: number, timestampMs: number): number {
-  if (priority > 2048) {
-    throw new Error('Priority must be <= 2048');
-  }
+  validateJobPriority(priority);
   return priority * PRIORITY_SHIFT + timestampMs;
 }
 
@@ -283,12 +317,13 @@ export function nextReconnectDelay(currentDelay: number, maxMs = 30000): number 
 
 /**
  * Convert a HashDataType array ({ field, value }[]) from hgetall to a plain Record.
- * Returns null if the array is empty or falsy (key does not exist).
+ * Returns null if the array is empty, falsy (key does not exist) or not an array.
  */
 export function hashDataToRecord(
   hashData: { field?: unknown; key?: unknown; value: unknown }[] | null,
 ): Record<string, string> | null {
-  if (!hashData || hashData.length === 0) return null;
+  // Non-array input is a per-command batch error (e.g. WRONGTYPE): treat as missing.
+  if (!Array.isArray(hashData) || hashData.length === 0) return null;
   const record: Record<string, string> = Object.create(null);
   for (let i = 0; i < hashData.length; i++) {
     const entry = hashData[i];
