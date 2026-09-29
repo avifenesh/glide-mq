@@ -74,7 +74,7 @@ export async function createBlockingClient(opts: ConnectionOptions): Promise<Cli
  * comes from a different copy/version of @glidemq/speedkey (dependency duplication).
  */
 export function isClusterClient(client: Client): boolean {
-  if (client instanceof GlideClusterClient) return true;
+  if (typeof GlideClusterClient === 'function' && client instanceof GlideClusterClient) return true;
   // Duck-type fallback: GlideClusterClient has scan(ClusterScanCursor, ...) signature
   // while GlideClient has scan(cursor: string, ...) - check for cluster-specific method
   return typeof (client as any).clusterScan === 'function' || client.constructor?.name === 'GlideClusterClient';
