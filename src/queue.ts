@@ -95,6 +95,7 @@ import {
   sweepSuspended,
   getActiveListJobIds,
   casSchedulerEntry,
+  registerChildDep,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -826,7 +827,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           const parentKeys = buildKeys(parentQueue, this.opts.prefix);
           const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
           const depsMember = `${prefix}:${jobId}`;
-          await client.sadd(parentKeys.deps(parentId), [depsMember]);
+          await registerChildDep(client, parentKeys, parentId, depsMember);
         }
       } else {
         const result = await addJob(
@@ -871,7 +872,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           const parentKeys = buildKeys(parentQueue, this.opts.prefix);
           const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
           const depsMember = `${prefix}:${jobId}`;
-          await client.sadd(parentKeys.deps(parentId), [depsMember]);
+          await registerChildDep(client, parentKeys, parentId, depsMember);
         }
       }
 
@@ -1097,7 +1098,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const job = builtJobs[i];
       if (job && p.parentId && p.parentQueue && p.parentQueue !== this.name) {
         const parentKeys = buildKeys(p.parentQueue, this.opts.prefix);
-        await client.sadd(parentKeys.deps(p.parentId), [`${prefix}:${job.id}`]);
+        await registerChildDep(client, parentKeys, p.parentId, `${prefix}:${job.id}`);
       }
     }
 

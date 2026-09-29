@@ -99,7 +99,11 @@ export const LIBRARY_NAME = 'glidemq';
 //   changePriority/changeDelay handle list-held jobs; debounce resolves replaced children;
 //   glidemq_updateJobFields writes only existing job hashes.
 // Version 127: glidemq_casSchedulerEntry lets upsertJobScheduler write only over the entry it read.
-export const LIBRARY_VERSION = '127';
+// Version 126: cross-queue child completions that reach the parent before registration are parked
+//   (depearly) and counted by glidemq_registerChildDep; debounce replacements inherit the replaced
+//   cross-queue parent dependency (replacedIds).
+// Version 128: version 127 (casSchedulerEntry) plus the version 126 changes above.
+export const LIBRARY_VERSION = '128';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1283,6 +1287,30 @@ export async function casSchedulerEntry(
 ): Promise<boolean> {
   const result = await client.fcall('glidemq_casSchedulerEntry', [queueKeys.schedulers], [name, expected, value]);
   return Number(result) === 1;
+}
+
+/**
+ * Register a cross-queue child in its parent's deps set after the child was
+ * added. A completion that reached the parent first is counted here, so the
+ * parent is not released early. Falls back to a plain SADD when the loaded
+ * library predates glidemq_registerChildDep (rolling upgrade).
+ */
+export async function registerChildDep(
+  client: Client,
+  parentKeys: QueueKeys,
+  parentId: string,
+  depsMember: string,
+): Promise<void> {
+  try {
+    await client.fcall(
+      'glidemq_registerChildDep',
+      [parentKeys.deps(parentId), parentKeys.job(parentId), parentKeys.stream, parentKeys.events],
+      [depsMember, parentId],
+    );
+  } catch (error) {
+    if (!(error instanceof RequestError) || !/function\s+not\s+found/i.test(error.message)) throw error;
+    await client.sadd(parentKeys.deps(parentId), [depsMember]);
+  }
 }
 
 /**

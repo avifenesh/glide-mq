@@ -201,6 +201,43 @@ local function xaddJob(streamKey, jobId, jobName)
   redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name', jobName or '')
 end
 
+local function releaseParentIfReady(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, parentId)
+  local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
+  local remaining = redis.call('SCARD', parentDepsKey) - doneCount
+  if remaining <= 0 and redis.call('HGET', parentJobKey, 'state') == 'waiting-children' then
+    redis.call('HSET', parentJobKey, 'state', 'waiting')
+    xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
+    emitEvent(parentEventsKey, 'active', parentId, nil)
+  end
+  return remaining
+end
+
+-- A cross-queue child is registered in its parent's deps after the child
+-- exists, so it can finish first. Counting that completion before the member
+-- is in deps lets SCARD - depsCompleted reach 0 while other children are
+-- pending. Such a completion is parked as depearly:<member> and counted once
+-- the member is registered.
+local function countEarlyDeps(parentDepsKey, parentJobKey)
+  if (tonumber(redis.call('HGET', parentJobKey, 'depsEarly')) or 0) <= 0 then return false end
+  local counted = false
+  local fields = redis.call('HKEYS', parentJobKey)
+  for i = 1, #fields do
+    local f = fields[i]
+    if string.sub(f, 1, 9) == 'depearly:' then
+      local member = string.sub(f, 10)
+      if redis.call('SISMEMBER', parentDepsKey, member) == 1 then
+        redis.call('HDEL', parentJobKey, f)
+        redis.call('HINCRBY', parentJobKey, 'depsEarly', -1)
+        if redis.call('HSETNX', parentJobKey, 'depdone:' .. member, '1') == 1 then
+          redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+          counted = true
+        end
+      end
+    end
+  end
+  return counted
+end
+
 -- Complete one parent dependency without recreating a parent removed while its
 -- child was still in flight. All callers run inside a single FCALL, so the
 -- EXISTS/HSETNX sequence is atomic with respect to removal and completion.
@@ -208,20 +245,24 @@ local function completeParentDependency(parentDepsKey, parentJobKey, parentStrea
   if redis.call('EXISTS', parentJobKey) == 0 then
     return -1
   end
-  local depMarker = 'depdone:' .. depsMember
-  if redis.call('HSETNX', parentJobKey, depMarker, '1') == 0 then
+  if redis.call('SISMEMBER', parentDepsKey, depsMember) == 0 then
+    if redis.call('HSETNX', parentJobKey, 'depearly:' .. depsMember, '1') == 1 then
+      redis.call('HINCRBY', parentJobKey, 'depsEarly', 1)
+    end
     local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
     return redis.call('SCARD', parentDepsKey) - doneCount
   end
-  local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-  local totalDeps = redis.call('SCARD', parentDepsKey)
-  local remaining = totalDeps - doneCount
-  if remaining <= 0 and redis.call('HGET', parentJobKey, 'state') == 'waiting-children' then
-    redis.call('HSET', parentJobKey, 'state', 'waiting')
-    xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
-    emitEvent(parentEventsKey, 'active', parentId, nil)
+  local counted = countEarlyDeps(parentDepsKey, parentJobKey)
+  local depMarker = 'depdone:' .. depsMember
+  if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
+    redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+    counted = true
   end
-  return remaining
+  if not counted then
+    local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
+    return redis.call('SCARD', parentDepsKey) - doneCount
+  end
+  return releaseParentIfReady(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, parentId)
 end
 
 local function groupqScore(jobKey, jobId)
@@ -490,6 +531,28 @@ local function addParentNotification(notifications, seen, member)
   end
 end
 
+-- A debounce replacement of a cross-queue child inherits the replaced
+-- children's parent dependency (replacedIds, JSON array of job IDs), so the
+-- parent is not released between the replacement and its registration.
+local function decodeReplacedIds(raw)
+  if not raw or raw == '' then return nil end
+  local ok, ids = pcall(cjson.decode, raw)
+  if ok and type(ids) == 'table' then return ids end
+  return nil
+end
+
+-- Record the cross-queue tree-parent notifications of a finished child and of
+-- every child it replaced.
+local function enqueueTreeParentNotifies(prefix, jobId, parentQueue, parentId, replacedRaw, notifications, seen)
+  addParentNotification(notifications, seen, enqueueCrossQueueParentNotify(prefix, jobId, parentQueue, parentId))
+  local ids = decodeReplacedIds(replacedRaw)
+  if not ids then return end
+  for i = 1, #ids do
+    addParentNotification(notifications, seen,
+      enqueueCrossQueueParentNotify(prefix, tostring(ids[i]), parentQueue, parentId))
+  end
+end
+
 -- Resolve the parents of a child that is deleted before it completes (job
 -- removal, debounce replacement) so they do not wait for it forever.
 -- Same-queue tree and DAG parents are resolved here; cross-queue parents are
@@ -497,10 +560,11 @@ end
 -- readChildParents captures the edges before the child hash and its parents
 -- SET are deleted.
 local function readChildParents(prefix, jobKey, jobId)
-  local parent = redis.call('HMGET', jobKey, 'parentQueue', 'parentId')
+  local parent = redis.call('HMGET', jobKey, 'parentQueue', 'parentId', 'replacedIds')
   return {
     parentQueue = parent[1],
     parentId = parent[2],
+    replacedIds = parent[3],
     dagParents = redis.call('SMEMBERS', prefix .. 'parents:' .. jobId),
   }
 end
@@ -517,8 +581,8 @@ local function resolveRemovedChildParents(prefix, jobId, eventsKey, edges)
       completeParentDependency(prefix .. 'deps:' .. storedParentId, prefix .. 'job:' .. storedParentId,
         prefix .. 'stream', eventsKey, depsMember, storedParentId)
     else
-      addParentNotification(notifications, seen,
-        enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId))
+      enqueueTreeParentNotifies(prefix, jobId, storedParentQueue, storedParentId, edges.replacedIds,
+        notifications, seen)
     end
   end
   local dagParents = edges.dagParents
@@ -1163,11 +1227,8 @@ redis.register_function('glidemq_complete', function(keys, args)
   local storedParentId = redis.call('HGET', jobKey, 'parentId')
   local parentNotifications = {}
   local parentNotificationSet = {}
-  addParentNotification(
-    parentNotifications,
-    parentNotificationSet,
-    enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
-  )
+  enqueueTreeParentNotifies(prefix, jobId, storedParentQueue, storedParentId,
+    redis.call('HGET', jobKey, 'replacedIds'), parentNotifications, parentNotificationSet)
   if broadcastMode ~= '1' then
     if removeMode == 'true' then
       redis.call('ZREM', completedKey, jobId)
@@ -1310,11 +1371,8 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
     local storedParentId = redis.call('HGET', jobKey, 'parentId')
     local parentNotificationSet = {}
-    addParentNotification(
-      parentNotifications,
-      parentNotificationSet,
-      enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
-    )
+    enqueueTreeParentNotifies(prefix, jobId, storedParentQueue, storedParentId,
+      redis.call('HGET', jobKey, 'replacedIds'), parentNotifications, parentNotificationSet)
     if entryId == '' then decrListActive(prefix .. 'list-active') end
 
     -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
@@ -2280,6 +2338,20 @@ redis.register_function('glidemq_dedup', function(keys, args)
       hashFields[#hashFields + 1] = parentQueue
     end
   end
+  -- The caller registers a cross-queue replacement in its parent's deps only
+  -- after this FCALL. Resolving the replaced child now could release the
+  -- parent in between, so the replacement inherits that dependency and
+  -- resolves it when it finishes.
+  if replacedJobId and parentId ~= '' and parentQueue ~= '' and
+     parentQueue ~= extractQueueTag(string.sub(prefix, 1, #prefix - 1)) and
+     replacedEdges.parentQueue == parentQueue and replacedEdges.parentId == parentId then
+    local inherited = decodeReplacedIds(replacedEdges.replacedIds) or {}
+    inherited[#inherited + 1] = replacedJobId
+    hashFields[#hashFields + 1] = 'replacedIds'
+    hashFields[#hashFields + 1] = cjson.encode(inherited)
+    replacedEdges.parentId = nil
+    replacedEdges.replacedIds = nil
+  end
   if lifo > 0 then
     hashFields[#hashFields + 1] = 'lifo'
     hashFields[#hashFields + 1] = '1'
@@ -3230,6 +3302,25 @@ redis.register_function('glidemq_completeChild', function(keys, args)
   return completeParentDependency(depsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
 end)
 
+-- Register a cross-queue child in its parent's deps after the child was added.
+-- A completion that arrived first was parked as depearly and is counted now.
+-- KEYS: [parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey]
+-- ARGS: [depsMember, parentId]
+-- Returns the parent's remaining dependency count, or -1 if the parent is gone.
+redis.register_function('glidemq_registerChildDep', function(keys, args)
+  local depsKey = keys[1]
+  local parentJobKey = keys[2]
+  local depsMember = args[1]
+  local parentId = args[2]
+  if redis.call('EXISTS', parentJobKey) == 0 then return -1 end
+  redis.call('SADD', depsKey, depsMember)
+  if countEarlyDeps(depsKey, parentJobKey) then
+    return releaseParentIfReady(depsKey, parentJobKey, keys[3], keys[4], parentId)
+  end
+  local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
+  return redis.call('SCARD', depsKey) - doneCount
+end)
+
 redis.register_function('glidemq_registerParent', function(keys, args)
   -- Register an additional parent for an existing child job (DAG multi-parent).
   -- Keys: [childJobKey, childParentsKey, parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey]
@@ -3759,6 +3850,9 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
   -- Race condition check: children may have already completed before this call
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   local depsKey = prefix .. 'deps:' .. jobId
+  -- An older producer registers with a plain SADD, which cannot count a
+  -- completion that arrived before it.
+  countEarlyDeps(depsKey, jobKey)
   local totalDeps = redis.call('SCARD', depsKey)
   local depsCompleted = tonumber(redis.call('HGET', jobKey, 'depsCompleted')) or 0
   -- totalDeps == 0 is already complete: do not park with no children to wait on.

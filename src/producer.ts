@@ -20,7 +20,7 @@ import {
 } from './utils';
 import { createClient, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
-import { LIBRARY_SOURCE, addJob, dedup } from './functions/index';
+import { LIBRARY_SOURCE, addJob, dedup, registerChildDep } from './functions/index';
 import type { QueueKeys } from './functions/index';
 
 function validateOrderingKey(orderingKey: string): void {
@@ -161,7 +161,7 @@ export class Producer<D = any> {
     const pfx = keyPrefix(this.opts.prefix ?? 'glide', this.name);
     const depsMember = `${pfx}:${jobId}`;
     try {
-      await client.sadd(parentKeys.deps(parentId), [depsMember]);
+      await registerChildDep(client, parentKeys, parentId, depsMember);
     } catch (err) {
       throw new GlideMQError(
         `Failed to register cross-queue parent dependency (parent: ${parentQueue}/${parentId}): ${err instanceof Error ? err.message : String(err)}`,
@@ -488,19 +488,37 @@ export class Producer<D = any> {
 
     // Batch all cross-queue parent registrations
     if (crossQueueParents.length > 0) {
-      const parentBatch = isCluster ? new ClusterBatch(false) : new Batch(false);
       const pfx = keyPrefix(this.opts.prefix ?? 'glide', this.name);
-
-      for (const { parentId, parentQueue, jobId } of crossQueueParents) {
-        const parentKeys = buildKeys(parentQueue, this.opts.prefix);
-        const depsMember = `${pfx}:${jobId}`;
-        parentBatch.sadd(parentKeys.deps(parentId), [depsMember]);
-      }
+      const buildBatch = (legacySadd: boolean): Batch | ClusterBatch => {
+        const parentBatch = isCluster ? new ClusterBatch(false) : new Batch(false);
+        for (const { parentId, parentQueue, jobId } of crossQueueParents) {
+          const parentKeys = buildKeys(parentQueue, this.opts.prefix);
+          const depsMember = `${pfx}:${jobId}`;
+          if (legacySadd) {
+            parentBatch.sadd(parentKeys.deps(parentId), [depsMember]);
+          } else {
+            parentBatch.fcall(
+              'glidemq_registerChildDep',
+              [parentKeys.deps(parentId), parentKeys.job(parentId), parentKeys.stream, parentKeys.events],
+              [depsMember, parentId],
+            );
+          }
+        }
+        return parentBatch;
+      };
+      const execBatch = (parentBatch: Batch | ClusterBatch) =>
+        isCluster
+          ? (client as GlideClusterClient).exec(parentBatch as ClusterBatch, true)
+          : (client as GlideClient).exec(parentBatch as Batch, true);
 
       try {
-        await (isCluster
-          ? (client as GlideClusterClient).exec(parentBatch as ClusterBatch, true)
-          : (client as GlideClient).exec(parentBatch as Batch, true));
+        try {
+          await execBatch(buildBatch(false));
+        } catch (err) {
+          // Rolling upgrade: the loaded library predates glidemq_registerChildDep.
+          if (!(err instanceof Error) || !/function\s+not\s+found/i.test(err.message)) throw err;
+          await execBatch(buildBatch(true));
+        }
       } catch (err) {
         throw new GlideMQError(
           `Failed to register cross-queue parent dependencies in bulk: ${err instanceof Error ? err.message : String(err)}`,
