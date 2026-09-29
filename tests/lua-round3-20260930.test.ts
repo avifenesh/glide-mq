@@ -76,4 +76,51 @@ describeEachMode('Lua round 3 2026-09-30', (CONNECTION) => {
       await queue.close();
     }
   }, 20000);
+
+  // Item 2: a job failed for cost over capacity while completeAndFetchNext
+  // fetches the next job gets its DLQ copy like a moveToActive failure.
+  it('completeAndFetchNext reports jobs failed at activation and the worker adds the DLQ copy', async () => {
+    const Q = uniqueQueue('r3-caf-dlq');
+    const DLQ = uniqueQueue('r3-caf-dlq-dead');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const dlq = new Queue(DLQ, { connection: CONNECTION });
+    const processed: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const ordering = { key: 'g', concurrency: 4, tokenBucket: { capacity: 10, refillRate: 100 } };
+    const worker = new Worker(
+      Q,
+      async (job) => {
+        processed.push(job.id);
+        if (job.name === 'first') await gate;
+      },
+      { connection: CONNECTION, concurrency: 1, deadLetterQueue: { name: DLQ } },
+    );
+    try {
+      const first = await queue.add('first', {}, { ordering });
+      await waitFor(() => processed.includes(first!.id), 5000);
+      const costly = await queue.add('costly', { n: 2 }, { ordering, cost: 5 });
+      // The capacity shrinks under the waiting job; its activation in the
+      // completeAndFetchNext of 'first' fails it.
+      await cleanupClient.hset(k.group('g'), { tbCapacity: '1', tbTokens: '1' });
+      release();
+      await waitFor(async () => (await cleanupClient.hget(k.job(costly!.id), 'state')) === 'failed', 5000);
+      await waitFor(async () => (await dlq.getJobCounts()).waiting === 1, 5000);
+      expect(processed).toEqual([first!.id]);
+      const [dead] = await dlq.getJobs('waiting');
+      expect(dead.name).toBe('costly');
+      expect(dead.data).toMatchObject({
+        originalQueue: Q,
+        originalJobId: costly!.id,
+        data: { n: 2 },
+        failedReason: 'cost exceeds token bucket capacity',
+      });
+    } finally {
+      release();
+      await worker.close();
+      await dlq.close();
+      await queue.close();
+    }
+  }, 20000);
 });

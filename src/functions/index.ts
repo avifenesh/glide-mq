@@ -366,7 +366,31 @@ export async function renewLock(client: Client, lockKey: string, token: string, 
 const RETENTION_NONE = { mode: '0', count: 0, age: 0 } as const;
 const RETENTION_TRUE = { mode: 'true', count: 0, age: 0 } as const;
 const PARENT_NOTIFICATIONS_MARKER = '__glidemq_parent_notifications__';
+const FAILED_ACTIVATIONS_MARKER = '__glidemq_failed_activations__';
 const COMPLETE_REVOKED_MARKER = '__glidemq_complete_revoked__';
+
+/** A job the chain call failed at activation (server-side terminal failure). */
+export interface FailedActivation {
+  jobId: string;
+  reason: string;
+}
+
+function parseFailedActivations(raw: unknown): FailedActivation[] {
+  if (typeof raw !== 'string' || raw === '') return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: FailedActivation[] = [];
+    for (const entry of parsed) {
+      if (entry && typeof entry === 'object' && typeof (entry as { id?: unknown }).id === 'string') {
+        out.push({ jobId: (entry as { id: string }).id, reason: String((entry as { reason?: unknown }).reason ?? '') });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
 
 function parseParentNotifications(raw: unknown): string[] {
   if (typeof raw !== 'string' || raw === '') return [];
@@ -496,6 +520,12 @@ export interface CompleteAndFetchResult {
   nextEntryId?: string;
   /** Retryable cross-queue parent notifications recorded by the completion FCALL. */
   parentNotifications: string[];
+  /**
+   * Jobs the call failed terminally at activation (cost over token bucket
+   * capacity) while fetching the next job or promoting a group. A worker with a
+   * dead letter queue adds their DLQ copies. Library 132+; empty before.
+   */
+  failedActivations: FailedActivation[];
 }
 
 export interface CompleteAndFetchHints {
@@ -567,7 +597,7 @@ export async function completeAndFetchNext(
   // Backward compatibility: JSON protocol (older library versions)
   const parsed = JSON.parse(String(raw));
   if (!parsed.next || parsed.next === false) {
-    return { completed: parsed.completed, next: false, parentNotifications: [] };
+    return { completed: parsed.completed, next: false, parentNotifications: [], failedActivations: [] };
   }
   if (parsed.next === 'REVOKED') {
     return {
@@ -576,6 +606,7 @@ export async function completeAndFetchNext(
       nextJobId: parsed.nextJobId,
       nextEntryId: parsed.nextEntryId,
       parentNotifications: [],
+      failedActivations: [],
     };
   }
   const parsedHash = parsed.next as string[];
@@ -589,6 +620,7 @@ export async function completeAndFetchNext(
     nextJobId: parsed.nextJobId,
     nextEntryId: parsed.nextEntryId,
     parentNotifications: [],
+    failedActivations: [],
   };
 }
 
@@ -599,16 +631,29 @@ export async function completeAndFetchNext(
  * Cross-queue completions append the parent notifications marker and payload.
  */
 function parseChainReply(raw: unknown[], jobId: string, func: string): CompleteAndFetchResult {
-  const notificationOffset =
-    raw.length >= 2 && String(raw.at(-2)) === PARENT_NOTIFICATIONS_MARKER ? raw.length - 2 : raw.length;
-  const parentNotifications = notificationOffset < raw.length ? parseParentNotifications(raw.at(-1)) : [];
+  // Trailing markers, each followed by one payload: parent notifications last,
+  // failed activations before it. Read from the end until no marker matches.
+  let end = raw.length;
+  let parentNotifications: string[] = [];
+  let failedActivations: FailedActivation[] = [];
+  while (end >= 2) {
+    const marker = String(raw[end - 2]);
+    if (marker === PARENT_NOTIFICATIONS_MARKER) {
+      parentNotifications = parseParentNotifications(raw[end - 1]);
+    } else if (marker === FAILED_ACTIVATIONS_MARKER) {
+      failedActivations = parseFailedActivations(raw[end - 1]);
+    } else {
+      break;
+    }
+    end -= 2;
+  }
   const tag = String(raw[0]);
   const completed = raw[1] != null ? String(raw[1]) : jobId;
   if (tag === 'NEXT_NONE') {
-    return { completed, next: false, parentNotifications };
+    return { completed, next: false, parentNotifications, failedActivations };
   }
   if (tag === 'CURRENT_REVOKED') {
-    return { completed, next: 'CURRENT_REVOKED', parentNotifications: [] };
+    return { completed, next: 'CURRENT_REVOKED', parentNotifications: [], failedActivations: [] };
   }
   if (tag === 'NEXT_REVOKED') {
     return {
@@ -617,11 +662,12 @@ function parseChainReply(raw: unknown[], jobId: string, func: string): CompleteA
       nextJobId: String(raw[2]),
       nextEntryId: String(raw[3]),
       parentNotifications,
+      failedActivations,
     };
   }
   if (tag === 'NEXT_HASH') {
     const hash: Record<string, string> = Object.create(null);
-    for (let i = 4; i + 1 < notificationOffset; i += 2) {
+    for (let i = 4; i + 1 < end; i += 2) {
       hash[String(raw[i])] = String(raw[i + 1]);
     }
     return {
@@ -630,6 +676,7 @@ function parseChainReply(raw: unknown[], jobId: string, func: string): CompleteA
       nextJobId: String(raw[2]),
       nextEntryId: String(raw[3]),
       parentNotifications,
+      failedActivations,
     };
   }
   throw new Error(`Unexpected ${func} tag: ${tag}`);

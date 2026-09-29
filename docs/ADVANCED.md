@@ -508,7 +508,7 @@ await queue.add('bulk-export', data, {
 
 **Check order**: when both concurrency, token bucket, and sliding window are configured, the gates are checked in order: concurrency -> token bucket -> sliding window. All applicable limits must pass. Strict FIFO is maintained - jobs never skip ahead of earlier jobs in the same group.
 
-**Cost validation**: a job with `cost` greater than `capacity` is rejected at enqueue time. If a previously valid job becomes invalid (e.g., capacity was lowered), it is failed at activation with `cost exceeds token bucket capacity`. A worker with `deadLetterQueue` adds a DLQ copy when the failure happens in `moveToActive`; a job failed this way inside `completeAndFetchNext` gets no DLQ copy.
+**Cost validation**: a job with `cost` greater than `capacity` is rejected at enqueue time. If a previously valid job becomes invalid (e.g., capacity was lowered), it is failed at activation with `cost exceeds token bucket capacity`. A worker with `deadLetterQueue` adds a DLQ copy whether the failure happens in `moveToActive` or while `completeAndFetchNext` / `failAndFetchNext` fetch the next job or promote the group. A job failed by the scheduler tick's rate-limited group promotion gets no DLQ copy (no worker owns it).
 
 **Differences from sliding window** (`rateLimit`):
 

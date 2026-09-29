@@ -6,6 +6,16 @@ local PRIORITY_SHIFT = 4398046511104
 -- also advance repeatAfterComplete schedulers.
 local advanceRepeatAfterComplete
 
+-- Jobs the current chain call (completeAndFetchNext, failAndFetchNext) failed
+-- at activation (cost over token bucket capacity). The reply lists them so the
+-- worker can add the DLQ copy; nil outside a chain call.
+local activationFailures = nil
+local function noteActivationFailure(jobId, reason)
+  if activationFailures then
+    activationFailures[#activationFailures + 1] = { id = jobId, reason = reason }
+  end
+end
+
 -- Guarded decrement of the per-queue list-active counter.
 -- Used at every site that tracks completion/failure/release of a list-sourced
 -- job (entryId == ''). The guard is required because healListActive cannot
@@ -434,6 +444,7 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey, keep
             'failedReason', 'cost exceeds token bucket capacity',
             'finishedOn', tostring(ts))
           advanceRepeatAfterComplete(headJobKey, prefix, ts)
+          noteActivationFailure(headJobId, 'cost exceeds token bucket capacity')
           emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
           recordMetrics(metricsKey, ts, ts - processedOn)
           closeOrderingHole(headJobKey, headJobId, ts)
@@ -549,6 +560,17 @@ local function appendParentNotifications(result, notifications)
   result[#result + 1] = '__glidemq_parent_notifications__'
   result[#result + 1] = cjson.encode(notifications)
   return result
+end
+
+-- Close a chain call: append the activation-failure marker (before the parent
+-- notifications marker, which parsers read from the end) and stop collecting.
+local function finishChainReply(result, notifications)
+  if activationFailures and #activationFailures > 0 then
+    result[#result + 1] = '__glidemq_failed_activations__'
+    result[#result + 1] = cjson.encode(activationFailures)
+  end
+  activationFailures = nil
+  return appendParentNotifications(result, notifications or {})
 end
 
 local function addParentNotification(notifications, seen, member)
@@ -1448,6 +1470,7 @@ local function fetchNextForChain(prefix, streamKey, eventsKey, failedMetricsKey,
                     'failedReason', 'cost exceeds token bucket capacity',
                     'finishedOn', tostring(timestamp))
                   advanceRepeatAfterComplete(priJobKey, prefix, tonumber(timestamp))
+                  noteActivationFailure(priJobId, 'cost exceeds token bucket capacity')
                   if skipEvents ~= '1' then emitEvent(eventsKey, 'failed', priJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
                   if skipMetrics ~= '1' then recordMetrics(prefix .. 'metrics:failed', tonumber(timestamp), tonumber(timestamp) - priProcessedOn) end
                   if priOrdSeq > 0 then
@@ -1667,6 +1690,7 @@ local function fetchNextForChain(prefix, streamKey, eventsKey, failedMetricsKey,
           'failedReason', 'cost exceeds token bucket capacity',
           'finishedOn', tostring(timestamp))
         advanceRepeatAfterComplete(nextJobKey, prefix, tonumber(timestamp))
+        noteActivationFailure(nextJobId, 'cost exceeds token bucket capacity')
         if skipEvents ~= '1' then emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
         if skipMetrics ~= '1' then recordMetrics(failedMetricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn) end
         closeOrderingHoleAndPromote(nextJobKey, nextJobId, tonumber(timestamp))
@@ -1766,6 +1790,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   if cur[1] == '1' then
     return {'CURRENT_REVOKED', jobId}
   end
+  activationFailures = {}
   local processedOn
   if hintProcessedOn ~= '' then
     processedOn = tonumber(hintProcessedOn) or timestamp
@@ -1893,15 +1918,15 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
 
   -- In broadcast mode: do not fetch next (avoids XDEL of next entry which would break other consumer groups)
   if broadcastMode == '1' then
-    return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
+    return finishChainReply({'NEXT_NONE', jobId}, parentNotifications)
   end
 
   -- Queue.pause(): finish the current job but do not claim the next one.
   if isQueuePaused(prefix) then
-    return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
+    return finishChainReply({'NEXT_NONE', jobId}, parentNotifications)
   end
 
-  return appendParentNotifications(
+  return finishChainReply(
     fetchNextForChain(prefix, streamKey, eventsKey, prefix .. 'metrics:failed', group, consumer, timestamp, skipEvents, skipMetrics, jobId),
     parentNotifications)
 end)
@@ -2053,6 +2078,7 @@ end)
 -- KEYS: as glidemq_fail. ARGS: glidemq_fail args 1..13, then the consumer name.
 -- Returns {failResult, 'NEXT_NONE' | 'NEXT_REVOKED' | 'NEXT_HASH', ...} (see fetchNextForChain).
 redis.register_function('glidemq_failAndFetchNext', function(keys, args)
+  activationFailures = {}
   local failResult = failJobCore(keys, args, false)
   local jobId = args[1]
   local prefix = string.sub(keys[5], 1, #keys[5] - #('job:' .. jobId))
@@ -2064,6 +2090,7 @@ redis.register_function('glidemq_failAndFetchNext', function(keys, args)
     out = fetchNextForChain(prefix, keys[1], keys[4], keys[6], args[7], consumer, tonumber(args[4]),
       args[12] or '0', args[13] or '0', jobId)
   end
+  out = finishChainReply(out, nil)
   table.insert(out, 1, failResult)
   return out
 end)

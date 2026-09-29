@@ -1995,7 +1995,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
             return;
           }
-          fetchResult = { completed: currentJobId, next: false as const, parentNotifications: notifications };
+          fetchResult = {
+            completed: currentJobId,
+            next: false as const,
+            parentNotifications: notifications,
+            failedActivations: [],
+          };
         } else {
           fetchResult = await completeAndFetchNext(
             this.commandClient,
@@ -2039,6 +2044,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
         if (job.schedulerName) {
           await this.updateSchedulerAfterComplete(job.schedulerName, job.id, now);
+        }
+      }
+
+      // Jobs the chain call failed at activation get the DLQ copy that
+      // worker-side terminal failures get.
+      if (fetchResult.failedActivations.length > 0 && this.opts.deadLetterQueue) {
+        for (const failed of fetchResult.failedActivations) {
+          await this.moveFailedJobToDLQ(failed.jobId);
         }
       }
 

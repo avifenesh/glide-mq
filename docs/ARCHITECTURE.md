@@ -70,7 +70,7 @@ added --> stream (ready) --> PEL (active) --> completed (ZSet)
                      stream (re-queued)
 ```
 
-`moveToActive` may return `GROUP_RATE_LIMITED` when a job's ordering-key sliding window rate limit is exceeded, or `GROUP_TOKEN_LIMITED` when the token bucket has insufficient tokens. In both cases, the job is parked in the `glide:{queueName}:ratelimited` ZSet with a score equal to the earliest eligible timestamp. The scheduler's promotion loop picks it up once capacity is available. If a job's `cost` exceeds the bucket's `tbCapacity`, `moveToActive` fails the job (`ERR:COST_EXCEEDS_CAPACITY`) and a worker with `deadLetterQueue` adds a DLQ copy. A job failed this way inside `completeAndFetchNext` gets no DLQ copy.
+`moveToActive` may return `GROUP_RATE_LIMITED` when a job's ordering-key sliding window rate limit is exceeded, or `GROUP_TOKEN_LIMITED` when the token bucket has insufficient tokens. In both cases, the job is parked in the `glide:{queueName}:ratelimited` ZSet with a score equal to the earliest eligible timestamp. The scheduler's promotion loop picks it up once capacity is available. If a job's `cost` exceeds the bucket's `tbCapacity`, the job is failed at activation: `moveToActive` returns `ERR:COST_EXCEEDS_CAPACITY`, and `completeAndFetchNext` / `failAndFetchNext` list the job in a trailing `__glidemq_failed_activations__` marker of their reply. In both cases a worker with `deadLetterQueue` adds the DLQ copy. A job failed this way by the scheduler tick's group promotion (`promoteRateLimited`) has no worker context and gets no DLQ copy.
 
 ### LIFO Mode
 
