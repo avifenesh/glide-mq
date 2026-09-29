@@ -109,7 +109,9 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 129: reclaimStalled/reclaimStalledListJobs reply stalled IDs on an optional returnIds arg;
 //   glidemq_fail honors optional skipEvents/skipMetrics args; addJob/dedup/addFlow reject a priority
 //   outside 0..2048 integers with an error reply, and changePriority returns error:invalid_priority for it.
-export const LIBRARY_VERSION = '129';
+// Version 130: broadcast reclaimStalled counts stalls per subscription (job:<id>:sub:<group> 's') and,
+//   on an optional redispatch arg, replies the reclaimed entries so the worker runs them again.
+export const LIBRARY_VERSION = '130';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -704,6 +706,11 @@ export interface ReclaimStalledResult {
   count: number;
   /** Jobs that stalled and went back to waiting. Empty when the library predates the IDs reply. */
   stalledIds: string[];
+  /**
+   * Broadcast entries this call moved into the caller's PEL for it to run
+   * again. Only filled on a redispatch call to a library that supports it.
+   */
+  redispatch: { jobId: string; entryId: string }[];
 }
 
 /**
@@ -712,14 +719,25 @@ export interface ReclaimStalledResult {
  */
 export function parseReclaimStalledResult(raw: GlideReturnType): ReclaimStalledResult {
   if (Array.isArray(raw)) {
-    return { count: Number(raw[0]) || 0, stalledIds: raw.slice(1).map((v) => String(v)) };
+    // Redispatch reply: {count, {stalledId...}, {jobId, entryId, ...}}.
+    if (Array.isArray(raw[1])) {
+      const pairs = Array.isArray(raw[2]) ? raw[2] : [];
+      const redispatch: { jobId: string; entryId: string }[] = [];
+      for (let i = 0; i + 1 < pairs.length; i += 2) {
+        redispatch.push({ jobId: String(pairs[i]), entryId: String(pairs[i + 1]) });
+      }
+      return { count: Number(raw[0]) || 0, stalledIds: raw[1].map((v) => String(v)), redispatch };
+    }
+    return { count: Number(raw[0]) || 0, stalledIds: raw.slice(1).map((v) => String(v)), redispatch: [] };
   }
-  return { count: Number(raw) || 0, stalledIds: [] };
+  return { count: Number(raw) || 0, stalledIds: [], redispatch: [] };
 }
 
 /**
  * reclaimStalled that also returns the IDs of the jobs that stalled and went
- * back to waiting (the ones that got a 'stalled' event).
+ * back to waiting (the ones that got a 'stalled' event). With `redispatch`
+ * in broadcast mode it also returns the entries it moved into `consumer`'s PEL,
+ * which the caller must run again (XCLAIM by ID).
  */
 export async function reclaimStalledWithIds(
   client: Client,
@@ -731,22 +749,21 @@ export async function reclaimStalledWithIds(
   group: string = CONSUMER_GROUP,
   broadcastMode?: boolean,
   workerLockDuration: number = 0,
+  redispatch?: boolean,
 ): Promise<ReclaimStalledResult> {
-  const result = await client.fcall(
-    'glidemq_reclaimStalled',
-    [k.stream, k.events],
-    [
-      group,
-      consumer,
-      minIdleMs.toString(),
-      maxStalledCount.toString(),
-      timestamp.toString(),
-      k.failed,
-      broadcastMode ? '1' : '0',
-      workerLockDuration.toString(),
-      '1',
-    ],
-  );
+  const args = [
+    group,
+    consumer,
+    minIdleMs.toString(),
+    maxStalledCount.toString(),
+    timestamp.toString(),
+    k.failed,
+    broadcastMode ? '1' : '0',
+    workerLockDuration.toString(),
+    '1',
+  ];
+  if (broadcastMode && redispatch) args.push('1');
+  const result = await client.fcall('glidemq_reclaimStalled', [k.stream, k.events], args);
   return parseReclaimStalledResult(result);
 }
 

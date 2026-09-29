@@ -172,6 +172,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected globalConcurrencyEnabled = false;
   protected globalRateLimitEnabled = false;
   protected queuePaused = false;
+  /**
+   * Broadcast entries held in this consumer's PEL that must run again here:
+   * claims parked during a queue-pause activation race and claims stalled
+   * reclaim moved into this PEL. Drained by XCLAIM by ID in pollOnce.
+   */
   protected pausedBroadcastEntries = new Set<string>();
   protected cachedRateLimitMax = 0;
   protected cachedRateLimitDuration = 0;
@@ -385,6 +390,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       onStalled: (jobId) => {
         this.emit('stalled', jobId, 'active');
       },
+      onRedispatch: this.broadcastMode
+        ? (entries) => {
+            for (const entry of entries) this.pausedBroadcastEntries.add(entry.entryId);
+          }
+        : undefined,
       onError: (err) => {
         if (!this.closing) {
           this.emit('error', err);

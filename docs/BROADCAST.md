@@ -173,6 +173,15 @@ await emailWorker.close();
 
 Both `Broadcast` and `BroadcastWorker` support graceful shutdown via `close()`. The worker drains in-progress jobs before disconnecting.
 
+## Crash and stall recovery
+
+A message a subscription's worker claimed but did not finish stays in that subscription's pending entries list: the worker was killed, force-closed with `close(true)`, or received the message while it was closing. Another `BroadcastWorker` on the same subscription reclaims it once the claim has been idle for `stalledInterval` and the message's `lastActive` is older than `lockDuration`, then runs it again. Other subscriptions are not affected.
+
+- Stalls are counted per subscription, in `job:<id>:sub:<subscription>` (24h TTL). After more than `maxStalledCount` stalls in one subscription, the message fails, like a terminal processor failure in that subscription (the message hash, shared by all subscriptions, is marked failed).
+- Recovery needs a running `BroadcastWorker` on that subscription. A restarted process gets a new consumer ID, so its own old claims are recovered the same way.
+- `lastActive` is shared by all subscriptions. While another subscription is still processing the same message, stall detection waits until that heartbeat stops.
+- A reclaimed message that the reclaiming worker has not started when it closes or pauses stays in its pending list and is reclaimed again, which counts one more stall.
+
 ## HTTP proxy
 
 The proxy exposes broadcast publish and SSE fan-out over HTTP:

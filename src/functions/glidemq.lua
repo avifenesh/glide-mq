@@ -858,8 +858,18 @@ end
 
 -- Apply stall logic to a job: increment stalledCount, fail if over max, else emit stalled event.
 -- Returns true if the job was moved to failed, false if only stalled.
-local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp)
-  local stalledCount = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
+-- subKey: broadcast mode counts stalls per subscription in job:<id>:sub:<group>
+-- field 's', so a stall in one subscription does not count against another.
+local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp, subKey)
+  local stalledCount
+  if subKey then
+    stalledCount = redis.call('HINCRBY', subKey, 's', 1)
+    -- Same retention as the per-subscription retry counter; never shorten a
+    -- longer TTL a scheduled retry set.
+    if redis.call('PTTL', subKey) < 86400000 then redis.call('PEXPIRE', subKey, 86400000) end
+  else
+    stalledCount = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
+  end
   if stalledCount > maxStalledCount then
     local metricsKey = prefix .. 'metrics:failed'
     local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
@@ -2015,8 +2025,15 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   -- 'stalled' for the jobs this call returned to waiting. Older callers omit
   -- it and keep the integer reply.
   local returnIds = args[9] == '1'
+  -- Optional, broadcast mode: '1' means the calling worker re-dispatches the
+  -- entries this call reclaimed into its own PEL. The reply becomes
+  -- {count, {stalledId...}, {jobId, entryId, ...}}. Older callers omit it and
+  -- keep the entry parked in the reclaiming consumer's PEL.
+  local redispatch = broadcastMode == '1' and args[10] == '1'
   local stalledIds = {}
+  local redispatched = {}
   local function reply(count)
+    if redispatch then return {count, stalledIds, redispatched} end
     if not returnIds then return count end
     local out = {count}
     for i = 1, #stalledIds do out[#out + 1] = stalledIds[i] end
@@ -2075,16 +2092,23 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       if lastActive and (timestamp - lastActive) < effectiveIdle then
         count = count + 1
       else
-      local failed = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp)
+      local subKey = nil
+      if broadcastMode == '1' then subKey = jobKey .. ':sub:' .. group end
+      local failed = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp, subKey)
       if not failed then stalledIds[#stalledIds + 1] = jobId end
       if failed then
         if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
         if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
       elseif broadcastMode == '1' then
         -- Broadcast mode keeps the original entry visible to all subscribers,
-        -- so we can't redispatch via XADD. Leave state active for the next
-        -- reclaim cycle; if it stalls again, applyStalledLogic will fail it.
+        -- so it cannot be redispatched via XADD. XAUTOCLAIM moved the claim
+        -- into this consumer's PEL: a redispatching caller runs it again by
+        -- entry ID. Otherwise it stays there for the next reclaim cycle.
         redis.call('HSET', jobKey, 'state', 'active')
+        if redispatch then
+          redispatched[#redispatched + 1] = jobId
+          redispatched[#redispatched + 1] = entryId
+        end
       else
         -- Under maxStalledCount threshold: redispatch the job to the stream
         -- so a healthy worker picks it up. The original PEL entry now belongs
