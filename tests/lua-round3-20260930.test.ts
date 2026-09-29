@@ -8,8 +8,23 @@ import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './he
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { completeJob, moveToActive, CONSUMER_GROUP } = require('../dist/functions') as typeof import('../src/functions');
+const { BroadcastWorker } = require('../dist/broadcast-worker') as typeof import('../src/broadcast-worker');
+const { Broadcast } = require('../dist/broadcast') as typeof import('../src/broadcast');
+const { buildKeys, keyPrefix } = require('../dist/utils') as typeof import('../src/utils');
+const {
+  addJob,
+  completeAndFetchNext,
+  completeChild,
+  completeJob,
+  deferActive,
+  healEarlyDeps,
+  healListActive,
+  moveToActive,
+  reclaimStalledWithIds,
+  recoverBroadcastClaims,
+  removeIdleConsumer,
+  CONSUMER_GROUP,
+} = require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Lua round 3 2026-09-30', (CONNECTION) => {
   let cleanupClient: any;
@@ -193,4 +208,326 @@ describeEachMode('Lua round 3 2026-09-30', (CONNECTION) => {
       await queue.close();
     }
   }, 20000);
+
+  async function consumerNames(streamKey: string, group: string): Promise<string[]> {
+    const info = await cleanupClient.xinfoConsumers(streamKey, group);
+    return info.map((c: any) => String(c.name));
+  }
+
+  // Item 4: a graceful close deletes the consumer once it holds no pending
+  // entry; stalled reclaim deletes idle consumers with nothing pending.
+  it('graceful close removes the consumer and reclaim deletes idle empty consumers', async () => {
+    const Q = uniqueQueue('r3-delconsumer');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const seen: string[] = [];
+    const worker = new Worker(Q, async (job) => void seen.push(job.id), { connection: CONNECTION, blockTimeout: 200 });
+    try {
+      await queue.add('a', {});
+      await waitFor(() => seen.length === 1, 5000);
+      const consumerId = (worker as any).consumerId as string;
+      expect(await consumerNames(k.stream, CONSUMER_GROUP)).toContain(consumerId);
+      await worker.close();
+      expect(await consumerNames(k.stream, CONSUMER_GROUP)).not.toContain(consumerId);
+
+      // A consumer holding a pending entry is kept by both paths.
+      const held = await queue.add('b', {});
+      await cleanupClient.xreadgroup(CONSUMER_GROUP, 'busy', { [k.stream]: '>' }, { count: 1 });
+      await cleanupClient.xreadgroup(CONSUMER_GROUP, 'dead-idle', { [k.stream]: '>' }, { count: 1 });
+      expect(await removeIdleConsumer(cleanupClient, k, CONSUMER_GROUP, 'busy')).toBe(false);
+      await new Promise((r) => setTimeout(r, 30));
+      await reclaimStalledWithIds(
+        cleanupClient,
+        k,
+        'rescuer',
+        60_000,
+        5,
+        Date.now(),
+        CONSUMER_GROUP,
+        false,
+        60_000,
+        false,
+        10,
+      );
+      const names = await consumerNames(k.stream, CONSUMER_GROUP);
+      expect(names).toContain('busy');
+      expect(names).not.toContain('dead-idle');
+      expect(await cleanupClient.hget(k.job(held!.id), 'state')).toBe('waiting');
+    } finally {
+      await worker.close().catch(() => {});
+      await queue.close();
+    }
+  }, 15000);
+
+  // Item 5a: stall detection per subscription. Subscription B keeps the shared
+  // lastActive fresh while A's claim is dead; A must still reclaim.
+  it('broadcast stalled reclaim reads the per-subscription heartbeat', async () => {
+    const Q = uniqueQueue('r3-bcast-la');
+    const k = buildKeys(Q);
+    const bcast = new Broadcast(Q, { connection: CONNECTION });
+    try {
+      const id = (await bcast.publish('evt', { n: 1 }))!;
+      for (const g of ['subA', 'subB']) {
+        await cleanupClient.xgroupCreate(k.stream, g, '0', { mkStream: true }).catch(() => {});
+      }
+      const readEntry = async (group: string, consumer: string): Promise<string> => {
+        const res = await cleanupClient.xreadgroup(group, consumer, { [k.stream]: '>' }, { count: 1 });
+        return String(Object.keys(res[0].value)[0]);
+      };
+      const entryA = await readEntry('subA', 'deadA');
+      const entryB = await readEntry('subB', 'liveB');
+      const tsA = Date.now() - 120_000;
+      const hashA = await moveToActive(cleanupClient, k, id, tsA, k.stream, entryA, 'subA', true);
+      expect(typeof hashA).toBe('object');
+      // Activation writes the per-subscription heartbeat.
+      expect(await cleanupClient.hget(`${k.job(id)}:sub:subA`, 'la')).toBe(String(tsA));
+      await moveToActive(cleanupClient, k, id, Date.now(), k.stream, entryB, 'subB', true);
+      // B heartbeats: shared lastActive is fresh, A's own heartbeat is 2 minutes old.
+      await cleanupClient.hset(k.job(id), { lastActive: String(Date.now()) });
+      await cleanupClient.hset(`${k.job(id)}:sub:subA`, { la: String(Date.now() - 120_000) });
+      await new Promise((r) => setTimeout(r, 20));
+
+      const result = await reclaimStalledWithIds(
+        cleanupClient,
+        k,
+        'rescuerA',
+        10,
+        5,
+        Date.now(),
+        'subA',
+        true,
+        30_000,
+        true,
+      );
+      expect(result.stalledIds).toEqual([id]);
+      expect(result.redispatch).toEqual([{ jobId: id, entryId: entryA }]);
+      expect(await cleanupClient.hget(`${k.job(id)}:sub:subA`, 's')).toBe('1');
+      // B's claim is not stalled: its heartbeat is fresh.
+      const resultB = await reclaimStalledWithIds(
+        cleanupClient,
+        k,
+        'rescuerB',
+        10,
+        5,
+        Date.now(),
+        'subB',
+        true,
+        30_000,
+        true,
+      );
+      expect(resultB.stalledIds).toEqual([]);
+    } finally {
+      await bcast.close();
+    }
+  });
+
+  // Item 5b: a parked claim (worker paused or closed before running it) is
+  // handed back without counting a stall, and only its owner re-takes it.
+  it('broadcast hand-back marks the claim, reclaim skips the stall count, recovery keeps ownership', async () => {
+    const Q = uniqueQueue('r3-bcast-hb');
+    const k = buildKeys(Q);
+    const bcast = new Broadcast(Q, { connection: CONNECTION });
+    try {
+      const id = (await bcast.publish('evt', { n: 1 }))!;
+      await cleanupClient.xgroupCreate(k.stream, 'sub', '0', { mkStream: true }).catch(() => {});
+      const res = await cleanupClient.xreadgroup('sub', 'w1', { [k.stream]: '>' }, { count: 1 });
+      const entryId = String(Object.keys(res[0].value)[0]);
+      const subKey = `${k.job(id)}:sub:sub`;
+
+      // Another consumer does not own the claim: no mark.
+      await deferActive(cleanupClient, k, id, entryId, 'sub', true, { pausedRestore: true, consumer: 'w2' });
+      expect(await cleanupClient.hget(subKey, 'hb')).toBeNull();
+      // The owner hands it back.
+      await deferActive(cleanupClient, k, id, entryId, 'sub', true, { pausedRestore: true, consumer: 'w1' });
+      expect(await cleanupClient.hget(subKey, 'hb')).toBe('1');
+
+      // Reclaim redispatches it without a stall count or stalled event.
+      await cleanupClient.hset(k.job(id), { lastActive: '1' });
+      await new Promise((r) => setTimeout(r, 20));
+      const result = await reclaimStalledWithIds(cleanupClient, k, 'w2', 10, 1, Date.now(), 'sub', true, 30_000, true);
+      expect(result.redispatch).toEqual([{ jobId: id, entryId }]);
+      expect(result.stalledIds).toEqual([]);
+      expect(await cleanupClient.hget(subKey, 's')).toBeNull();
+      expect(await cleanupClient.hget(subKey, 'hb')).toBeNull();
+
+      // w1 resumes: the entry now belongs to w2, so w1 must not re-take it.
+      expect(await recoverBroadcastClaims(cleanupClient, k, 'sub', 'w1', [entryId])).toEqual({});
+      const recovered = await recoverBroadcastClaims(cleanupClient, k, 'sub', 'w2', [entryId]);
+      expect(Object.keys(recovered)).toEqual([entryId]);
+      expect(recovered[entryId].map(([f]) => String(f))).toContain('jobId');
+    } finally {
+      await bcast.close();
+    }
+  });
+
+  // Item 5b (worker level): a BroadcastWorker paused before running a parked
+  // message hands it back; a second worker's reclaim does not count a stall.
+  it('a paused BroadcastWorker hands parked messages back without a stall', async () => {
+    const Q = uniqueQueue('r3-bcast-pause');
+    const k = buildKeys(Q);
+    const bcast = new Broadcast(Q, { connection: CONNECTION });
+    const ran: string[] = [];
+    const w1 = new BroadcastWorker(Q, async (job) => void ran.push(`w1:${job.id}`), {
+      connection: CONNECTION,
+      subscription: 'sub',
+      blockTimeout: 200,
+      stalledInterval: 100_000,
+    });
+    let w2: InstanceType<typeof BroadcastWorker> | null = null;
+    try {
+      await waitFor(async () => (await consumerNames(k.stream, 'sub').catch(() => [])).length === 1, 5000);
+      // Park a claim as the queue-pause race would: paused worker, entry in its PEL.
+      await w1.pause();
+      // The read that was in flight when pause() landed has returned.
+      await waitFor(() => (w1 as any).pollLoopPromise == null, 5000);
+      const id = (await bcast.publish('evt', { n: 1 }))!;
+      const res = await cleanupClient.xreadgroup('sub', (w1 as any).consumerId, { [k.stream]: '>' }, { count: 1 });
+      const entryId = String(Object.keys(res[0].value)[0]);
+      await (w1 as any).deferPausedActivation({ jobId: id, entryId });
+      expect(await cleanupClient.hget(`${k.job(id)}:sub:sub`, 'hb')).toBe('1');
+      await cleanupClient.hset(k.job(id), { lastActive: '1' });
+
+      w2 = new BroadcastWorker(Q, async (job) => void ran.push(`w2:${job.id}`), {
+        connection: CONNECTION,
+        subscription: 'sub',
+        blockTimeout: 200,
+        stalledInterval: 300,
+        lockDuration: 1000,
+      });
+      await waitFor(() => ran.includes(`w2:${id}`), 10_000);
+      expect(await cleanupClient.hget(`${k.job(id)}:sub:sub`, 's')).toBeNull();
+      // w1 resumes and must not run the message a second time.
+      await w1.resume();
+      await new Promise((r) => setTimeout(r, 600));
+      expect(ran).toEqual([`w2:${id}`]);
+    } finally {
+      await w1.close();
+      await w2?.close();
+      await bcast.close();
+    }
+  }, 20000);
+
+  // Item 5c: a retry entry promoted by a library before 130 (no bcastEntry)
+  // keeps its message when the original entry is trimmed.
+  it('trimBroadcast looks up a legacy retry entry before deleting the message', async () => {
+    const Q = uniqueQueue('r3-bcast-legacy-retry');
+    const k = buildKeys(Q);
+    const bcast = new Broadcast(Q, { connection: CONNECTION, maxMessages: 2 });
+    try {
+      const id = (await bcast.publish('evt', { n: 1 }))!;
+      await cleanupClient.xgroupCreate(k.stream, 'sub', '0', { mkStream: true }).catch(() => {});
+      // Pre-130 state: a retry entry in the stream, attempts recorded, no bcastEntry.
+      const retryEntry = String(
+        await cleanupClient.xadd(k.stream, [
+          ['jobId', id],
+          ['name', 'evt'],
+          ['retryGroup', 'sub'],
+        ]),
+      );
+      await cleanupClient.hset(`${k.job(id)}:sub:sub`, { a: '1' });
+      await cleanupClient.hdel(k.job(id), ['bcastEntry']);
+      // This publish trims the original entry; the retry entry stays.
+      await bcast.publish('evt', { n: 2 });
+      await waitFor(async () => (await cleanupClient.xlen(k.stream)) <= 2, 5000);
+      expect(await cleanupClient.exists([k.job(id)])).toBe(1);
+      expect(await cleanupClient.hget(k.job(id), 'bcastEntry')).toBe(retryEntry);
+      // Trimming the retry entry too removes the message.
+      await bcast.publish('evt', { n: 3 });
+      await waitFor(async () => (await cleanupClient.exists([k.job(id)])) === 0, 5000);
+    } finally {
+      await bcast.close();
+    }
+  });
+
+  // Item 8: the chain reply says when priority list, LIFO list and stream were
+  // all empty, and only then.
+  it('completeAndFetchNext reports empty lists only when nothing is waiting anywhere', async () => {
+    const Q = uniqueQueue('r3-lists-empty');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true }).catch(() => {});
+      const claim = async (): Promise<{ id: string; entryId: string }> => {
+        const res = await cleanupClient.xreadgroup(CONSUMER_GROUP, 'w', { [k.stream]: '>' }, { count: 1 });
+        const entryId = String(Object.keys(res[0].value)[0]);
+        const id = String(res[0].value[entryId]!.find(([f]: any) => String(f) === 'jobId')![1]);
+        await moveToActive(cleanupClient, k, id, Date.now(), k.stream, entryId, CONSUMER_GROUP);
+        return { id, entryId };
+      };
+      const caf = (c: { id: string; entryId: string }) =>
+        completeAndFetchNext(cleanupClient, k, c.id, c.entryId, 'null', Date.now(), CONSUMER_GROUP, 'w');
+
+      await queue.add('a', {});
+      const empty = await caf(await claim());
+      expect(empty.next).toBe(false);
+      expect(empty.listsEmpty).toBe(true);
+
+      // A waiting stream job: NEXT_HASH, no marker.
+      await queue.add('b', {});
+      await queue.add('c', {});
+      const chained = await caf(await claim());
+      expect(typeof chained.next).toBe('object');
+      expect(chained.listsEmpty).toBe(false);
+      await completeJob(cleanupClient, k, chained.nextJobId!, chained.nextEntryId!, 'null', Date.now(), CONSUMER_GROUP);
+
+      // Paused queue: NEXT_NONE without the marker.
+      await queue.add('d', {});
+      const d = await claim();
+      await queue.pause();
+      const paused = await caf(d);
+      expect(paused.next).toBe(false);
+      expect(paused.listsEmpty).toBe(false);
+      await queue.resume();
+
+      // A LIFO job waiting in its list: the lists were not empty.
+      await queue.add('e', {});
+      const e = await claim();
+      await queue.add('lifo', {}, { lifo: true });
+      const withLifo = await caf(e);
+      expect(withLifo.listsEmpty).toBe(false);
+    } finally {
+      await queue.close();
+    }
+  });
+
+  // Item 9a: a parent already waiting for children whose last child was
+  // registered by a plain SADD after that child completed is released by the
+  // scheduler tick's heal.
+  it('healEarlyDeps releases a parent whose last child registered via plain SADD after completing', async () => {
+    const PQ = uniqueQueue('r3-early-parent');
+    const CQ = uniqueQueue('r3-early-child');
+    const pk = buildKeys(PQ);
+    const parentId = String(await addJob(cleanupClient, pk, 'parent', '{}', '{}', Date.now(), 0, 0, '', 0));
+    // The parent is parked, waiting for children (its stream entry consumed).
+    await cleanupClient.hset(pk.job(parentId), { state: 'waiting-children' });
+    await cleanupClient.del([pk.stream]);
+    const member = `${keyPrefix('glide', CQ)}:child-1`;
+    // The child completes before the old producer's SADD registers it.
+    expect(await completeChild(cleanupClient, pk, parentId, member)).toBe(0);
+    expect(await cleanupClient.hget(pk.job(parentId), 'depsEarly')).toBe('1');
+    await cleanupClient.sadd(pk.deps(parentId), [member]);
+    expect(await cleanupClient.hget(pk.job(parentId), 'state')).toBe('waiting-children');
+
+    expect(await healEarlyDeps(cleanupClient, pk)).toBe(1);
+    expect(await cleanupClient.hget(pk.job(parentId), 'state')).toBe('waiting');
+    expect(await cleanupClient.xlen(pk.stream)).toBe(1);
+    expect(await cleanupClient.scard(`${pk.id.slice(0, -2)}deps-early`)).toBe(0);
+    expect(await healEarlyDeps(cleanupClient, pk)).toBe(0);
+  });
+
+  // Item 9b: heal re-seeds list-active-ids from a complete scan when the set
+  // went stale (downgrade and re-upgrade).
+  it('healListActive re-seeds a stale list-active-ids set', async () => {
+    const Q = uniqueQueue('r3-heal-reseed');
+    const k = buildKeys(Q);
+    await cleanupClient.hset(k.job('7'), { id: '7', name: 'x', state: 'active', listSourced: '1' });
+    await cleanupClient.set(k.listActive, '1');
+    await cleanupClient.hset(k.meta, { listActiveIds: '1' });
+    // Stale set: a released claim is still a member, the live claim is missing.
+    await cleanupClient.sadd(k.listActiveIds, ['stale']);
+    expect(await healListActive(cleanupClient, k)).toBe(0);
+    const members = (await cleanupClient.smembers(k.listActiveIds)) as Set<string>;
+    expect([...members].map(String).sort()).toEqual(['7']);
+    expect(String(await cleanupClient.get(k.listActive))).toBe('1');
+  });
 });
