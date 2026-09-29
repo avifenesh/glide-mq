@@ -921,8 +921,14 @@ export function createRoutes(
     if (pending) return pending;
 
     const init = (async () => {
+      // Every cached Queue shares one command client; blocking reads (addAndWait) still
+      // open dedicated connections from `connection`.
+      const client = await getSharedClient();
+      if (draining || closed) {
+        throw httpError(503, 'Proxy is shutting down');
+      }
       const queue = new Queue(name, {
-        client: opts.client,
+        client,
         compression: opts.compression,
         connection: opts.connection,
         prefix: opts.prefix,
@@ -955,8 +961,12 @@ export function createRoutes(
     if (pending) return pending;
 
     const init = (async () => {
+      const client = await getSharedClient();
+      if (draining || closed) {
+        throw httpError(503, 'Proxy is shutting down');
+      }
       const broadcast = new Broadcast(name, {
-        client: opts.client,
+        client,
         compression: opts.compression,
         connection: opts.connection,
         prefix: opts.prefix,

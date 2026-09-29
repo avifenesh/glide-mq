@@ -10,7 +10,10 @@ import type { Server } from 'http';
 import { createCleanupClient, flushQueue, STANDALONE } from './helpers/fixture';
 
 const { createProxyServer } = require('../dist/proxy/index') as typeof import('../src/proxy/index');
-const connectionModule = require('../dist/connection') as { createBlockingClient: (conn: any) => Promise<any> };
+const connectionModule = require('../dist/connection') as {
+  createBlockingClient: (conn: any) => Promise<any>;
+  createClient: (conn: any) => Promise<any>;
+};
 
 const CONNECTION = STANDALONE;
 const RUN_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -276,5 +279,51 @@ describe('HTTP proxy hardening - bounded list ranges', () => {
       method: 'DELETE',
     });
     expect(cleanOk.status).toBe(200);
+  });
+});
+
+describe('HTTP proxy hardening - queue cache connections', () => {
+  let cleanupClient: any;
+  const queueNames: string[] = [];
+
+  afterAll(async () => {
+    await Promise.allSettled(queueNames.map((name) => flushQueue(cleanupClient, name)));
+    cleanupClient?.close();
+  });
+
+  it('cached queues and broadcasts share one command client instead of one connection per name', async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    const originalCreateClient = connectionModule.createClient;
+    let created = 0;
+    connectionModule.createClient = async (conn: any) => {
+      created += 1;
+      return originalCreateClient(conn);
+    };
+
+    const proxy = createProxyServer({ connection: CONNECTION });
+    const { baseUrl, server } = await listen(proxy.app);
+    try {
+      for (let i = 0; i < 5; i++) {
+        const name = `proxy-hard-${RUN_ID}-cache-${i}`;
+        queueNames.push(name);
+        const counts = await fetch(`${baseUrl}/queues/${name}/counts`);
+        expect(counts.status).toBe(200);
+        const publish = await fetch(`${baseUrl}/broadcast/${name}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subject: 'cache.check', data: { i } }),
+        });
+        expect(publish.status).toBe(201);
+      }
+      expect(created).toBe(1);
+
+      const health = await fetch(`${baseUrl}/health`);
+      expect((await health.json()).queues).toBe(5);
+    } finally {
+      connectionModule.createClient = originalCreateClient;
+      server.closeAllConnections?.();
+      await proxy.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
