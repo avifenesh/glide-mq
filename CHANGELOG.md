@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`addDAG` could release a parent early**: a leaf with one dependent was wired at creation while a sibling with several dependents was wired a round trip later, so a fast leaf could release the parent before the sibling was registered. Leaf ids are reserved and every dependent's deps set is filled before any leaf becomes runnable.
+- **Scheduled jobs skipped gzip compression** on queues with `compression: 'gzip'`. The scheduler entry records the upserting queue's compression and the tick compresses like `Queue.add`.
+- **Switching a scheduler to `repeatAfterComplete` fired immediately**, overlapping a still-running job from the old mode. The first run is now held until the old mode's next run.
+- **`TestJob.moveToDelayed()` was missing** in testing mode.
 - **Cross-queue parent released early**: `Queue.add`/`Producer.add` registered a cross-queue child in the parent's deps only after creating it, so a fast child could release a parent that still had pending children. Such completions are now parked and counted when the child is registered through `glidemq_registerChildDep`. Debounce replacing a cross-queue child inherits the replaced child's dependency.
 - **Flow budgets applied late**: the budget hash and each job's `budgetKey` were written after the flow's jobs were runnable. The budget is now created first and `budgetKey` is written in the same call that creates each job.
 - **Ordered group jobs completed via `completeAndFetchNext` skipped ordering bookkeeping** when only `groupKey` was stored.
@@ -52,6 +56,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Scheduler templates reject `delay`, `deduplication` and `parent`** at upsert (the scheduler never applied them). Stored entries keep firing.
 - **Server function library version is `128`.** Workers and producers reload it on connect.
 - **`completeAndFetchNext` no longer emits `active` events** from its priority and LIFO paths, matching the stream path and `moveToActive`. Workers still emit their local `active` event.
 - **Proxy request bounds (`maxPageSize`, default 1000)**: `GET /jobs`, `/dlq` and `/suspended` without `end` (or `end=-1`) return at most `maxPageSize` items from `start`, and larger explicit spans return 400. `dlq/replay-all` replays at most `maxPageSize` per call, and `clean` rejects a `limit` above it. `POST /flows` rejects flows with more than 1000 nodes.
