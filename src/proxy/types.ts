@@ -28,7 +28,16 @@ export interface ProxyOptions {
   queues?: string[];
   /** Enable transparent compression for job data. Default: 'none'. */
   compression?: 'none' | 'gzip';
-  /** Callback for queue-level errors. Defaults to console.error if not provided. */
+  /**
+   * Maximum items per list or batch request: `start`/`end` spans on job, DLQ, and suspended
+   * listings, `count` on DLQ replay-all, and `limit` on clean. An omitted `end` (or `end=-1`)
+   * returns at most this many items. Default: 1000.
+   */
+  maxPageSize?: number;
+  /**
+   * Callback for queue-level errors and for internal request errors. 5xx responses return a
+   * generic message; the underlying error is passed here. Defaults to console.error if not provided.
+   */
   onError?: (err: Error, queueName: string) => void;
 }
 

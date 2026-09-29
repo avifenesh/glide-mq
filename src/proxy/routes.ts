@@ -13,6 +13,7 @@ import { buildKeys, compileSubjectMatcher, hashDataToRecord, validateJobId, vali
 import type { AddJobRequest, AddJobResponse, AddJobSkippedResponse, ProxyOptions } from './types';
 
 const MAX_BULK_SIZE = 1000;
+const DEFAULT_MAX_PAGE_SIZE = MAX_BULK_SIZE;
 const MIN_JOB_OPTS_LOCK_DURATION_MS = 1000;
 const MAX_JOB_OPTS_LOCK_DURATION_MS = 86_400_000;
 const SSE_BLOCK_MS = 5000;
@@ -31,6 +32,8 @@ type SharedBroadcastStream = {
   clients: Set<BroadcastClient>;
   close: () => Promise<void>;
   closing: boolean;
+  /** Requests that acquired the stream and have not yet attached or given up. */
+  pending: number;
   ready: Promise<void>;
   worker: BroadcastWorker<any, void>;
 };
@@ -67,9 +70,11 @@ function queryValue(req: Request, key: string): string | undefined {
   return value != null ? String(value) : undefined;
 }
 
+/** Error with an HTTP status whose message is written by the proxy and safe to return to clients. */
 function httpError(status: number, message: string): Error {
   const err = new Error(message);
   (err as any).status = status;
+  (err as any).expose = true;
   return err;
 }
 
@@ -110,22 +115,43 @@ function isValidationError(err: unknown): boolean {
 }
 
 /**
+ * Map a client-facing failure of a job mutation (a known "Cannot ..." rejection or a validation
+ * error) to 400. Anything else, such as a transport error, is returned unchanged.
+ */
+function asClientError(err: unknown, knownPrefix: string): unknown {
+  if (err instanceof Error && (err.message.startsWith(knownPrefix) || isValidationError(err))) {
+    return httpError(400, err.message);
+  }
+  return err;
+}
+
+function genericServerMessage(status: number): string {
+  if (status === 503) return 'Service unavailable';
+  if (status === 504) return 'Gateway timeout';
+  return 'Internal server error';
+}
+
+/**
  * Resolve the HTTP status code and message for a caught error.
  * Returns the .status property if set, falls back to 400/500 heuristic.
+ * 5xx responses carry a generic message unless the proxy itself wrote it (httpError).
  */
-function errorResponse(err: unknown): { status: number; message: string } {
+function errorResponse(err: unknown): { status: number; message: string; internal: boolean } {
   if (err && typeof err === 'object') {
     const status = (err as any).status;
     if (typeof status === 'number' && status >= 400) {
+      if (status >= 500 && (err as any).expose !== true) {
+        return { status, message: genericServerMessage(status), internal: true };
+      }
       const message = err instanceof Error ? err.message : 'Request error';
-      return { status, message };
+      return { status, message, internal: false };
     }
   }
   if (isValidationError(err)) {
     const message = err instanceof Error ? err.message : 'Bad request';
-    return { status: 400, message };
+    return { status: 400, message, internal: false };
   }
-  return { status: 500, message: 'Internal server error' };
+  return { status: 500, message: 'Internal server error', internal: true };
 }
 
 function parseInteger(raw: string, label: string, opts?: { allowNegativeOne?: boolean; min?: number }): number {
@@ -143,6 +169,24 @@ function parseInteger(raw: string, label: string, opts?: { allowNegativeOne?: bo
     throw httpError(400, `${label} must be >= ${opts.min}`);
   }
   return value;
+}
+
+/**
+ * Parse `start`/`end` list query params into an inclusive range of at most `maxPageSize` items.
+ * An omitted `end` or `end=-1` returns up to `maxPageSize` items from `start`; an explicit span
+ * larger than the cap is rejected.
+ */
+function parsePageRange(req: Request, maxPageSize: number): { start: number; end: number } {
+  const startRaw = queryValue(req, 'start');
+  const endRaw = queryValue(req, 'end');
+  const start = startRaw !== undefined ? parseInteger(startRaw, 'start', { min: 0 }) : 0;
+  const end = endRaw !== undefined ? parseInteger(endRaw, 'end', { allowNegativeOne: true, min: 0 }) : -1;
+  const cappedEnd = start + maxPageSize - 1;
+  if (end === -1) return { start, end: cappedEnd };
+  if (end > cappedEnd) {
+    throw httpError(400, `Range exceeds maximum page size (${maxPageSize})`);
+  }
+  return { start, end };
 }
 
 function parseBoolean(raw: string, label: string): boolean {
@@ -250,6 +294,37 @@ function startSse(res: Response): void {
     'Content-Type': 'text/event-stream',
   });
   res.flushHeaders?.();
+}
+
+type DisconnectTracker = {
+  readonly closed: boolean;
+  onClose: (fn: () => void) => void;
+};
+
+/**
+ * Track client disconnect from the start of a streaming route. Listeners are attached before
+ * any await, so a close that lands while the route is still setting up is never missed.
+ */
+function trackDisconnect(req: Request, res: Response): DisconnectTracker {
+  let closed = false;
+  const listeners: Array<() => void> = [];
+  const markClosed = () => {
+    if (closed) return;
+    closed = true;
+    for (const fn of listeners.splice(0)) fn();
+  };
+  req.once('close', markClosed);
+  res.once('close', markClosed);
+  if (req.destroyed || res.destroyed || req.socket?.destroyed) markClosed();
+  return {
+    get closed() {
+      return closed;
+    },
+    onClose(fn: () => void) {
+      if (closed) fn();
+      else listeners.push(fn);
+    },
+  };
 }
 
 function serializeJob(job: Job<any, any>, state: string) {
@@ -575,7 +650,12 @@ function validateJobOpts(
   return null;
 }
 
-function validateFlowJobOpts(flow: FlowJob, path = 'flow'): string | null {
+function validateFlowJobOpts(flow: FlowJob, path = 'flow', visited = { count: 0 }): string | null {
+  // Counted before recursing, so the cap also bounds tree depth.
+  visited.count += 1;
+  if (visited.count > MAX_BULK_SIZE) {
+    return `Too many flow nodes (max ${MAX_BULK_SIZE})`;
+  }
   if (!flow || typeof flow !== 'object' || Array.isArray(flow)) {
     return `${path} must be an object`;
   }
@@ -586,7 +666,7 @@ function validateFlowJobOpts(flow: FlowJob, path = 'flow'): string | null {
     return `${path}.children must be an array`;
   }
   for (let i = 0; i < children.length; i++) {
-    const childError = validateFlowJobOpts(children[i], `${path}.children[${i}]`);
+    const childError = validateFlowJobOpts(children[i], `${path}.children[${i}]`, visited);
     if (childError) return childError;
   }
   return null;
@@ -598,6 +678,9 @@ function validateDagJobOpts(dag: DAGFlow): string | null {
   }
   if (!Array.isArray(dag.nodes)) {
     return 'dag.nodes must be an array';
+  }
+  if (dag.nodes.length > MAX_BULK_SIZE) {
+    return `Too many dag nodes (max ${MAX_BULK_SIZE})`;
   }
   for (let i = 0; i < dag.nodes.length; i++) {
     const node = dag.nodes[i];
@@ -633,6 +716,10 @@ export function createRoutes(
   const activeQueueEventClosers = new Set<() => void>();
   const startTime = Date.now();
   const allowedQueues = opts.queues ? new Set(opts.queues) : null;
+  const maxPageSize = opts.maxPageSize ?? DEFAULT_MAX_PAGE_SIZE;
+  if (!Number.isSafeInteger(maxPageSize) || maxPageSize < 1) {
+    throw new Error('ProxyOptions.maxPageSize must be a positive integer');
+  }
   const flowPrefix = opts.prefix ?? 'glide';
   const errorHandler =
     opts.onError ??
@@ -644,6 +731,15 @@ export function createRoutes(
   let sharedClient: Client | null = null;
   let sharedClientOwned = false;
   let sharedClientInit: Promise<Client> | null = null;
+
+  /** errorResponse() plus logging of internal errors through onError, since clients get a generic message. */
+  function resolveError(err: unknown, req: Request): { status: number; message: string } {
+    const { status, message, internal } = errorResponse(err);
+    if (internal) {
+      errorHandler(err instanceof Error ? err : new Error(String(err)), param(req, 'name') ?? '');
+    }
+    return { status, message };
+  }
 
   function requireConnection(feature: string) {
     if (!opts.connection) {
@@ -865,8 +961,14 @@ export function createRoutes(
     if (pending) return pending;
 
     const init = (async () => {
+      // Every cached Queue shares one command client; blocking reads (addAndWait) still
+      // open dedicated connections from `connection`.
+      const client = await getSharedClient();
+      if (draining || closed) {
+        throw httpError(503, 'Proxy is shutting down');
+      }
       const queue = new Queue(name, {
-        client: opts.client,
+        client,
         compression: opts.compression,
         connection: opts.connection,
         prefix: opts.prefix,
@@ -879,7 +981,12 @@ export function createRoutes(
     })();
 
     queueInitMap.set(name, init);
-    init.finally(() => queueInitMap.delete(name));
+    // The caller awaits `init`; clean up on both outcomes without leaving a derived
+    // promise that rejects unhandled when client setup fails.
+    const clear = () => {
+      queueInitMap.delete(name);
+    };
+    init.then(clear, clear);
     return init;
   }
 
@@ -899,8 +1006,12 @@ export function createRoutes(
     if (pending) return pending;
 
     const init = (async () => {
+      const client = await getSharedClient();
+      if (draining || closed) {
+        throw httpError(503, 'Proxy is shutting down');
+      }
       const broadcast = new Broadcast(name, {
-        client: opts.client,
+        client,
         compression: opts.compression,
         connection: opts.connection,
         prefix: opts.prefix,
@@ -913,7 +1024,12 @@ export function createRoutes(
     })();
 
     broadcastInitMap.set(name, init);
-    init.finally(() => broadcastInitMap.delete(name));
+    // The caller awaits `init`; clean up on both outcomes without leaving a derived
+    // promise that rejects unhandled when client setup fails.
+    const clear = () => {
+      broadcastInitMap.delete(name);
+    };
+    init.then(clear, clear);
     return init;
   }
 
@@ -935,11 +1051,26 @@ export function createRoutes(
         /* ignore */
       }
     }
-    if (stream.clients.size === 0) {
+    closeBroadcastStreamIfIdle(stream);
+  }
+
+  function closeBroadcastStreamIfIdle(stream: SharedBroadcastStream): void {
+    if (stream.clients.size === 0 && stream.pending === 0) {
       void stream.close();
     }
   }
 
+  /** Give up a stream acquired via getSharedBroadcastStream without attaching a client. */
+  function releaseBroadcastStream(stream: SharedBroadcastStream): void {
+    stream.pending = Math.max(0, stream.pending - 1);
+    closeBroadcastStreamIfIdle(stream);
+  }
+
+  /**
+   * Acquire the shared stream for a subscription. On success the caller holds one `pending`
+   * reference and must either attach a client (and decrement `pending`) or call
+   * releaseBroadcastStream().
+   */
   async function getSharedBroadcastStream(name: string, subscription: string): Promise<SharedBroadcastStream> {
     if (draining || closed) {
       throw httpError(503, 'Proxy is shutting down');
@@ -947,8 +1078,15 @@ export function createRoutes(
     const cacheKey = `${name}\u0000${subscription}`;
     const cached = broadcastStreams.get(cacheKey);
     if (cached) {
-      await cached.ready;
+      cached.pending += 1;
+      try {
+        await cached.ready;
+      } catch (err) {
+        cached.pending = Math.max(0, cached.pending - 1);
+        throw err;
+      }
       if (draining || closed) {
+        releaseBroadcastStream(cached);
         throw httpError(503, 'Proxy is shutting down');
       }
       return cached;
@@ -960,6 +1098,7 @@ export function createRoutes(
     const stream: SharedBroadcastStream = {
       clients,
       closing: false,
+      pending: 1,
       ready: Promise.resolve(),
       worker: null as unknown as BroadcastWorker<any, void>,
       close: async () => {
@@ -1062,7 +1201,7 @@ export function createRoutes(
       };
       res.status(201).json(response);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1100,7 +1239,7 @@ export function createRoutes(
       const anyCreated = results.some((job) => job !== null);
       res.status(anyCreated ? 201 : 200).json({ jobs: responseJobs });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1110,11 +1249,8 @@ export function createRoutes(
       if (!checkAllowlist(req, res)) return;
       const queue = await getQueue(param(req, 'name'));
       const state = parseQueueState(req);
-      const startRaw = queryValue(req, 'start');
-      const endRaw = queryValue(req, 'end');
+      const { start, end } = parsePageRange(req, maxPageSize);
       const excludeDataRaw = queryValue(req, 'excludeData');
-      const start = startRaw !== undefined ? parseInteger(startRaw, 'start', { min: 0 }) : 0;
-      const end = endRaw !== undefined ? parseInteger(endRaw, 'end', { allowNegativeOne: true, min: 0 }) : -1;
       const excludeData = excludeDataRaw !== undefined ? parseBoolean(excludeDataRaw, 'excludeData') : false;
 
       const jobs = await queue.getJobs(state, start, end, { excludeData });
@@ -1122,7 +1258,7 @@ export function createRoutes(
         jobs: jobs.map((job) => serializeJob(job, state)),
       });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1145,20 +1281,19 @@ export function createRoutes(
       const result = await queue.addAndWait(body.name, body.data ?? null, body.opts as any);
       res.status(200).json({ result });
     } catch (err) {
-      if (err instanceof Error) {
+      let mapped = err;
+      if (err instanceof Error && (err as any).status == null) {
         if (err.message.includes('did not finish within')) {
-          (err as any).status = 504;
+          mapped = httpError(504, err.message);
         } else if (
           err.message.includes('cannot wait on a deduplicated') ||
           err.message.includes('removeOnComplete/removeOnFail') ||
           err.message.includes('waitTimeout')
         ) {
-          (err as any).status = 400;
-        } else if ((err as any).status == null) {
-          (err as any).status = 500;
+          mapped = httpError(400, err.message);
         }
       }
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(mapped, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1176,7 +1311,7 @@ export function createRoutes(
 
       res.status(200).json(serializeJob(job, await job.getState()));
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1185,17 +1320,14 @@ export function createRoutes(
     try {
       if (!checkAllowlist(req, res)) return;
       const queue = await getQueue(param(req, 'name'));
-      const startRaw = queryValue(req, 'start');
-      const endRaw = queryValue(req, 'end');
-      const start = startRaw !== undefined ? parseInteger(startRaw, 'start', { min: 0 }) : 0;
-      const end = endRaw !== undefined ? parseInteger(endRaw, 'end', { allowNegativeOne: true, min: 0 }) : -1;
+      const { start, end } = parsePageRange(req, maxPageSize);
       const jobs = await queue.getDeadLetterJobs(start, end);
       res.status(200).json({
         count: jobs.length,
         jobs: jobs.map((job) => serializeDeadLetterJob(job)),
       });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1205,9 +1337,12 @@ export function createRoutes(
       if (!checkAllowlist(req, res)) return;
       const body = req.body as { count?: unknown } | undefined;
       const countRaw = typeof body?.count === 'number' ? String(body.count) : queryValue(req, 'count');
-      const count = countRaw !== undefined ? parseInteger(countRaw, 'count', { min: 1 }) : undefined;
+      const count = countRaw !== undefined ? parseInteger(countRaw, 'count', { min: 1 }) : maxPageSize;
+      if (count > maxPageSize) {
+        throw httpError(400, `count exceeds maximum page size (${maxPageSize})`);
+      }
       const queue = await getQueue(param(req, 'name'));
-      const dlqJobs = await queue.getDeadLetterJobs(0, count !== undefined ? count - 1 : -1);
+      const dlqJobs = await queue.getDeadLetterJobs(0, count - 1);
       const replayedJobs: Array<{ id: string; name: string; sourceId: string }> = [];
 
       for (const job of dlqJobs) {
@@ -1218,7 +1353,7 @@ export function createRoutes(
 
       res.status(200).json({ jobs: replayedJobs, replayed: replayedJobs.length });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1233,7 +1368,7 @@ export function createRoutes(
       }
       res.status(200).json(serializeDeadLetterJob(job));
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1248,7 +1383,7 @@ export function createRoutes(
       }
       res.status(200).json({ name: replayed.name, newJobId: replayed.id });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1263,7 +1398,7 @@ export function createRoutes(
       }
       res.status(200).json({ removed: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1285,12 +1420,12 @@ export function createRoutes(
       try {
         await job.changePriority(body.priority);
       } catch (err) {
-        throw withStatus(err, 400, 'Cannot change priority');
+        throw asClientError(err, 'Cannot change priority');
       }
 
       res.status(200).json({ priority: body.priority, updated: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1312,12 +1447,12 @@ export function createRoutes(
       try {
         await job.changeDelay(body.delay);
       } catch (err) {
-        throw withStatus(err, 400, 'Cannot change delay');
+        throw asClientError(err, 'Cannot change delay');
       }
 
       res.status(200).json({ delay: body.delay, updated: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1335,34 +1470,32 @@ export function createRoutes(
       try {
         await job.promote();
       } catch (err) {
-        throw withStatus(err, 400, 'Cannot promote job');
+        throw asClientError(err, 'Cannot promote');
       }
 
       res.status(200).json({ promoted: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
 
   router.get('/queues/:name/jobs/:id/stream', async (req: Request, res: Response) => {
+    const disconnect = trackDisconnect(req, res);
     try {
       if (!checkAllowlist(req, res)) return;
 
       const queue = await getQueue(param(req, 'name'));
       const jobId = param(req, 'id');
+      if (disconnect.closed) return;
 
       startSse(res);
 
       let lastId = (req.headers['last-event-id'] as string) || queryValue(req, 'lastId') || undefined;
-      let connectionClosed = false;
 
-      req.on('close', () => {
-        connectionClosed = true;
-      });
-
-      while (!connectionClosed && !draining) {
+      while (!disconnect.closed && !draining) {
         const entries = await queue.readStream(jobId, { count: 100, lastId });
+        if (disconnect.closed) break;
         const latest = writeStreamEntries(res, entries);
         if (latest) lastId = latest;
 
@@ -1381,7 +1514,7 @@ export function createRoutes(
       res.end();
     } catch (err) {
       if (!res.headersSent) {
-        const { status, message } = errorResponse(err);
+        const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
         res.end();
@@ -1390,6 +1523,7 @@ export function createRoutes(
   });
 
   router.get('/queues/:name/jobs/:id/events', async (req: Request, res: Response) => {
+    const disconnect = trackDisconnect(req, res);
     let closeConnection: (() => void) | undefined;
     try {
       if (!checkAllowlist(req, res)) return;
@@ -1399,6 +1533,7 @@ export function createRoutes(
       if (!job) {
         throw httpError(404, 'Job not found');
       }
+      if (disconnect.closed) return;
 
       const connection = requireConnection('job events SSE');
       const keys = buildKeys(param(req, 'name'), opts.prefix);
@@ -1423,7 +1558,8 @@ export function createRoutes(
       };
 
       activeQueueEventClosers.add(closeConnection);
-      req.on('close', closeConnection);
+      disconnect.onClose(closeConnection);
+      if (connectionClosed) return;
       startSse(res);
       writeSseComment(res, 'connected');
 
@@ -1485,7 +1621,7 @@ export function createRoutes(
     } catch (err) {
       closeConnection?.();
       if (!res.headersSent) {
-        const { status, message } = errorResponse(err);
+        const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
         res.end();
@@ -1494,6 +1630,7 @@ export function createRoutes(
   });
 
   router.get('/queues/:name/events', async (req: Request, res: Response) => {
+    const disconnect = trackDisconnect(req, res);
     let closeConnection: (() => void) | undefined;
     try {
       if (!checkAllowlist(req, res)) return;
@@ -1520,7 +1657,8 @@ export function createRoutes(
       };
 
       activeQueueEventClosers.add(closeConnection);
-      req.on('close', closeConnection);
+      disconnect.onClose(closeConnection);
+      if (connectionClosed) return;
 
       startSse(res);
       writeSseComment(res, 'connected');
@@ -1567,7 +1705,7 @@ export function createRoutes(
     } catch (err) {
       closeConnection?.();
       if (!res.headersSent) {
-        const { status, message } = errorResponse(err);
+        const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
         res.end();
@@ -1582,7 +1720,7 @@ export function createRoutes(
       await queue.pause();
       res.status(200).json({ paused: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1594,7 +1732,7 @@ export function createRoutes(
       await queue.resume();
       res.status(200).json({ paused: false });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1606,7 +1744,7 @@ export function createRoutes(
       const counts = await queue.getJobCounts();
       res.status(200).json(counts);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1626,7 +1764,7 @@ export function createRoutes(
       );
       res.status(200).json(metrics);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1638,7 +1776,7 @@ export function createRoutes(
       const workers: WorkerInfo[] = await queue.getWorkers();
       res.status(200).json({ workers });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1647,11 +1785,8 @@ export function createRoutes(
     try {
       if (!checkAllowlist(req, res)) return;
       const queue = await getQueue(param(req, 'name'));
-      const startRaw = queryValue(req, 'start');
-      const endRaw = queryValue(req, 'end');
+      const { start, end } = parsePageRange(req, maxPageSize);
       const excludeDataRaw = queryValue(req, 'excludeData');
-      const start = startRaw !== undefined ? parseInteger(startRaw, 'start', { min: 0 }) : 0;
-      const end = endRaw !== undefined ? parseInteger(endRaw, 'end', { allowNegativeOne: true, min: 0 }) : -1;
       const excludeData = excludeDataRaw !== undefined ? parseBoolean(excludeDataRaw, 'excludeData') : false;
       const jobs = await queue.getSuspendedJobs(start, end, { excludeData });
       const serialized = await Promise.all(
@@ -1662,7 +1797,7 @@ export function createRoutes(
       );
       res.status(200).json({ jobs: serialized.filter((job) => job.suspend != null) });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1676,7 +1811,7 @@ export function createRoutes(
       await queue.drain(delayed);
       res.status(200).json({ delayed, drained: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1691,7 +1826,7 @@ export function createRoutes(
       const retried = await queue.retryJobs(count !== undefined ? { count } : undefined);
       res.status(200).json({ retried });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1706,12 +1841,15 @@ export function createRoutes(
       }
       const ageSeconds = parseInteger(ageRaw, 'age', { min: 0 });
       const limitRaw = queryValue(req, 'limit');
-      const limit = limitRaw !== undefined ? parseInteger(limitRaw, 'limit', { min: 1 }) : 1000;
+      const limit = limitRaw !== undefined ? parseInteger(limitRaw, 'limit', { min: 1 }) : maxPageSize;
+      if (limit > maxPageSize) {
+        throw httpError(400, `limit exceeds maximum page size (${maxPageSize})`);
+      }
       const queue = await getQueue(param(req, 'name'));
       const removed = await queue.clean(ageSeconds * 1000, limit, state);
       res.status(200).json({ removed });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1723,7 +1861,7 @@ export function createRoutes(
       const schedulers = await queue.getRepeatableJobs();
       res.status(200).json({ schedulers });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1739,7 +1877,7 @@ export function createRoutes(
       }
       res.status(200).json({ entry, name });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1755,7 +1893,7 @@ export function createRoutes(
       await queue.upsertJobScheduler(param(req, 'id'), body.schedule, body.template);
       res.status(200).json({ upserted: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1772,7 +1910,7 @@ export function createRoutes(
       await queue.removeJobScheduler(name);
       res.status(200).json({ removed: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1789,7 +1927,7 @@ export function createRoutes(
       const usage = await queue.getFlowUsage(parentId);
       res.status(200).json(usage);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1804,7 +1942,7 @@ export function createRoutes(
       }
       res.status(200).json(budget);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1905,7 +2043,7 @@ export function createRoutes(
         await producer.close().catch(() => undefined);
       }
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1928,7 +2066,7 @@ export function createRoutes(
         usage: snapshot.usage,
       });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1951,7 +2089,7 @@ export function createRoutes(
         usage: snapshot.usage,
       });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1996,7 +2134,7 @@ export function createRoutes(
       await deleteFlowRecord(flowId);
       res.status(200).json({ flagged, flowId, jobs, revoked, skipped });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2050,7 +2188,7 @@ export function createRoutes(
 
       res.status(200).json(summary);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2067,7 +2205,7 @@ export function createRoutes(
 
       res.status(200).json(info);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2087,7 +2225,7 @@ export function createRoutes(
       const resumed = await queue.signal(jobId, body.name, body.data);
       res.status(200).json({ resumed });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2104,7 +2242,7 @@ export function createRoutes(
 
       res.status(200).json({ status });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2116,7 +2254,7 @@ export function createRoutes(
       const rateLimit = await queue.getGlobalRateLimit();
       res.status(200).json({ rateLimit });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2141,7 +2279,7 @@ export function createRoutes(
       await queue.setGlobalRateLimit({ duration: body.duration, max: body.max });
       res.status(200).json({ rateLimit: { duration: body.duration, max: body.max } });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2153,7 +2291,7 @@ export function createRoutes(
       await queue.removeGlobalRateLimit();
       res.status(200).json({ removed: true, rateLimit: null });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2177,12 +2315,13 @@ export function createRoutes(
       }
       res.status(201).json({ id, subject: body.subject });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
 
   router.get('/broadcast/:name/events', async (req: Request, res: Response) => {
+    const disconnect = trackDisconnect(req, res);
     let cleanup: (() => void) | undefined;
     try {
       if (!checkAllowlist(req, res)) return;
@@ -2192,9 +2331,15 @@ export function createRoutes(
       }
       const matcher = compileSubjectMatcher(parseCsvQuery(req, 'subjects'));
       const stream = await getSharedBroadcastStream(param(req, 'name'), subscription);
+      if (disconnect.closed) {
+        releaseBroadcastStream(stream);
+        return;
+      }
       if (draining || closed || stream.closing) {
+        releaseBroadcastStream(stream);
         throw httpError(503, 'Proxy is shutting down');
       }
+      stream.pending -= 1;
 
       startSse(res);
       writeSseComment(res, 'connected');
@@ -2216,11 +2361,11 @@ export function createRoutes(
       };
 
       stream.clients.add(client);
-      req.on('close', cleanup);
+      disconnect.onClose(cleanup);
     } catch (err) {
       cleanup?.();
       if (!res.headersSent) {
-        const { status, message } = errorResponse(err);
+        const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
         res.end();

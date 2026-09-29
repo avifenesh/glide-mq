@@ -861,6 +861,8 @@ proxy.app.listen(3000);
 
 - Add your own auth/rate-limit middleware before exposing the proxy to a network. The proxy does not ship built-in authentication.
 - Queue-wide SSE (`/queues/:name/events`) and broadcast SSE (`/broadcast/:name/events`) require `connection`, not just a shared `client`, because they allocate blocking readers internally.
+- 5xx responses return a generic message (`Internal server error`, `Service unavailable`, `Gateway timeout`) except for proxy-authored ones such as `Proxy is shutting down`. The underlying error goes to `onError`.
+- List and batch routes are bounded by `maxPageSize` (default `1000`). `GET /queues/:name/jobs`, `/dlq`, and `/suspended` return at most `maxPageSize` items from `start` when `end` is omitted or `-1`, and reject an explicit `start`/`end` span larger than the cap with `400`. `POST /queues/:name/dlq/replay-all` defaults `count` to the cap and `DELETE /queues/:name/clean` defaults `limit` to the cap; larger values return `400`. Page through larger sets with `start`/`end`.
 
 | Method | Path                                 | Description                                                                                                                                              |
 | ------ | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -910,5 +912,5 @@ proxy.app.listen(3000);
 | GET    | /broadcast/:name/events              | SSE broadcast stream. Requires `subscription`; optional `subjects=a.*,b.>` filter.                                                                       |
 | GET    | /health                              | Health check and proxy uptime.                                                                                                                           |
 
-- `POST /flows` supports both FlowProducer-style trees and DAG payloads. Queue names inside the submitted flow must pass the proxy allowlist.
+- `POST /flows` supports both FlowProducer-style trees and DAG payloads. Queue names inside the submitted flow must pass the proxy allowlist. A flow may hold at most 1000 nodes (tree nodes counted across all levels, or `dag.nodes` entries); larger flows return `400`.
 - Flow budgets are persisted and returned through `/flows/:id` and `/queues/:name/flows/:id/budget`, but HTTP-submitted budgets are currently supported only for tree flows, not DAG payloads.
