@@ -912,5 +912,5 @@ proxy.app.listen(3000);
 | GET    | /broadcast/:name/events              | SSE broadcast stream. Requires `subscription`; optional `subjects=a.*,b.>` filter.                                                                       |
 | GET    | /health                              | Health check and proxy uptime.                                                                                                                           |
 
-- `POST /flows` supports both FlowProducer-style trees and DAG payloads. Queue names inside the submitted flow must pass the proxy allowlist.
+- `POST /flows` supports both FlowProducer-style trees and DAG payloads. Queue names inside the submitted flow must pass the proxy allowlist. A flow may hold at most 1000 nodes (tree nodes counted across all levels, or `dag.nodes` entries); larger flows return `400`.
 - Flow budgets are persisted and returned through `/flows/:id` and `/queues/:name/flows/:id/budget`, but HTTP-submitted budgets are currently supported only for tree flows, not DAG payloads.

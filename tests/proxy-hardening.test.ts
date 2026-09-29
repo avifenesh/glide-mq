@@ -439,3 +439,58 @@ describe('HTTP proxy hardening - error responses', () => {
     expect((await rejected.json()).error).toBe('Cannot promote: job is not delayed');
   });
 });
+
+describe('HTTP proxy hardening - flow node limit', () => {
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+  const queueName = `proxy-hard-${RUN_ID}-flows`;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    const proxy = createProxyServer({ connection: CONNECTION });
+    proxyClose = proxy.close;
+    ({ baseUrl, server } = await listen(proxy.app));
+  });
+
+  afterAll(async () => {
+    server.closeAllConnections?.();
+    await proxyClose();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  }, 30000);
+
+  async function postFlow(body: unknown): Promise<Response> {
+    return fetch(`${baseUrl}/flows`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('rejects a tree flow with more than 1000 nodes', async () => {
+    const children = Array.from({ length: 1000 }, (_, i) => ({ name: `c${i}`, queueName, data: {} }));
+    const res = await postFlow({ flow: { name: 'root', queueName, data: {}, children } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('Too many flow nodes (max 1000)');
+  });
+
+  it('rejects a tree flow nested deeper than the node limit', async () => {
+    let flow: any = { name: 'leaf', queueName, data: {} };
+    for (let i = 0; i < 1000; i++) {
+      flow = { name: `n${i}`, queueName, data: {}, children: [flow] };
+    }
+    const res = await postFlow({ flow });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('Too many flow nodes (max 1000)');
+  });
+
+  it('rejects a DAG with more than 1000 nodes', async () => {
+    const nodes = Array.from({ length: 1001 }, (_, i) => ({ name: `d${i}`, queueName, data: {} }));
+    const res = await postFlow({ dag: { nodes } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('Too many dag nodes (max 1000)');
+  });
+});

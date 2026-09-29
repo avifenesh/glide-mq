@@ -650,7 +650,12 @@ function validateJobOpts(
   return null;
 }
 
-function validateFlowJobOpts(flow: FlowJob, path = 'flow'): string | null {
+function validateFlowJobOpts(flow: FlowJob, path = 'flow', visited = { count: 0 }): string | null {
+  // Counted before recursing, so the cap also bounds tree depth.
+  visited.count += 1;
+  if (visited.count > MAX_BULK_SIZE) {
+    return `Too many flow nodes (max ${MAX_BULK_SIZE})`;
+  }
   if (!flow || typeof flow !== 'object' || Array.isArray(flow)) {
     return `${path} must be an object`;
   }
@@ -661,7 +666,7 @@ function validateFlowJobOpts(flow: FlowJob, path = 'flow'): string | null {
     return `${path}.children must be an array`;
   }
   for (let i = 0; i < children.length; i++) {
-    const childError = validateFlowJobOpts(children[i], `${path}.children[${i}]`);
+    const childError = validateFlowJobOpts(children[i], `${path}.children[${i}]`, visited);
     if (childError) return childError;
   }
   return null;
@@ -673,6 +678,9 @@ function validateDagJobOpts(dag: DAGFlow): string | null {
   }
   if (!Array.isArray(dag.nodes)) {
     return 'dag.nodes must be an array';
+  }
+  if (dag.nodes.length > MAX_BULK_SIZE) {
+    return `Too many dag nodes (max ${MAX_BULK_SIZE})`;
   }
   for (let i = 0; i < dag.nodes.length; i++) {
     const node = dag.nodes[i];
