@@ -18,6 +18,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **QueueEvents**: an init failure is emitted as `'error'` instead of an unhandled rejection, and a throwing listener no longer redelivers the same event forever.
 - **`suspend` continuations grew without bound**: entries are dropped on failed suspends and on close, and the map is capped at 10,000.
 - **Shutdown**: `close(true)` aborts running jobs' `abortSignal`; limiter waits wake on close and hand the job back; a second SIGINT/SIGTERM during a hung graceful shutdown exits the process.
+- **`Queue.addBulk` registered the wrong cross-queue children**: skipped or duplicate jobs shifted the result array, so a later job was added to another job's cross-queue parent. Results now stay aligned with the input, and returned jobs carry `parentQueue`.
+- **Negative or fractional priority stuck jobs**: `priority: -1` with a delay was never promoted while the scheduler spun on a 1ms timer, and fractional priorities broke score decoding. Priority must be an integer 0-2048, delay a finite number >= 0, attempts an integer >= 0, and backoff delay/jitter finite and >= 0, on every add path (`Queue.add`/`addBulk`, `Producer`, `FlowProducer`, `addDAG`). FlowProducer and DAG validate the whole tree before any write, including queue names.
+- **Cross-queue flows failed with CROSSSLOT in cluster mode**: `FlowProducer.add` put every leaf child's keys into one server function call. In cluster mode, leaf children in another queue are now created first and wired to the parent the same way nested sub-flows are. Standalone still uses the single atomic call.
+- **Client leaks during init**: `Queue` closed no client when the function library load failed or `close()` ran during init, and `FlowProducer` created one client per concurrent first call and never retried a failed load.
+- **`searchJobs()` without a state returned phantom jobs**: the key scan did not escape glob characters in queue names and matched per-subscription and usage-lock sub-keys. Only real job hashes are returned now.
 - **Hung sandboxed jobs held pool slots forever**: a timed-out or revoked sandboxed job kept its worker until the processor replied, queued waiters for aborted jobs still ran later (alongside their retry), and an already-aborted job was still dispatched. Aborted waiters are now dropped, and a processor that has not settled 5 seconds after its abort has its worker thread terminated or child process SIGKILLed and replaced.
 - **Host crash on send to a dead sandbox child**: a proxy response sent after the child exited emitted an unhandled `ERR_IPC_CHANNEL_CLOSED` that killed the worker process. Sends to disconnected children are skipped and the error listener stays attached.
 - **Testing mode diverged from production**: `TestQueue`/`TestWorker` now validate job options, payload size and priority with the same helpers as `Queue.add`; persist `updateData`/`updateProgress` to the stored job; dispatch priority, then LIFO, then FIFO jobs; honor `removeOnComplete`/`removeOnFail` (`true`, count, `{ age, count }`); emit the worker `failed` event on every failed attempt, set `failedReason` and park retries in `delayed` for their backoff (`fixed`, `exponential`, jitter, `backoffStrategies`); and apply deduplication like `glidemq_dedup` (simple frees the id once the job finishes, throttle expires after `ttl`, debounce replaces a delayed job). **Behavior change**: deduplication now applies whenever a job sets `deduplication`, without `new TestQueue(name, { dedup: true })`. Pass `dedup: false` to opt out.
@@ -29,6 +34,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Proxy request bounds (`maxPageSize`, default 1000)**: `GET /jobs`, `/dlq` and `/suspended` without `end` (or `end=-1`) return at most `maxPageSize` items from `start`, and larger explicit spans return 400. `dlq/replay-all` replays at most `maxPageSize` per call, and `clean` rejects a `limit` above it. `POST /flows` rejects flows with more than 1000 nodes.
 - **`prefetch` is capped at `concurrency`** (`concurrency * batch.size` in batch mode). Prefetch above concurrency ran more processors than `concurrency` allowed, or left entries without heartbeats to be reclaimed and run twice.
+
+### Changed
+
+- **Producer priority errors** are now plain `Error`s with the same messages as `Queue.add`, instead of `GlideMQError`.
 
 ### Documentation
 
