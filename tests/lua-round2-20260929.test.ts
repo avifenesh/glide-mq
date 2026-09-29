@@ -308,4 +308,40 @@ describeEachMode('Lua round 2 2026-09-29', (CONNECTION) => {
     const ttl = Number(await cleanupClient.ttl(`${k.job('b1')}:sub:subA`));
     expect(ttl).toBeGreaterThan(twoDaysMs / 1000);
   });
+
+  it('P4/P5: complete and CAF with removeOnComplete still report the parent and free the group slot', async () => {
+    const Q = uniqueQueue('r2-rm-complete');
+    const k = buildKeys(Q);
+    await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true });
+    await cleanupClient.hset(k.group('g'), { maxConcurrency: '2', active: '2', nextSeq: '3' });
+    const edge = { groupKey: 'g', parentQueue: 'other-q', parentId: 'p1', replacedIds: '["old"]' };
+    await cleanupClient.hset(k.job('a'), { id: 'a', name: 'a', state: 'active', orderingSeq: '1', ...edge });
+    await cleanupClient.hset(k.job('b'), { id: 'b', name: 'b', state: 'active', orderingSeq: '2', ...edge });
+    const hints = { orderingKey: undefined, orderingSeq: 1, groupKey: 'g' };
+    const caf = await completeAndFetchNext(
+      cleanupClient,
+      k,
+      'a',
+      '',
+      'rv',
+      Date.now(),
+      CONSUMER_GROUP,
+      'c1',
+      true,
+      undefined,
+      hints,
+    );
+    const viaComplete = await completeJob(cleanupClient, k, 'b', '', 'rv', Date.now(), CONSUMER_GROUP, true);
+    for (const notifications of [caf.parentNotifications, viaComplete]) {
+      expect(notifications.map((m: string) => parseCrossQueueParentNotification(m)![2]).sort()).toHaveLength(2);
+    }
+    expect(caf.parentNotifications.map((m: string) => parseCrossQueueParentNotification(m)![2]).sort()).toEqual([
+      `${keyPrefix('glide', Q)}:a`,
+      `${keyPrefix('glide', Q)}:old`,
+    ]);
+    expect(await cleanupClient.exists([k.job('a'), k.job('b')])).toBe(0);
+    expect(Number(await cleanupClient.zcard(k.completed))).toBe(0);
+    expect(await hget(k.group('g'), 'active')).toBe('0');
+    expect(await hget(k.meta, 'orderdone:g')).toBe('2');
+  });
 });

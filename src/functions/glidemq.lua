@@ -1207,7 +1207,7 @@ redis.register_function('glidemq_complete', function(keys, args)
   local broadcastMode = args[11] or '0'
   local skipEvents = args[12] or '0'
   local skipMetrics = args[13] or '0'
-  local cur = redis.call('HMGET', jobKey, 'revoked', 'state', 'processedOn')
+  local cur = redis.call('HMGET', jobKey, 'revoked', 'state', 'processedOn', 'parentQueue', 'parentId', 'replacedIds')
   if cur[1] == '1' then
     return 'REVOKED'
   end
@@ -1228,12 +1228,12 @@ redis.register_function('glidemq_complete', function(keys, args)
   if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
   if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-  local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
-  local storedParentId = redis.call('HGET', jobKey, 'parentId')
+  local storedParentQueue = cur[4]
+  local storedParentId = cur[5]
   local parentNotifications = {}
   local parentNotificationSet = {}
   enqueueTreeParentNotifies(prefix, jobId, storedParentQueue, storedParentId,
-    redis.call('HGET', jobKey, 'replacedIds'), parentNotifications, parentNotificationSet)
+    cur[6], parentNotifications, parentNotificationSet)
   if broadcastMode ~= '1' then
     if removeMode == 'true' then
       redis.call('ZREM', completedKey, jobId)
@@ -1342,7 +1342,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local skipMetrics = args[19] or '0'
 
   -- Phase 1: Complete current job (same as glidemq_complete)
-  local cur = redis.call('HMGET', jobKey, 'revoked', 'state', 'processedOn')
+  local cur = redis.call('HMGET', jobKey, 'revoked', 'state', 'processedOn', 'parentQueue', 'parentId', 'replacedIds')
   if cur[1] == '1' then
     return {'CURRENT_REVOKED', jobId}
   end
@@ -1377,11 +1377,11 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     end
     if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
     if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
-    local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
-    local storedParentId = redis.call('HGET', jobKey, 'parentId')
+    local storedParentQueue = cur[4]
+    local storedParentId = cur[5]
     local parentNotificationSet = {}
     enqueueTreeParentNotifies(prefix, jobId, storedParentQueue, storedParentId,
-      redis.call('HGET', jobKey, 'replacedIds'), parentNotifications, parentNotificationSet)
+      cur[6], parentNotifications, parentNotificationSet)
     if entryId == '' then decrListActive(prefix .. 'list-active') end
 
     -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
@@ -1492,19 +1492,19 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
 
     local priJobKey = prefix .. 'job:' .. priJobId
     -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' (3 → 1)
-    local priMeta = redis.call('HMGET', priJobKey, 'state', 'revoked', 'expireAt')
+    local priMeta = redis.call('HMGET', priJobKey, 'state', 'revoked', 'expireAt', 'groupKey', 'orderingSeq')
     if priMeta[1] and isActivatableState(priMeta[1]) then
       if priMeta[2] ~= '1' then
         local priExpireAt = tonumber(priMeta[3])
         if not priExpireAt or priExpireAt <= 0 or timestamp <= priExpireAt then
           -- Check ordering/group gates for priority-list jobs
-          local priGroupKey = redis.call('HGET', priJobKey, 'groupKey')
+          local priGroupKey = priMeta[4]
           if priGroupKey and priGroupKey ~= '' then
             local priGroupHashKey = prefix .. 'group:' .. priGroupKey
             local priGrpFields = redis.call('HGETALL', priGroupHashKey)
             local priGrp = {}
             for pf = 1, #priGrpFields, 2 do priGrp[priGrpFields[pf]] = priGrpFields[pf + 1] end
-            local priOrdSeq = tonumber(redis.call('HGET', priJobKey, 'orderingSeq')) or 0
+            local priOrdSeq = tonumber(priMeta[5]) or 0
             local priNextSeq = tonumber(priGrp.nextSeq) or 0
             if priNextSeq > 0 then
               local priAdv = advancePastSkips(priGroupHashKey, priNextSeq)
@@ -1641,6 +1641,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   -- Phase 2: Fetch next job (non-blocking XREADGROUP), skip expired (up to 3 attempts)
   local nextJobId, nextEntryId, nextJobKey
   local nextGroupKey = nil
+  local nextOrderingSeq = nil
   for _fetchAttempt = 1, 3 do
     local nextEntries = redis.call('XREADGROUP', 'GROUP', group, consumer, 'COUNT', 1, 'STREAMS', streamKey, '>')
     if not nextEntries or #nextEntries == 0 then
@@ -1666,7 +1667,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     end
     nextJobKey = prefix .. 'job:' .. nextJobId
     -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' + HGET 'groupKey' (4 → 1)
-    local nextMeta = redis.call('HMGET', nextJobKey, 'state', 'revoked', 'expireAt', 'groupKey')
+    local nextMeta = redis.call('HMGET', nextJobKey, 'state', 'revoked', 'expireAt', 'groupKey', 'orderingSeq')
     if not nextMeta[1] then
       -- state is nil: job hash does not exist
       return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
@@ -1689,6 +1690,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       nextJobId = nil
     else
       nextGroupKey = nextMeta[4]
+      nextOrderingSeq = nextMeta[5]
       break
     end
   end
@@ -1707,7 +1709,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local nextActive = tonumber(nGrp.active) or 0
     local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
     -- Ordering gate
-    local nextJobOrderingSeq = tonumber(redis.call('HGET', nextJobKey, 'orderingSeq')) or 0
+    local nextJobOrderingSeq = tonumber(nextOrderingSeq) or 0
     local nextReturning = false
     if nextJobOrderingSeq > 0 then
       local nextExpectedSeq = tonumber(nGrp.nextSeq) or 0
@@ -2800,7 +2802,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     local waitListKey = prefix .. 'groupq:' .. groupKey
     -- Ordering gate: park future jobs (seq > nextSeq) in sorted groupq.
     -- Returning step-jobs (seq <= nextSeq) are allowed through.
-    local jobOrderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+    local jobOrderingSeq = tonumber(orderingSeq) or 0
     local isReturningStepJob = false
     if jobOrderingSeq > 0 then
       local nextSeq = tonumber(grp.nextSeq) or 0
