@@ -1002,4 +1002,54 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await flushQueue(cleanupClient, qName);
     }
   }, 20000);
+  it('wires leaves with custom job ids into every dependent before they run', async () => {
+    const qName = Q + '-custom-leaf-ids';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const k = buildKeys(qName);
+    try {
+      const jobs = await flow.addDAG({
+        nodes: [
+          { name: 'A', queueName: qName, data: {}, opts: { jobId: 'leaf-a' } },
+          { name: 'B', queueName: qName, data: {}, opts: { jobId: 'leaf-b' } },
+          { name: 'P', queueName: qName, data: {}, deps: ['A', 'B'] },
+          { name: 'Q', queueName: qName, data: {}, deps: ['B'] },
+        ],
+      });
+      expect(jobs.get('A')!.id).toBe('leaf-a');
+      expect(jobs.get('B')!.id).toBe('leaf-b');
+      const pfx = keyPrefix('glide', qName);
+      const pDeps = [...(await cleanupClient.smembers(k.deps(jobs.get('P')!.id)))].map(String).sort();
+      const qDeps = [...(await cleanupClient.smembers(k.deps(jobs.get('Q')!.id)))].map(String);
+      expect(pDeps).toEqual([`${pfx}:leaf-a`, `${pfx}:leaf-b`]);
+      expect(qDeps).toEqual([`${pfx}:leaf-b`]);
+    } finally {
+      await flow.close();
+      await flushQueue(cleanupClient, qName);
+    }
+  });
+
+  it('mixes custom-id and auto-id leaves without reusing an id', async () => {
+    const qName = Q + '-mixed-leaf-ids';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const k = buildKeys(qName);
+    try {
+      const jobs = await flow.addDAG({
+        nodes: [
+          { name: 'A', queueName: qName, data: {}, opts: { jobId: 'leaf-a' } },
+          { name: 'B', queueName: qName, data: {} },
+          { name: 'C', queueName: qName, data: {} },
+          { name: 'P', queueName: qName, data: {}, deps: ['A', 'B'] },
+        ],
+      });
+      const ids = ['A', 'B', 'C', 'P'].map((n) => jobs.get(n)!.id);
+      expect(new Set(ids).size).toBe(4);
+      const pfx = keyPrefix('glide', qName);
+      const pDeps = [...(await cleanupClient.smembers(k.deps(jobs.get('P')!.id)))].map(String).sort();
+      expect(pDeps).toEqual([`${pfx}:${jobs.get('A')!.id}`, `${pfx}:${jobs.get('B')!.id}`].sort());
+      expect(String(await cleanupClient.hget(k.job(jobs.get('C')!.id), 'state'))).toBe('waiting');
+    } finally {
+      await flow.close();
+      await flushQueue(cleanupClient, qName);
+    }
+  });
 });

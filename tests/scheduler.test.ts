@@ -969,6 +969,19 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     await queue.removeJobScheduler('switch-end-rac');
   });
 
+  it('changing an every schedule recomputes nextRun instead of holding it', async () => {
+    const name = 'every-change-recompute';
+    await queue.upsertJobScheduler(name, { every: 600_000 }, { name: 'every-change' });
+    const first = await queue.getJobScheduler(name);
+    const before = Date.now();
+    await queue.upsertJobScheduler(name, { every: 1000 }, { name: 'every-change' });
+    const changed = await queue.getJobScheduler(name);
+    expect(changed!.every).toBe(1000);
+    expect(changed!.nextRun).toBeLessThan(first!.nextRun);
+    expect(changed!.nextRun).toBeLessThanOrEqual(before + 1000 + 50);
+    await queue.removeJobScheduler(name);
+  });
+
   it('re-upserting a repeatAfterComplete scheduler while its job is in flight keeps the awaiting state', async () => {
     const k = buildKeys(Q);
     const name = 'rac-inflight-state';
