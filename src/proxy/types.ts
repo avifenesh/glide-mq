@@ -35,6 +35,13 @@ export interface ProxyOptions {
    */
   maxPageSize?: number;
   /**
+   * Upper bound in ms for `opts.waitTimeout` on `POST /queues/:name/jobs/wait`; larger values
+   * return 400. An omitted `waitTimeout` uses 30000 capped at this value. Each in-flight wait
+   * holds a dedicated blocking connection, released early if the HTTP client disconnects.
+   * Default: 60000.
+   */
+  maxWaitTimeout?: number;
+  /**
    * Callback for queue-level errors and for internal request errors. 5xx responses return a
    * generic message; the underlying error is passed here. Defaults to console.error if not provided.
    */

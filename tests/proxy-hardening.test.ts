@@ -791,3 +791,78 @@ describe('HTTP proxy hardening - SSE errors after headers', () => {
     await expectStreamEndsWithError(`/queues/${queueName}/jobs/${id}/stream`, 'xrange failed 10.0.0.9:6379');
   });
 });
+
+describe('HTTP proxy hardening - jobs/wait bounds', () => {
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+  const queueName = `proxy-hard-${RUN_ID}-wait`;
+  const blockingClients: TrackedClient[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    connectionModule.createBlockingClient = async (conn: any) => {
+      const client = await originalCreateBlockingClient(conn);
+      const entry: TrackedClient = { closed: false };
+      const close = client.close.bind(client);
+      client.close = (...args: unknown[]) => {
+        entry.closed = true;
+        return close(...args);
+      };
+      blockingClients.push(entry);
+      return client;
+    };
+    const proxy = createProxyServer({ connection: CONNECTION, maxWaitTimeout: 20000 });
+    proxyClose = proxy.close;
+    ({ baseUrl, server } = await listen(proxy.app));
+  });
+
+  afterEach(() => {
+    blockingClients.length = 0;
+  });
+
+  afterAll(async () => {
+    connectionModule.createBlockingClient = originalCreateBlockingClient;
+    server.closeAllConnections?.();
+    await proxyClose();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  }, 30000);
+
+  it('rejects an invalid maxWaitTimeout at startup', () => {
+    expect(() => createProxyServer({ connection: CONNECTION, maxWaitTimeout: 0 })).toThrow(/maxWaitTimeout/);
+    expect(() => createProxyServer({ connection: CONNECTION, maxWaitTimeout: 1.5 })).toThrow(/maxWaitTimeout/);
+  });
+
+  it('returns 400 when waitTimeout exceeds maxWaitTimeout', async () => {
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs/wait`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'too-long', data: {}, opts: { waitTimeout: 20001 } }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/maxWaitTimeout \(20000\)/);
+    expect(blockingClients).toHaveLength(0);
+  });
+
+  it('releases the blocking client when the HTTP client disconnects before the result', async () => {
+    const body = JSON.stringify({ name: 'never-processed', data: {}, opts: { waitTimeout: 15000 } });
+    const url = new URL(`${baseUrl}/queues/${queueName}/jobs/wait`);
+    const req = http.request({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    });
+    req.on('error', () => undefined);
+    req.end(body);
+
+    await waitFor(() => blockingClients.length === 1, 5000);
+    await sleep(100);
+    req.destroy();
+    await waitFor(() => blockingClients[0].closed, 3000);
+  });
+});

@@ -146,6 +146,12 @@ function createUsageQueueSummary(): UsageQueueSummary {
   };
 }
 
+function addAndWaitAbortError(): Error {
+  const err = new GlideMQError('addAndWait aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
 function createUsageSummaryResult(startTime: number, endTime: number): UsageSummary {
   return {
     startTime,
@@ -910,13 +916,20 @@ export class Queue<D = any, R = any> extends EventEmitter {
       );
     }
 
-    const { waitTimeout: _waitTimeout, ...jobOpts } = opts ?? {};
+    const { waitTimeout: _waitTimeout, signal, ...jobOpts } = opts ?? {};
+    if (signal?.aborted) {
+      throw addAndWaitAbortError();
+    }
     const client = await this.getClient();
     const eventCursor = await this.latestEventCursor(client);
     const blockingClient = await createBlockingClient(this.opts.connection!);
     if (this.closing) {
       blockingClient.close();
       throw new GlideMQError('Queue is closing');
+    }
+    if (signal?.aborted) {
+      blockingClient.close();
+      throw addAndWaitAbortError();
     }
     this.waitClients.add(blockingClient);
     try {
@@ -933,7 +946,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       // handles cleanup (including reconnection) in its own finally block.
       // The await ensures that if waitForJobResult rejects, the error
       // propagates through this try/catch for proper handling.
-      return await this.waitForJobResult(blockingClient, job.id, eventCursor, waitTimeout);
+      return await this.waitForJobResult(blockingClient, job.id, eventCursor, waitTimeout, signal);
     } catch (err) {
       // Re-throw after ensuring cleanup runs in finally
       throw err;
@@ -1125,16 +1138,21 @@ export class Queue<D = any, R = any> extends EventEmitter {
     jobId: string,
     lastId: string,
     waitTimeout: number,
+    signal?: AbortSignal,
   ): Promise<R> {
     let cursor = lastId;
     const deadline = Date.now() + waitTimeout;
     let reconnectBackoff = 0;
     let clientClosed = false;
     let rejectOnClose: ((err: Error) => void) | null = null;
+    // Rejects when the queue closes or the caller aborts, so an in-flight XREAD BLOCK or a
+    // reconnect backoff sleep ends immediately instead of running to the deadline.
     const closePromise = new Promise<never>((_, reject) => {
       rejectOnClose = reject;
       this.waitRejectors.add(reject);
     });
+    const onAbort = () => rejectOnClose?.(addAndWaitAbortError());
+    signal?.addEventListener('abort', onAbort, { once: true });
 
     try {
       while (Date.now() < deadline) {
@@ -1158,6 +1176,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
           clientClosed = true;
           if (this.closing) {
             throw new GlideMQError('Queue is closing');
+          }
+          if (signal?.aborted) {
+            throw addAndWaitAbortError();
           }
           const remaining = deadline - Date.now();
           if (remaining <= 0) {
@@ -1227,6 +1248,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         }
       }
     } finally {
+      signal?.removeEventListener('abort', onAbort);
       if (rejectOnClose) {
         this.waitRejectors.delete(rejectOnClose);
       }

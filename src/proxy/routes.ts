@@ -14,6 +14,8 @@ import type { AddJobRequest, AddJobResponse, AddJobSkippedResponse, ProxyOptions
 
 const MAX_BULK_SIZE = 1000;
 const DEFAULT_MAX_PAGE_SIZE = MAX_BULK_SIZE;
+const DEFAULT_WAIT_TIMEOUT_MS = 30000;
+const DEFAULT_MAX_WAIT_TIMEOUT_MS = 60000;
 const MIN_JOB_OPTS_LOCK_DURATION_MS = 1000;
 const MAX_JOB_OPTS_LOCK_DURATION_MS = 86_400_000;
 const SSE_BLOCK_MS = 5000;
@@ -313,7 +315,12 @@ function trackDisconnect(req: Request, res: Response): DisconnectTracker {
     closed = true;
     for (const fn of listeners.splice(0)) fn();
   };
-  req.once('close', markClosed);
+  // A request whose body was consumed (POST through express.json) is auto-destroyed and emits
+  // 'close' while the socket is still open; only a dead socket counts as a disconnect there.
+  // The response 'close' fires on a lost connection regardless of body handling.
+  req.once('close', () => {
+    if (req.socket?.destroyed || res.destroyed) markClosed();
+  });
   res.once('close', markClosed);
   if (req.destroyed || res.destroyed || req.socket?.destroyed) markClosed();
   return {
@@ -719,6 +726,10 @@ export function createRoutes(
   const maxPageSize = opts.maxPageSize ?? DEFAULT_MAX_PAGE_SIZE;
   if (!Number.isSafeInteger(maxPageSize) || maxPageSize < 1) {
     throw new Error('ProxyOptions.maxPageSize must be a positive integer');
+  }
+  const maxWaitTimeout = opts.maxWaitTimeout ?? DEFAULT_MAX_WAIT_TIMEOUT_MS;
+  if (!Number.isSafeInteger(maxWaitTimeout) || maxWaitTimeout < 1) {
+    throw new Error('ProxyOptions.maxWaitTimeout must be a positive integer');
   }
   const flowPrefix = opts.prefix ?? 'glide';
   const errorHandler =
@@ -1277,6 +1288,7 @@ export function createRoutes(
   });
 
   router.post('/queues/:name/jobs/wait', async (req: Request, res: Response) => {
+    const disconnect = trackDisconnect(req, res);
     try {
       if (!checkAllowlist(req, res)) return;
 
@@ -1289,11 +1301,26 @@ export function createRoutes(
       if (validationError) {
         throw httpError(400, validationError);
       }
+      const requestedWait = body.opts?.waitTimeout as number | undefined;
+      if (requestedWait !== undefined && requestedWait > maxWaitTimeout) {
+        throw httpError(400, `opts.waitTimeout exceeds maxWaitTimeout (${maxWaitTimeout})`);
+      }
+      const waitTimeout = requestedWait ?? Math.min(DEFAULT_WAIT_TIMEOUT_MS, maxWaitTimeout);
 
       const queue = await getQueue(param(req, 'name'));
-      const result = await queue.addAndWait(body.name, body.data ?? null, body.opts as any);
+      // A client that leaves stops the wait and frees its blocking connection; the job stays queued.
+      const abort = new AbortController();
+      disconnect.onClose(() => abort.abort());
+      if (disconnect.closed) return;
+      const result = await queue.addAndWait(body.name, body.data ?? null, {
+        ...(body.opts as any),
+        signal: abort.signal,
+        waitTimeout,
+      });
+      if (disconnect.closed) return;
       res.status(200).json({ result });
     } catch (err) {
+      if (disconnect.closed) return;
       let mapped = err;
       if (err instanceof Error && (err as any).status == null) {
         if (err.message.includes('did not finish within')) {
