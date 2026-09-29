@@ -244,7 +244,6 @@ local function releaseParentIfReady(parentDepsKey, parentJobKey, parentStreamKey
   if remaining <= 0 and redis.call('HGET', parentJobKey, 'state') == 'waiting-children' then
     redis.call('HSET', parentJobKey, 'state', 'waiting')
     xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
-    emitEvent(parentEventsKey, 'active', parentId, nil)
   end
   return remaining
 end
@@ -4273,7 +4272,6 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
   if depsCompleted >= totalDeps then
     redis.call('HSET', jobKey, 'state', 'waiting')
     xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
-    emitEvent(eventsKey, 'active', jobId, nil)
     if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
     return 'completed'
   end

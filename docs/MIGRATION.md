@@ -613,7 +613,7 @@ The processor function signature is identical. The only change is the connection
 | `'removed'`           | `'removed'`          | Full                                                                                      |
 | `'retries-exhausted'` | `'failed'`           | Changed - check `job.attemptsMade >= job.opts.attempts`                                   |
 | `'waiting'`           | -                    | Gap                                                                                       |
-| `'active'`            | `'active'`           | Partial - emitted only on some activation paths; do not rely on it                        |
+| `'active'`            | -                    | Gap - use `worker.on('active')`; the events stream carries no activation event            |
 | `'delayed'`           | -                    | Gap (`'retrying'` carries the backoff `delay`)                                            |
 | `'drained'`           | `'drained'`          | Changed - emitted by `queue.drain()` with `jobId` = removed count, not when queue empties |
 | `'cleaned'`           | `'cleaned'`          | Changed - emitted by `queue.clean()` with `jobId` = removed count                         |
