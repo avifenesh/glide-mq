@@ -198,3 +198,83 @@ describe('HTTP proxy hardening', () => {
     });
   });
 });
+
+describe('HTTP proxy hardening - bounded list ranges', () => {
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+  const queueName = `proxy-hard-${RUN_ID}-pages`;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    const proxy = createProxyServer({ connection: CONNECTION, maxPageSize: 3 });
+    proxyClose = proxy.close;
+    ({ baseUrl, server } = await listen(proxy.app));
+    for (let i = 0; i < 5; i++) {
+      const res = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: `page-${i}`, data: { i } }),
+      });
+      expect(res.status).toBe(201);
+    }
+  });
+
+  afterAll(async () => {
+    server.closeAllConnections?.();
+    await proxyClose();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  }, 30000);
+
+  it('rejects an invalid maxPageSize', () => {
+    expect(() => createProxyServer({ connection: CONNECTION, maxPageSize: 0 })).toThrow(/maxPageSize/);
+    expect(() => createProxyServer({ connection: CONNECTION, maxPageSize: 1.5 })).toThrow(/maxPageSize/);
+  });
+
+  it('GET /jobs caps the default and end=-1 page and rejects oversized spans', async () => {
+    const defaultRes = await fetch(`${baseUrl}/queues/${queueName}/jobs?state=waiting`);
+    expect(defaultRes.status).toBe(200);
+    expect((await defaultRes.json()).jobs).toHaveLength(3);
+
+    const openEnded = await fetch(`${baseUrl}/queues/${queueName}/jobs?state=waiting&start=3&end=-1`);
+    expect(openEnded.status).toBe(200);
+    expect((await openEnded.json()).jobs).toHaveLength(2);
+
+    const withinCap = await fetch(`${baseUrl}/queues/${queueName}/jobs?state=waiting&start=1&end=3`);
+    expect(withinCap.status).toBe(200);
+    expect((await withinCap.json()).jobs).toHaveLength(3);
+
+    const oversized = await fetch(`${baseUrl}/queues/${queueName}/jobs?state=waiting&start=0&end=3`);
+    expect(oversized.status).toBe(400);
+    expect((await oversized.json()).error).toMatch(/maximum page size \(3\)/);
+  });
+
+  it('dlq, suspended, replay-all, and clean enforce the cap', async () => {
+    const dlq = await fetch(`${baseUrl}/queues/${queueName}/dlq?start=0&end=10`);
+    expect(dlq.status).toBe(400);
+
+    const suspended = await fetch(`${baseUrl}/queues/${queueName}/suspended?end=3`);
+    expect(suspended.status).toBe(400);
+    const suspendedDefault = await fetch(`${baseUrl}/queues/${queueName}/suspended`);
+    expect(suspendedDefault.status).toBe(200);
+
+    const replayAll = await fetch(`${baseUrl}/queues/${queueName}/dlq/replay-all`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count: 4 }),
+    });
+    expect(replayAll.status).toBe(400);
+
+    const clean = await fetch(`${baseUrl}/queues/${queueName}/clean?state=completed&age=0&limit=4`, {
+      method: 'DELETE',
+    });
+    expect(clean.status).toBe(400);
+    const cleanOk = await fetch(`${baseUrl}/queues/${queueName}/clean?state=completed&age=0&limit=3`, {
+      method: 'DELETE',
+    });
+    expect(cleanOk.status).toBe(200);
+  });
+});

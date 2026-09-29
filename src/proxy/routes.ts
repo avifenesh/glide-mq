@@ -13,6 +13,7 @@ import { buildKeys, compileSubjectMatcher, hashDataToRecord, validateJobId, vali
 import type { AddJobRequest, AddJobResponse, AddJobSkippedResponse, ProxyOptions } from './types';
 
 const MAX_BULK_SIZE = 1000;
+const DEFAULT_MAX_PAGE_SIZE = MAX_BULK_SIZE;
 const MIN_JOB_OPTS_LOCK_DURATION_MS = 1000;
 const MAX_JOB_OPTS_LOCK_DURATION_MS = 86_400_000;
 const SSE_BLOCK_MS = 5000;
@@ -145,6 +146,24 @@ function parseInteger(raw: string, label: string, opts?: { allowNegativeOne?: bo
     throw httpError(400, `${label} must be >= ${opts.min}`);
   }
   return value;
+}
+
+/**
+ * Parse `start`/`end` list query params into an inclusive range of at most `maxPageSize` items.
+ * An omitted `end` or `end=-1` returns up to `maxPageSize` items from `start`; an explicit span
+ * larger than the cap is rejected.
+ */
+function parsePageRange(req: Request, maxPageSize: number): { start: number; end: number } {
+  const startRaw = queryValue(req, 'start');
+  const endRaw = queryValue(req, 'end');
+  const start = startRaw !== undefined ? parseInteger(startRaw, 'start', { min: 0 }) : 0;
+  const end = endRaw !== undefined ? parseInteger(endRaw, 'end', { allowNegativeOne: true, min: 0 }) : -1;
+  const cappedEnd = start + maxPageSize - 1;
+  if (end === -1) return { start, end: cappedEnd };
+  if (end > cappedEnd) {
+    throw httpError(400, `Range exceeds maximum page size (${maxPageSize})`);
+  }
+  return { start, end };
 }
 
 function parseBoolean(raw: string, label: string): boolean {
@@ -666,6 +685,10 @@ export function createRoutes(
   const activeQueueEventClosers = new Set<() => void>();
   const startTime = Date.now();
   const allowedQueues = opts.queues ? new Set(opts.queues) : null;
+  const maxPageSize = opts.maxPageSize ?? DEFAULT_MAX_PAGE_SIZE;
+  if (!Number.isSafeInteger(maxPageSize) || maxPageSize < 1) {
+    throw new Error('ProxyOptions.maxPageSize must be a positive integer');
+  }
   const flowPrefix = opts.prefix ?? 'glide';
   const errorHandler =
     opts.onError ??
@@ -1166,11 +1189,8 @@ export function createRoutes(
       if (!checkAllowlist(req, res)) return;
       const queue = await getQueue(param(req, 'name'));
       const state = parseQueueState(req);
-      const startRaw = queryValue(req, 'start');
-      const endRaw = queryValue(req, 'end');
+      const { start, end } = parsePageRange(req, maxPageSize);
       const excludeDataRaw = queryValue(req, 'excludeData');
-      const start = startRaw !== undefined ? parseInteger(startRaw, 'start', { min: 0 }) : 0;
-      const end = endRaw !== undefined ? parseInteger(endRaw, 'end', { allowNegativeOne: true, min: 0 }) : -1;
       const excludeData = excludeDataRaw !== undefined ? parseBoolean(excludeDataRaw, 'excludeData') : false;
 
       const jobs = await queue.getJobs(state, start, end, { excludeData });
@@ -1241,10 +1261,7 @@ export function createRoutes(
     try {
       if (!checkAllowlist(req, res)) return;
       const queue = await getQueue(param(req, 'name'));
-      const startRaw = queryValue(req, 'start');
-      const endRaw = queryValue(req, 'end');
-      const start = startRaw !== undefined ? parseInteger(startRaw, 'start', { min: 0 }) : 0;
-      const end = endRaw !== undefined ? parseInteger(endRaw, 'end', { allowNegativeOne: true, min: 0 }) : -1;
+      const { start, end } = parsePageRange(req, maxPageSize);
       const jobs = await queue.getDeadLetterJobs(start, end);
       res.status(200).json({
         count: jobs.length,
@@ -1261,9 +1278,12 @@ export function createRoutes(
       if (!checkAllowlist(req, res)) return;
       const body = req.body as { count?: unknown } | undefined;
       const countRaw = typeof body?.count === 'number' ? String(body.count) : queryValue(req, 'count');
-      const count = countRaw !== undefined ? parseInteger(countRaw, 'count', { min: 1 }) : undefined;
+      const count = countRaw !== undefined ? parseInteger(countRaw, 'count', { min: 1 }) : maxPageSize;
+      if (count > maxPageSize) {
+        throw httpError(400, `count exceeds maximum page size (${maxPageSize})`);
+      }
       const queue = await getQueue(param(req, 'name'));
-      const dlqJobs = await queue.getDeadLetterJobs(0, count !== undefined ? count - 1 : -1);
+      const dlqJobs = await queue.getDeadLetterJobs(0, count - 1);
       const replayedJobs: Array<{ id: string; name: string; sourceId: string }> = [];
 
       for (const job of dlqJobs) {
@@ -1706,11 +1726,8 @@ export function createRoutes(
     try {
       if (!checkAllowlist(req, res)) return;
       const queue = await getQueue(param(req, 'name'));
-      const startRaw = queryValue(req, 'start');
-      const endRaw = queryValue(req, 'end');
+      const { start, end } = parsePageRange(req, maxPageSize);
       const excludeDataRaw = queryValue(req, 'excludeData');
-      const start = startRaw !== undefined ? parseInteger(startRaw, 'start', { min: 0 }) : 0;
-      const end = endRaw !== undefined ? parseInteger(endRaw, 'end', { allowNegativeOne: true, min: 0 }) : -1;
       const excludeData = excludeDataRaw !== undefined ? parseBoolean(excludeDataRaw, 'excludeData') : false;
       const jobs = await queue.getSuspendedJobs(start, end, { excludeData });
       const serialized = await Promise.all(
@@ -1765,7 +1782,10 @@ export function createRoutes(
       }
       const ageSeconds = parseInteger(ageRaw, 'age', { min: 0 });
       const limitRaw = queryValue(req, 'limit');
-      const limit = limitRaw !== undefined ? parseInteger(limitRaw, 'limit', { min: 1 }) : 1000;
+      const limit = limitRaw !== undefined ? parseInteger(limitRaw, 'limit', { min: 1 }) : maxPageSize;
+      if (limit > maxPageSize) {
+        throw httpError(400, `limit exceeds maximum page size (${maxPageSize})`);
+      }
       const queue = await getQueue(param(req, 'name'));
       const removed = await queue.clean(ageSeconds * 1000, limit, state);
       res.status(200).json({ removed });

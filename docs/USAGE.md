@@ -861,6 +861,7 @@ proxy.app.listen(3000);
 
 - Add your own auth/rate-limit middleware before exposing the proxy to a network. The proxy does not ship built-in authentication.
 - Queue-wide SSE (`/queues/:name/events`) and broadcast SSE (`/broadcast/:name/events`) require `connection`, not just a shared `client`, because they allocate blocking readers internally.
+- List and batch routes are bounded by `maxPageSize` (default `1000`). `GET /queues/:name/jobs`, `/dlq`, and `/suspended` return at most `maxPageSize` items from `start` when `end` is omitted or `-1`, and reject an explicit `start`/`end` span larger than the cap with `400`. `POST /queues/:name/dlq/replay-all` defaults `count` to the cap and `DELETE /queues/:name/clean` defaults `limit` to the cap; larger values return `400`. Page through larger sets with `start`/`end`.
 
 | Method | Path                                 | Description                                                                                                                                              |
 | ------ | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |

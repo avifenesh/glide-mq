@@ -232,6 +232,7 @@ proxy.app.listen(3000);
 | `prefix` | `string` | Key prefix (default: `glide`). |
 | `queues` | `string[]` | Optional allowlist. Unlisted queue names return `403`. |
 | `compression` | `'none' \| 'gzip'` | Transparent job payload compression. |
+| `maxPageSize` | `number` | Max items per list/batch request (default `1000`). Caps `start`/`end` spans on job, DLQ, and suspended listings, `count` on DLQ replay-all, and `limit` on clean. |
 | `onError` | `(err, queueName) => void` | Queue-level error hook. |
 
 ### Route Surface
