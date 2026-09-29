@@ -363,6 +363,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
   }
 
+  private reconnectRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
   private reconnectCtx = {
     isActive: () => this.running && !this.closing,
     getBackoff: () => this.reconnectBackoff,
@@ -372,15 +374,44 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     onError: (err: unknown) => {
       this.emit('error', err);
     },
+    setRetryTimer: (timer: ReturnType<typeof setTimeout> | null) => {
+      this.reconnectRetryTimer = timer;
+    },
   };
 
   /**
    * Attempt to reconnect clients and resume polling after a connection error.
+   * close() can land during any await below. Each resume point checks
+   * `closing` and disposes the clients this attempt created, so a late
+   * reconnect cannot leave a client, scheduler or heartbeat timer behind.
    */
   private async reconnectAndResume(): Promise<void> {
     await reconnectWithBackoff(
       this.reconnectCtx,
       async () => {
+        // Clients this attempt created and has not yet handed to a field.
+        // Once assigned, performClose owns them unless they are still there.
+        let pendingCommand: Client | null = null;
+        let pendingBlocking: Client | null = null;
+        let assignedBlocking: Client | null = null;
+        const closeQuietly = (client: Client) => {
+          try {
+            client.close();
+          } catch {
+            /* ignore */
+          }
+        };
+        const abortIfClosing = () => {
+          if (!this.closing) return;
+          if (pendingCommand) closeQuietly(pendingCommand);
+          if (pendingBlocking) closeQuietly(pendingBlocking);
+          if (assignedBlocking && this.blockingClient === assignedBlocking) {
+            this.blockingClient = null;
+            closeQuietly(assignedBlocking);
+          }
+          throw new ConnectionError('Worker closed during reconnect.');
+        };
+
         // Close stale blocking client (always owned)
         if (this.blockingClient) {
           try {
@@ -402,9 +433,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
               }
               this.commandClient = null;
             }
-            const client = await createClient(this.opts.connection!);
-            await ensureFunctionLibrary(client, undefined, this.opts.connection!.clusterMode ?? false);
-            this.commandClient = client;
+            pendingCommand = await createClient(this.opts.connection!);
+            abortIfClosing();
+            await ensureFunctionLibrary(pendingCommand, undefined, this.opts.connection!.clusterMode ?? false);
+            abortIfClosing();
+            this.commandClient = pendingCommand;
+            pendingCommand = null;
           } else if (this.commandClient) {
             // Keep the live command client so in-flight completions and
             // heartbeats continue. Closing it here freezes lastActive and
@@ -416,6 +450,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
               this.emit('error', new ConnectionError('Command client is unreachable while jobs are in flight.'));
               throw err;
             }
+            abortIfClosing();
           }
         } else {
           // Injected command client - verify liveness and re-ensure library
@@ -430,12 +465,22 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             );
             throw err;
           }
+          abortIfClosing();
         }
 
-        this.blockingClient = await createBlockingClient(this.opts.connection!);
+        pendingBlocking = await createBlockingClient(this.opts.connection!);
+        abortIfClosing();
+        this.blockingClient = assignedBlocking = pendingBlocking;
+        pendingBlocking = null;
 
         // Re-ensure consumer group
         await createConsumerGroup(this.commandClient!, this.queueKeys.stream, this.consumerGroup, this.startFrom);
+        abortIfClosing();
+
+        // Re-register before starting timers so no await separates the last
+        // closing check from the scheduler and heartbeat creation.
+        await this.registerWorker();
+        abortIfClosing();
 
         // Restart scheduler with the (possibly same) client
         if (this.scheduler) {
@@ -444,11 +489,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.scheduler = this.createScheduler(this.commandClient!);
         this.scheduler.start();
 
-        // Re-register worker and restart heartbeat timer after reconnect
         if (this.workerHeartbeatTimer) {
           clearInterval(this.workerHeartbeatTimer);
         }
-        await this.registerWorker();
         const hbMs = Math.max(1000, Math.floor(this.stalledInterval / 2));
         this.workerHeartbeatTimer = setInterval(() => {
           void this.registerWorker();
@@ -2106,6 +2149,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   }
 
   private async performClose(force?: boolean): Promise<void> {
+    if (this.reconnectRetryTimer) {
+      clearTimeout(this.reconnectRetryTimer);
+      this.reconnectRetryTimer = null;
+    }
     // Wait for init to complete so clients are available for cleanup
     await this.initPromise.catch(() => {});
     await this.stopSchedulerOnClose(force);

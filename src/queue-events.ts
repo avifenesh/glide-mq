@@ -15,6 +15,7 @@ export class QueueEvents extends EventEmitter {
   private initPromise: Promise<void>;
   private blockTimeout: number;
   private reconnectBackoff = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(name: string, opts: QueueEventsOptions) {
     super();
@@ -64,7 +65,10 @@ export class QueueEvents extends EventEmitter {
         if (this.running && !this.closing) {
           this.emit('error', err);
           this.reconnectBackoff = nextReconnectDelay(this.reconnectBackoff);
-          setTimeout(() => this.reconnectAndResume(), this.reconnectBackoff);
+          this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            void this.reconnectAndResume();
+          }, this.reconnectBackoff);
         }
       });
   }
@@ -77,6 +81,9 @@ export class QueueEvents extends EventEmitter {
     },
     onError: (err: unknown) => {
       this.emit('error', err);
+    },
+    setRetryTimer: (timer: ReturnType<typeof setTimeout> | null) => {
+      this.reconnectTimer = timer;
     },
   };
 
@@ -96,8 +103,22 @@ export class QueueEvents extends EventEmitter {
           this.client = null;
         }
 
-        this.client = await createBlockingClient(this.opts.connection);
-        await ensureFunctionLibrary(this.client, undefined, this.opts.connection.clusterMode ?? false);
+        // close() can land during either await. Keep the new client local
+        // until both finish so close() never misses a client created late.
+        const client = await createBlockingClient(this.opts.connection);
+        try {
+          if (this.closing) throw new GlideMQError('QueueEvents closed during reconnect.');
+          await ensureFunctionLibrary(client, undefined, this.opts.connection.clusterMode ?? false);
+          if (this.closing) throw new GlideMQError('QueueEvents closed during reconnect.');
+        } catch (err) {
+          try {
+            client.close();
+          } catch {
+            /* ignore */
+          }
+          throw err;
+        }
+        this.client = client;
       },
       () => this.pollLoop(),
     );
@@ -159,6 +180,10 @@ export class QueueEvents extends EventEmitter {
     if (this.closing) return;
     this.closing = true;
     this.running = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     // Wait for init to complete so client is available for cleanup
     try {
       await this.initPromise;
