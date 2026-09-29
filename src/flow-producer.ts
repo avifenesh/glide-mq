@@ -36,6 +36,7 @@ export class FlowProducer {
   private client: Client | null = null;
   private clientOwned = true;
   private closing = false;
+  private initPromise: Promise<Client> | null = null;
   private serializer: Serializer;
 
   constructor(opts: FlowProducerOptions) {
@@ -51,20 +52,40 @@ export class FlowProducer {
     if (this.closing) {
       throw new GlideMQError('FlowProducer is closing');
     }
-    if (!this.client) {
-      if (this.opts.client) {
-        const injected = this.opts.client;
-        const clusterMode = this.opts.connection?.clusterMode ?? isClusterClient(injected);
-        await ensureFunctionLibraryOnce(injected, LIBRARY_SOURCE, clusterMode);
-        this.client = injected;
-        this.clientOwned = false;
-      } else {
-        this.client = await createClient(this.opts.connection!);
-        this.clientOwned = true;
-        await ensureFunctionLibrary(this.client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
-      }
+    if (this.client) return this.client;
+    // Share one init across concurrent callers; a failed init is cleared so
+    // the next call retries, and an owned client is never leaked.
+    this.initPromise ??= this.initClient().catch((err) => {
+      this.initPromise = null;
+      throw err;
+    });
+    return this.initPromise;
+  }
+
+  private async initClient(): Promise<Client> {
+    if (this.opts.client) {
+      const injected = this.opts.client;
+      const clusterMode = this.opts.connection?.clusterMode ?? isClusterClient(injected);
+      await ensureFunctionLibraryOnce(injected, LIBRARY_SOURCE, clusterMode);
+      if (this.closing) throw new GlideMQError('FlowProducer is closing');
+      this.clientOwned = false;
+      this.client = injected;
+      return injected;
     }
-    return this.client;
+    const client = await createClient(this.opts.connection!);
+    try {
+      await ensureFunctionLibrary(client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
+    } catch (err) {
+      client.close();
+      throw err;
+    }
+    if (this.closing) {
+      client.close();
+      throw new GlideMQError('FlowProducer is closing');
+    }
+    this.clientOwned = true;
+    this.client = client;
+    return client;
   }
 
   /**

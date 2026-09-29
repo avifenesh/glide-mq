@@ -2,7 +2,7 @@
  * Producer-side API correctness regressions (Queue, Producer, FlowProducer).
  * Runs against both standalone (:6379) and cluster (:7000).
  */
-import { it, expect, beforeAll, afterAll } from 'vitest';
+import { it, expect, beforeAll, afterAll, afterEach, describe, vi } from 'vitest';
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
@@ -10,6 +10,92 @@ const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { Producer } = require('../dist/producer') as typeof import('../src/producer');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys, keyPrefix } = require('../dist/utils') as typeof import('../src/utils');
+const connection = require('../dist/connection') as typeof import('../src/connection');
+
+describe('client initialization lifecycle', () => {
+  const CONN = { addresses: [{ host: 'localhost', port: 6379 }] };
+
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => (resolve = r));
+    return { promise, resolve };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('Queue closes a created client when library load fails', async () => {
+    const fake = { close: vi.fn() };
+    vi.spyOn(connection, 'createClient').mockResolvedValue(fake as any);
+    vi.spyOn(connection, 'ensureFunctionLibrary').mockRejectedValue(new Error('load failed'));
+    const queue = new Queue('apicorr-init-q1', { connection: CONN });
+    queue.on('error', () => {});
+    await expect(queue.getClient()).rejects.toThrow('load failed');
+    expect(fake.close).toHaveBeenCalledTimes(1);
+    await queue.close();
+  });
+
+  it('Queue closes a client whose init finishes after close()', async () => {
+    const fake = { close: vi.fn() };
+    const created = deferred<any>();
+    vi.spyOn(connection, 'createClient').mockReturnValue(created.promise);
+    vi.spyOn(connection, 'ensureFunctionLibrary').mockResolvedValue(undefined as any);
+    const queue = new Queue('apicorr-init-q2', { connection: CONN });
+    const pending = queue.getClient();
+    await queue.close();
+    created.resolve(fake);
+    await expect(pending).rejects.toThrow('closing');
+    expect(fake.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('FlowProducer shares one init across concurrent callers', async () => {
+    const fake = { close: vi.fn() };
+    const created = deferred<any>();
+    const createSpy = vi.spyOn(connection, 'createClient').mockReturnValue(created.promise);
+    vi.spyOn(connection, 'ensureFunctionLibrary').mockResolvedValue(undefined as any);
+    const flow = new FlowProducer({ connection: CONN });
+    const a = (flow as any).getClient();
+    const b = (flow as any).getClient();
+    created.resolve(fake);
+    expect(await a).toBe(fake);
+    expect(await b).toBe(fake);
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    await flow.close();
+    expect(fake.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('FlowProducer closes a client after a failed library load and retries', async () => {
+    const first = { close: vi.fn() };
+    const second = { close: vi.fn() };
+    const createSpy = vi
+      .spyOn(connection, 'createClient')
+      .mockResolvedValueOnce(first as any)
+      .mockResolvedValueOnce(second as any);
+    vi.spyOn(connection, 'ensureFunctionLibrary')
+      .mockRejectedValueOnce(new Error('load failed'))
+      .mockResolvedValueOnce(undefined as any);
+    const flow = new FlowProducer({ connection: CONN });
+    await expect((flow as any).getClient()).rejects.toThrow('load failed');
+    expect(first.close).toHaveBeenCalledTimes(1);
+    expect(await (flow as any).getClient()).toBe(second);
+    expect(createSpy).toHaveBeenCalledTimes(2);
+    await flow.close();
+  });
+
+  it('FlowProducer closes a client whose init finishes after close()', async () => {
+    const fake = { close: vi.fn() };
+    const created = deferred<any>();
+    vi.spyOn(connection, 'createClient').mockReturnValue(created.promise);
+    vi.spyOn(connection, 'ensureFunctionLibrary').mockResolvedValue(undefined as any);
+    const flow = new FlowProducer({ connection: CONN });
+    const pending = (flow as any).getClient();
+    await flow.close();
+    created.resolve(fake);
+    await expect(pending).rejects.toThrow('closing');
+    expect(fake.close).toHaveBeenCalledTimes(1);
+  });
+});
 
 describeEachMode('Queue.addBulk cross-queue parents', (CONNECTION) => {
   const Q = 'test-apicorr-bulk-' + Date.now();

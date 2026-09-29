@@ -629,19 +629,28 @@ export class Queue<D = any, R = any> extends EventEmitter {
               this.emit('error', err);
               throw err;
             }
+            if (this.closing) {
+              throw new GlideMQError('Queue is closing');
+            }
             this.client = injected;
             this.clientOwned = false;
             return injected;
           }
 
-          let client: Client;
+          let client: Client | undefined;
           try {
             client = await createClient(this.opts.connection!);
             await ensureFunctionLibrary(client, LIBRARY_SOURCE, this.opts.connection!.clusterMode ?? false);
           } catch (err) {
             // Don't cache a failed client - next getClient() call will retry
+            client?.close();
             this.emit('error', err);
             throw err;
+          }
+          if (this.closing) {
+            // close() ran during init and could not see this client.
+            client.close();
+            throw new GlideMQError('Queue is closing');
           }
           this.client = client;
           this.clientOwned = true;
