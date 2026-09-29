@@ -45,9 +45,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Proxy request bounds (`maxPageSize`, default 1000)**: `GET /jobs`, `/dlq` and `/suspended` without `end` (or `end=-1`) return at most `maxPageSize` items from `start`, and larger explicit spans return 400. `dlq/replay-all` replays at most `maxPageSize` per call, and `clean` rejects a `limit` above it. `POST /flows` rejects flows with more than 1000 nodes.
 - **`prefetch` is capped at `concurrency`** (`concurrency * batch.size` in batch mode). Prefetch above concurrency ran more processors than `concurrency` allowed, or left entries without heartbeats to be reclaimed and run twice.
 - **Producer priority errors** are now plain `Error`s with the same messages as `Queue.add`, instead of `GlideMQError`.
-
-### Changed
-
 - **`Job.retry()` only retries failed jobs** and throws on any other state, as its documentation already stated. Server function library version is `125`.
 
 ### Documentation
