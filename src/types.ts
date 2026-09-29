@@ -97,7 +97,12 @@ export interface QueueOptions {
   events?: boolean;
 }
 
-/** Options for sandboxed (file-path) processors running in worker threads or child processes. */
+/**
+ * Options for sandboxed (file-path) processors running in worker threads or child processes.
+ * When a job's abort signal fires (timeout or revocation), the abort is forwarded to the processor.
+ * If it has not settled 5 seconds later, its worker thread is terminated (or its child process is
+ * SIGKILLed) and replaced, so a hung processor cannot hold a sandbox slot.
+ */
 export interface SandboxOptions {
   /** Use worker_threads (default: true). When false, uses child_process.fork. */
   useWorkerThreads?: boolean;

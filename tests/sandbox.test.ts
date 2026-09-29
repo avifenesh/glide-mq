@@ -36,6 +36,8 @@ const CONDITIONAL_PROXY_CRASH_PROCESSOR = path.join(PROCESSORS, 'conditional-pro
 const MOVE_TO_DELAYED_PROCESSOR = path.join(PROCESSORS, 'move-to-delayed.js');
 const THROW_DELAYED_ERROR_PROCESSOR = path.join(PROCESSORS, 'throw-delayed-error.js');
 const THROW_SPOOFED_DELAYED_ERROR_PROCESSOR = path.join(PROCESSORS, 'throw-spoofed-delayed-error.js');
+const SPIN_OR_ECHO_PROCESSOR = path.join(PROCESSORS, 'spin-or-echo.js');
+const ABORT_AWARE_PROCESSOR = path.join(PROCESSORS, 'abort-aware.js');
 
 // The compiled runner.js lives in dist/sandbox/
 const RUNNER_PATH = path.resolve(__dirname, '..', 'dist', 'sandbox', 'runner.js');
@@ -769,6 +771,111 @@ describe('Stress tests', () => {
       const result = await pool.run(makeJob('post-crash-proxy', { recovered: true }));
       expect(result).toEqual({ recovered: true });
     } finally {
+      await pool.close();
+    }
+  }, 30_000);
+
+  const withSignal = (job: Job, signal: AbortSignal) => Object.assign(job, { abortSignal: signal }) as Job;
+
+  for (const useWorkerThreads of [true, false]) {
+    const mode = useWorkerThreads ? 'worker thread' : 'fork mode';
+
+    it(`should terminate a hung processor after the abort grace period and reuse the slot (${mode})`, async () => {
+      const pool = new SandboxPool(SPIN_OR_ECHO_PROCESSOR, useWorkerThreads, 1, RUNNER_PATH, 200);
+
+      try {
+        const ac = new AbortController();
+        const hung = withSignal(makeJob('hung-1', { spin: true }), ac.signal);
+        const hungRun = pool.run(hung);
+        await vi.waitFor(() => expect(hung.log).toHaveBeenCalled(), { timeout: 10_000 });
+        ac.abort();
+        await expect(hungRun).rejects.toThrow(/did not settle within 200ms of abort/);
+
+        const result = await pool.run(makeJob('after-hung', { ok: true }));
+        expect(result).toEqual({ ok: true });
+      } finally {
+        await pool.close(true);
+      }
+    }, 30_000);
+  }
+
+  it('should drop a queued job whose signal aborts before a worker frees up', async () => {
+    const pool = new SandboxPool(SPIN_OR_ECHO_PROCESSOR, true, 1, RUNNER_PATH);
+
+    try {
+      const busyRun = pool.run(makeJob('busy', { delay: 500 }));
+      const ac = new AbortController();
+      const queued = withSignal(makeJob('queued', { v: 1 }), ac.signal);
+      const queuedRun = pool.run(queued);
+      setTimeout(() => ac.abort(), 50);
+
+      await expect(queuedRun).rejects.toThrow('Job aborted');
+      expect(await busyRun).toEqual({ delay: 500 });
+      expect((pool as any).waiters).toHaveLength(0);
+
+      const result = await pool.run(makeJob('next', { v: 2 }));
+      expect(result).toEqual({ v: 2 });
+      expect(queued.log).not.toHaveBeenCalled();
+    } finally {
+      await pool.close();
+    }
+  }, 30_000);
+
+  it('should not run a job whose signal is already aborted', async () => {
+    const pool = new SandboxPool(SPIN_OR_ECHO_PROCESSOR, true, 1, RUNNER_PATH);
+
+    try {
+      const ac = new AbortController();
+      ac.abort();
+      const job = withSignal(makeJob('pre-aborted', { v: 1 }), ac.signal);
+      await expect(pool.run(job)).rejects.toThrow('Job aborted');
+      expect(job.log).not.toHaveBeenCalled();
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it('should keep the worker when an aborted processor settles within the grace period', async () => {
+    const pool = new SandboxPool(ABORT_AWARE_PROCESSOR, true, 1, RUNNER_PATH, 2000);
+
+    try {
+      const ac = new AbortController();
+      const job = withSignal(makeJob('abort-aware', {}), ac.signal);
+      const run = pool.run(job);
+      await vi.waitFor(() => expect((pool as any).workers).toHaveLength(1));
+      const thread = (pool as any).workers[0].thread;
+      setTimeout(() => ac.abort(), 100);
+      expect(await run).toEqual({ aborted: true });
+
+      await new Promise((r) => setTimeout(r, 2500));
+      expect((pool as any).workers).toHaveLength(1);
+      expect((pool as any).workers[0].thread).toBe(thread);
+    } finally {
+      await pool.close();
+    }
+  }, 30_000);
+
+  it('should not crash the host when a proxy response targets a dead child (fork mode)', async () => {
+    const pool = new SandboxPool(CONDITIONAL_PROXY_CRASH_PROCESSOR, false, 1, RUNNER_PATH);
+    const uncaught: unknown[] = [];
+    const onUncaught = (err: unknown) => uncaught.push(err);
+    process.on('uncaughtException', onUncaught);
+
+    try {
+      // The log proxy resolves after the child has exited, so the proxy-response send hits a closed channel
+      const crashJob = {
+        ...makeJob('crash-proxy-fork', { crash: true }),
+        log: vi.fn(() => new Promise((r) => setTimeout(r, 300))),
+      } as unknown as Job;
+      await expect(pool.run(crashJob)).rejects.toThrow(/exited with code/);
+      await new Promise((r) => setTimeout(r, 600));
+      expect(crashJob.log).toHaveBeenCalled();
+      expect(uncaught).toEqual([]);
+
+      const result = await pool.run(makeJob('post-crash-proxy-fork', { recovered: true }));
+      expect(result).toEqual({ recovered: true });
+    } finally {
+      process.off('uncaughtException', onUncaught);
       await pool.close();
     }
   }, 30_000);
