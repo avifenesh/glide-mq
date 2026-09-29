@@ -46,6 +46,9 @@ jobs:
     needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v6
@@ -58,7 +61,7 @@ jobs:
 
       - name: Run unit tests (no Valkey needed)
         run: >-
-          npx vitest run
+          npx vitest run --coverage
           tests/api-completeness.test.ts
           tests/az-affinity.test.ts
           tests/connection.test.ts
@@ -73,6 +76,15 @@ jobs:
           tests/library-source.test.ts
           tests/lua-instrument.test.ts
           tests/workflows.test.ts
+
+      - name: Upload coverage
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          files: coverage/lcov.info
+          flags: unit
+          fail_ci_if_error: false
+          use_oidc: true
 
   test-integration:
     needs: quality
