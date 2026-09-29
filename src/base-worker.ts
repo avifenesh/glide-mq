@@ -729,6 +729,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           continue;
         }
 
+        if (await this.divertIfBudgetExceeded(job, entry.jobId, entry.entryId)) continue;
+
         this.startHeartbeat(entry.jobId, job.opts.lockDuration);
         batch.push({ jobId: entry.jobId, entryId: entry.entryId, job });
       }
@@ -843,7 +845,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         const err = new Error(`Batch processor returned ${len} results but batch had ${batch.length} jobs`);
         for (const entry of batch) {
           if (await this.skipMovedToFailed(entry.job)) continue;
-          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
+          await this.failProcessedJob(entry.job, entry.jobId, entry.entryId, err);
         }
         return;
       }
@@ -892,7 +894,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
         if (result instanceof Error) {
           const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : result;
-          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
+          await this.failProcessedJob(entry.job, entry.jobId, entry.entryId, failure);
         } else {
           let returnvalue: string;
           try {
@@ -927,7 +929,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       for (const entry of batch) {
         if (await this.skipMovedToFailed(entry.job)) continue;
         const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : thrownError;
-        await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
+        await this.failProcessedJob(entry.job, entry.jobId, entry.entryId, failure);
       }
     }
   }
@@ -1047,6 +1049,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       entry.job.returnvalue = result;
       entry.job.finishedOn = Date.now();
       if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
+
+      try {
+        await this.chargeUsageToBudget(entry.job, entry.jobId, false);
+      } catch (err) {
+        this.emit('error', err);
+      }
 
       if (this.opts.tokenLimiter) {
         const tpmTokens = Math.max(entry.job.usage?.totalTokens ?? 0, entry.job.tpmTokens ?? 0);
@@ -1643,36 +1651,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.isDrained = false;
       if (this.hasActiveListeners) this.emit('active', job, currentJobId);
 
-      // Pre-dispatch budget check: if budget already exceeded, fail immediately
-      if (job.budgetKey && this.commandClient) {
-        const budgetStatus = await checkBudget(this.commandClient, job.budgetKey);
-        if (budgetStatus === 'exceeded') {
-          const onExceeded = await this.getBudgetOnExceeded(job.budgetKey);
-          this.emit('budget-exceeded', job, currentJobId);
-          if (onExceeded === 'pause') {
-            // Move to delayed with a long backoff so it can be resumed
-            try {
-              await moveActiveToDelayed(
-                this.commandClient,
-                this.queueKeys,
-                currentJobId,
-                currentEntryId,
-                Date.now() + 86400000,
-                undefined,
-                Date.now(),
-                this.consumerGroup,
-                this.broadcastMode ? true : undefined,
-              );
-            } catch (err) {
-              const e = err instanceof Error ? err : new Error(String(err));
-              await this.handleJobFailure(job, currentJobId, currentEntryId, e);
-            }
-          } else {
-            await this.handleJobFailure(job, currentJobId, currentEntryId, new Error('Budget exceeded'));
-          }
-          return;
-        }
-      }
+      if (await this.divertIfBudgetExceeded(job, currentJobId, currentEntryId)) return;
 
       // Check for suspend continuation: if this job was previously suspended on this
       // worker and has an onResume callback, run it instead of the main processor.
@@ -1827,14 +1806,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         // close(true) aborted it; leave it active for stalled recovery.
         if (aborted && this.forceClosing) return;
         if (await this.skipMovedToFailed(job)) return;
-        // Tokens a failed attempt spent are real spend; count them.
-        try {
-          await this.chargeUsageToBudget(job, currentJobId, true);
-        } catch (err) {
-          this.emit('error', err);
-        }
         const confirmedRevoked = aborted && (await this.isJobRevoked(currentJobId));
-        await this.handleJobFailure(
+        await this.failProcessedJob(
           job,
           currentJobId,
           currentEntryId,
@@ -2027,6 +2000,54 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Pre-dispatch budget check. A job whose flow budget is already exceeded
+   * does not run: onExceeded 'fail' fails it, 'pause' parks it in delayed.
+   * Returns true when the job was diverted.
+   */
+  private async divertIfBudgetExceeded(job: Job<D, R>, jobId: string, entryId: string): Promise<boolean> {
+    if (!job.budgetKey || !this.commandClient) return false;
+    const budgetStatus = await checkBudget(this.commandClient, job.budgetKey);
+    if (budgetStatus !== 'exceeded') return false;
+    const onExceeded = await this.getBudgetOnExceeded(job.budgetKey);
+    this.emit('budget-exceeded', job, jobId);
+    if (onExceeded === 'pause') {
+      // Move to delayed with a long backoff so it can be resumed
+      try {
+        await moveActiveToDelayed(
+          this.commandClient,
+          this.queueKeys,
+          jobId,
+          entryId,
+          Date.now() + 86400000,
+          undefined,
+          Date.now(),
+          this.consumerGroup,
+          this.broadcastMode ? true : undefined,
+        );
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        await this.handleJobFailure(job, jobId, entryId, e);
+      }
+    } else {
+      await this.handleJobFailure(job, jobId, entryId, new Error('Budget exceeded'));
+    }
+    return true;
+  }
+
+  /**
+   * Fail an attempt whose processor ran. Tokens the attempt spent are real
+   * spend, so its reported usage is charged to the flow budget first.
+   */
+  private async failProcessedJob(job: Job<D, R>, jobId: string, entryId: string, error: Error): Promise<void> {
+    try {
+      await this.chargeUsageToBudget(job, jobId, true);
+    } catch (err) {
+      this.emit('error', err);
+    }
+    await this.handleJobFailure(job, jobId, entryId, error);
   }
 
   /**
