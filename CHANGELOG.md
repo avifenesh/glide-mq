@@ -66,7 +66,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - **Scheduler templates reject `delay`, `deduplication` and `parent`** at upsert (the scheduler never applied them). Stored entries keep firing.
-- **Server function library version is `128`.** Workers and producers reload it on connect.
 - **Server-side priority validation**: `addJob`, `dedup` and `addFlow` reject a priority that is not an integer 0-2048 with an error, as a defense behind the client checks.
 - **Server function library version is `130`.** Workers and producers reload it on connect.
 - **`completeAndFetchNext` no longer emits `active` events** from its priority and LIFO paths, matching the stream path and `moveToActive`. Workers still emit their local `active` event.
