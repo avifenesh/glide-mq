@@ -66,8 +66,9 @@ export interface DeadLetterQueueOptions {
   /** Queue name to use as the dead letter queue. */
   name: string;
   /**
-   * Not read. A job moves to the DLQ when it fails terminally, which is decided by
-   * the job's own `attempts` option.
+   * @deprecated Not read and scheduled for removal in the next major version. A job
+   * moves to the DLQ when it fails terminally, which is decided by the job's own
+   * `attempts` option; there is no separate DLQ retry count.
    */
   maxRetries?: number;
 }

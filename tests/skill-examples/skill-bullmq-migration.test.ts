@@ -369,7 +369,7 @@ describe('BullMQ new-features.md', () => {
     const queue = track(
       new Queue(qName, {
         connection,
-        deadLetterQueue: { name: dlqName, maxRetries: 3 },
+        deadLetterQueue: { name: dlqName },
       }),
     );
 

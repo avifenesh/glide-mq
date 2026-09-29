@@ -788,6 +788,8 @@ const failedJobs = await dlqQueue.getJobs('waiting');
 const dlqJobs = await queue.getDeadLetterJobs(0, 49);
 ```
 
+A job is copied when it fails terminally, which the job's own `attempts` option decides; `deadLetterQueue.maxRetries` is not read (deprecated, removed in the next major version).
+
 The DLQ entry is a best-effort copy. The original job stays in the `failed` state of its own queue (subject to `removeOnFail`), and if writing the copy fails the worker emits `error` and moves on. The entry is added to the DLQ queue as a new waiting job named like the original, whose data is a JSON envelope: `{ originalQueue, originalJobId, data, failedReason, attemptsMade }`. A worker on the DLQ queue would process these entries.
 
 Because the entry is waiting, not failed, `Job.retry()` on it throws. To retry, call `retry()` on the original failed job (`queue.getJob(originalJobId)`), or re-add the envelope's `data` to the original queue.
