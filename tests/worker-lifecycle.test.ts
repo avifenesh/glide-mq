@@ -1272,3 +1272,45 @@ describe('batch refill during close', () => {
     expect(blocking.xreadgroup).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('eager cross-queue parent notifications', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('keeps the xq-pending entry unless the parent took the completion or is gone', async () => {
+    const results: Record<string, () => unknown> = {
+      thrown: () => {
+        throw new Error('connection lost');
+      },
+      counted: () => 0,
+      gone: () => -1,
+      odd: () => null,
+    };
+    const command = makeMockClient({
+      fcall: routeFcall({ glidemq_completeChild: (_keys, args) => results[args[1]]() }),
+      srem: vi.fn().mockResolvedValue(1),
+    });
+    wireClients(command, makeMockClient());
+    const worker = new Worker('lifecycle-xq', vi.fn(), { connection, blockTimeout: 100 });
+    const errors: Error[] = [];
+    worker.on('error', (err) => errors.push(err));
+    await worker.waitUntilReady();
+
+    const member = (parentId: string) => JSON.stringify(['parent-q', parentId, `glide:{lifecycle-xq}:${parentId}c`]);
+    await expect(
+      (worker as any).notifyCrossQueueParents([member('thrown'), member('counted'), member('gone'), member('odd')]),
+    ).resolves.toBeUndefined();
+
+    const removed = command.srem.mock.calls.flatMap((c: any[]) => c[1]);
+    expect(removed).toEqual([member('counted'), member('gone')]);
+    expect(errors.map((e) => e.message)).toEqual(['connection lost']);
+
+    await worker.close(true);
+  });
+});

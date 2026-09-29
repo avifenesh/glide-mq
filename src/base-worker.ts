@@ -1491,15 +1491,32 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
   }
 
-  /** Deliver notifications recorded atomically by the completion FCALL. */
+  /**
+   * Deliver notifications recorded atomically by the completion FCALL.
+   * The xq-pending entry is removed only when the parent took the completion
+   * (remaining count >= 0) or no longer exists (-1), as in the scheduler
+   * retry. A failed delivery stays pending for that retry and is reported
+   * without interrupting the completion path.
+   */
   protected async notifyCrossQueueParents(notifications: string[]): Promise<void> {
     if (!this.commandClient) return;
     for (const member of notifications) {
       const notification = parseCrossQueueParentNotification(member);
       if (!notification) continue;
       const [parentQueue, parentId, depsMember] = notification;
-      await completeChild(this.commandClient, buildKeys(parentQueue, this.opts.prefix), parentId, depsMember);
-      await this.commandClient.srem(this.queueKeys.xqPending, [member]);
+      try {
+        const remaining = await completeChild(
+          this.commandClient,
+          buildKeys(parentQueue, this.opts.prefix),
+          parentId,
+          depsMember,
+        );
+        if (Number.isInteger(remaining) && remaining >= -1) {
+          await this.commandClient.srem(this.queueKeys.xqPending, [member]);
+        }
+      } catch (err) {
+        if (!this.closing) this.emit('error', err instanceof Error ? err : new Error(String(err)));
+      }
     }
   }
 
