@@ -40,8 +40,12 @@ describe('Job', () => {
       zadd: vi.fn(),
       hget: vi.fn(),
     };
-    (Batch as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockBatch);
-    (ClusterBatch as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockBatch);
+    (Batch as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
+      return mockBatch;
+    });
+    (ClusterBatch as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
+      return mockBatch;
+    });
   });
 
   describe('constructor', () => {

@@ -12,9 +12,9 @@ vi.mock('@glidemq/speedkey', () => {
   const MockGlideClusterClient = {
     createClient: vi.fn(),
   };
-  const MockBatch = vi.fn().mockImplementation(() => ({
-    fcall: vi.fn().mockReturnThis(),
-  }));
+  const MockBatch = vi.fn(function () {
+    return { fcall: vi.fn().mockReturnThis() };
+  });
   return {
     GlideClient: MockGlideClient,
     GlideClusterClient: MockGlideClusterClient,
