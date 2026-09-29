@@ -104,6 +104,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected running = false;
   protected paused = false;
   protected closing = false;
+  protected forceClosing = false;
   protected closed = false;
   private closePromise: Promise<void> | null = null;
   protected queueKeys: ReturnType<typeof buildKeys>;
@@ -768,6 +769,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
 
     if (!this.commandClient) return;
+
+    // close(true) aborted the batch; leave the jobs active for stalled recovery.
+    if (this.forceClosing && (batchError || thrownError)) return;
 
     if (handBack) {
       for (const entry of batch) {
@@ -1655,6 +1659,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
 
       if (processError || aborted) {
+        // close(true) aborted it; leave it active for stalled recovery.
+        if (aborted && this.forceClosing) return;
         if (await this.skipMovedToFailed(job)) return;
         const confirmedRevoked = aborted && (await this.isJobRevoked(currentJobId));
         await this.handleJobFailure(
@@ -2232,6 +2238,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    */
   async close(force?: boolean): Promise<void> {
     if (this.closed) return;
+    // Force close signals running processors through job.abortSignal, also
+    // when it escalates a graceful close that is still waiting for them.
+    if (force) this.abortActiveJobsForClose();
     if (this.closePromise) return this.closePromise;
     this.closing = true;
     this.running = false;
@@ -2239,6 +2248,16 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     this.internalEvents.emit('closing');
     this.emit('closing');
     return this.closePromise;
+  }
+
+  /**
+   * Abort every in-flight job for close(true). Those jobs are not failed:
+   * the worker is going away, so they stay active for stalled recovery,
+   * the same outcome as a force close whose processor ignores the signal.
+   */
+  private abortActiveJobsForClose(): void {
+    this.forceClosing = true;
+    for (const ac of this.activeAbortControllers.values()) ac.abort();
   }
 
   private async stopSchedulerOnClose(force?: boolean): Promise<void> {

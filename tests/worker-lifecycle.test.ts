@@ -868,3 +868,95 @@ describe('limiter waits during close()', () => {
     await closeDuringWait({ tokenLimiter: { maxTokens: 10, duration: 60000, scope: 'worker' } }, {});
   });
 });
+
+describe('close(true) aborts running processors', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([false, true])('signals job.abortSignal without failing the job (batch=%s)', async (batch) => {
+    const command = makeMockClient({ fcall: routeFcall({}) });
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult([['1-0', 'running']]))
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+
+    let signal: AbortSignal | undefined;
+    const started = deferred<void>();
+    const waitForAbort = (s: AbortSignal) =>
+      new Promise<never>((_, reject) => s.addEventListener('abort', () => reject(new Error('aborted by close'))));
+    const processor = batch
+      ? async (jobs: any[]) => {
+          signal = jobs[0].abortSignal;
+          started.resolve();
+          return waitForAbort(signal!);
+        }
+      : async (job: any) => {
+          signal = job.abortSignal;
+          started.resolve();
+          return waitForAbort(signal!);
+        };
+    const worker = new Worker('lifecycle-w11-force', processor as any, {
+      connection,
+      blockTimeout: 100,
+      ...(batch ? { batch: { size: 1 } } : {}),
+    });
+    const failed: string[] = [];
+    worker.on('failed', (job: any) => failed.push(job.id));
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    await started.promise;
+
+    await worker.close(true);
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(signal!.aborted).toBe(true);
+    expect(failed).toEqual([]);
+    expect(command.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_fail')).toHaveLength(0);
+  });
+
+  it('escalates a graceful close that is waiting for a running job', async () => {
+    const command = makeMockClient({ fcall: routeFcall({}) });
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult([['1-0', 'slow']]))
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+
+    const started = deferred<void>();
+    const worker = new Worker(
+      'lifecycle-w11-escalate',
+      (job: any) =>
+        new Promise((_, reject) => {
+          started.resolve();
+          job.abortSignal.addEventListener('abort', () => reject(new Error('aborted by close')));
+        }),
+      { connection, blockTimeout: 100 },
+    );
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    await started.promise;
+
+    let gracefulDone = false;
+    const graceful = worker.close().then(() => {
+      gracefulDone = true;
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(gracefulDone).toBe(false);
+
+    await worker.close(true);
+    await graceful;
+    expect(gracefulDone).toBe(true);
+    expect(command.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_fail')).toHaveLength(0);
+  });
+});

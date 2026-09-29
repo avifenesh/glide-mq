@@ -266,7 +266,7 @@ await worker.pause(true); // force-stop immediately
 await worker.resume();
 
 await worker.close(); // graceful: waits for active jobs to finish
-await worker.close(true); // force-close immediately
+await worker.close(true); // force-close now: aborts job.abortSignal, running jobs are left for stalled recovery
 ```
 
 ---
