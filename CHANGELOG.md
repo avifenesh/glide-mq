@@ -62,6 +62,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Security
 
 - **Dev dependencies**: `vitest` and `@vitest/coverage-v8` upgraded to 4.1.11 (path traversal via `@vitest/mocker` redirect mocks) and `@humanfs/node` to 0.16.8 (recursive copy followed symlinks). Test tooling only; no runtime dependency changed.
+
 ### Performance
 
 - **List-active scans** (heal, list stall reclaim, active list job lookup) read a same-slot `list-active-ids` set instead of scanning the keyspace, falling back to SCAN when the set is incomplete (legacy workers).
