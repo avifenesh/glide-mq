@@ -687,3 +687,59 @@ describe('QueueEvents throwing listener', () => {
     }
   });
 });
+
+describe('prefetch above concurrency', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function countedReads(total: number) {
+    let next = 0;
+    return vi.fn().mockImplementation((_g: string, _c: string, _s: unknown, opts: { count: number }) => {
+      if (next >= total) return neverResolve();
+      const entries: [string, string][] = [];
+      for (let i = 0; i < opts.count && next < total; i++, next++) entries.push([`${next + 1}-0`, `j${next}`]);
+      return Promise.resolve(streamResult(entries));
+    });
+  }
+
+  it.each([1, 3])('never runs more than concurrency=%i jobs or claims beyond it', async (concurrency) => {
+    const blocking = makeMockClient({ xreadgroup: countedReads(20) });
+    wireClients(makeMockClient({ fcall: routeFcall({}) }), blocking);
+
+    let running = 0;
+    let maxRunning = 0;
+    const release: (() => void)[] = [];
+    const worker = new Worker(
+      'lifecycle-w8',
+      () =>
+        new Promise<string>((resolve) => {
+          running++;
+          maxRunning = Math.max(maxRunning, running);
+          release.push(() => {
+            running--;
+            resolve('ok');
+          });
+        }),
+      { connection, concurrency, prefetch: 10, blockTimeout: 100 },
+    );
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(maxRunning).toBe(concurrency);
+    for (const call of blocking.xreadgroup.mock.calls) expect(call[3].count).toBeLessThanOrEqual(concurrency);
+
+    for (let i = 0; i < 20 && release.length > 0; i++) {
+      release.splice(0).forEach((r) => r());
+      await vi.advanceTimersByTimeAsync(20);
+    }
+    expect(maxRunning).toBe(concurrency);
+
+    await worker.close(true);
+  });
+});

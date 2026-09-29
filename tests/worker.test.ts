@@ -176,7 +176,7 @@ describe('Worker', () => {
     await worker.close(true);
   });
 
-  it('should call xreadgroup with correct parameters', async () => {
+  it('should call xreadgroup with prefetch capped at concurrency', async () => {
     const processor = vi.fn().mockResolvedValue('done');
 
     let resolveXRead: ((value: any) => void) | null = null;
@@ -201,7 +201,7 @@ describe('Worker', () => {
       CONSUMER_GROUP,
       expect.any(String),
       { [keys.stream]: '>' },
-      { count: 10, block: 2000 },
+      { count: 5, block: 2000 },
     );
 
     // Resolve to prevent hanging

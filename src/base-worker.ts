@@ -237,7 +237,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     this.consumerId = `worker-${Date.now()}-${randomBytes(4).toString('hex')}`;
 
     this.concurrency = opts.concurrency ?? 1;
-    this.prefetch = opts.prefetch ?? (this.batchMode ? this.concurrency * this.batchSize : this.concurrency);
+    // prefetch is the XREADGROUP COUNT and can only lower the claim size.
+    // Dispatch has no separate concurrency gate, so a larger prefetch would
+    // run more jobs than `concurrency` (c>1) or leave claimed entries in the
+    // PEL with no heartbeat until stalled reclaim ran them twice (c=1).
+    const maxPrefetch = this.batchMode ? this.concurrency * this.batchSize : this.concurrency;
+    this.prefetch = Math.min(opts.prefetch ?? maxPrefetch, maxPrefetch);
     this.blockTimeout = opts.blockTimeout ?? 5000;
     this.stalledInterval = opts.stalledInterval ?? 30000;
     this.maxStalledCount = opts.maxStalledCount ?? 1;
