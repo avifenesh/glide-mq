@@ -1593,7 +1593,6 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
                   redis.call('HSET', priGroupHashKey, 'nextSeq', tostring(priOrdSeq + 1))
                   redis.call('ZREM', priWaitListKey, priJobId)
                 end
-                if skipEvents ~= '1' then emitEvent(eventsKey, 'active', priJobId, nil) end
                 local priJobFields = redis.call('HGETALL', priJobKey)
                 redis.call('INCR', prefix .. 'list-active')
                 return appendParentNotifications({'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}, parentNotifications)
@@ -1602,7 +1601,6 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
           else
             -- Non-group job: activate directly
             redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
-            if skipEvents ~= '1' then emitEvent(eventsKey, 'active', priJobId, nil) end
             local priJobFields = redis.call('HGETALL', priJobKey)
             redis.call('INCR', prefix .. 'list-active')
             return appendParentNotifications({'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}, parentNotifications)
@@ -1630,7 +1628,6 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         local lifoExpireAt = tonumber(lifoMeta[3])
         if not lifoExpireAt or lifoExpireAt <= 0 or timestamp <= lifoExpireAt then
           redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
-          if skipEvents ~= '1' then emitEvent(eventsKey, 'active', lifoJobId, nil) end
           local lifoJobFields = redis.call('HGETALL', lifoJobKey)
           redis.call('INCR', prefix .. 'list-active')
           return appendParentNotifications({'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}, parentNotifications)

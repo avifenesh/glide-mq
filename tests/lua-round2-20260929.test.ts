@@ -6,6 +6,7 @@
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { createCleanupClient, describeEachMode, flushQueue } from './helpers/fixture';
 
+const { InfBoundary } = require('@glidemq/speedkey') as typeof import('@glidemq/speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys, keyPrefix, parseCrossQueueParentNotification } =
@@ -256,5 +257,44 @@ describeEachMode('Lua round 2 2026-09-29', (CONNECTION) => {
     );
     expect(await hget(k.meta, 'orderdone:g')).toBe('1');
     expect(await cleanupClient.exists([`${keyPrefix('glide', Q)}:orderdone:pending:g`])).toBe(0);
+  });
+
+  async function eventTypes(Q: string): Promise<string[]> {
+    const entries = await cleanupClient.xrange(
+      buildKeys(Q).events,
+      InfBoundary.NegativeInfinity,
+      InfBoundary.PositiveInfinity,
+    );
+    const types: string[] = [];
+    for (const fields of Object.values(entries ?? {}) as [string, string][][]) {
+      for (const [f, v] of fields) if (String(f) === 'event') types.push(String(v));
+    }
+    return types;
+  }
+
+  it('R2-12: completeAndFetchNext activation emits no active event from any phase', async () => {
+    const Q = uniqueQueue('r2-caf-active');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true });
+      await queue.add('fifo', {});
+      await queue.add('lifo', {}, { lifo: true });
+      await cleanupClient.hset(k.job('pri'), { id: 'pri', name: 'pri', state: 'waiting', priority: '1' });
+      await cleanupClient.lpush(k.priority, ['pri']);
+      await cleanupClient.hset(k.job('cur'), { id: 'cur', name: 'cur', state: 'active' });
+      let current = 'cur';
+      const activated: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const r = await completeAndFetchNext(cleanupClient, k, current, '', 'null', Date.now(), CONSUMER_GROUP, 'c1');
+        expect(r.next).not.toBe(false);
+        current = r.nextJobId!;
+        activated.push((r.next as Record<string, string>).name);
+      }
+      expect(activated).toEqual(['pri', 'lifo', 'fifo']);
+      expect(await eventTypes(Q)).not.toContain('active');
+    } finally {
+      await queue.close();
+    }
   });
 });
