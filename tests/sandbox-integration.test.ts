@@ -16,6 +16,7 @@ const ECHO_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/echo.js');
 const PROGRESS_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/progress.js');
 const CRASH_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/crash.js');
 const ABORT_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/abort-aware.js');
+const SPIN_OR_ECHO_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/spin-or-echo.js');
 
 describeEachMode('Sandboxed Processor', (CONNECTION) => {
   let cleanupClient: any;
@@ -191,5 +192,27 @@ describeEachMode('Sandboxed Processor', (CONNECTION) => {
 
     const err = await failedPromise;
     expect(err.message).toBe('Job aborted');
+  }, 60_000);
+
+  it('a timed-out hung processor frees its sandbox slot for the next job', async () => {
+    const queue = makeQueue();
+    const worker = new Worker(queue.name, SPIN_OR_ECHO_PROCESSOR, {
+      connection: CONNECTION,
+      concurrency: 1,
+    });
+    workers.push(worker);
+
+    const failed: string[] = [];
+    const completed: any[] = [];
+    worker.on('failed', (_job: any, err: any) => failed.push(err.message));
+    worker.on('completed', (_job: any, result: any) => completed.push(result));
+
+    await queue.add('hung', { spin: true }, { timeout: 300, attempts: 1 });
+    await queue.add('next', { ok: true });
+
+    // ABORT_GRACE_MS (5s) bounds how long the hung worker keeps the slot after the timeout
+    await waitFor(() => completed.length === 1, 20_000);
+    expect(failed).toEqual(['Job timeout exceeded']);
+    expect(completed).toEqual([{ ok: true }]);
   }, 60_000);
 });

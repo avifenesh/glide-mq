@@ -9,6 +9,8 @@ import { isPlainStepPayload } from '../utils';
 interface PoolWorker {
   thread: WorkerThread | ChildProcess;
   busy: boolean;
+  /** Set when the pool terminates the worker on purpose; replaces the generic exit error. */
+  terminationError?: Error;
   currentReject?: (err: Error) => void;
   currentCleanup?: () => void;
   send: (msg: MainToChild) => void;
@@ -24,6 +26,14 @@ interface Waiter {
 let nextInvocationId = 0;
 
 /**
+ * How long a sandboxed job may keep running after its abort signal fires (timeout or revocation).
+ * The abort is forwarded to the processor, which gets this long to settle. After that the pool
+ * terminates the worker thread or SIGKILLs the child process so a hung processor cannot hold a
+ * pool slot. Jobs that settle normally never trigger it.
+ */
+export const ABORT_GRACE_MS = 5000;
+
+/**
  * Pool of worker threads or child processes that execute sandboxed processors.
  * Manages lifecycle, IPC message routing, and concurrency.
  */
@@ -34,13 +44,21 @@ export class SandboxPool {
   private runnerPath: string;
   private workers: PoolWorker[] = [];
   private waiters: Waiter[] = [];
+  private abortGraceMs: number;
   private _closed = false;
 
-  constructor(processorPath: string, useWorkerThreads: boolean, maxWorkers: number, runnerPath: string) {
+  constructor(
+    processorPath: string,
+    useWorkerThreads: boolean,
+    maxWorkers: number,
+    runnerPath: string,
+    abortGraceMs: number = ABORT_GRACE_MS,
+  ) {
     this.processorPath = processorPath;
     this.useWorkerThreads = useWorkerThreads;
     this.maxWorkers = maxWorkers;
     this.runnerPath = runnerPath;
+    this.abortGraceMs = abortGraceMs;
   }
 
   private spawn(): PoolWorker {
@@ -102,7 +120,7 @@ export class SandboxPool {
       }
 
       if (pw.currentReject) {
-        pw.currentReject(error);
+        pw.currentReject(pw.terminationError ?? error);
         pw.currentReject = undefined;
       }
 
@@ -122,7 +140,7 @@ export class SandboxPool {
     return pw;
   }
 
-  private acquire(): Promise<PoolWorker> {
+  private acquire(signal?: AbortSignal): Promise<PoolWorker> {
     const idle = this.workers.find((w) => !w.busy);
     if (idle) {
       idle.busy = true;
@@ -136,13 +154,41 @@ export class SandboxPool {
     }
 
     return new Promise<PoolWorker>((resolve, reject) => {
-      this.waiters.push({ resolve, reject });
+      const onAbort = () => {
+        const idx = this.waiters.indexOf(waiter);
+        if (idx >= 0) this.waiters.splice(idx, 1);
+        reject(new GlideMQError('Job aborted'));
+      };
+      const waiter: Waiter = {
+        resolve: (pw) => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve(pw);
+        },
+        reject: (err) => {
+          signal?.removeEventListener('abort', onAbort);
+          reject(err);
+        },
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.waiters.push(waiter);
     });
   }
 
+  /** Forcefully stop a worker. Its exit handler removes it and hands the slot to the next waiter. */
+  private terminate(pw: PoolWorker, reason: Error): void {
+    pw.terminationError = reason;
+    if (this.useWorkerThreads) {
+      (pw.thread as WorkerThread).terminate().catch(() => {});
+    } else {
+      (pw.thread as ChildProcess).kill('SIGKILL');
+    }
+  }
+
   private release(pw: PoolWorker): void {
-    pw.busy = false;
     pw.currentReject = undefined;
+    // A worker being terminated stays busy; its exit handler spawns the replacement.
+    if (pw.terminationError) return;
+    pw.busy = false;
 
     const waiter = this.waiters.shift();
     if (waiter) {
@@ -160,17 +206,39 @@ export class SandboxPool {
       throw new GlideMQError('SandboxPool is closed');
     }
 
-    const pw = await this.acquire();
+    const signal = job.abortSignal;
+    if (signal?.aborted) {
+      throw new GlideMQError('Job aborted');
+    }
+
+    const pw = await this.acquire(signal);
+    if (signal?.aborted) {
+      this.release(pw);
+      throw new GlideMQError('Job aborted');
+    }
+
     const serialized = toSerializedJob(job);
     const invocationId = String(++nextInvocationId);
 
     return new Promise<R>((resolve, reject) => {
       pw.currentReject = reject;
       let cleaned = false;
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
 
       const abortHandler = job.abortSignal
         ? () => {
             pw.send({ type: 'abort', id: invocationId });
+            if (graceTimer !== undefined) return;
+            graceTimer = setTimeout(() => {
+              graceTimer = undefined;
+              if (cleaned) return;
+              this.terminate(
+                pw,
+                new GlideMQError(
+                  `Sandbox worker terminated: job did not settle within ${this.abortGraceMs}ms of abort`,
+                ),
+              );
+            }, this.abortGraceMs);
           }
         : undefined;
 
@@ -178,6 +246,10 @@ export class SandboxPool {
         if (cleaned) return;
         cleaned = true;
         pw.currentCleanup = undefined;
+        if (graceTimer !== undefined) {
+          clearTimeout(graceTimer);
+          graceTimer = undefined;
+        }
         pw.offMsg(onMessage);
         if (job.abortSignal && abortHandler) {
           job.abortSignal.removeEventListener('abort', abortHandler);
