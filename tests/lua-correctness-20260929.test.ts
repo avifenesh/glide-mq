@@ -10,7 +10,8 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { completeAndFetchNext, CONSUMER_GROUP } = require('../dist/functions') as typeof import('../src/functions');
+const { completeAndFetchNext, reclaimStalled, CONSUMER_GROUP } =
+  require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
   let cleanupClient: any;
@@ -222,5 +223,101 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
     expect(await hget(k.job('pri'), 'state')).toBe('failed');
     const config = JSON.parse((await hget(k.schedulers, 'rac'))!);
     expect(config.nextRun).toBe(now + 1000);
+  });
+  function gate(): { wait: Promise<void>; open: () => void } {
+    let open!: () => void;
+    const wait = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    return { wait, open };
+  }
+
+  it('completing a removed active job leaves no ghost and keeps group accounting', async () => {
+    const Q = uniqueQueue('lc-rm-active');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const gates = new Map<string, ReturnType<typeof gate>>();
+    const started: string[] = [];
+    const worker = new Worker(
+      Q,
+      async (job) => {
+        started.push(job.name);
+        const g = gate();
+        gates.set(job.name, g);
+        await g.wait;
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 2, blockTimeout: 50, stalledInterval: 60_000 },
+    );
+    worker.on('error', () => {});
+    try {
+      const a = await queue.add('a', {}, { ordering: { key: 'g', concurrency: 2 } });
+      await queue.add('b', {}, { ordering: { key: 'g', concurrency: 2 } });
+      await waitFor(() => started.length === 2, 5000, 25);
+      expect(await hget(k.group('g'), 'active')).toBe('2');
+      await (await queue.getJob(a.id!))!.remove();
+      expect(await hget(k.group('g'), 'active')).toBe('1');
+      gates.get('a')!.open();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(await cleanupClient.exists([k.job(a.id!)])).toBe(0);
+      expect(await cleanupClient.zscore(k.completed, a.id!)).toBeNull();
+      expect(await hget(k.group('g'), 'active')).toBe('1');
+      gates.get('b')!.open();
+    } finally {
+      for (const g of gates.values()) g.open();
+      await worker.close(true);
+      await queue.close();
+    }
+  });
+
+  it('failing a removed active job with attempts left does not schedule a ghost retry', async () => {
+    const Q = uniqueQueue('lc-rm-active-fail');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const g = gate();
+    let started = false;
+    const worker = new Worker(
+      Q,
+      async () => {
+        started = true;
+        await g.wait;
+        throw new Error('boom');
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 50, stalledInterval: 60_000 },
+    );
+    worker.on('error', () => {});
+    worker.on('failed', () => {});
+    try {
+      const job = await queue.add('x', {}, { attempts: 3 });
+      await waitFor(() => started, 5000, 25);
+      await (await queue.getJob(job.id!))!.remove();
+      g.open();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(await cleanupClient.exists([k.job(job.id!)])).toBe(0);
+      expect(await cleanupClient.zscore(k.scheduled, job.id!)).toBeNull();
+      expect(await cleanupClient.xlen(k.stream)).toBe(0);
+    } finally {
+      g.open();
+      await worker.close(true);
+      await queue.close();
+    }
+  });
+
+  it('stalled recovery does not resurrect a removed active job', async () => {
+    const Q = uniqueQueue('lc-rm-active-stall');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      const job = await queue.add('x', {});
+      await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true }).catch(() => {});
+      await cleanupClient.xreadgroup(CONSUMER_GROUP, 'dead', { [k.stream]: '>' });
+      await cleanupClient.hset(k.job(job.id!), { state: 'active', lastActive: '1' });
+      await (await queue.getJob(job.id!))!.remove();
+      await reclaimStalled(cleanupClient, k, 'rescuer', 0, 5, Date.now(), CONSUMER_GROUP);
+      expect(await cleanupClient.exists([k.job(job.id!)])).toBe(0);
+      expect(await cleanupClient.xlen(k.stream)).toBe(0);
+    } finally {
+      await queue.close();
+    }
   });
 });

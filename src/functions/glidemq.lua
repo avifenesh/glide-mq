@@ -1072,12 +1072,16 @@ redis.register_function('glidemq_complete', function(keys, args)
   local broadcastMode = args[11] or '0'
   local skipEvents = args[12] or '0'
   local skipMetrics = args[13] or '0'
-  local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
-  if redis.call('HGET', jobKey, 'revoked') == '1' then
+  local cur = redis.call('HMGET', jobKey, 'revoked', 'state', 'processedOn')
+  if cur[1] == '1' then
     return 'REVOKED'
   end
+  local processedOn = tonumber(cur[3]) or timestamp
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
+  -- The job was removed while active: removeJob already released its slot,
+  -- list reservation and parents. Do not recreate the hash.
+  if not cur[2] then return '' end
   redis.call('ZADD', completedKey, timestamp, jobId)
   redis.call('HSET', jobKey,
     'state', 'completed',
@@ -1206,118 +1210,123 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local skipMetrics = args[19] or '0'
 
   -- Phase 1: Complete current job (same as glidemq_complete)
+  local cur = redis.call('HMGET', jobKey, 'revoked', 'state', 'processedOn')
+  if cur[1] == '1' then
+    return {'CURRENT_REVOKED', jobId}
+  end
   local processedOn
   if hintProcessedOn ~= '' then
     processedOn = tonumber(hintProcessedOn) or timestamp
   else
-    processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
-  end
-  if redis.call('HGET', jobKey, 'revoked') == '1' then
-    return {'CURRENT_REVOKED', jobId}
+    processedOn = tonumber(cur[3]) or timestamp
   end
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
-  redis.call('ZADD', completedKey, timestamp, jobId)
-  redis.call('HSET', jobKey,
-    'state', 'completed',
-    'returnvalue', returnvalue,
-    'finishedOn', tostring(timestamp)
-  )
-  if currentOrderingKey ~= '__' then
-    markOrderingDone(jobKey, jobId, currentOrderingKey, currentOrderingSeq)
-  end
-  if currentGroupKey ~= '__' then
-    releaseGroupSlotAndPromote(jobKey, jobId, timestamp, currentGroupKey)
-  end
-  if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
-  if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-  local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
-  local storedParentId = redis.call('HGET', jobKey, 'parentId')
   local parentNotifications = {}
-  local parentNotificationSet = {}
-  addParentNotification(
-    parentNotifications,
-    parentNotificationSet,
-    enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
-  )
-  if entryId == '' then decrListActive(prefix .. 'list-active') end
+  -- A job removed while active was already released by removeJob. Skip the
+  -- completion so the hash and group/list accounting are not touched again.
+  if cur[2] then
+    redis.call('ZADD', completedKey, timestamp, jobId)
+    redis.call('HSET', jobKey,
+      'state', 'completed',
+      'returnvalue', returnvalue,
+      'finishedOn', tostring(timestamp)
+    )
+    if currentOrderingKey ~= '__' then
+      markOrderingDone(jobKey, jobId, currentOrderingKey, currentOrderingSeq)
+    end
+    if currentGroupKey ~= '__' then
+      releaseGroupSlotAndPromote(jobKey, jobId, timestamp, currentGroupKey)
+    end
+    if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
+    if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
+    local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
+    local storedParentId = redis.call('HGET', jobKey, 'parentId')
+    local parentNotificationSet = {}
+    addParentNotification(
+      parentNotifications,
+      parentNotificationSet,
+      enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
+    )
+    if entryId == '' then decrListActive(prefix .. 'list-active') end
 
-  -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
-  if broadcastMode ~= '1' then
-    if removeMode == 'true' then
-      redis.call('ZREM', completedKey, jobId)
-      redis.call('UNLINK', jobKey)
-    elseif removeMode == 'count' and removeCount > 0 then
-      local total = redis.call('ZCARD', completedKey)
-      if total > removeCount then
-        local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
-        if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
-      end
-    elseif removeMode == 'age_count' then
-      if removeAge > 0 then
-        local cutoff = timestamp - (removeAge * 1000)
-        local old = redis.call('ZRANGEBYSCORE', completedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
-        if #old > 0 then removeExcessJobs(completedKey, prefix, old) end
-      end
-      if removeCount > 0 then
+    -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
+    if broadcastMode ~= '1' then
+      if removeMode == 'true' then
+        redis.call('ZREM', completedKey, jobId)
+        redis.call('UNLINK', jobKey)
+      elseif removeMode == 'count' and removeCount > 0 then
         local total = redis.call('ZCARD', completedKey)
         if total > removeCount then
           local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
           if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
         end
+      elseif removeMode == 'age_count' then
+        if removeAge > 0 then
+          local cutoff = timestamp - (removeAge * 1000)
+          local old = redis.call('ZRANGEBYSCORE', completedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
+          if #old > 0 then removeExcessJobs(completedKey, prefix, old) end
+        end
+        if removeCount > 0 then
+          local total = redis.call('ZCARD', completedKey)
+          if total > removeCount then
+            local excess = redis.call('ZRANGE', completedKey, 0, math.min(total - removeCount, 1000) - 1)
+            if #excess > 0 then removeExcessJobs(completedKey, prefix, excess) end
+          end
+        end
       end
     end
-  end
 
-  -- Parent deps
-  if depsMember ~= '' and parentId ~= '' and #keys >= 9 then
-    local parentDepsKey = keys[6]
-    local parentJobKey = keys[7]
-    local parentStreamKey = keys[8]
-    local parentEventsKey = keys[9]
-    completeParentDependency(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
-  elseif storedParentQueue == extractQueueTag(string.sub(prefix, 1, #prefix - 1)) and storedParentId and storedParentId ~= '' then
-    completeParentDependency(
-      prefix .. 'deps:' .. storedParentId,
-      prefix .. 'job:' .. storedParentId,
-      prefix .. 'stream',
-      prefix .. 'events',
-      string.sub(prefix, 1, #prefix - 1) .. ':' .. jobId,
-      storedParentId
-    )
-  end
-  -- DAG multi-parent: always check parents SET. The previous hasParents
-  -- arg was sourced from the worker's snapshot of the job hash, which is
-  -- stale if registerParent populates the SET after the worker fetched the
-  -- job but before completion (race seen on the addDAG path). SMEMBERS on
-  -- a non-existent / empty SET costs ~nothing on the server, so always run.
-  do
-    local parentsKey = prefix .. 'parents:' .. jobId
-    local dagParents = redis.call('SMEMBERS', parentsKey)
-    if dagParents and #dagParents > 0 then
-      local childQueuePrefix = string.sub(prefix, 1, #prefix - 1)
-      local dagDepsMember = childQueuePrefix .. ':' .. jobId
-      for pi = 1, #dagParents do
-        local pEntry = dagParents[pi]
-        local pSep = pEntry:find(':([^:]+)$')
-        if pSep then
-          local pQueue = string.sub(pEntry, 1, pSep - 1)
-          local pId = string.sub(pEntry, pSep + 1)
-          if pQueue == childQueuePrefix then
-            local pPrefix = prefix
-            local pJobKey = pPrefix .. 'job:' .. pId
-            local pDepsKey = pPrefix .. 'deps:' .. pId
-            local pStreamKey = pPrefix .. 'stream'
-            local pEventsKey = pPrefix .. 'events'
-            completeParentDependency(pDepsKey, pJobKey, pStreamKey, pEventsKey, dagDepsMember, pId)
-          else
-            local pTag = extractQueueTag(pQueue)
-            addParentNotification(
-              parentNotifications,
-              parentNotificationSet,
-              enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
-            )
+    -- Parent deps
+    if depsMember ~= '' and parentId ~= '' and #keys >= 9 then
+      local parentDepsKey = keys[6]
+      local parentJobKey = keys[7]
+      local parentStreamKey = keys[8]
+      local parentEventsKey = keys[9]
+      completeParentDependency(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
+    elseif storedParentQueue == extractQueueTag(string.sub(prefix, 1, #prefix - 1)) and storedParentId and storedParentId ~= '' then
+      completeParentDependency(
+        prefix .. 'deps:' .. storedParentId,
+        prefix .. 'job:' .. storedParentId,
+        prefix .. 'stream',
+        prefix .. 'events',
+        string.sub(prefix, 1, #prefix - 1) .. ':' .. jobId,
+        storedParentId
+      )
+    end
+    -- DAG multi-parent: always check parents SET. The previous hasParents
+    -- arg was sourced from the worker's snapshot of the job hash, which is
+    -- stale if registerParent populates the SET after the worker fetched the
+    -- job but before completion (race seen on the addDAG path). SMEMBERS on
+    -- a non-existent / empty SET costs ~nothing on the server, so always run.
+    do
+      local parentsKey = prefix .. 'parents:' .. jobId
+      local dagParents = redis.call('SMEMBERS', parentsKey)
+      if dagParents and #dagParents > 0 then
+        local childQueuePrefix = string.sub(prefix, 1, #prefix - 1)
+        local dagDepsMember = childQueuePrefix .. ':' .. jobId
+        for pi = 1, #dagParents do
+          local pEntry = dagParents[pi]
+          local pSep = pEntry:find(':([^:]+)$')
+          if pSep then
+            local pQueue = string.sub(pEntry, 1, pSep - 1)
+            local pId = string.sub(pEntry, pSep + 1)
+            if pQueue == childQueuePrefix then
+              local pPrefix = prefix
+              local pJobKey = pPrefix .. 'job:' .. pId
+              local pDepsKey = pPrefix .. 'deps:' .. pId
+              local pStreamKey = pPrefix .. 'stream'
+              local pEventsKey = pPrefix .. 'events'
+              completeParentDependency(pDepsKey, pJobKey, pStreamKey, pEventsKey, dagDepsMember, pId)
+            else
+              local pTag = extractQueueTag(pQueue)
+              addParentNotification(
+                parentNotifications,
+                parentNotificationSet,
+                enqueueCrossQueueParentNotify(prefix, jobId, pTag, pId)
+              )
+            end
           end
         end
       end
@@ -1702,6 +1711,8 @@ redis.register_function('glidemq_fail', function(keys, args)
   local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
+  -- Removed while active: do not recreate the hash or schedule a retry.
+  if redis.call('EXISTS', jobKey) == 0 then return 'removed' end
   local attemptsMade
   if broadcastMode == '1' then
     local subKey = jobKey .. ':sub:' .. group
@@ -1838,7 +1849,11 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
     end
     if jobId then
       local jobKey = prefix .. 'job:' .. jobId
-      if checkExpired(jobKey, jobId, prefix, timestamp) then
+      if redis.call('EXISTS', jobKey) == 0 then
+        -- Orphan PEL entry of a removed job: drop it without recreating the hash.
+        redis.call('XACK', streamKey, group, entryId)
+        if broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
+      elseif checkExpired(jobKey, jobId, prefix, timestamp) then
         if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
         if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
         count = count + 1
@@ -3169,7 +3184,9 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   local removedLifo = redis.call('LREM', prefix .. 'lifo', 0, jobId)
   local removedPriority = redis.call('LREM', prefix .. 'priority', 0, jobId)
   markOrderingDone(jobKey, jobId)
-  if state == 'waiting' and removedLifo == 0 and removedPriority == 0 then
+  -- An active stream job also has a PEL entry. Clear it so stalled recovery
+  -- cannot redispatch the removed job.
+  if (state == 'waiting' or state == 'active') and removedLifo == 0 and removedPriority == 0 then
     local cursor = '-'
     local found = false
     while not found do
