@@ -3851,6 +3851,18 @@ redis.register_function('glidemq_drain', function(keys, args)
   local group = args[2]
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local removed = 0
+  -- Drained ordered jobs never run. Close each sequence hole (and release a
+  -- retained slot) so successors are not blocked. Parked successors are
+  -- promoted once after the drain, so they are not drained in this call.
+  local drainedGroups = {}
+  local function closeDrainedOrdering(jobId)
+    local jobKey = prefix .. 'job:' .. jobId
+    local gk = redis.call('HGET', jobKey, 'groupKey')
+    if not gk or gk == '' then return end
+    markOrderingDone(jobKey, jobId)
+    closeOrderingHole(jobKey, jobId, 0)
+    drainedGroups[gk] = true
+  end
 
   -- Build set of active entry IDs from PEL via paginated XPENDING
   local activeSet = {}
@@ -3891,6 +3903,7 @@ redis.register_function('glidemq_drain', function(keys, args)
         for j = 1, #fields, 2 do
           if fields[j] == 'jobId' and fields[j + 1] ~= '' then
             local jobId = fields[j + 1]
+            closeDrainedOrdering(jobId)
             redis.call('UNLINK', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId, prefix .. 'signals:' .. jobId)
             removed = removed + 1
             break
@@ -3920,6 +3933,7 @@ redis.register_function('glidemq_drain', function(keys, args)
       local batch = {}
       for j = 1, #scheduled do
         local jobId = scheduled[j]
+        closeDrainedOrdering(jobId)
         batch[#batch + 1] = prefix .. 'job:' .. jobId
         batch[#batch + 1] = prefix .. 'log:' .. jobId
         batch[#batch + 1] = prefix .. 'deps:' .. jobId
@@ -3938,6 +3952,7 @@ redis.register_function('glidemq_drain', function(keys, args)
     local lifoIds = redis.call('LRANGE', lifoKey, 0, -1)
     for i = 1, #lifoIds do
       local jobId = lifoIds[i]
+      closeDrainedOrdering(jobId)
       redis.call('UNLINK', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId, prefix .. 'signals:' .. jobId)
       removed = removed + 1
     end
@@ -3949,10 +3964,21 @@ redis.register_function('glidemq_drain', function(keys, args)
     local priorityIds = redis.call('LRANGE', priorityKey, 0, -1)
     for i = 1, #priorityIds do
       local jobId = priorityIds[i]
+      closeDrainedOrdering(jobId)
       redis.call('UNLINK', prefix .. 'job:' .. jobId, prefix .. 'log:' .. jobId, prefix .. 'deps:' .. jobId, prefix .. 'jstream:' .. jobId, prefix .. 'signals:' .. jobId)
       removed = removed + 1
     end
     redis.call('UNLINK', priorityKey)
+  end
+
+  if next(drainedGroups) then
+    local now = redisNowMs()
+    for gk in pairs(drainedGroups) do
+      local resumeAt = tonumber(redis.call('ZSCORE', prefix .. 'ratelimited', gk)) or 0
+      if resumeAt <= now then
+        releaseGroupSlotAndPromote(prefix .. 'job:', '', now, gk, true)
+      end
+    end
   end
 
   if removed > 0 then

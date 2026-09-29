@@ -158,4 +158,36 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
       await queue.close();
     }
   });
+  async function processedBy(Q: string, names: string[], timeoutMs = 5000): Promise<string[]> {
+    const processed: string[] = [];
+    const worker = new Worker(
+      Q,
+      async (job) => {
+        processed.push(job.name);
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 50, stalledInterval: 60_000 },
+    );
+    worker.on('error', () => {});
+    try {
+      await waitFor(() => names.every((n) => processed.includes(n)), timeoutMs, 25).catch(() => {});
+    } finally {
+      await worker.close(true);
+    }
+    return processed;
+  }
+
+  it('drain closes ordering holes so later ordered jobs still run', async () => {
+    const Q = uniqueQueue('lc-drain-ord');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      for (let i = 0; i < 3; i++) await queue.add(`old-${i}`, {}, { ordering: { key: 'k' } });
+      await queue.add('old-delayed', {}, { ordering: { key: 'k' }, delay: 60_000 });
+      await queue.drain(true);
+      await queue.add('fresh', {}, { ordering: { key: 'k' } });
+      expect(await processedBy(Q, ['fresh'])).toEqual(['fresh']);
+    } finally {
+      await queue.close();
+    }
+  });
 });
