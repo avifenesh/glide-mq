@@ -65,6 +65,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Security
 
 - **Dev dependencies**: `vitest` and `@vitest/coverage-v8` upgraded to 4.1.11 (path traversal via `@vitest/mocker` redirect mocks) and `@humanfs/node` to 0.16.8 (recursive copy followed symlinks). Test tooling only; no runtime dependency changed.
+
 ### Performance
 
 - **Batch workers** pipeline `moveToActive` and completion calls: 2 round trips per batch instead of 2 per job. A failing command no longer stops the rest of the batch; that entry is left for stalled recovery.
