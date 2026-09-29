@@ -317,12 +317,13 @@ export function nextReconnectDelay(currentDelay: number, maxMs = 30000): number 
 
 /**
  * Convert a HashDataType array ({ field, value }[]) from hgetall to a plain Record.
- * Returns null if the array is empty or falsy (key does not exist).
+ * Returns null if the array is empty, falsy (key does not exist) or not an array.
  */
 export function hashDataToRecord(
   hashData: { field?: unknown; key?: unknown; value: unknown }[] | null,
 ): Record<string, string> | null {
-  if (!hashData || hashData.length === 0) return null;
+  // Non-array input is a per-command batch error (e.g. WRONGTYPE): treat as missing.
+  if (!Array.isArray(hashData) || hashData.length === 0) return null;
   const record: Record<string, string> = Object.create(null);
   for (let i = 0; i < hashData.length; i++) {
     const entry = hashData[i];

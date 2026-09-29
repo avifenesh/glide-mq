@@ -310,3 +310,43 @@ describeEachMode('FlowProducer.add with leaf children in other queues', (CONNECT
     }
   }, 30000);
 });
+
+describeEachMode('searchJobs without state', (CONNECTION) => {
+  const TS = Date.now();
+  const Q = `apicorr-glob-${TS}-*`;
+  const OTHER = `apicorr-glob-${TS}-x`;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, Q);
+    await flushQueue(cleanupClient, OTHER);
+    cleanupClient.close();
+  });
+
+  it('returns only real jobs of this queue', async () => {
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const other = new Queue(OTHER, { connection: CONNECTION });
+    try {
+      const job = await queue.add('real', { v: 1 });
+      await other.add('real', { v: 2 });
+      await other.add('real', { v: 3 });
+      const jobKey = buildKeys(Q).job(job!.id);
+      await cleanupClient.hset(`${jobKey}:sub:grp`, { a: '1' });
+      await cleanupClient.set(`${jobKey}:usage-lock`, 'x');
+
+      const all = await queue.searchJobs({ limit: 100 });
+      expect(all.map((j) => j.id)).toEqual([job!.id]);
+      expect(all[0].data).toEqual({ v: 1 });
+
+      const named = await queue.searchJobs({ name: 'real', limit: 100 });
+      expect(named.map((j) => j.id)).toEqual([job!.id]);
+    } finally {
+      await queue.close();
+      await other.close();
+    }
+  });
+});

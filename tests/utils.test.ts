@@ -6,11 +6,20 @@ import {
   decompress,
   MAX_JOB_DATA_SIZE,
   hmgetArrayToRecord,
+  hashDataToRecord,
   JOB_METADATA_FIELDS,
   encodeScore,
   validateQueueName,
   sanitizeForLog,
 } from '../src/utils';
+
+describe('hashDataToRecord', () => {
+  it('treats a non-array batch result (per-command error) as missing', () => {
+    expect(hashDataToRecord(new Error('WRONGTYPE') as any)).toBeNull();
+    expect(hashDataToRecord({} as any)).toBeNull();
+    expect(hashDataToRecord([{ key: 'name', value: 'x' }])).toEqual({ name: 'x' });
+  });
+});
 
 describe('sanitizeForLog', () => {
   it('removes control characters that could forge a log line', () => {

@@ -2019,12 +2019,17 @@ export class Queue<D = any, R = any> extends EventEmitter {
     nameFilter: string | undefined,
     limit: number,
   ): Promise<string[]> {
-    const pattern = `${pfx}:job:*`;
+    const pattern = `${keyPrefixPattern(this.opts.prefix ?? 'glide', this.name)}:job:*`;
     const jobIds: string[] = [];
-    const prefixLen = `${pfx}:job:`.length;
+    const jobKeyPrefix = `${pfx}:job:`;
+    const prefixLen = jobKeyPrefix.length;
 
     const collectKeys = async (keys: unknown[]): Promise<void> => {
-      const keyStrs = keys.map((k) => String(k));
+      // Job IDs cannot contain ':', so keys like job:<id>:sub:<group> or
+      // job:<id>:usage-lock are auxiliary keys, not job hashes.
+      const keyStrs = keys
+        .map((k) => String(k))
+        .filter((k) => k.startsWith(jobKeyPrefix) && !k.includes(':', prefixLen));
       if (keyStrs.length === 0) return;
       if (!nameFilter) {
         for (const k of keyStrs) {
