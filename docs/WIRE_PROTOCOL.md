@@ -21,7 +21,7 @@ In cluster mode, `FUNCTION LOAD` must be sent to all primary nodes.
 FCALL glidemq_version 1 {glidemq}:_
 ```
 
-Returns the current library version as a string (e.g. `"80"`). The dummy key `{glidemq}:_` is required for cluster slot routing.
+Returns the current library version as a string (e.g. `"127"`). The dummy key `{glidemq}:_` is required for cluster slot routing.
 
 ---
 
@@ -70,7 +70,7 @@ Each job is stored as a hash at `glide:{queueName}:job:{id}` with these fields:
 | `timestamp`         | string (int)   | Enqueue timestamp in ms                                                                                   |
 | `attemptsMade`      | string (int)   | Number of attempts made                                                                                   |
 | `delay`             | string (int)   | Delay in ms                                                                                               |
-| `priority`          | string (int)   | Priority (0 = highest)                                                                                    |
+| `priority`          | string (int)   | Priority, 1 = highest, 0 = no priority                                                                    |
 | `maxAttempts`       | string (int)   | Maximum retry attempts                                                                                    |
 | `state`             | string         | `waiting`, `active`, `delayed`, `prioritized`, `completed`, `failed`, `waiting-children`, `group-waiting` |
 | `returnvalue`       | string         | JSON-serialized return value (set on completion)                                                          |
@@ -117,6 +117,8 @@ Atomically creates a job hash and enqueues it to the stream (or scheduled ZSet i
 | 3        | `glide:{queueName}:scheduled` |
 | 4        | `glide:{queueName}:events`    |
 
+An optional 5th key, `glide:{queueName}:deps:{parentId}`, registers the job in a same-queue parent's deps set.
+
 ### Args (21)
 
 | Position | Name              | Type         | Description                                                            |
@@ -126,7 +128,7 @@ Atomically creates a job hash and enqueues it to the stream (or scheduled ZSet i
 | 3        | jobOpts           | string       | JSON-serialized options object                                         |
 | 4        | timestamp         | string (int) | Current time in ms (e.g. `Date.now()`)                                 |
 | 5        | delay             | string (int) | Delay in ms, `"0"` for immediate                                       |
-| 6        | priority          | string (int) | Priority, `"0"` for default (highest)                                  |
+| 6        | priority          | string (int) | Priority 1-2048 (1 = highest), `"0"` for no priority                   |
 | 7        | parentId          | string       | Parent job ID, `""` if none                                            |
 | 8        | maxAttempts       | string (int) | Max retry attempts, `"0"` for no retries                               |
 | 9        | orderingKey       | string       | Ordering key, `""` if none                                             |
@@ -206,14 +208,17 @@ Adds a job with deduplication. Checks the dedup hash first and either skips or c
 | 4        | `glide:{queueName}:scheduled` |
 | 5        | `glide:{queueName}:events`    |
 
-### Args (24)
+An optional 6th key, `glide:{queueName}:deps:{parentId}`, registers the job in a same-queue parent's deps set.
 
-| Position | Name                       | Type         | Description                                    |
-| -------- | -------------------------- | ------------ | ---------------------------------------------- |
-| 1        | dedupId                    | string       | Deduplication identifier                       |
-| 2        | ttlMs                      | string (int) | TTL for throttle mode in ms, `"0"` if not used |
-| 3        | mode                       | string       | `"simple"`, `"throttle"`, or `"debounce"`      |
-| 4-24     | (same as addJob args 1-21) |              | Same 21 args as glidemq_addJob                 |
+### Args (23)
+
+| Position | Name                       | Type         | Description                                                    |
+| -------- | -------------------------- | ------------ | -------------------------------------------------------------- |
+| 1        | dedupId                    | string       | Deduplication identifier                                       |
+| 2        | ttlMs                      | string (int) | TTL for throttle mode in ms, `"0"` if not used                 |
+| 3        | mode                       | string       | `"simple"`, `"throttle"`, or `"debounce"`                      |
+| 4-22     | (same as addJob args 1-19) |              | glidemq_addJob args 1-19 (`jobName` through `parentQueue`)     |
+| 23       | skipEvents                 | string       | `"1"` to skip event emission (dedup takes no `schedulerName`)  |
 
 ### Return Values
 
@@ -225,9 +230,9 @@ Same as `glidemq_addJob`, plus:
 
 ### Deduplication Modes
 
-- **simple**: Skip if a non-terminal job with the same dedup ID exists
-- **throttle**: Skip if the last job with the same dedup ID was created within `ttlMs`
-- **debounce**: Cancel the previous delayed/prioritized job with the same dedup ID, then create a new one
+- **simple**: Skip if a non-terminal job with the same dedup ID exists. `ttlMs` is ignored.
+- **throttle**: Skip if the last job with the same dedup ID was created within `ttlMs`. With `ttlMs` `"0"`, nothing is skipped.
+- **debounce**: Cancel the previous delayed/prioritized job with the same dedup ID, then create a new one. Skip if that job is waiting or active. `ttlMs` is ignored.
 
 ---
 
@@ -327,7 +332,8 @@ score = priority * 2^42 + timestamp_ms
 
 Where `2^42 = 4398046511104`.
 
-- Priority 0 is highest. A priority-0 delayed job uses score `0 + (timestamp + delay)`.
+- Priority 1 is highest. Priority 0 means no priority: a priority-0 delayed job uses score `0 + (timestamp + delay)` and goes to the stream when promoted, while priority > 0 jobs go to the priority list, which workers read before the LIFO list and the stream.
+- Priority must be an integer from 0 to 2048. The client rejects anything else before the FCALL; the server function does not validate it.
 - Priority 1 uses score `4398046511104 + timestamp_ms`.
 - Within the same priority, FIFO by timestamp.
 - Non-delayed priority jobs use score `priority * 2^42 + 0` (timestamp = 0) so they promote immediately.
@@ -403,8 +409,10 @@ Workers use a single consumer group named `workers`.
 To create the group (idempotent):
 
 ```
-XGROUP CREATE glide:{queueName}:stream workers $ MKSTREAM
+XGROUP CREATE glide:{queueName}:stream workers 0 MKSTREAM
 ```
+
+The group starts at `0`, so entries added before the first worker connected are delivered. (`BroadcastWorker` subscriptions default to `$` and take a `startFrom` option.)
 
 Workers consume via:
 
@@ -628,9 +636,9 @@ Returns "ok" or "not_suspended".
 
 Fails suspended jobs whose timeout has passed.
 
-### Keys (2): glide:{queueName}:suspended, glide:{queueName}:events
+### Keys (4): glide:{queueName}:suspended, glide:{queueName}:events, glide:{queueName}:failed, glide:{queueName}:metrics:failed
 
-### Args (2): now (string int), keyPrefix (string)
+### Args (2): now (string int), keyPrefix (string, `glide:{queueName}:`)
 
 Returns integer: number of jobs timed out.
 
