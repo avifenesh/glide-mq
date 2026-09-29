@@ -326,6 +326,45 @@ describe('HTTP proxy hardening - queue cache connections', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+  it('a failed shared-client connect does not leave an unhandled rejection and is retried', async () => {
+    const originalCreateClient = connectionModule.createClient;
+    let calls = 0;
+    connectionModule.createClient = async (conn: any) => {
+      calls += 1;
+      if (calls === 1) throw new Error('connect ECONNREFUSED');
+      return originalCreateClient(conn);
+    };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+
+    const errors: Error[] = [];
+    const proxy = createProxyServer({ connection: CONNECTION, onError: (err) => errors.push(err) });
+    const { baseUrl, server } = await listen(proxy.app);
+    const name = `proxy-hard-${RUN_ID}-connect-fail`;
+    queueNames.push(name);
+    try {
+      const first = await fetch(`${baseUrl}/queues/${name}/counts`);
+      expect(first.status).toBe(500);
+      const broadcastFirst = await fetch(`${baseUrl}/broadcast/${name}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject: 'connect.fail', data: {} }),
+      });
+      expect(broadcastFirst.status).toBe(201);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(unhandled).toEqual([]);
+
+      const retry = await fetch(`${baseUrl}/queues/${name}/counts`);
+      expect(retry.status).toBe(200);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      connectionModule.createClient = originalCreateClient;
+      server.closeAllConnections?.();
+      await proxy.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });
 
 describe('HTTP proxy hardening - error responses', () => {

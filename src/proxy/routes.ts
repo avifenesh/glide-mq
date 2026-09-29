@@ -981,7 +981,12 @@ export function createRoutes(
     })();
 
     queueInitMap.set(name, init);
-    init.finally(() => queueInitMap.delete(name));
+    // The caller awaits `init`; clean up on both outcomes without leaving a derived
+    // promise that rejects unhandled when client setup fails.
+    const clear = () => {
+      queueInitMap.delete(name);
+    };
+    init.then(clear, clear);
     return init;
   }
 
@@ -1019,7 +1024,12 @@ export function createRoutes(
     })();
 
     broadcastInitMap.set(name, init);
-    init.finally(() => broadcastInitMap.delete(name));
+    // The caller awaits `init`; clean up on both outcomes without leaving a derived
+    // promise that rejects unhandled when client setup fails.
+    const clear = () => {
+      broadcastInitMap.delete(name);
+    };
+    init.then(clear, clear);
     return init;
   }
 
