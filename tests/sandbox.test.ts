@@ -773,6 +773,31 @@ describe('Stress tests', () => {
     }
   }, 30_000);
 
+  it('should not crash the host when a proxy response targets a dead child (fork mode)', async () => {
+    const pool = new SandboxPool(CONDITIONAL_PROXY_CRASH_PROCESSOR, false, 1, RUNNER_PATH);
+    const uncaught: unknown[] = [];
+    const onUncaught = (err: unknown) => uncaught.push(err);
+    process.on('uncaughtException', onUncaught);
+
+    try {
+      // The log proxy resolves after the child has exited, so the proxy-response send hits a closed channel
+      const crashJob = {
+        ...makeJob('crash-proxy-fork', { crash: true }),
+        log: vi.fn(() => new Promise((r) => setTimeout(r, 300))),
+      } as unknown as Job;
+      await expect(pool.run(crashJob)).rejects.toThrow(/exited with code/);
+      await new Promise((r) => setTimeout(r, 600));
+      expect(crashJob.log).toHaveBeenCalled();
+      expect(uncaught).toEqual([]);
+
+      const result = await pool.run(makeJob('post-crash-proxy-fork', { recovered: true }));
+      expect(result).toEqual({ recovered: true });
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      await pool.close();
+    }
+  }, 30_000);
+
   it('should close() during active and queued jobs', async () => {
     const pool = new SandboxPool(SLOW_PROCESSOR, true, 2, RUNNER_PATH);
 

@@ -68,14 +68,18 @@ export class SandboxPool {
       : {
           thread,
           busy: false,
-          send: (msg) => (thread as ChildProcess).send(msg),
+          send: (msg) => {
+            const child = thread as ChildProcess;
+            // A dead child is handled by the exit path; sending would only emit ERR_IPC_CHANNEL_CLOSED.
+            if (!child.connected) return;
+            child.send(msg);
+          },
           onMsg: (handler) => (thread as ChildProcess).on('message', handler as any),
           offMsg: (handler) => (thread as ChildProcess).off('message', handler as any),
         };
 
     let cleaned = false;
     const onExit = (code: number | null) => {
-      thread.off('error', onError);
       removeAndCleanup(new GlideMQError(`Sandbox worker exited with code ${code}`));
     };
     const onError = (err: Error) => {
@@ -87,8 +91,8 @@ export class SandboxPool {
       if (cleaned) return;
       cleaned = true;
 
+      // Keep onError attached: a dead thread can still emit 'error', and it is a no-op once cleaned.
       thread.off('exit', onExit);
-      thread.off('error', onError);
 
       const idx = this.workers.indexOf(pw);
       if (idx >= 0) this.workers.splice(idx, 1);
