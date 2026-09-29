@@ -31,6 +31,8 @@ type SharedBroadcastStream = {
   clients: Set<BroadcastClient>;
   close: () => Promise<void>;
   closing: boolean;
+  /** Requests that acquired the stream and have not yet attached or given up. */
+  pending: number;
   ready: Promise<void>;
   worker: BroadcastWorker<any, void>;
 };
@@ -250,6 +252,37 @@ function startSse(res: Response): void {
     'Content-Type': 'text/event-stream',
   });
   res.flushHeaders?.();
+}
+
+type DisconnectTracker = {
+  readonly closed: boolean;
+  onClose: (fn: () => void) => void;
+};
+
+/**
+ * Track client disconnect from the start of a streaming route. Listeners are attached before
+ * any await, so a close that lands while the route is still setting up is never missed.
+ */
+function trackDisconnect(req: Request, res: Response): DisconnectTracker {
+  let closed = false;
+  const listeners: Array<() => void> = [];
+  const markClosed = () => {
+    if (closed) return;
+    closed = true;
+    for (const fn of listeners.splice(0)) fn();
+  };
+  req.once('close', markClosed);
+  res.once('close', markClosed);
+  if (req.destroyed || res.destroyed || req.socket?.destroyed) markClosed();
+  return {
+    get closed() {
+      return closed;
+    },
+    onClose(fn: () => void) {
+      if (closed) fn();
+      else listeners.push(fn);
+    },
+  };
 }
 
 function serializeJob(job: Job<any, any>, state: string) {
@@ -935,11 +968,26 @@ export function createRoutes(
         /* ignore */
       }
     }
-    if (stream.clients.size === 0) {
+    closeBroadcastStreamIfIdle(stream);
+  }
+
+  function closeBroadcastStreamIfIdle(stream: SharedBroadcastStream): void {
+    if (stream.clients.size === 0 && stream.pending === 0) {
       void stream.close();
     }
   }
 
+  /** Give up a stream acquired via getSharedBroadcastStream without attaching a client. */
+  function releaseBroadcastStream(stream: SharedBroadcastStream): void {
+    stream.pending = Math.max(0, stream.pending - 1);
+    closeBroadcastStreamIfIdle(stream);
+  }
+
+  /**
+   * Acquire the shared stream for a subscription. On success the caller holds one `pending`
+   * reference and must either attach a client (and decrement `pending`) or call
+   * releaseBroadcastStream().
+   */
   async function getSharedBroadcastStream(name: string, subscription: string): Promise<SharedBroadcastStream> {
     if (draining || closed) {
       throw httpError(503, 'Proxy is shutting down');
@@ -947,8 +995,15 @@ export function createRoutes(
     const cacheKey = `${name}\u0000${subscription}`;
     const cached = broadcastStreams.get(cacheKey);
     if (cached) {
-      await cached.ready;
+      cached.pending += 1;
+      try {
+        await cached.ready;
+      } catch (err) {
+        cached.pending = Math.max(0, cached.pending - 1);
+        throw err;
+      }
       if (draining || closed) {
+        releaseBroadcastStream(cached);
         throw httpError(503, 'Proxy is shutting down');
       }
       return cached;
@@ -960,6 +1015,7 @@ export function createRoutes(
     const stream: SharedBroadcastStream = {
       clients,
       closing: false,
+      pending: 1,
       ready: Promise.resolve(),
       worker: null as unknown as BroadcastWorker<any, void>,
       close: async () => {
@@ -1346,23 +1402,21 @@ export function createRoutes(
   });
 
   router.get('/queues/:name/jobs/:id/stream', async (req: Request, res: Response) => {
+    const disconnect = trackDisconnect(req, res);
     try {
       if (!checkAllowlist(req, res)) return;
 
       const queue = await getQueue(param(req, 'name'));
       const jobId = param(req, 'id');
+      if (disconnect.closed) return;
 
       startSse(res);
 
       let lastId = (req.headers['last-event-id'] as string) || queryValue(req, 'lastId') || undefined;
-      let connectionClosed = false;
 
-      req.on('close', () => {
-        connectionClosed = true;
-      });
-
-      while (!connectionClosed && !draining) {
+      while (!disconnect.closed && !draining) {
         const entries = await queue.readStream(jobId, { count: 100, lastId });
+        if (disconnect.closed) break;
         const latest = writeStreamEntries(res, entries);
         if (latest) lastId = latest;
 
@@ -1390,6 +1444,7 @@ export function createRoutes(
   });
 
   router.get('/queues/:name/jobs/:id/events', async (req: Request, res: Response) => {
+    const disconnect = trackDisconnect(req, res);
     let closeConnection: (() => void) | undefined;
     try {
       if (!checkAllowlist(req, res)) return;
@@ -1399,6 +1454,7 @@ export function createRoutes(
       if (!job) {
         throw httpError(404, 'Job not found');
       }
+      if (disconnect.closed) return;
 
       const connection = requireConnection('job events SSE');
       const keys = buildKeys(param(req, 'name'), opts.prefix);
@@ -1423,7 +1479,8 @@ export function createRoutes(
       };
 
       activeQueueEventClosers.add(closeConnection);
-      req.on('close', closeConnection);
+      disconnect.onClose(closeConnection);
+      if (connectionClosed) return;
       startSse(res);
       writeSseComment(res, 'connected');
 
@@ -1494,6 +1551,7 @@ export function createRoutes(
   });
 
   router.get('/queues/:name/events', async (req: Request, res: Response) => {
+    const disconnect = trackDisconnect(req, res);
     let closeConnection: (() => void) | undefined;
     try {
       if (!checkAllowlist(req, res)) return;
@@ -1520,7 +1578,8 @@ export function createRoutes(
       };
 
       activeQueueEventClosers.add(closeConnection);
-      req.on('close', closeConnection);
+      disconnect.onClose(closeConnection);
+      if (connectionClosed) return;
 
       startSse(res);
       writeSseComment(res, 'connected');
@@ -2183,6 +2242,7 @@ export function createRoutes(
   });
 
   router.get('/broadcast/:name/events', async (req: Request, res: Response) => {
+    const disconnect = trackDisconnect(req, res);
     let cleanup: (() => void) | undefined;
     try {
       if (!checkAllowlist(req, res)) return;
@@ -2192,9 +2252,15 @@ export function createRoutes(
       }
       const matcher = compileSubjectMatcher(parseCsvQuery(req, 'subjects'));
       const stream = await getSharedBroadcastStream(param(req, 'name'), subscription);
+      if (disconnect.closed) {
+        releaseBroadcastStream(stream);
+        return;
+      }
       if (draining || closed || stream.closing) {
+        releaseBroadcastStream(stream);
         throw httpError(503, 'Proxy is shutting down');
       }
+      stream.pending -= 1;
 
       startSse(res);
       writeSseComment(res, 'connected');
@@ -2216,7 +2282,7 @@ export function createRoutes(
       };
 
       stream.clients.add(client);
-      req.on('close', cleanup);
+      disconnect.onClose(cleanup);
     } catch (err) {
       cleanup?.();
       if (!res.headersSent) {
