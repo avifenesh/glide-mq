@@ -2860,3 +2860,77 @@ describe('TestJob / TestQueue / TestWorker surface parity', () => {
     expect((await queue.getJobs('delayed')).map((j) => j.id)).toEqual([job!.id]);
   });
 });
+
+describe('TestWorker batch mode honours job.moveToFailed() (revuto #313)', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it('a moved-to-failed job is not completed when the batch succeeds', async () => {
+    queue = new TestQueue('batch-move-to-failed');
+    const completed: string[] = [];
+    const failed: [string, string][] = [];
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        for (const job of jobs) {
+          if (job.data.bad && job.attemptsMade === 0) await job.moveToFailed(new Error('manual failure'));
+        }
+        return jobs.map(() => 'ok');
+      },
+      { batch: { size: 10 } },
+    );
+    worker.on('completed', (job) => completed.push(job.name));
+    worker.on('failed', (job, err: Error) => failed.push([job.name, err.message]));
+    await queue.pause();
+    await queue.add('good', {});
+    const bad = await queue.add('bad', { bad: true }, { attempts: 2, backoff: { type: 'fixed', delay: 0 } });
+    await queue.resume();
+    expect(await bad!.waitUntilFinished(5, 2000)).toBe('completed');
+    expect(failed).toEqual([['bad', 'manual failure']]);
+    expect(completed.sort()).toEqual(['bad', 'good']);
+    expect((await queue.getJob(bad!.id))!.attemptsMade).toBe(1);
+  });
+
+  it('a moved-to-failed job stays failed through BatchError results and whole-batch throws', async () => {
+    queue = new TestQueue('batch-move-to-failed-error');
+    const failed: [string, string][] = [];
+    const completed: string[] = [];
+    let call = 0;
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        call++;
+        for (const job of jobs) if (job.data.move) await job.moveToFailed(new Error('moved'));
+        if (call === 1) throw new BatchError(jobs.map(() => 'fine'));
+        throw new Error('batch exploded');
+      },
+      { batch: { size: 10 } },
+    );
+    worker.on('failed', (job, err: Error) => failed.push([job.name, err.message]));
+    worker.on('completed', (job) => completed.push(job.name));
+    await queue.pause();
+    const moved = await queue.add('moved-1', { move: true });
+    await queue.add('plain-1', {});
+    await queue.resume();
+    expect(await moved!.waitUntilFinished(5, 2000)).toBe('failed');
+    expect(completed).toEqual(['plain-1']);
+
+    await queue.pause();
+    const moved2 = await queue.add('moved-2', { move: true });
+    const plain2 = await queue.add('plain-2', {});
+    await queue.resume();
+    expect(await moved2!.waitUntilFinished(5, 2000)).toBe('failed');
+    expect(await plain2!.waitUntilFinished(5, 2000)).toBe('failed');
+    expect(failed).toEqual([
+      ['moved-1', 'moved'],
+      ['moved-2', 'moved'],
+      ['plain-2', 'batch exploded'],
+    ]);
+  });
+});

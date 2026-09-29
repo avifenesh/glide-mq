@@ -2509,6 +2509,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         for (let i = 0; i < records.length; i++) {
           const record = records[i];
           const job = jobs[i];
+          if (this.settleMovedToFailed(record, job)) continue;
           const result = results[i];
           const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
           record.state = 'completed';
@@ -2529,6 +2530,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           for (let i = 0; i < records.length; i++) {
             const record = records[i];
             const job = jobs[i];
+            if (this.settleMovedToFailed(record, job)) continue;
             const result = i < batchErr.results.length ? batchErr.results[i] : new Error('No result in BatchError');
 
             if (result instanceof Error) {
@@ -2554,6 +2556,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           for (let i = 0; i < records.length; i++) {
             const record = records[i];
             const job = jobs[i];
+            if (this.settleMovedToFailed(record, job)) continue;
             this.handleFailure(record, job, err);
           }
         }
@@ -2564,6 +2567,19 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           this.processAvailable();
         }
       });
+  }
+
+  /**
+   * Like BaseWorker.skipMovedToFailed: a job that called moveToFailed() inside
+   * the processor is settled through the failure path, whatever the batch
+   * outcome for it. Returns true when the job was handled here.
+   */
+  private settleMovedToFailed(record: TestJobRecord<D, R>, job: TestJob<D, R>): boolean {
+    const err = record.movedToFailed;
+    if (!err) return false;
+    record.movedToFailed = undefined;
+    this.handleFailure(record, job, err);
+    return true;
   }
 
   /** Wait if the TPM counter exceeds the limit for the current window. */
