@@ -568,27 +568,46 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       }
       id = customJobId;
     } else {
-      id = String(++this.idCounter);
-      let retries = 0;
-      while (this.jobs.has(id)) {
-        if (++retries >= 1000) throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
-        id = String(++this.idCounter);
-      }
+      id = this.generateJobId();
     }
     // Record dedup key only after all checks pass (custom ID, etc.)
     if (dedup) {
       this.dedupEntries.set(dedup.id, { jobId: id, timestamp: now });
     }
-    const ttl = opts?.ttl ?? 0;
-    const delay = opts?.delay ?? 0;
-    const priority = opts?.priority ?? 0;
+    return this.insertRecord(name, serializedData, opts ?? {}, id, now, opts?.delay ?? 0);
+  }
+
+  private generateJobId(): string {
+    let id = String(++this.idCounter);
+    let retries = 0;
+    while (this.jobs.has(id)) {
+      if (++retries >= 1000) throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
+      id = String(++this.idCounter);
+    }
+    return id;
+  }
+
+  /**
+   * Create the job record and enqueue it like glidemq_addJob: delayed when
+   * `delay` > 0, prioritized when it has a priority, otherwise waiting.
+   */
+  private insertRecord(
+    name: string,
+    serializedData: string,
+    opts: JobOptions,
+    id: string,
+    now: number,
+    delay: number,
+  ): TestJob<D, R> {
+    const ttl = opts.ttl ?? 0;
+    const priority = opts.priority ?? 0;
     // Roundtrip data through serializer to match production behavior
     const roundtrippedData = this.serializer.deserialize(serializedData) as D;
     const record: TestJobRecord<D, R> = {
       id,
       name,
       data: roundtrippedData,
-      opts: opts ?? {},
+      opts,
       state: 'waiting',
       attemptsMade: 0,
       returnvalue: undefined,
@@ -1684,20 +1703,28 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
         const template = entry.template ?? {};
         const jobName = template.name ?? name;
-        let jobData = template.data !== undefined ? template.data : ({} as D);
+        const jobData = template.data !== undefined ? template.data : ({} as D);
+        let serialized: string;
         try {
-          const serialized = this.serializer.serialize(jobData);
-          const byteLen = Buffer.byteLength(serialized, 'utf8');
-          if (byteLen > MAX_JOB_DATA_SIZE) {
+          serialized = this.serializer.serialize(jobData);
+          if (Buffer.byteLength(serialized, 'utf8') > MAX_JOB_DATA_SIZE) {
             this.schedulers.delete(name);
             continue;
           }
-          jobData = this.serializer.deserialize(serialized) as D;
         } catch {
           this.schedulers.delete(name);
           continue;
         }
-        await this.add(jobName, jobData, template.opts as JobOptions | undefined);
+        // Like Scheduler.runSchedulers, a run calls glidemq_addJob directly: no
+        // deduplication, no custom jobId and delay 0, whatever the stored template says.
+        this.insertRecord(
+          jobName,
+          serialized,
+          (template.opts as JobOptions | undefined) ?? {},
+          this.generateJobId(),
+          now,
+          0,
+        );
 
         entry.lastRun = now;
         entry.iterationCount = currentIterationCount + 1;

@@ -1158,29 +1158,30 @@ describe('TestQueue scheduler runtime', () => {
     expect(await queue.getJobScheduler('oversized')).toBeNull();
   });
 
-  it('consumes testing-mode scheduler iterations even when the templated add is deduplicated', async () => {
-    queue = new TestQueue('sched-runtime-dedup', { dedup: true });
+  it('scheduler runs ignore stored template deduplication, delay and jobId, like the real tick', async () => {
+    queue = new TestQueue('sched-runtime-template-opts');
     worker = new TestWorker(queue, async () => 'ok');
     // Keep the seed job waiting: simple dedup releases the id once the job completes.
     await queue.pause();
 
-    await queue.add('seed', { ok: true }, { deduplication: { id: 'dup-key', mode: 'simple' } });
-    // upsertJobScheduler rejects template deduplication, so seed a stored legacy entry directly.
+    const seed = await queue.add('seed', { ok: true }, { deduplication: { id: 'dup-key', mode: 'simple' } });
+    // upsertJobScheduler rejects these template options, so seed a stored legacy entry directly.
     await queue.upsertJobScheduler(
-      'dedup-scheduler',
+      'legacy-scheduler',
       { every: 20, limit: 1 },
-      { name: 'dedup-job', data: { ok: true } },
+      { name: 'scheduled-job', data: { ok: true } },
     );
-    const seeded = (queue as any).schedulers.get('dedup-scheduler');
-    seeded.template.opts = { deduplication: { id: 'dup-key', mode: 'simple' } };
+    const seeded = (queue as any).schedulers.get('legacy-scheduler');
+    seeded.template.opts = { deduplication: { id: 'dup-key', mode: 'simple' }, delay: 60_000, jobId: 'fixed-id' };
 
-    const deadline = Date.now() + 500;
-    while ((await queue.getJobScheduler('dedup-scheduler')) && Date.now() < deadline) {
-      await new Promise<void>((r) => setTimeout(r, 20));
-    }
+    await waitFor(async () => (await queue.getJobScheduler('legacy-scheduler')) === null, 2000, 10);
 
-    expect(await queue.getJobScheduler('dedup-scheduler')).toBeNull();
-    expect(queue.jobs.size).toBe(1);
+    const produced = (await queue.searchJobs({ name: 'scheduled-job' }))[0];
+    expect(produced).toBeDefined();
+    expect(produced.id).not.toBe('fixed-id');
+    expect(produced.id).not.toBe(seed!.id);
+    expect(await produced.getState()).toBe('waiting');
+    expect(queue.jobs.size).toBe(2);
   });
 });
 
