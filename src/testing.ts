@@ -616,6 +616,30 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     return job;
   }
 
+  /**
+   * @internal Waiting jobs in the order Queue.getJobs('waiting') reads them:
+   * the priority list (lowest priority number first, FIFO within a priority),
+   * then the LIFO list (newest first), then the FIFO stream.
+   */
+  waitingInDispatchOrder(): TestJobRecord<D, R>[] {
+    const seen = new Set<string>();
+    const live: TestJobRecord<D, R>[] = [];
+    for (const record of this.waitingQueue) {
+      if (record.state !== 'waiting' || this.jobs.get(record.id) !== record || seen.has(record.id)) continue;
+      seen.add(record.id);
+      live.push(record);
+    }
+    for (const record of this.jobs.values()) {
+      if (record.state === 'waiting' && !seen.has(record.id)) live.push(record);
+    }
+    const priority = live
+      .filter((r) => !r.opts.lifo && (r.opts.priority ?? 0) > 0)
+      .sort((a, b) => (a.opts.priority ?? 0) - (b.opts.priority ?? 0));
+    const lifo = live.filter((r) => r.opts.lifo).reverse();
+    const fifo = live.filter((r) => !r.opts.lifo && (r.opts.priority ?? 0) === 0);
+    return priority.concat(lifo, fifo);
+  }
+
   /** @internal Put a record in 'waiting' and wake the workers, like an XADD / list push. */
   enqueueWaiting(record: TestJobRecord<D, R>): void {
     record.state = 'waiting';
@@ -739,7 +763,10 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     opts?: GetJobsOptions,
   ): Promise<TestJob<D, R>[]> {
     // The scheduled ZSet backs getJobs('delayed') and holds prioritized jobs too.
-    const records = [...this.jobs.values()].filter((r) => matchesQueueState(r.state, type));
+    const records =
+      type === 'waiting'
+        ? this.waitingInDispatchOrder()
+        : [...this.jobs.values()].filter((r) => matchesQueueState(r.state, type));
     if (type === 'delayed') {
       // Scheduled ZSet order: score = priority * PRIORITY_SHIFT + due time, ties by id.
       records.sort(

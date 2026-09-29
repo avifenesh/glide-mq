@@ -2605,3 +2605,34 @@ describe('TestWorker rate limit parity', () => {
     expect(started[0] - t0).toBeGreaterThanOrEqual(55);
   });
 });
+
+describe('TestQueue.getJobs waiting order parity', () => {
+  it('lists waiting jobs in dispatch order: priority list, LIFO list, FIFO stream', async () => {
+    const queue = new TestQueue('waiting-order');
+    // A paused queue with a worker attached promotes priority jobs to waiting without running them.
+    await queue.pause();
+    const worker = new TestWorker(queue, async () => 'ok');
+    await queue.add('fifo-a', {});
+    await queue.add('p5', {}, { priority: 5 });
+    await queue.add('lifo-x', {}, { lifo: true });
+    await queue.add('p1-a', {}, { priority: 1 });
+    await queue.add('fifo-b', {});
+    await queue.add('lifo-y', {}, { lifo: true });
+    await queue.add('p1-b', {}, { priority: 1 });
+    await waitFor(async () => (await queue.getJobCounts()).waiting === 7, 2000, 2);
+
+    const names = (await queue.getJobs('waiting')).map((j) => j.name);
+    expect(names).toEqual(['p1-a', 'p1-b', 'p5', 'lifo-y', 'lifo-x', 'fifo-a', 'fifo-b']);
+    expect((await queue.getJobs('waiting', 2, 4)).map((j) => j.name)).toEqual(['p5', 'lifo-y', 'lifo-x']);
+    expect((await queue.getJobs('waiting', 5)).map((j) => j.name)).toEqual(['fifo-a', 'fifo-b']);
+
+    const order: string[] = [];
+    worker.on('completed', (job) => order.push(job.name));
+    await queue.resume();
+    await waitFor(() => order.length === 7, 2000, 5);
+    expect(order).toEqual(names);
+
+    await worker.close();
+    await queue.close();
+  });
+});
