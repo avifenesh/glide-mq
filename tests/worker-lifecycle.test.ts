@@ -892,11 +892,13 @@ describe('limiter waits during close()', () => {
 
   it('wakes a token limiter sleep and hands the job back', async () => {
     const realNow = Date.now;
-    // Local counter already at the cap for the current window.
+    // Local counter already at the cap for a window that just started. Anchor
+    // the window at now: a minute-aligned start could expire mid-test near a
+    // minute boundary and let the job run instead of sleeping.
     const spy = vi.spyOn(Worker.prototype as any, 'waitForTokenLimit');
     spy.mockImplementationOnce(async function (this: any) {
       this.tpmLocalCounter = 10;
-      this.tpmWindowStart = realNow() - (realNow() % 60000);
+      this.tpmWindowStart = realNow();
       spy.mockRestore();
       return this.waitForTokenLimit();
     });

@@ -65,7 +65,10 @@ export interface ConnectionOptions {
 export interface DeadLetterQueueOptions {
   /** Queue name to use as the dead letter queue. */
   name: string;
-  /** Max retries before moving to DLQ. If not set, uses the job's own attempts config. */
+  /**
+   * Not read. A job moves to the DLQ when it fails terminally, which is decided by
+   * the job's own `attempts` option.
+   */
   maxRetries?: number;
 }
 
@@ -80,7 +83,11 @@ export interface QueueOptions {
    */
   client?: Client;
   prefix?: string;
-  /** Dead letter queue configuration. Jobs that exhaust retries are moved here. */
+  /**
+   * Dead letter queue configuration. On a Worker, jobs that fail terminally are copied
+   * to this queue. On a Queue, it only records the DLQ name for `getDeadLetterJobs()`
+   * and routes nothing.
+   */
   deadLetterQueue?: DeadLetterQueueOptions;
   /** Enable transparent compression of job data. Default: 'none'. */
   compression?: 'none' | 'gzip';
@@ -154,6 +161,7 @@ export interface WorkerOptions extends QueueOptions {
   batch?: BatchOptions;
   /** Emit events to Valkey event stream on job completion/activation. Default: true.
    *  Set to false to skip XADD events in hot path (~1 fewer redis.call per job).
+   *  'failed', 'retrying' and 'stalled' stream events are still written.
    *  TS-side EventEmitter ('completed', 'failed', etc.) is unaffected. */
   events?: boolean;
   /** Record per-minute timing metrics in Valkey on job completion. Default: true.
@@ -208,6 +216,10 @@ export interface JobOptions {
    */
   jobId?: string;
   delay?: number;
+  /**
+   * Integer 0-2048. 1 is the highest priority. 0 (default) means no priority: those jobs
+   * run after any waiting job with priority > 0. Other values throw.
+   */
   priority?: number;
   /** Process jobs in LIFO (last-in-first-out) order. Cannot be combined with ordering keys. */
   lifo?: boolean;
@@ -472,7 +484,7 @@ export interface QueueEventsOptions {
 
 /** Options for defining a job schedule (cron, interval, or repeat-after-complete). */
 export interface ScheduleOpts {
-  /** Cron pattern (5 fields: minute hour dayOfMonth month dayOfWeek) */
+  /** Cron pattern (5 fields: minute hour dayOfMonth month dayOfWeek, dayOfWeek 0-6; no seconds field) */
   pattern?: string;
   /** Repeat interval in milliseconds */
   every?: number;

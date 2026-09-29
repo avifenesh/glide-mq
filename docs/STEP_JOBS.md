@@ -62,6 +62,9 @@ const parentWorker = new Worker(
       await childQueue.add('chunk-2', { chunk: 2 }, { parent: { queue: 'orchestrator', id: job.id } });
       await childQueue.close();
 
+      // Advance the step first, or the re-run spawns the children again
+      await job.updateData({ ...job.data, step: 'collect' });
+
       // Pause - throws WaitingChildrenError internally
       await job.moveToWaitingChildren();
     }
@@ -74,7 +77,7 @@ const parentWorker = new Worker(
 );
 ```
 
-`moveToWaitingChildren()` throws `WaitingChildrenError` to signal the worker. If all children have already completed by the time the call is made, the job transitions directly back to active.
+`moveToWaitingChildren()` throws `WaitingChildrenError` to signal the worker. The processor re-runs from the top when the children finish, with the data saved by `updateData()`. If all children have already completed by the time the call is made, the job goes straight back to waiting and runs again.
 
 ## Combining both patterns
 
@@ -96,10 +99,11 @@ const worker = new Worker(
           await q.add('process-item', item, { parent: { queue: 'pipeline', id: job.id } });
         }
         await q.close();
+        await job.updateData({ ...job.data, step: 'collect' });
         await job.moveToWaitingChildren();
         break;
 
-      default:
+      case 'collect':
         // All children done - collect results
         const results = await job.getChildrenValues();
         return { processed: Object.keys(results).length };
@@ -119,9 +123,9 @@ import { DelayedError } from 'glide-mq';
 const worker = new Worker(
   'manual',
   async (job) => {
-    // Equivalent to job.moveToDelayed(Date.now() + 60_000)
+    // Equivalent to job.moveToDelayed(Date.now() + 60_000, 'next')
     await job.updateData({ ...job.data, step: 'next' });
-    throw new DelayedError('Pausing for 60 seconds');
+    throw new DelayedError(Date.now() + 60_000, 'Pausing for 60 seconds');
   },
   { connection },
 );

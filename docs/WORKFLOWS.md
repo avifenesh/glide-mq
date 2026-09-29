@@ -18,7 +18,7 @@
 
 ## FlowProducer
 
-`FlowProducer` lets you atomically enqueue a tree of parent and child jobs. A parent job only becomes runnable once **all** of its children have successfully completed; failed or dead-lettered children do not unblock the parent.
+`FlowProducer` enqueues a tree of parent and child jobs. Each level (a parent and its leaf children) is created in one atomic call. Nested sub-flows are separate calls made bottom-up, and in cluster mode leaf children in another queue are created and wired to the parent separately, so a failure part way can leave the lower levels created. A parent job only becomes runnable once **all** of its children have successfully completed; failed or dead-lettered children do not unblock the parent.
 
 ```typescript
 import { FlowProducer } from 'glide-mq';
@@ -243,7 +243,7 @@ const worker = new Worker(
 ### Example: dynamic fan-out
 
 ```typescript
-import { Queue, Worker, FlowProducer } from 'glide-mq';
+import { Queue, Worker } from 'glide-mq';
 
 const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 const queue = new Queue('processing', { connection });
@@ -262,17 +262,15 @@ const worker = new Worker(
     // First execution: inspect data and spawn children dynamically
     const { urls } = job.data;
 
-    const flow = new FlowProducer({ connection });
     for (const url of urls) {
       await queue.add(
         'fetch-url',
         { url },
         {
-          parent: { id: job.id!, queue: job.queueQualifiedName },
+          parent: { id: job.id!, queue: 'processing' }, // plain queue name of the parent
         },
       );
     }
-    await flow.close();
 
     // Pause until all children complete — throws WaitingChildrenError
     await job.moveToWaitingChildren();
@@ -417,10 +415,10 @@ In a DAG, suspending a node does not block sibling branches. Other branches with
 
 FlowProducer.add() accepts an optional budget parameter that creates a shared budget hash for the entire flow. Every job in the flow (parent and children) shares this budget.
 
-Each child job has a budgetKey that points to the shared budget hash. When reportUsage() is called, the worker atomically increments the budget counters via glidemq_recordUsageAndCheckBudget. If limits are exceeded:
+Each child job has a budgetKey that points to the shared budget hash. The usage a job reports with reportUsage() is charged when the attempt ends, whether it completes or fails: the worker increments the budget counters via glidemq_recordUsageAndCheckBudget. A retry that reports no new usage is not charged again. Batch workers do not charge budgets. Before each job runs, the worker checks the budget. If limits are exceeded:
 
-- **fail**: The current job completes normally, subsequent jobs fail with a budget error.
-- **pause**: Subsequent jobs are paused.
+- **fail**: The job that crossed the limit completes normally. Each later job fails with `Budget exceeded` when it starts (normal retry rules apply).
+- **pause**: Each later job is moved back to delayed for 24 hours when it starts, and again every time it is promoted while the budget stays exceeded.
 
 ---
 

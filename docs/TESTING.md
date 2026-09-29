@@ -229,19 +229,11 @@ import { BatchError } from 'glide-mq';
 const worker = new TestWorker(
   queue,
   async (jobs) => {
-    const results = [];
-    const failedIndexes = new Map<number, Error>();
+    // One entry per job: an Error fails that job, any other value completes it
+    const results = jobs.map((job) => (job.data.bad ? new Error('bad input') : { ok: true }));
 
-    for (let i = 0; i < jobs.length; i++) {
-      if (jobs[i].data.bad) {
-        failedIndexes.set(i, new Error('bad input'));
-      } else {
-        results[i] = { ok: true };
-      }
-    }
-
-    if (failedIndexes.size > 0) {
-      throw new BatchError(results, failedIndexes);
+    if (results.some((r) => r instanceof Error)) {
+      throw new BatchError(results);
     }
     return results;
   },
@@ -293,7 +285,7 @@ Pass `new TestQueue(name, { dedup: false })` to ignore `deduplication` options (
 
 ## Step Jobs in Tests
 
-`moveToDelayed` is **not supported** in test mode. Because delayed jobs become waiting immediately in `TestQueue`, calling `job.moveToDelayed()` inside a processor will not pause the job on a future timestamp the way it does in production.
+`moveToDelayed` is **not supported** in test mode. `TestJob` has no `moveToDelayed()` method, so calling it inside a processor throws a `TypeError` and fails the job. Delayed jobs also become waiting immediately in `TestQueue`.
 
 If your processor relies on `moveToDelayed` for step-job orchestration, use integration tests with a real Valkey instance instead:
 

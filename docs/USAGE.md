@@ -45,7 +45,7 @@ await queue.add(
   { to: 'user@example.com' },
   {
     delay: 5_000, // run after 5 s
-    priority: 1, // lower = higher priority (default: 0)
+    priority: 1, // 1 = highest, up to 2048; 0 (default) = no priority, runs after prioritized jobs
     attempts: 3, // run at most 3 times total (initial + 2 retries)
     backoff: { type: 'exponential', delay: 1_000 },
     timeout: 30_000, // fail job if processor exceeds 30 s
@@ -142,9 +142,11 @@ await queue.drain(); // remove waiting jobs only
 await queue.drain(true); // also remove delayed/scheduled jobs
 
 // Remove ALL queue data from Valkey
-await queue.obliterate(); // fails if there are active jobs
+await queue.obliterate(); // fails if stream jobs are active (see note below)
 await queue.obliterate({ force: true }); // unconditional wipe
 ```
+
+The active-job check counts the stream's pending entries only. Active priority and LIFO jobs have no pending entry, so `obliterate()` without `force` does not see them and wipes the queue while they run.
 
 ### Cleaning old jobs
 
@@ -238,10 +240,6 @@ worker.on('error', (err) => {
   console.error('Worker error', err);
 });
 
-worker.on('stalled', (jobId) => {
-  console.warn(`Job ${jobId} stalled and was re-queued`);
-});
-
 worker.on('drained', () => {
   console.log('Queue is empty — no more jobs waiting');
 });
@@ -253,10 +251,11 @@ worker.on('drained', () => {
 | `completed` | `(job, result)` | Fired when a job finishes successfully          |
 | `failed`    | `(job, err)`    | Fired when a job throws or times out            |
 | `error`     | `(err)`         | Internal worker error (connection issues, etc.) |
-| `stalled`   | `(jobId)`       | Job exceeded lock duration and was re-queued    |
 | `drained`   | `()`            | Queue transitioned from non-empty to empty      |
 | `closing`   | `()`            | Worker is beginning to close                    |
 | `closed`    | `()`            | Worker has fully closed                         |
+
+Workers do not emit `stalled`. Stalled recovery writes a `stalled` event to the events stream; listen with `QueueEvents` (`events.on('stalled', ({ jobId }) => ...)`, see below).
 
 ### Pausing / closing a worker
 
@@ -434,11 +433,11 @@ const queue = new Queue('tasks', { connection, events: false });
 // Producer - same option
 const producer = new Producer('tasks', { connection, events: false });
 
-// Worker - skip XADD 'completed'/'failed' events on process
+// Worker - skip XADD 'completed' (and list-pop 'active') events on process
 const worker = new Worker('tasks', handler, { connection, events: false });
 ```
 
-This only affects the Valkey events stream. TS-side `EventEmitter` events (`worker.on('completed', ...)`) are unaffected.
+A worker with `events: false` still writes `failed` and `retrying` events, and stalled recovery still writes `stalled`. This only affects the Valkey events stream. TS-side `EventEmitter` events (`worker.on('completed', ...)`) are unaffected.
 
 ### `QueueEvents` — stream-based lifecycle events
 
@@ -539,21 +538,25 @@ Each job is individually completed or failed based on its corresponding entry in
 Use `job.moveToDelayed(timestampMs, nextStep?)` inside a processor when the same logical job should sleep and resume later instead of completing.
 
 ```typescript
-const worker = new Worker('drip-campaign', async (job) => {
-  switch (job.data.step) {
-    case 'send':
-      await sendEmail(job.data);
-      return job.moveToDelayed(Date.now() + 24 * 3600_000, 'check');
-    case 'check':
-      if (!(await checkOpened(job.data))) {
-        return job.moveToDelayed(Date.now() + 3600_000, 'followup');
-      }
-      return 'done';
-    case 'followup':
-      await sendFollowUp(job.data);
-      return 'done';
-  }
-});
+const worker = new Worker(
+  'drip-campaign',
+  async (job) => {
+    switch (job.data.step) {
+      case 'send':
+        await sendEmail(job.data);
+        return job.moveToDelayed(Date.now() + 24 * 3600_000, 'check');
+      case 'check':
+        if (!(await checkOpened(job.data))) {
+          return job.moveToDelayed(Date.now() + 3600_000, 'followup');
+        }
+        return 'done';
+      case 'followup':
+        await sendFollowUp(job.data);
+        return 'done';
+    }
+  },
+  { connection },
+);
 ```
 
 Notes:
@@ -581,6 +584,9 @@ const parentWorker = new Worker(
       await childQueue.add('chunk-2', { chunk: 2 }, { parent: { queue: 'orchestrator', id: job.id } });
       await childQueue.close();
 
+      // Advance the step first, or the re-run spawns the children again
+      await job.updateData({ ...job.data, step: 'collect' });
+
       // Pause — throws WaitingChildrenError internally
       await job.moveToWaitingChildren();
     }
@@ -593,7 +599,7 @@ const parentWorker = new Worker(
 );
 ```
 
-`moveToWaitingChildren()` throws `WaitingChildrenError` to signal the worker. If all children have already completed by the time the call is made, the job transitions directly back to active.
+`moveToWaitingChildren()` throws `WaitingChildrenError` to signal the worker. The processor re-runs from the top when the children finish, with the data saved by `updateData()`. If all children have already completed by the time the call is made, the job goes straight back to waiting and runs again.
 
 ### UnrecoverableError
 
@@ -806,7 +812,7 @@ See [ADVANCED.md](./ADVANCED.md#fallback-chains) for details on how the chain ad
 
 ### Budget Middleware (Flow-level Token/Cost Caps)
 
-Enforce hard caps on total tokens and/or cost across all jobs in a flow. Pass a budget option to FlowProducer.add() with maxTotalTokens, maxTotalCost, and onExceeded (fail or pause). Per-category limits are also supported via maxTokens (e.g. `{ input: 5000 }`), tokenWeights (e.g. `{ output: 4 }`), maxCosts, and costUnit. When a job calls reportUsage() inside a budgeted flow, the worker calls glidemq_recordUsageAndCheckBudget to atomically increment counters and check limits.
+Enforce hard caps on total tokens and/or cost across all jobs in a flow. Pass a budget option to FlowProducer.add() with maxTotalTokens, maxTotalCost, and onExceeded (fail or pause). Per-category limits are also supported via maxTokens (e.g. `{ input: 5000 }`), tokenWeights (e.g. `{ output: 4 }`), maxCosts, and costUnit. When an attempt of a job in a budgeted flow ends, whether it completes or fails, the worker charges the usage it reported with reportUsage() through glidemq_recordUsageAndCheckBudget, which atomically increments counters and checks limits. A retry that reports no new usage is not charged again. Batch workers do not charge budgets.
 
 Query budget state via queue.getFlowBudget(flowId). Budget state is stored in glide:{queueName}:budget:{flowId}.
 
@@ -832,7 +838,7 @@ Jobs report token consumption via job.reportTokens(count) or automatically via j
 
 Override the worker-level lockDuration for individual jobs via opts.lockDuration. Useful for mixed workloads where some jobs are fast and others are long-running. The per-job lockDuration is read by glidemq_reclaimStalled and glidemq_reclaimStalledListJobs to set the stall threshold per job.
 
-The stall threshold resolution chain is: per-job `opts.lockDuration` (if set) > worker-level `lockDuration` > `stalledInterval`. Use a short `stalledInterval` only to make the scheduler check more often - it is not the threshold. To get fast stall recovery, set `lockDuration` to the small value, not `stalledInterval`.
+The stall threshold resolution chain is: per-job `opts.lockDuration` (if set) > worker-level `lockDuration` > `stalledInterval`. The scheduler also checks only every `stalledInterval`, and stream entries are claimed only after they have been idle for `stalledInterval`. So a stalled job is recovered no sooner than `max(stalledInterval, threshold)` after its last heartbeat. To get fast stall recovery, lower both `stalledInterval` and `lockDuration`.
 
 ### Vector Search (createJobIndex / storeVector / vectorSearch)
 

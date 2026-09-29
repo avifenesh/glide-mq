@@ -139,7 +139,7 @@ await producer.add('urgent', data, { priority: 1 });
 
 // Deduplication
 await producer.add('idempotent', data, {
-  deduplication: { id: 'unique-key', ttl: 60000 },
+  deduplication: { id: 'unique-key', ttl: 60000, mode: 'throttle' },
 });
 
 // Custom job ID

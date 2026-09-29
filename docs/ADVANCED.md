@@ -194,7 +194,7 @@ await queue.removeJobScheduler('cleanup');
 
 ### Cron syntax
 
-Patterns use the standard 5 fields: `minute hour day-of-month month day-of-week` (0 = Sunday). Each field accepts `*`, numbers, ranges (`1-5`), steps (`*/15`, `10-40/10`) and lists (`1,15`). Patterns run in UTC unless `tz` is set.
+Patterns use the standard 5 fields: `minute hour day-of-month month day-of-week` (0 = Sunday). Each field accepts `*`, numbers, ranges (`1-5`), steps (`*/15`, `10-40/10`) and lists (`1,15`). There is no seconds field, and names (`MON`, `JAN`), day-of-week `7`, `L`, `W`, `#` and `?` are rejected. Patterns run in UTC unless `tz` is set.
 
 - **Day-of-month and day-of-week**: when both fields are restricted, a day matches if either field matches. `0 0 1 * 1` fires on every 1st of the month and on every Monday. When one of them is unrestricted, only the other one decides. A field is unrestricted when it is `*` or `*/1` (day-of-month also when it covers `1-31`). An explicit `0-6` day-of-week counts as restricted. This matches cron-parser (BullMQ). Vixie cron differs only for stepped wildcards such as `*/2`, which it treats as unrestricted. Releases up to 0.15.5 required both fields to match.
 - **Daylight saving time** (with `tz`): follows vixie cron. A pattern whose minute or hour field contains `*` (`*/15 * * * *`, `0 * * * *`) is a wildcard pattern and runs on elapsed time: when clocks fall back it fires in both instances of the repeated hour. Any other pattern is fixed-time (`30 1 * * *`, `0,30 1-3 * * *`) and fires once: at the earlier instant when clocks fall back, and at the first instant after the gap when clocks spring forward (`30 2 * * *` in America/New_York runs at 03:00 EDT on the transition day; several skipped times coalesce into that one run). Wildcard patterns skip the missing times. Releases up to 0.15.5 lost part of the repeated hour and skipped fixed times inside the gap until the next day.
@@ -498,7 +498,7 @@ await queue.add('bulk-export', data, {
 
 **Check order**: when both concurrency, token bucket, and sliding window are configured, the gates are checked in order: concurrency -> token bucket -> sliding window. All applicable limits must pass. Strict FIFO is maintained - jobs never skip ahead of earlier jobs in the same group.
 
-**Cost validation**: a job with `cost` greater than `capacity` is rejected at enqueue time. If a previously valid job becomes invalid (e.g., capacity was lowered), it is moved to the DLQ at activation.
+**Cost validation**: a job with `cost` greater than `capacity` is rejected at enqueue time. If a previously valid job becomes invalid (e.g., capacity was lowered), it is failed at activation with `cost exceeds token bucket capacity`. It is not copied to the DLQ.
 
 **Differences from sliding window** (`rateLimit`):
 
@@ -553,8 +553,10 @@ const job = await queue.add(
 | ------------------ | ---------------------------------------------------- |
 | `Queue.add`        | Returns `null` (silent skip)                         |
 | `Queue.addBulk`    | Silently omits the duplicate from the returned array |
-| `FlowProducer.add` | Throws - flows cannot be partially created           |
+| `FlowProducer.add` | Throws `Duplicate job ID in flow`                    |
 | `TestQueue.add`    | Returns `null` (mirrors production)                  |
+
+`FlowProducer.add` checks every custom ID in a level before writing it, so the level holding the duplicate is not created. Nested sub-flows are separate calls made first, so sub-flows created before the failing level stay in place.
 
 **Interaction with deduplication**
 
@@ -566,14 +568,14 @@ const job = await queue.add(
 
 Prevent duplicate jobs from entering the queue using `deduplication.id`. Three modes are supported:
 
-| Mode       | Behaviour                                                                 |
-| ---------- | ------------------------------------------------------------------------- |
-| `simple`   | Skip the new job if any job with the same ID already exists (any state).  |
-| `throttle` | Accept only the first job in a TTL window; later arrivals are dropped.    |
-| `debounce` | Accept only the last job in a TTL window; earlier arrivals are cancelled. |
+| Mode       | Behaviour                                                                                                                    |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `simple`   | Skip the new job while the job holding the ID is not yet completed or failed. `ttl` is ignored.                              |
+| `throttle` | Skip the new job for `ttl` ms after the job that took the ID was added. Without `ttl`, nothing is skipped.                   |
+| `debounce` | Replace the job holding the ID if it is still `delayed` or `prioritized`; skip if it is waiting or active. `ttl` is ignored. |
 
 ```typescript
-// Simple: skip if a job with this ID is already queued / active / completed
+// Simple: skip while a job with this ID is queued or active; the ID frees once it completes or fails
 await queue.add(
   'send-welcome',
   { userId: 99 },
@@ -591,15 +593,18 @@ await queue.add(
   },
 );
 
-// Debounce: only the last "search" job within 500 ms is actually queued
+// Debounce: each add within 500 ms replaces the pending delayed job, so only the last one runs
 await queue.add(
   'search',
   { query: 'hello' },
   {
-    deduplication: { id: 'search-user-1', mode: 'debounce', ttl: 500 },
+    delay: 500,
+    deduplication: { id: 'search-user-1', mode: 'debounce' },
   },
 );
 ```
+
+Debounce needs a `delay` (or a priority job not yet promoted). Once the job is waiting or active, later adds with the same ID are skipped, and once it completes or fails the next add starts a new job.
 
 `queue.add()` returns `null` when a job is skipped by deduplication.
 
@@ -619,7 +624,7 @@ await queue.setGlobalConcurrency(20);
 await queue.setGlobalConcurrency(0);
 ```
 
-Workers check this limit atomically before picking up each job via the `checkConcurrency` server function.
+Workers read the limit from queue metadata on each scheduler tick. Priority and LIFO jobs are popped with an atomic check (`glidemq_rpopAndReserve`). For stream jobs, the `glidemq_checkConcurrency` call runs before `XREADGROUP` as a separate call, so workers polling at the same time can briefly overshoot the limit.
 
 ---
 
@@ -641,7 +646,7 @@ const limit = await queue.getGlobalRateLimit();
 await queue.removeGlobalRateLimit();
 ```
 
-- Global rate limit takes precedence over `WorkerOptions.limiter`. When both are set, the stricter limit wins.
+- While a global rate limit is set, it replaces `WorkerOptions.limiter` on every worker, even if the worker limiter is stricter. Removing it restores the worker limiter.
 - Changes are picked up by workers within one scheduler tick (no restart needed).
 
 ---
@@ -749,13 +754,13 @@ await queue.add('api-call', data, {
 });
 ```
 
-When `attempts` is exhausted the job moves to the `failed` state (or the DLQ if configured).
+When `attempts` is exhausted the job moves to the `failed` state. If the worker has a DLQ configured, a copy also goes to the DLQ.
 
 ---
 
 ## Dead Letter Queues
 
-Route permanently failed jobs to a separate queue for later inspection or manual retry.
+Copy permanently failed jobs to a separate queue for later inspection. Configure it on the Worker; `deadLetterQueue` on a `Queue` only tells `getDeadLetterJobs()` which queue to read.
 
 ```typescript
 const worker = new Worker('tasks', processor, {
@@ -771,7 +776,9 @@ const failedJobs = await dlqQueue.getJobs('waiting');
 const dlqJobs = await queue.getDeadLetterJobs(0, 49);
 ```
 
-Jobs in the DLQ are ordinary jobs — you can inspect, retry, or remove them like any other job.
+The DLQ entry is a best-effort copy. The original job stays in the `failed` state of its own queue (subject to `removeOnFail`), and if writing the copy fails the worker emits `error` and moves on. The entry is added to the DLQ queue as a new waiting job named like the original, whose data is a JSON envelope: `{ originalQueue, originalJobId, data, failedReason, attemptsMade }`. A worker on the DLQ queue would process these entries.
+
+Because the entry is waiting, not failed, `Job.retry()` on it throws. To retry, call `retry()` on the original failed job (`queue.getJob(originalJobId)`), or re-add the envelope's `data` to the original queue.
 
 ---
 
@@ -781,7 +788,7 @@ Configure ordered fallback models/providers on a per-job basis. On each retryabl
 
 - job.fallbackIndex starts at 0. currentFallback returns undefined (use your default model).
 - On the first retry failure, glidemq_fail sets fallbackIndex to 1. currentFallback returns fallbacks[0].
-- If fallbackIndex exceeds the array length, currentFallback returns the last entry (sticky).
+- Once fallbackIndex passes the end of the array, currentFallback returns undefined (back to your default model).
 - Each entry supports metadata for provider-specific parameters.
 
 See [USAGE.md](./USAGE.md#fallback-chains) for usage examples.

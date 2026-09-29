@@ -1359,7 +1359,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   /**
    * Set a global rate limit for this queue.
    * All workers will respect this limit dynamically (picked up within one scheduler tick).
-   * Takes precedence over WorkerOptions.limiter when set.
+   * While set, it replaces WorkerOptions.limiter on every worker (the limits are not combined).
    */
   async setGlobalRateLimit(config: RateLimitConfig): Promise<void> {
     const client = await this.getClient();
@@ -1707,7 +1707,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   /**
    * Remove all data associated with this queue from the server.
-   * If force=false (default), fails if there are active jobs.
+   * If force=false (default), fails if the stream has pending (active) entries.
+   * Active priority/LIFO jobs have no pending entry and are not counted.
    * If force=true, deletes everything regardless of active jobs.
    */
   async obliterate(opts?: { force?: boolean }): Promise<void> {
