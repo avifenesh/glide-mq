@@ -265,15 +265,44 @@ describe('nextCronOccurrence with timezone', () => {
 
   // --- DST transitions ---
 
-  it('spring-forward: skips nonexistent wall-clock time', () => {
+  it('spring-forward: fixed time inside the gap fires at the first instant after it', () => {
     // In America/New_York, 2024-03-10: clocks spring forward 2:00 AM -> 3:00 AM
-    // "30 2 * * *" = 2:30 AM - does not exist on March 10
-    // Next valid occurrence is March 11 at 2:30 AM EDT = 06:30 UTC
+    // "30 2 * * *" = 2:30 AM does not exist on March 10; like vixie cron it runs at 3:00 AM EDT = 07:00 UTC
     const now = new Date('2024-03-10T06:00:00Z').getTime(); // 1:00 AM EST
     const next = nextCronOccurrence('30 2 * * *', now, 'America/New_York');
-    // March 10 2:30 AM doesn't exist, so it should fire March 11 at 2:30 AM EDT
-    // March 11 2:30 AM EDT = 06:30 UTC
-    expect(new Date(next).toISOString()).toBe('2024-03-11T06:30:00.000Z');
+    expect(new Date(next).toISOString()).toBe('2024-03-10T07:00:00.000Z');
+    // The day after is back to 2:30 AM EDT = 06:30 UTC
+    expect(new Date(nextCronOccurrence('30 2 * * *', next, 'America/New_York')).toISOString()).toBe(
+      '2024-03-11T06:30:00.000Z',
+    );
+  });
+
+  it('spring-forward: several fixed times inside the gap coalesce into one run', () => {
+    const now = new Date('2024-03-10T06:00:00Z').getTime();
+    const first = nextCronOccurrence('0,30 2 * * *', now, 'America/New_York');
+    expect(new Date(first).toISOString()).toBe('2024-03-10T07:00:00.000Z');
+    expect(new Date(nextCronOccurrence('0,30 2 * * *', first, 'America/New_York')).toISOString()).toBe(
+      '2024-03-11T06:00:00.000Z',
+    );
+  });
+
+  it('spring-forward: fixed time in a 30-minute gap (Australia/Lord_Howe)', () => {
+    // 2026-10-04 02:00 LHST (+10:30) -> 02:30 LHDT (+11); 02:15 does not exist
+    const now = new Date('2026-10-03T15:00:00Z').getTime(); // 01:30 LHST
+    const next = nextCronOccurrence('15 2 * * *', now, 'Australia/Lord_Howe');
+    expect(new Date(next).toISOString()).toBe('2026-10-03T15:30:00.000Z'); // 02:30 LHDT
+  });
+
+  it('spring-forward: wildcard pattern skips the missing times', () => {
+    const now = new Date('2024-03-10T06:30:00Z').getTime(); // 1:30 AM EST
+    expect(walkCron('*/30 * * * *', '2024-03-10T06:30:00Z', 3, 'America/New_York')).toEqual([
+      '2024-03-10T07:00:00.000Z', // 3:00 AM EDT
+      '2024-03-10T07:30:00.000Z',
+      '2024-03-10T08:00:00.000Z',
+    ]);
+    expect(nextCronOccurrence('*/30 * * * *', now, 'America/New_York')).toBe(
+      new Date('2024-03-10T07:00:00Z').getTime(),
+    );
   });
 
   it('fall-back: picks first (earlier) UTC instant for ambiguous time', () => {

@@ -720,6 +720,26 @@ function tzWallToInstants(
   return instants.sort((a, b) => a - b);
 }
 
+/**
+ * First instant after the spring-forward gap that skips the given wall time.
+ * Only valid when tzWallToInstants returned no instants for it.
+ */
+function tzGapEnd(year: number, month: number, day: number, hour: number, minute: number, tz: string): number {
+  const naive = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  const guess = tzOffsetMs(naive, tz);
+  const offsetBefore = tzOffsetMs(naive - guess - DST_WINDOW_MS, tz);
+  const offsetAfter = tzOffsetMs(naive - guess + DST_WINDOW_MS, tz);
+  // naive - offsetAfter is still before the transition, naive - offsetBefore is after it.
+  let lo = naive - offsetAfter;
+  let hi = naive - offsetBefore;
+  while (hi - lo > MINUTE_MS) {
+    const mid = lo + Math.floor((hi - lo) / 2 / MINUTE_MS) * MINUTE_MS;
+    if (tzOffsetMs(mid, tz) === offsetBefore) lo = mid;
+    else hi = mid;
+  }
+  return hi;
+}
+
 /** Vixie cron wildcard rule: the minute or hour field contains '*'. */
 function isWildcardCronTime(pattern: string): boolean {
   const fields = pattern.trim().split(/\s+/);
@@ -899,7 +919,8 @@ function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
  *   instances of the repeated hour; fixed-time patterns fire once, at the
  *   earlier instant.
  * - Spring-forward (a wall-clock hour is skipped): wildcard patterns skip the
- *   missing times.
+ *   missing times; fixed-time patterns due inside the gap fire once at the
+ *   first instant after it (02:30 in America/New_York runs at 03:00 EDT).
  */
 function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): number {
   const cron = parseCronPattern(pattern);
@@ -1016,10 +1037,15 @@ function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): num
     }
 
     // Found a candidate wall-clock time - convert to UTC. A skipped wall time
-    // has no instant; a repeated one has two and only wildcard patterns use
-    // the second.
+    // has no instant: fixed-time patterns run at the end of the gap instead.
+    // A repeated one has two and only wildcard patterns use the second.
     const instants = tzWallToInstants(year, month, day, hour, minute, tz);
-    const eligible = wildcardTime ? instants : instants.slice(0, 1);
+    let eligible: number[];
+    if (instants.length === 0) {
+      eligible = wildcardTime ? [] : [tzGapEnd(year, month, day, hour, minute, tz)];
+    } else {
+      eligible = wildcardTime ? instants : instants.slice(0, 1);
+    }
     const next = eligible.find((t) => t > afterMs);
     if (next !== undefined) {
       return next;
