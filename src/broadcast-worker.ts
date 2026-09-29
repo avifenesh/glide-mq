@@ -210,7 +210,7 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
     // If timeout is set and batch is not full, fetch more
     if (this.batchTimeout > 0 && collected.length < this.batchSize) {
       const deadline = Date.now() + this.batchTimeout;
-      while (collected.length < this.batchSize && this.running && !this.closing) {
+      while (collected.length < this.batchSize && this.running && !this.closing && !this.paused) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) break;
 

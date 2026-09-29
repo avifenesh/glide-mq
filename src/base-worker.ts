@@ -608,6 +608,19 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (!this.commandClient) return;
     if (collected.length === 0) return;
 
+    // Entries delivered by a read that was in flight when pause()/close()
+    // landed go back unclaimed. List jobs restore in reverse claim order so
+    // the next RPOP keeps the original sequence.
+    if (this.paused || this.closing) {
+      for (const entry of collected) {
+        if (entry.entryId !== '') await this.deferPausedActivation(entry);
+      }
+      for (let i = collected.length - 1; i >= 0; i--) {
+        if (collected[i].entryId === '') await this.deferPausedActivation(collected[i]);
+      }
+      return;
+    }
+
     // Activate jobs and build batch
     const batch: { jobId: string; entryId: string; job: Job<D, R> }[] = [];
     const pausedListEntries: { jobId: string; entryId: string }[] = [];
@@ -1370,10 +1383,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected async processJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
 
-    // close() can land while XREADGROUP/list-pop is in flight. The poll loop
-    // still delivers that claim, but the while-guard below would otherwise
-    // drop it in this consumer's PEL until stall reclaim.
-    if (this.closing) {
+    // close() or pause() can land while XREADGROUP/list-pop is in flight. The
+    // poll loop still delivers that claim; hand it back instead of running it
+    // after the worker stopped taking work (or leaving it in this PEL).
+    if (this.closing || this.paused) {
       await this.deferPausedActivation({ jobId, entryId });
       return;
     }
@@ -1640,10 +1653,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         }
       }
       const now = Date.now();
-      // close() sets closing before waitForActiveJobs. Completing without
-      // fetch-next avoids claiming a job that this worker will not process.
+      // close() and pause() set their flag before waitForActiveJobs.
+      // Completing without fetch-next avoids claiming a job this worker will
+      // not process now; chaining under a backlog would never let pause() land.
       let fetchResult: CompleteAndFetchResult;
-      if (this.closing) {
+      if (this.closing || this.paused) {
         const notifications = await completeJob(
           this.commandClient,
           this.queueKeys,
@@ -1740,10 +1754,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         await this.updateSchedulerAfterComplete(job.schedulerName, now);
       }
 
-      // CAF raced with close(): the next job is already claimed. Defer it
-      // so another worker can take it without waiting for stall reclaim.
+      // CAF raced with close() or pause(): the next job is already claimed.
+      // Defer it so it is not run or stranded without a heartbeat.
       if (
-        this.closing &&
+        (this.closing || this.paused) &&
         typeof fetchResult.next === 'object' &&
         fetchResult.nextJobId &&
         fetchResult.nextEntryId != null

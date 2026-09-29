@@ -379,3 +379,137 @@ describe('heartbeat cleanup on pre-processor failures', () => {
     await worker.close(true);
   });
 });
+
+function nextHash(completed: string, nextId: string, nextEntryId: string) {
+  return ['NEXT_HASH', completed, nextId, nextEntryId, ...JSON.parse(jobHash(nextId))];
+}
+
+describe('Worker.pause() under backlog', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('stops chaining completeAndFetchNext once paused', async () => {
+    let cafCalls = 0;
+    const command = makeMockClient({
+      fcall: routeFcall({
+        // Bounded backlog so the pre-fix behavior terminates.
+        glidemq_completeAndFetchNext: (_keys, args) => {
+          cafCalls++;
+          if (cafCalls > 5) return JSON.stringify({ completed: args[0], next: false });
+          return nextHash(args[0], `n${cafCalls}`, `${cafCalls + 1}-0`);
+        },
+      }),
+    });
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult([['1-0', 'j1']]))
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+
+    let pausePromise: Promise<void> | undefined;
+    let pauseResolved = false;
+    const worker = new Worker(
+      'lifecycle-w3',
+      async () => {
+        if (!pausePromise) {
+          pausePromise = worker.pause().then(() => {
+            pauseResolved = true;
+          });
+        }
+        return 'ok';
+      },
+      { connection, blockTimeout: 100 },
+    );
+    const processed: string[] = [];
+    worker.on('completed', (job: any) => processed.push(job.id));
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(processed).toEqual(['j1']);
+    expect(cafCalls).toBe(0);
+    const completeCalls = command.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_complete');
+    expect(completeCalls).toHaveLength(1);
+    expect(pauseResolved).toBe(true);
+
+    await worker.close(true);
+  });
+
+  it('defers the next job fetched by a completeAndFetchNext that raced pause()', async () => {
+    const holder: { worker?: Worker } = {};
+    const command = makeMockClient({
+      fcall: routeFcall({
+        glidemq_completeAndFetchNext: (_keys, args) => {
+          void holder.worker!.pause(true);
+          return nextHash(args[0], 'raced', '2-0');
+        },
+      }),
+    });
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult([['1-0', 'j1']]))
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+
+    const processed: string[] = [];
+    const worker = new Worker(
+      'lifecycle-w3-caf',
+      async (job) => {
+        processed.push(job.id!);
+        return 'ok';
+      },
+      { connection, blockTimeout: 100 },
+    );
+    holder.worker = worker;
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(processed).toEqual(['j1']);
+    const deferCalls = command.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_deferActive');
+    expect(deferCalls).toHaveLength(1);
+    // jobId, entryId, group, broadcast, pausedRestore, undoGroupClaim
+    expect(deferCalls[0][2]).toEqual(['raced', '2-0', 'workers', '0', '1', '1']);
+
+    await worker.close(true);
+  });
+
+  it('hands back entries delivered by an XREADGROUP in flight when pause() landed', async () => {
+    const read = deferred<any>();
+    const command = makeMockClient({ fcall: routeFcall({}) });
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockImplementationOnce(() => read.promise)
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+
+    const processor = vi.fn().mockResolvedValue('ok');
+    const worker = new Worker('lifecycle-w3-inflight', processor, { connection, blockTimeout: 100 });
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(10);
+
+    await worker.pause();
+    read.resolve(streamResult([['1-0', 'late']]));
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(processor).not.toHaveBeenCalled();
+    const moveCalls = command.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_moveToActive');
+    expect(moveCalls).toHaveLength(0);
+    const deferCalls = command.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_deferActive');
+    expect(deferCalls).toHaveLength(1);
+    expect(deferCalls[0][2][0]).toBe('late');
+    expect(deferCalls[0][2][1]).toBe('1-0');
+
+    await worker.close(true);
+  });
+});
