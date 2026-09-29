@@ -231,7 +231,7 @@ const worker = new Worker(
     const retryAfter = await checkUpstreamRateLimit(job.data.clientId);
     if (retryAfter > 0) {
       await worker.rateLimit(retryAfter);
-      throw new Worker.RateLimitError(); // re-queues the job, not counted as failure
+      throw new Worker.RateLimitError(); // re-queues the job, never fails it (attemptsMade still increments)
     }
     return process(job.data);
   },
@@ -534,7 +534,7 @@ The processor function signature is identical. The only change is the connection
 | `worker.on('closed')`                                                                                                         | `worker.on('closed')`                                                                                                                                     | Full    |
 | `worker.on('active', (job, prev))`                                                                                            | `worker.on('active', (job, jobId))`                                                                                                                       | Changed |
 | `worker.on('drained')`                                                                                                        | `worker.on('drained')`                                                                                                                                    | Full    |
-| `Worker.RateLimitError`                                                                                                       | `Worker.RateLimitError`                                                                                                                                   | Full    |
+| `Worker.RateLimitError`                                                                                                       | `Worker.RateLimitError` (re-queues without failing, but increments `attemptsMade`)                                                                       | Changed |
 | Sandboxed processor (file path string)                                                                                        | `new Worker('q', './processor.js', { connection, sandbox: {} })`                                                                                          | Full    |
 
 ### Job methods
@@ -580,8 +580,8 @@ The processor function signature is identical. The only change is the connection
 | `attempts`          | `attempts`             | Full                                                               |
 | `backoff`           | `backoff`              | Full                                                               |
 | `timeout`           | `timeout`              | Full                                                               |
-| `removeOnComplete`  | `removeOnComplete`     | Full                                                               |
-| `removeOnFail`      | `removeOnFail`         | Full                                                               |
+| `removeOnComplete`  | `removeOnComplete`     | Changed - object form needs both `age` and `count`                 |
+| `removeOnFail`      | `removeOnFail`         | Changed - object form needs both `age` and `count`                 |
 | `deduplication`     | `deduplication`        | Changed (see [Deduplication](#deduplication))                      |
 | `parent`            | `parent`               | Full                                                               |
 | `jobId` (custom ID) | `jobId`                | Full                                                               |
@@ -600,24 +600,26 @@ The processor function signature is identical. The only change is the connection
 
 ### QueueEvents events
 
-| BullMQ event          | glide-mq event | Status                                                  |
-| --------------------- | -------------- | ------------------------------------------------------- |
-| `'added'`             | `'added'`      | Full                                                    |
-| `'completed'`         | `'completed'`  | Full                                                    |
-| `'failed'`            | `'failed'`     | Full                                                    |
-| `'stalled'`           | `'stalled'`    | Full                                                    |
-| `'progress'`          | `'progress'`   | Full                                                    |
-| `'paused'`            | `'paused'`     | Full                                                    |
-| `'resumed'`           | `'resumed'`    | Full                                                    |
-| `'removed'`           | `'removed'`    | Full                                                    |
-| `'retries-exhausted'` | `'failed'`     | Changed - check `job.attemptsMade >= job.opts.attempts` |
-| `'waiting'`           | -              | Gap                                                     |
-| `'active'`            | -              | Gap                                                     |
-| `'delayed'`           | -              | Gap                                                     |
-| `'drained'`           | -              | Gap                                                     |
-| `'cleaned'`           | -              | Gap                                                     |
-| `'deduplicated'`      | -              | Gap                                                     |
-| `'waiting-children'`  | -              | Gap                                                     |
+| BullMQ event          | glide-mq event       | Status                                                                                  |
+| --------------------- | -------------------- | --------------------------------------------------------------------------------------- |
+| `'added'`             | `'added'`            | Full                                                                                    |
+| `'completed'`         | `'completed'`        | Full                                                                                    |
+| `'failed'`            | `'failed'`           | Changed - terminal failures only; a failed attempt that will retry emits `'retrying'`   |
+| `'stalled'`           | `'stalled'`          | Full                                                                                    |
+| `'progress'`          | `'progress'`         | Full                                                                                    |
+| `'paused'`            | `'paused'`           | Full                                                                                    |
+| `'resumed'`           | `'resumed'`          | Full                                                                                    |
+| `'removed'`           | `'removed'`          | Full                                                                                    |
+| `'retries-exhausted'` | `'failed'`           | Changed - check `job.attemptsMade >= job.opts.attempts`                                 |
+| `'waiting'`           | -                    | Gap                                                                                     |
+| `'active'`            | `'active'`           | Partial - emitted only on some activation paths; do not rely on it                      |
+| `'delayed'`           | -                    | Gap (`'retrying'` carries the backoff `delay`)                                          |
+| `'drained'`           | `'drained'`          | Changed - emitted by `queue.drain()` with `jobId` = removed count, not when queue empties |
+| `'cleaned'`           | `'cleaned'`          | Changed - emitted by `queue.clean()` with `jobId` = removed count                       |
+| `'deduplicated'`      | -                    | Gap                                                                                     |
+| `'waiting-children'`  | `'waiting-children'` | Partial - emitted by `job.moveToWaitingChildren()`, not when a flow parent is created   |
+
+glide-mq also emits `'retrying'`, `'retried'`, `'promoted'`, `'revoked'`, `'expired'`, `'suspended'`, `'priority-changed'`, `'delay-changed'`, `'group-rate-limited'` and `'usage'`.
 
 ---
 
@@ -932,13 +934,13 @@ glide-mq adds a `jitter` field to spread retries under load:
 // glide-mq only
 await queue.add('job', data, {
   attempts: 5,
-  backoff: { type: 'exponential', delay: 1000, jitter: 0.25 }, // ±25% random jitter
+  backoff: { type: 'exponential', delay: 1000, jitter: 0.25 }, // adds 0 to +25% of the delay
 });
 ```
 
 Custom backoff strategies moved from `settings.backoffStrategy` to `backoffStrategies` map - see [Worker section](#worker).
 
-**`timeout` option exists but behavior note** - Both BullMQ and glide-mq accept `opts.timeout`. In BullMQ this is also not fully implemented in all versions. In glide-mq the timeout is respected but acts as a heartbeat-based stall detection rather than a hard kill. Use `job.abortSignal` for cooperative cancellation within the processor:
+**`timeout` fails the attempt** - glide-mq enforces `opts.timeout` in the worker. When it passes, the attempt fails with `Job timeout exceeded` and `job.abortSignal` fires. Normal retry and backoff rules apply to that failure. The processor promise is not killed (a sandboxed processor still running 5 seconds after the abort is terminated), so check `job.abortSignal` for cooperative cancellation:
 
 ```ts
 const worker = new Worker(
@@ -995,7 +997,7 @@ const worker = new Worker(
   'q',
   async (job) => {
     if (shouldThrottle()) {
-      throw new Worker.RateLimitError(); // re-queues job, does not count as failure
+      throw new Worker.RateLimitError(); // re-queues job, never fails it (attemptsMade still increments)
     }
     return process(job);
   },
