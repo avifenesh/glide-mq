@@ -11,7 +11,15 @@ import {
 } from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
-import { LIBRARY_SOURCE, addFlow, addJob, addJobArgs, completeChild, registerParent } from './functions/index';
+import {
+  LIBRARY_SOURCE,
+  addFlow,
+  addJob,
+  addJobArgs,
+  completeChild,
+  registerParent,
+  updateJobFields,
+} from './functions/index';
 import { withSpan } from './telemetry';
 import { validateDAG, topoSort } from './dag-utils';
 import { Batch, ClusterBatch, type GlideClient, type GlideClusterClient } from '@glidemq/speedkey';
@@ -112,49 +120,80 @@ export class FlowProducer {
       async () => {
         validateFlowTree(flow);
         const client = await this.getClient();
-        const result = await this.addFlowRecursive(client, flow);
+        if (!flowOpts?.budget) return this.addFlowRecursive(client, flow);
 
-        if (flowOpts?.budget) {
-          const prefix = this.opts.prefix ?? 'glide';
-          const budgetKey = `${prefix}:{${flow.queueName}}:budget:${result.job.id}`;
-          const budgetFields: Record<string, string> = {
-            usedTokens: '0',
-            usedCost: '0',
-            exceeded: '0',
-            onExceeded: flowOpts.budget.onExceeded ?? 'fail',
-          };
-          if (flowOpts.budget.maxTotalTokens != null) {
-            budgetFields.maxTotalTokens = flowOpts.budget.maxTotalTokens.toString();
-          }
-          if (flowOpts.budget.maxTokens != null) {
-            budgetFields.maxTokens = JSON.stringify(flowOpts.budget.maxTokens);
-          }
-          if (flowOpts.budget.tokenWeights != null) {
-            budgetFields.tokenWeights = JSON.stringify(flowOpts.budget.tokenWeights);
-          }
-          if (flowOpts.budget.maxTotalCost != null) {
-            budgetFields.maxTotalCost = flowOpts.budget.maxTotalCost.toString();
-          }
-          if (flowOpts.budget.maxCosts != null) {
-            budgetFields.maxCosts = JSON.stringify(flowOpts.budget.maxCosts);
-          }
-          if (flowOpts.budget.costUnit != null) {
-            budgetFields.costUnit = flowOpts.budget.costUnit;
-          }
-          await client.hset(budgetKey, budgetFields);
+        // The budget id is the root job id. Choose it up front and create the
+        // budget hash before any job, so no job of the flow can run (or be
+        // removed) before it carries its budgetKey. Each job hash is created
+        // with budgetKey in the same FCALL.
+        const prefix = this.opts.prefix ?? 'glide';
+        const rootKeys = buildKeys(flow.queueName, prefix);
+        const rootId = await this.reserveRootId(client, flow, rootKeys);
+        const budgetKey = rootKeys.budget(rootId);
+        const budgetFields: Record<string, string> = {
+          usedTokens: '0',
+          usedCost: '0',
+          exceeded: '0',
+          onExceeded: flowOpts.budget.onExceeded ?? 'fail',
+        };
+        if (flowOpts.budget.maxTotalTokens != null) {
+          budgetFields.maxTotalTokens = flowOpts.budget.maxTotalTokens.toString();
+        }
+        if (flowOpts.budget.maxTokens != null) {
+          budgetFields.maxTokens = JSON.stringify(flowOpts.budget.maxTokens);
+        }
+        if (flowOpts.budget.tokenWeights != null) {
+          budgetFields.tokenWeights = JSON.stringify(flowOpts.budget.tokenWeights);
+        }
+        if (flowOpts.budget.maxTotalCost != null) {
+          budgetFields.maxTotalCost = flowOpts.budget.maxTotalCost.toString();
+        }
+        if (flowOpts.budget.maxCosts != null) {
+          budgetFields.maxCosts = JSON.stringify(flowOpts.budget.maxCosts);
+        }
+        if (flowOpts.budget.costUnit != null) {
+          budgetFields.costUnit = flowOpts.budget.costUnit;
+        }
+        await client.hset(budgetKey, budgetFields);
 
-          // Write budgetKey to all jobs in the flow
+        let result: JobNode;
+        try {
+          result = await this.addFlowRecursive(client, flow, { budgetKey, rootId });
+        } catch (err) {
+          if ((await client.exists([rootKeys.job(rootId)])) === 0) await client.del([budgetKey]);
+          throw err;
+        }
+        // A library older than v126 ignores the budgetKey argument.
+        if ((await client.hget(rootKeys.job(rootId), 'budgetKey')) == null) {
           await this.propagateBudgetKey(client, result, flow, budgetKey, prefix);
         }
-
         return result;
       },
     );
   }
 
   /**
-   * Recursively write budgetKey to every job in a flow tree.
-   * Walks the FlowJob tree in parallel with the JobNode tree to access queue names.
+   * Pick the root job id before any job of a budgeted flow is created. Auto
+   * ids skip ids taken by custom-id jobs, like the server-side id allocation.
+   */
+  private async reserveRootId(client: Client, flow: FlowJob, rootKeys: ReturnType<typeof buildKeys>): Promise<string> {
+    const customId = flow.opts?.jobId ?? '';
+    if (customId !== '') {
+      validateJobId(customId);
+      if ((await client.exists([rootKeys.job(customId)])) > 0) throw new Error('Duplicate job ID in flow');
+      return customId;
+    }
+    for (let i = 0; i < 1000; i++) {
+      const id = String(await client.incr(rootKeys.id));
+      if ((await client.exists([rootKeys.job(id)])) === 0) return id;
+    }
+    throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
+  }
+
+  /**
+   * Write budgetKey to every job of a flow created by a library that does not
+   * accept it at creation. Only existing hashes are written, so a job removed
+   * in the meantime is not recreated.
    */
   private async propagateBudgetKey(
     client: Client,
@@ -164,13 +203,16 @@ export class FlowProducer {
     prefix: string,
   ): Promise<void> {
     const keys = buildKeys(flowDef.queueName, prefix);
-    await client.hset(keys.job(node.job.id), { budgetKey });
+    try {
+      await updateJobFields(client, keys, node.job.id, { budgetKey });
+    } catch (error) {
+      if (!(error instanceof Error) || !/function\s+not\s+found/i.test(error.message)) throw error;
+      await client.hset(keys.job(node.job.id), { budgetKey });
+    }
     node.job.budgetKey = budgetKey;
     if (node.children && flowDef.children) {
       for (let i = 0; i < node.children.length; i++) {
-        const childNode = node.children[i];
-        const childFlow = flowDef.children[i];
-        await this.propagateBudgetKey(client, childNode, childFlow, budgetKey, prefix);
+        await this.propagateBudgetKey(client, node.children[i], flowDef.children[i], budgetKey, prefix);
       }
     }
   }
@@ -193,7 +235,11 @@ export class FlowProducer {
    * those sub-flows are added first (bottom-up), and the resulting
    * child jobs are used as direct children of the current parent.
    */
-  private async addFlowRecursive(client: Client, flow: FlowJob): Promise<JobNode> {
+  private async addFlowRecursive(
+    client: Client,
+    flow: FlowJob,
+    budget?: { budgetKey: string; rootId?: string },
+  ): Promise<JobNode> {
     const prefix = this.opts.prefix ?? 'glide';
     const parentQueueName = flow.queueName;
     const parentKeys = buildKeys(parentQueueName, prefix);
@@ -221,7 +267,7 @@ export class FlowProducer {
           `Job data exceeds maximum size (${dataByteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
         );
       }
-      const customJobId = opts.jobId ?? '';
+      const customJobId = budget?.rootId ?? opts.jobId ?? '';
       if (customJobId !== '') validateJobId(customJobId);
       if (opts.lifo && opts.ordering?.key) {
         throw new Error('lifo and ordering.key cannot be used together');
@@ -250,6 +296,8 @@ export class FlowProducer {
         '',
         '',
         '',
+        false,
+        budget?.budgetKey ?? '',
       );
       if (String(jobId) === 'duplicate') {
         throw new Error('Duplicate job ID in flow');
@@ -262,13 +310,15 @@ export class FlowProducer {
       }
       const job = new Job(client, parentKeys, String(jobId), flow.name, flow.data, opts, this.serializer);
       job.timestamp = timestamp;
+      if (budget) job.budgetKey = budget.budgetKey;
       return { job };
     }
 
     // Early check: if parent has a custom ID, verify it doesn't already exist
     // before recursing into children (to avoid orphaning sub-flow children).
-    const parentCustomId = (flow.opts ?? {}).jobId ?? '';
-    if (parentCustomId !== '') {
+    // A reserved budget root id was checked by reserveRootId.
+    const parentCustomId = budget?.rootId ?? (flow.opts ?? {}).jobId ?? '';
+    if (parentCustomId !== '' && !budget?.rootId) {
       validateJobId(parentCustomId);
       const exists = await client.exists([parentKeys.job(parentCustomId)]);
       if (exists > 0) {
@@ -285,7 +335,10 @@ export class FlowProducer {
     for (let i = 0; i < flow.children.length; i++) {
       const child = flow.children[i];
       if ((child.children && child.children.length > 0) || (isCluster && child.queueName !== parentQueueName)) {
-        childNodeMap.set(i, await this.addFlowRecursive(client, child));
+        childNodeMap.set(
+          i,
+          await this.addFlowRecursive(client, child, budget ? { budgetKey: budget.budgetKey } : undefined),
+        );
       }
     }
 
@@ -350,6 +403,7 @@ export class FlowProducer {
       childrenForLua,
       extraDeps,
       parentCustomId,
+      budget?.budgetKey ?? '',
     );
 
     if (ids[0] === 'duplicate') {
@@ -449,6 +503,7 @@ export class FlowProducer {
         childJob.timestamp = timestamp;
         childJob.parentId = parentId;
         childJob.parentQueue = parentQueueName;
+        if (budget) childJob.budgetKey = budget.budgetKey;
         childNodes.push({ job: childJob });
         leafIdx++;
       }
@@ -456,6 +511,7 @@ export class FlowProducer {
 
     const parentJob = new Job(client, parentKeys, parentId, flow.name, flow.data, parentOpts, this.serializer);
     parentJob.timestamp = timestamp;
+    if (budget) parentJob.budgetKey = budget.budgetKey;
 
     return { job: parentJob, children: childNodes };
   }

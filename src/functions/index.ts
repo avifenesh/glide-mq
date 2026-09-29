@@ -101,7 +101,7 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 127: glidemq_casSchedulerEntry lets upsertJobScheduler write only over the entry it read.
 // Version 126: cross-queue child completions that reach the parent before registration are parked
 //   (depearly) and counted by glidemq_registerChildDep; debounce replacements inherit the replaced
-//   cross-queue parent dependency (replacedIds).
+//   cross-queue parent dependency (replacedIds); addJob/addFlow accept an optional trailing budgetKey.
 // Version 128: version 127 (casSchedulerEntry) plus the version 126 changes above.
 export const LIBRARY_VERSION = '128';
 
@@ -147,6 +147,7 @@ export function addJobArgs(
   parentDepsKey: string = '',
   schedulerName: string = '',
   skipEvents: boolean = false,
+  budgetKey: string = '',
 ): { keys: string[]; args: string[] } {
   const keys = [k.id, k.stream, k.scheduled, k.events];
   if (parentDepsKey) {
@@ -176,6 +177,8 @@ export function addJobArgs(
       parentQueue,
       schedulerName,
       skipEvents ? '1' : '0',
+      // Appended optional arg: older libraries ignore it.
+      ...(budgetKey ? [budgetKey] : []),
     ],
   };
 }
@@ -205,6 +208,7 @@ export async function addJob(
   parentDepsKey: string = '',
   schedulerName: string = '',
   skipEvents: boolean = false,
+  budgetKey: string = '',
 ): Promise<string> {
   const { keys, args } = addJobArgs(
     k,
@@ -230,6 +234,7 @@ export async function addJob(
     parentDepsKey,
     schedulerName,
     skipEvents,
+    budgetKey,
   );
   const result = await client.fcall('glidemq_addJob', keys, args);
   return result as string;
@@ -1217,6 +1222,7 @@ export async function addFlow(
   }[],
   extraDeps: string[] = [],
   parentCustomId: string = '',
+  budgetKey: string = '',
 ): Promise<string[]> {
   const keys: string[] = [parentKeys.id, parentKeys.stream, parentKeys.scheduled, parentKeys.events];
   const args: string[] = [
@@ -1251,6 +1257,8 @@ export async function addFlow(
   for (const dep of extraDeps) {
     args.push(dep);
   }
+  // Appended optional arg: older libraries ignore it.
+  if (budgetKey) args.push(budgetKey);
 
   const result = await client.fcall('glidemq_addFlow', keys, args);
   return JSON.parse(result as string) as string[];

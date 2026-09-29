@@ -190,4 +190,43 @@ describeEachMode('Lua round 2 2026-09-29', (CONNECTION) => {
       await childQueue.close();
     }
   });
+
+  it('A-10: a budgeted flow creates the budget first and writes budgetKey with each job', async () => {
+    const Q = uniqueQueue('r2-budget');
+    const k = buildKeys(Q);
+    let budgetBeforeJobs: number | null = null;
+    let removedChild = '';
+    // A worker that finishes (removeOnComplete) a child right after creation.
+    const client = new Proxy(cleanupClient, {
+      get(target, prop) {
+        if (prop === 'fcall') {
+          return async (fn: string, keys: string[], args: string[]) => {
+            if (fn === 'glidemq_addFlow') budgetBeforeJobs = await target.exists([k.budget(args[8])]);
+            const result = await target.fcall(fn, keys, args);
+            if (fn === 'glidemq_addFlow') {
+              removedChild = JSON.parse(String(result))[1];
+              await target.del([k.job(removedChild)]);
+            }
+            return result;
+          };
+        }
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const flow = new FlowProducer({ client, connection: CONNECTION });
+    try {
+      const node = await flow.add(
+        { name: 'parent', queueName: Q, data: {}, children: [{ name: 'c1', queueName: Q, data: {} }] },
+        { budget: { maxTotalTokens: 100 } },
+      );
+      expect(budgetBeforeJobs).toBe(1);
+      expect(removedChild).toBe(node.children![0].job.id);
+      expect(await cleanupClient.exists([k.job(removedChild)])).toBe(0);
+      expect(await hget(k.job(node.job.id), 'budgetKey')).toBe(k.budget(node.job.id));
+      expect(node.children![0].job.budgetKey).toBe(k.budget(node.job.id));
+    } finally {
+      await flow.close();
+    }
+  });
 });

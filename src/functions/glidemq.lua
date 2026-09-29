@@ -899,6 +899,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local parentQueue = args[19] or ''
   local schedulerName = args[20] or ''
   local skipEvents = args[21] or '0'
+  local budgetKey = args[22] or ''
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local effectiveCost = (jobCost > 0) and jobCost or 1000
   if orderingKey ~= '' and tbCapacity > 0 and effectiveCost > tbCapacity then
@@ -1015,6 +1016,10 @@ redis.register_function('glidemq_addJob', function(keys, args)
   if schedulerName ~= '' then
     hashFields[#hashFields + 1] = 'schedulerName'
     hashFields[#hashFields + 1] = schedulerName
+  end
+  if budgetKey ~= '' then
+    hashFields[#hashFields + 1] = 'budgetKey'
+    hashFields[#hashFields + 1] = budgetKey
   end
   if lifo > 0 then
     hashFields[#hashFields + 1] = 'lifo'
@@ -3016,6 +3021,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   local parentMaxAttempts = tonumber(args[7]) or 0
   local numChildren = tonumber(args[8])
   local parentCustomId = args[9] or ''
+  -- Optional trailing arg after the extra deps: budget hash key written on
+  -- every job hash created here.
+  local extraDepsCount = tonumber(args[9 + numChildren * 9 + 1]) or 0
+  local budgetKey = args[9 + numChildren * 9 + 1 + extraDepsCount + 1] or ''
   local parentPrefix = string.sub(parentIdKey, 1, #parentIdKey - 2)
   local parentOrderingKey = extractOrderingKeyFromOpts(parentOpts)
   local parentGroupConc = extractGroupConcurrencyFromOpts(parentOpts)
@@ -3135,6 +3144,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     parentHash[#parentHash + 1] = 'expireAt'
     parentHash[#parentHash + 1] = tostring(timestamp + parentTtl)
   end
+  if budgetKey ~= '' then
+    parentHash[#parentHash + 1] = 'budgetKey'
+    parentHash[#parentHash + 1] = budgetKey
+  end
   redis.call('HSET', parentJobKey, unpack(parentHash))
   local childArgOffset = 9
   local childKeyOffset = 4
@@ -3242,6 +3255,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     if childLifo > 0 then
       childHash[#childHash + 1] = 'lifo'
       childHash[#childHash + 1] = '1'
+    end
+    if budgetKey ~= '' then
+      childHash[#childHash + 1] = 'budgetKey'
+      childHash[#childHash + 1] = budgetKey
     end
     if childDelay > 0 or childPriority > 0 then
       childHash[#childHash + 1] = 'state'
