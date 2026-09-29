@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { gzipSync } from 'zlib';
+import { parseExpression } from 'cron-parser';
 import {
   nextCronOccurrence,
   validateTimezone,
@@ -671,6 +672,169 @@ describe('nextCronOccurrence extended syntax', () => {
       expect(() => nextCronOccurrence('*/5/2 * * * *', Date.now())).toThrow('Invalid cron token: */5/2');
       expect(() => nextCronOccurrence('1-5-9 * * * *', Date.now())).toThrow('Invalid cron token: 1-5-9');
     });
+  });
+});
+
+/**
+ * Oracle: cron-parser 4.9.0, the parser BullMQ uses. Every pattern below is
+ * evaluated from many start instants in UTC and three DST zones and must give
+ * the same next occurrence. Samples are skipped only where cron-parser's
+ * documented semantics differ from ours:
+ * - DST: our rule follows cronie (fixed times inside a spring-forward gap run
+ *   at the gap end, wildcard patterns fire in both instances of a repeated
+ *   hour, fixed times once). cron-parser walks wall-clock hours with its own
+ *   adjustments and does not implement that rule. Samples whose start or
+ *   result lie within 3 hours of a transition are skipped; the DST behavior
+ *   is pinned by the explicit tests above.
+ * Patterns cron-parser cannot express or reads differently are not in the
+ * list and are covered by the explicit tests above:
+ * - W and LW: cron-parser 4.9 rejects W.
+ * - '#' combined with ',' (e.g. '1#2,5L'): cron-parser rejects the list.
+ * - '#' with a restricted day-of-month (e.g. '0 0 15 * 1#2'): cron-parser
+ *   applies the nth-week filter to the day-of-month match as well.
+ * - Day-of-week ranges that end in 7 ('0-7', '1-7'): cron-parser counts the
+ *   8-value field as unrestricted; we treat only '*' and '?' as unrestricted.
+ * - Day-of-month ranges that cover a short month ('1-30'): cron-parser treats
+ *   the field as unrestricted in months of that length; we require 1-31.
+ */
+describe('nextCronOccurrence agrees with cron-parser', () => {
+  const ZONES = ['UTC', 'America/New_York', 'Europe/Berlin', 'Australia/Lord_Howe'];
+  const PATTERNS = [
+    // standard fields
+    '* * * * *',
+    '*/5 * * * *',
+    '0 * * * *',
+    '15,45 * * * *',
+    '0 9 * * *',
+    '30 2 * * *',
+    '0 0 * * *',
+    '0 */2 * * *',
+    '0 9-17 * * 1-5',
+    '0 0 1 * *',
+    '0 0 1,15 * *',
+    '0 0 * * 0',
+    '0 0 1 * 1',
+    '0 12 */2 * 1',
+    '0 0 29 2 *',
+    '0 0 31 * *',
+    '0 0 1 1 *',
+    '5/15 * * * *',
+    '0 0 1-7 * *',
+    '10-40/10 8 * * *',
+    // names
+    '0 9 * * MON-FRI',
+    '0 0 * * sun,sat',
+    '0 0 1 JAN-MAR/2 *',
+    '0 0 1 jan,jul *',
+    '0 8 * DEC MON',
+    // day-of-week 7
+    '0 0 * * 7',
+    '0 0 * * 5-7',
+    '0 0 * * 1-7/3',
+    // ? in day fields
+    '0 0 ? * 1',
+    '0 0 15 * ?',
+    // seconds
+    '*/10 * * * * *',
+    '30 * * * * *',
+    '0 0 9 * * *',
+    '15 30 2 * * *',
+    '0,30 */5 * * * *',
+    '5 5 5 * * *',
+    // L and #
+    '0 0 L * *',
+    '0 0 * * 5L',
+    '0 0 * * FRIL',
+    '0 0 * * 2#1',
+    '0 0 * * 1#5',
+    '0 0 * * MON#2',
+    '0 0 L * 1',
+    '0 0 1,L * *',
+  ];
+  const SAMPLES_PER_ZONE = 30;
+  const RANGE_START = Date.UTC(2024, 0, 1);
+  const RANGE_END = Date.UTC(2027, 11, 31);
+  // Instants next to DST transitions in the three zones (mostly skipped; they exercise the skip rule).
+  const DST_STARTS = [
+    '2024-03-10T06:00:00Z',
+    '2024-11-03T05:00:00Z',
+    '2026-03-08T06:30:00Z',
+    '2026-11-01T04:30:00Z',
+    '2024-03-31T00:30:00Z',
+    '2024-10-27T00:30:00Z',
+    '2024-04-06T14:30:00Z',
+    '2024-10-05T15:30:00Z',
+  ].map((iso) => new Date(iso).getTime());
+
+  function mulberry32(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  const offsetFormatters = new Map<string, Intl.DateTimeFormat>();
+  function offsetMinutes(t: number, tz: string): number {
+    let f = offsetFormatters.get(tz);
+    if (!f) {
+      f = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz,
+        year: 'numeric',
+        month: 'numeric',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: 'numeric',
+        hour12: false,
+      });
+      offsetFormatters.set(tz, f);
+    }
+    const p: Record<string, number> = {};
+    for (const part of f.formatToParts(new Date(t))) p[part.type] = parseInt(part.value, 10);
+    const hour = p.hour === 24 ? 0 : p.hour;
+    const wall = Date.UTC(p.year, p.month - 1, p.day, hour, p.minute);
+    return Math.round((wall - Math.floor(t / 60_000) * 60_000) / 60_000);
+  }
+
+  const THREE_HOURS = 3 * 60 * 60_000;
+  function nearTransition(t: number, tz: string): boolean {
+    return offsetMinutes(t - THREE_HOURS, tz) !== offsetMinutes(t + THREE_HOURS, tz);
+  }
+
+  it.each(PATTERNS)('%s', (pattern) => {
+    const rand = mulberry32(20260930 + PATTERNS.indexOf(pattern));
+    const mismatches: string[] = [];
+    let compared = 0;
+    let skipped = 0;
+    for (const tz of ZONES) {
+      const starts = [...DST_STARTS];
+      for (let i = 0; i < SAMPLES_PER_ZONE; i++) {
+        starts.push(Math.floor((RANGE_START + rand() * (RANGE_END - RANGE_START)) / 1000) * 1000);
+      }
+      for (const start of starts) {
+        const ours = nextCronOccurrence(pattern, start, tz === 'UTC' ? undefined : tz);
+        const theirs = parseExpression(pattern, { currentDate: new Date(start), tz })
+          .next()
+          .getTime();
+        if (tz !== 'UTC' && [start, ours, theirs].some((t) => nearTransition(t, tz))) {
+          skipped++;
+          continue;
+        }
+        compared++;
+        if (ours !== theirs) {
+          mismatches.push(
+            `${tz} from ${new Date(start).toISOString()}: ours ${new Date(ours).toISOString()} theirs ${new Date(theirs).toISOString()}`,
+          );
+        }
+      }
+    }
+    expect(mismatches).toEqual([]);
+    // Most samples must be compared; the DST skip is a narrow window.
+    expect(compared).toBeGreaterThan(ZONES.length * SAMPLES_PER_ZONE * 0.8);
+    expect(skipped).toBeLessThan(ZONES.length * DST_STARTS.length + compared * 0.2);
   });
 });
 
