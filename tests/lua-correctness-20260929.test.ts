@@ -320,4 +320,52 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
       await queue.close();
     }
   });
+  it('bulk-retried failed ordered job respects group concurrency and balances active', async () => {
+    const Q = uniqueQueue('lc-retry-ord');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const bGate = gate();
+    const order: string[] = [];
+    let running = 0;
+    let maxRunning = 0;
+    let failA = true;
+    const worker = new Worker(
+      Q,
+      async (job) => {
+        running++;
+        maxRunning = Math.max(maxRunning, running);
+        try {
+          if (job.name === 'a' && failA) {
+            failA = false;
+            throw new Error('first run fails');
+          }
+          if (job.name === 'b') await bGate.wait;
+          order.push(job.name);
+          return 'ok';
+        } finally {
+          running--;
+        }
+      },
+      { connection: CONNECTION, concurrency: 4, blockTimeout: 50, stalledInterval: 60_000, promotionInterval: 50 },
+    );
+    worker.on('error', () => {});
+    worker.on('failed', () => {});
+    try {
+      const a = await queue.add('a', {}, { ordering: { key: 'k', concurrency: 1 } });
+      await waitFor(async () => (await hget(k.job(a.id!), 'state')) === 'failed', 5000, 25);
+      await queue.add('b', {}, { ordering: { key: 'k', concurrency: 1 } });
+      await waitFor(() => running === 1, 5000, 25);
+      expect(await queue.retryJobs()).toBe(1);
+      await new Promise((r) => setTimeout(r, 500));
+      bGate.open();
+      await waitFor(() => order.length === 2, 5000, 25);
+      expect(order).toEqual(['b', 'a']);
+      expect(maxRunning).toBe(1);
+      expect(await hget(k.group('k'), 'active')).toBe('0');
+    } finally {
+      bGate.open();
+      await worker.close(true);
+      await queue.close();
+    }
+  });
 });

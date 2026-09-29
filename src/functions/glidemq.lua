@@ -4005,6 +4005,28 @@ redis.register_function('glidemq_drain', function(keys, args)
   return removed
 end)
 
+-- Move one failed job to scheduled for a fresh run.
+local function retryFailedJob(prefix, jobKey, jobId, scheduledKey, timestamp)
+  local vals = redis.call('HMGET', jobKey, 'priority', 'orderingSeq', 'orderingKey', 'groupKey')
+  local priority = tonumber(vals[1]) or 0
+  local fields = {'state', 'delayed', 'attemptsMade', '0', 'failedReason', '', 'finishedOn', ''}
+  -- A terminal ordered job already closed its sequence and released its group
+  -- slot. With the old sequence, activation would treat it as a returning job
+  -- that holds a slot: it would skip the concurrency gate and never take the
+  -- slot its completion releases. A fresh sequence gates it like a new job.
+  local orderingSeq = tonumber(vals[2]) or 0
+  local orderingKey = vals[3]
+  if not orderingKey or orderingKey == '' then orderingKey = vals[4] end
+  if orderingSeq > 0 and orderingKey and orderingKey ~= '' then
+    local newSeq = redis.call('HINCRBY', prefix .. 'ordering', orderingKey, 1)
+    fields[#fields + 1] = 'orderingSeq'
+    fields[#fields + 1] = tostring(newSeq)
+  end
+  redis.call('HDEL', jobKey, 'retainedSlot')
+  redis.call('ZADD', scheduledKey, priority * PRIORITY_SHIFT + timestamp, jobId)
+  redis.call('HSET', jobKey, unpack(fields))
+end
+
 redis.register_function('glidemq_retryJobs', function(keys, args)
   local failedKey = keys[1]
   local scheduledKey = keys[2]
@@ -4029,15 +4051,7 @@ redis.register_function('glidemq_retryJobs', function(keys, args)
       local jobId = ids[i]
       local jobKey = prefix .. 'job:' .. jobId
       if redis.call('EXISTS', jobKey) == 1 then
-        local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
-        local score = priority * PRIORITY_SHIFT + timestamp
-        redis.call('ZADD', scheduledKey, score, jobId)
-        redis.call('HSET', jobKey,
-          'state', 'delayed',
-          'attemptsMade', '0',
-          'failedReason', '',
-          'finishedOn', ''
-        )
+        retryFailedJob(prefix, jobKey, jobId, scheduledKey, timestamp)
         retried = retried + 1
       end
     end
