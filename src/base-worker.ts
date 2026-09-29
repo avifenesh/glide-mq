@@ -1512,7 +1512,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       await this.finishFailure(job, error, failResult);
       return null;
     }
-    await this.finishFailure(job, error, result.failResult);
+    // The next job is already claimed. A throw here (DLQ add, a 'failed'
+    // listener) must not strand it without a heartbeat until stall reclaim.
+    try {
+      await this.finishFailure(job, error, result.failResult);
+    } catch (err) {
+      this.emit('error', err);
+    }
     return result;
   }
 
