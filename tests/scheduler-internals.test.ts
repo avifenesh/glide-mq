@@ -39,6 +39,36 @@ describe('Scheduler internals', () => {
     expect(errors.map((err) => err.message)).toContain('Lost scheduler tick lock while processing schedulers');
   });
 
+  it('still fires stored entries whose template carries delay, deduplication or parent', async () => {
+    const exec = vi.fn(async () => undefined);
+    const client = {
+      fcall: vi.fn(async (name: string) => {
+        if (name === 'glidemq_tryLock' || name === 'glidemq_renewLock' || name === 'glidemq_unlock') return 1;
+        throw new Error(`Unexpected function call: ${name}`);
+      }),
+      hgetall: vi.fn(async () => [
+        {
+          field: 'legacy',
+          value: JSON.stringify({
+            every: 1_000,
+            nextRun: Date.now() - 1_000,
+            template: {
+              name: 'tick',
+              opts: { delay: 5_000, deduplication: { id: 'd' }, parent: { queue: 'p', id: '1' } },
+            },
+          }),
+        },
+      ]),
+      exec,
+    } as any;
+    const errors: Error[] = [];
+    const scheduler = new Scheduler(client, buildKeys('scheduler-legacy-opts'), { onError: (e) => errors.push(e) });
+
+    expect(await scheduler.runSchedulers()).toBe(1);
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(errors).toEqual([]);
+  });
+
   it('continues a full stalled reclaim page without overlapping recovery', async () => {
     vi.useFakeTimers();
     let resolveFirstReclaim!: (count: number) => void;

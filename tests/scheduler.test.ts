@@ -1107,6 +1107,20 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     }
   });
 
+  it('upsertJobScheduler rejects template delay, deduplication and parent the tick would ignore', async () => {
+    const cases: [string, Record<string, unknown>, string][] = [
+      ['tmpl-delay', { delay: 1000 }, 'delay'],
+      ['tmpl-dedup', { deduplication: { id: 'd' } }, 'deduplication'],
+      ['tmpl-parent', { parent: { queue: Q, id: '1' } }, 'parent'],
+    ];
+    for (const [name, opts, field] of cases) {
+      await expect(queue.upsertJobScheduler(name, { every: 1000 }, { name: 'j', opts: opts as any })).rejects.toThrow(
+        `Scheduler template: ${field} is not supported`,
+      );
+      expect(await queue.getJobScheduler(name)).toBeNull();
+    }
+  });
+
   it('upsertJobScheduler rejects oversized, unserializable or out-of-range templates', async () => {
     const { MAX_JOB_DATA_SIZE } = require('../dist/utils') as typeof import('../src/utils');
     await expect(

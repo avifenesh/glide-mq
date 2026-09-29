@@ -1165,11 +1165,14 @@ describe('TestQueue scheduler runtime', () => {
     await queue.pause();
 
     await queue.add('seed', { ok: true }, { deduplication: { id: 'dup-key', mode: 'simple' } });
+    // upsertJobScheduler rejects template deduplication, so seed a stored legacy entry directly.
     await queue.upsertJobScheduler(
       'dedup-scheduler',
       { every: 20, limit: 1 },
-      { name: 'dedup-job', data: { ok: true }, opts: { deduplication: { id: 'dup-key', mode: 'simple' } } },
+      { name: 'dedup-job', data: { ok: true } },
     );
+    const seeded = (queue as any).schedulers.get('dedup-scheduler');
+    seeded.template.opts = { deduplication: { id: 'dup-key', mode: 'simple' } };
 
     const deadline = Date.now() + 500;
     while ((await queue.getJobScheduler('dedup-scheduler')) && Date.now() < deadline) {
@@ -1764,6 +1767,15 @@ describe('TestQueue.upsertJobScheduler template validation parity', () => {
     await expect(
       queue.upsertJobScheduler('e', { every: 1000 }, { name: 'j', data: 'a'.repeat(MAX_JOB_DATA_SIZE + 1) }),
     ).rejects.toThrow('Scheduler template: Job data exceeds maximum size');
+    for (const [opts, field] of [
+      [{ delay: 1000 }, 'delay'],
+      [{ deduplication: { id: 'd' } }, 'deduplication'],
+      [{ parent: { queue: 'p', id: '1' } }, 'parent'],
+    ] as const) {
+      await expect(queue.upsertJobScheduler('f', { every: 1000 }, { name: 'j', opts: opts as any })).rejects.toThrow(
+        `Scheduler template: ${field} is not supported`,
+      );
+    }
     expect(await queue.getRepeatableJobs()).toEqual([]);
     await queue.close();
   });

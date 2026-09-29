@@ -159,6 +159,12 @@ export function validateSchedulerTemplate(template: JobTemplate | undefined, ser
         'jobId is not supported: every run gets a generated id, a fixed id would drop each run after the first as a duplicate',
       );
     }
+    // The tick never applies these, so reject them instead of silently dropping them.
+    for (const field of ['delay', 'deduplication', 'parent'] as const) {
+      if (opts?.[field] != null) {
+        throw new Error(`${field} is not supported: scheduler runs do not apply it`);
+      }
+    }
     if (opts) validateSchedulerTemplateOpts(opts);
     serializeSchedulerTemplateData(template, serializer);
   } catch (err) {
