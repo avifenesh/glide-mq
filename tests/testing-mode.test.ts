@@ -3011,3 +3011,85 @@ describe('TestWorker rate limit keeps queue order (revuto #313)', () => {
     expect(order).toEqual(['p1', 'p5', 'lifo-y', 'lifo-x', 'fifo-a', 'fifo-b']);
   });
 });
+
+describe('waitingQueue holds each record at most once (revuto #313 round 2)', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  const duplicates = (q: TestQueue): string[] => {
+    const seen = new Set<string>();
+    const dupes: string[] = [];
+    for (const r of q.waitingQueue) {
+      if (seen.has(r.id)) dupes.push(r.id);
+      seen.add(r.id);
+    }
+    return dupes;
+  };
+
+  it('a job parked with changeDelay and promoted later is dispatched once, also in batch mode', async () => {
+    queue = new TestQueue('wq-park-once');
+    const job = await queue.add('once', {});
+    await job!.changeDelay(20);
+    expect(queue.waitingQueue.map((r) => r.id)).toEqual([]);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(duplicates(queue)).toEqual([]);
+
+    const seen: string[] = [];
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        seen.push(...jobs.map((j) => j.id));
+        return jobs.map(() => 'ok');
+      },
+      { batch: { size: 10 } },
+    );
+    await waitFor(async () => (await job!.getState()) === 'completed', 2000, 5);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(seen).toEqual([job!.id]);
+  });
+
+  it('never holds a record twice across park, promote, priority, revoke, remove and retry transitions', async () => {
+    queue = new TestQueue('wq-invariant');
+    await queue.pause();
+    const a = await queue.add('a', {});
+    const b = await queue.add('b', {}, { priority: 2 });
+    const c = await queue.add('c', {}, { lifo: true });
+    const d = await queue.add('d', {}, { delay: 10 });
+    const check = () => expect(duplicates(queue)).toEqual([]);
+    check();
+
+    await a!.changeDelay(10);
+    await b!.changeDelay(10);
+    check();
+    expect(queue.waitingQueue.map((r) => r.id)).toEqual([c!.id]);
+    await a!.promote();
+    await b!.changeDelay(0);
+    await d!.promote();
+    check();
+    await a!.changePriority(1);
+    await a!.changePriority(0);
+    await b!.changePriority(0);
+    await b!.changePriority(3);
+    check();
+    await a!.changeDelay(5);
+    await new Promise((r) => setTimeout(r, 20));
+    check();
+    expect(await queue.revoke(c!.id)).toBe('revoked');
+    await d!.remove();
+    check();
+    expect(await queue.retryJobs()).toBe(1);
+    check();
+    await queue.resume();
+    worker = new TestWorker(queue, async () => 'ok');
+    await waitFor(async () => (await queue.getJobCounts()).completed === 3, 2000, 5);
+    check();
+    expect(queue.waitingQueue).toEqual([]);
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 0, completed: 3, failed: 0 });
+  });
+});

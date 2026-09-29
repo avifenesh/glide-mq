@@ -799,8 +799,23 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     return priority.concat(lifo, fifo);
   }
 
+  /**
+   * @internal Drop a record's dispatch entry. Called whenever a job leaves the
+   * waiting / prioritized states (park, remove, revoke) and before it is
+   * enqueued again, so waitingQueue never holds a record twice.
+   */
+  dequeueRecord(record: TestJobRecord<D, R>): void {
+    const q = this.waitingQueue;
+    let write = 0;
+    for (let read = 0; read < q.length; read++) {
+      if (q[read].id !== record.id) q[write++] = q[read];
+    }
+    q.length = write;
+  }
+
   /** @internal Put a record in 'waiting' and wake the workers, like an XADD / list push. */
   enqueueWaiting(record: TestJobRecord<D, R>): void {
+    this.dequeueRecord(record);
     record.state = 'waiting';
     this.waitingQueue.push(record);
     // Notify attached workers (microtask so the add() caller gets the job first)
@@ -819,6 +834,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
    * the workers even when paused: production promotes on the scheduler tick.
    */
   enqueuePrioritized(record: TestJobRecord<D, R>): void {
+    this.dequeueRecord(record);
     record.state = 'prioritized';
     this.waitingQueue.push(record);
     queueMicrotask(() => {
@@ -839,6 +855,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   /** @internal Park a record in 'delayed' for delayMs and schedule its promotion. */
   parkDelayed(record: TestJobRecord<D, R>, delayMs: number): void {
+    this.dequeueRecord(record);
     record.state = 'delayed';
     this.schedulePromotion(record, delayMs);
   }
@@ -864,6 +881,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     if (!record) return false;
     this.clearPromotion(id);
     this.clearSuspendedTimeout(id);
+    this.dequeueRecord(record);
     this.jobs.delete(id);
     this.emit('removed', id);
     return true;
@@ -1018,6 +1036,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     record.revoked = true;
     if (record.state === 'waiting' || record.state === 'delayed' || record.state === 'prioritized') {
       this.clearPromotion(jobId);
+      this.dequeueRecord(record);
       record.delayedUntil = undefined;
       record.state = 'failed';
       record.failedReason = 'revoked';
@@ -1722,6 +1741,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       this.promotionTimers.delete(record.id);
       if (this.jobs.get(record.id) !== record || record.state !== 'delayed') return;
       record.delayedUntil = undefined;
+      this.dequeueRecord(record);
       record.state = 'waiting';
       this.waitingQueue.push(record);
       this.emit('promoted', record.id);
@@ -1773,10 +1793,14 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private nextWaitingIndex(): number {
     this.promotePrioritized();
     const q = this.waitingQueue;
+    const seen = new Set<string>();
     let write = 0;
     for (let read = 0; read < q.length; read++) {
       const r = q[read];
-      if (r.state === 'waiting' && this.jobs.get(r.id) === r) q[write++] = r;
+      if (r.state === 'waiting' && this.jobs.get(r.id) === r && !seen.has(r.id)) {
+        seen.add(r.id);
+        q[write++] = r;
+      }
     }
     q.length = write;
 
