@@ -1,6 +1,6 @@
 import { gzipSync, gunzipSync } from 'zlib';
 import { randomBytes } from 'crypto';
-import type { JobUsage, ScheduleOpts, SchedulerEntry } from './types';
+import type { JobOptions, JobUsage, ScheduleOpts, SchedulerEntry } from './types';
 
 const DEFAULT_PREFIX = 'glide';
 export const USAGE_BUCKET_MS = 60_000;
@@ -18,6 +18,79 @@ export const INVALID_JOB_ID_CHARS = /[\x00-\x1f\x7f{}:]/;
 
 /** Maximum length for ordering keys. */
 export const MAX_ORDERING_KEY_LENGTH = 256;
+
+/** Highest accepted job priority (lower numbers run first, 0 means no priority). */
+export const MAX_JOB_PRIORITY = 2048;
+
+export const MIN_JOB_LOCK_DURATION_MS = 1000;
+export const MAX_JOB_LOCK_DURATION_MS = 86_400_000;
+
+export function validateJobPriority(priority: number): void {
+  if (priority > MAX_JOB_PRIORITY) {
+    throw new Error(`Priority must be <= ${MAX_JOB_PRIORITY}`);
+  }
+}
+
+export function validateOrderingKey(orderingKey: string): void {
+  if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
+    throw new Error(`Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`);
+  }
+  if (orderingKey === '__') {
+    throw new Error("Ordering key '__' is reserved as an internal sentinel.");
+  }
+}
+
+/**
+ * Validate the per-job options shared by Queue.add and Queue.addBulk:
+ * token bucket, cost, ordering key, lifo, jobId, ttl and lockDuration.
+ * Priority and payload size are checked separately.
+ */
+export function validateJobOptions(opts: JobOptions | undefined): void {
+  const tb = opts?.ordering?.tokenBucket;
+  if (tb) {
+    if (!Number.isFinite(tb.capacity) || tb.capacity <= 0)
+      throw new Error('tokenBucket.capacity must be a positive finite number');
+    if (!Number.isFinite(tb.refillRate) || tb.refillRate <= 0)
+      throw new Error('tokenBucket.refillRate must be a positive finite number');
+  }
+  if (opts?.cost != null) {
+    if (!Number.isFinite(opts.cost) || opts.cost < 0) throw new Error('cost must be a non-negative finite number');
+  }
+  const orderingKey = opts?.ordering?.key ?? '';
+  validateOrderingKey(orderingKey);
+  if (opts?.lifo && orderingKey) {
+    throw new Error('lifo and ordering.key cannot be used together');
+  }
+  const customJobId = opts?.jobId ?? '';
+  if (customJobId !== '') validateJobId(customJobId);
+  if (opts?.ttl != null) {
+    if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
+  }
+  if (opts?.lockDuration != null) {
+    if (
+      !Number.isFinite(opts.lockDuration) ||
+      opts.lockDuration < MIN_JOB_LOCK_DURATION_MS ||
+      opts.lockDuration > MAX_JOB_LOCK_DURATION_MS
+    ) {
+      throw new Error(
+        `lockDuration must be a finite number between ${MIN_JOB_LOCK_DURATION_MS} and ${MAX_JOB_LOCK_DURATION_MS}`,
+      );
+    }
+  }
+}
+
+/** Reject serialized job payloads above MAX_JOB_DATA_SIZE bytes. */
+export function validateJobDataSize(serialized: string): void {
+  // UTF-8 worst case: 4 bytes per char. Skip Buffer.byteLength for small strings.
+  if (serialized.length > MAX_JOB_DATA_SIZE / 4) {
+    const byteLen = Buffer.byteLength(serialized, 'utf8');
+    if (byteLen > MAX_JOB_DATA_SIZE) {
+      throw new Error(
+        `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
+      );
+    }
+  }
+}
 
 /**
  * Validate a job ID. Throws if the ID is too long or contains forbidden characters.
