@@ -486,6 +486,73 @@ describe('nextCronOccurrence extended syntax', () => {
     });
   });
 
+  describe('seconds field', () => {
+    it('reads a 6-field pattern as second minute hour dom month dow', () => {
+      expect(walk('*/10 * * * * *', '2024-01-01T12:00:00.500Z', 3)).toEqual([
+        '2024-01-01T12:00:10.000Z',
+        '2024-01-01T12:00:20.000Z',
+        '2024-01-01T12:00:30.000Z',
+      ]);
+      expect(walk('30 5 * * * *', '2024-01-01T12:00:00Z', 2)).toEqual([
+        '2024-01-01T12:05:30.000Z',
+        '2024-01-01T13:05:30.000Z',
+      ]);
+      expect(walk('0 0 9 * * MON-FRI', '2024-01-13T00:00:00Z', 1)).toEqual(['2024-01-15T09:00:00.000Z']);
+    });
+
+    it('is strictly after the given instant at second granularity', () => {
+      expect(walk('*/10 * * * * *', '2024-01-01T12:00:10.000Z', 1)).toEqual(['2024-01-01T12:00:20.000Z']);
+      expect(walk('*/10 * * * * *', '2024-01-01T12:00:09.999Z', 1)).toEqual(['2024-01-01T12:00:10.000Z']);
+      expect(walk('* * * * *', '2024-01-01T12:00:00.000Z', 1)).toEqual(['2024-01-01T12:01:00.000Z']);
+      expect(walk('* * * * *', '2024-01-01T12:00:59.999Z', 1)).toEqual(['2024-01-01T12:01:00.000Z']);
+    });
+
+    it('defaults seconds to 0 for 5-field patterns', () => {
+      expect(walk('5 * * * *', '2024-01-01T12:04:30Z', 1)).toEqual(['2024-01-01T12:05:00.000Z']);
+    });
+
+    it('validates the field count and seconds range', () => {
+      expect(() => nextCronOccurrence('0 0 0 * * * *', Date.now())).toThrow(
+        'Invalid cron pattern: expected 5 or 6 fields, got 7',
+      );
+      expect(() => nextCronOccurrence('0 0 * *', Date.now())).toThrow(
+        'Invalid cron pattern: expected 5 or 6 fields, got 4',
+      );
+      expect(() => nextCronOccurrence('60 * * * * *', Date.now())).toThrow('Cron value out of bounds: 60');
+    });
+
+    it('honors seconds with a timezone', () => {
+      expect(walk('30 0 9 * * *', '2024-01-15T00:00:00Z', 1, 'America/New_York')).toEqual([
+        '2024-01-15T14:00:30.000Z',
+      ]);
+    });
+
+    it('fall-back: fixed minute and hour with stepped seconds fires only in the first instance', () => {
+      // 2026-11-01 America/New_York: 01:30 happens at 05:30 UTC (EDT) and 06:30 UTC (EST)
+      expect(walk('*/20 30 1 * * *', '2026-11-01T04:00:00Z', 4, 'America/New_York')).toEqual([
+        '2026-11-01T05:30:00.000Z',
+        '2026-11-01T05:30:20.000Z',
+        '2026-11-01T05:30:40.000Z',
+        '2026-11-02T06:30:00.000Z',
+      ]);
+    });
+
+    it('fall-back: wildcard minute with fixed second fires in both instances', () => {
+      expect(walk('30 * * * * *', '2026-11-01T05:59:00Z', 3, 'America/New_York')).toEqual([
+        '2026-11-01T05:59:30.000Z',
+        '2026-11-01T06:00:30.000Z',
+        '2026-11-01T06:01:30.000Z',
+      ]);
+    });
+
+    it('spring-forward: a fixed time with seconds inside the gap runs at the gap end', () => {
+      expect(walk('15 30 2 * * *', '2024-03-10T06:00:00Z', 2, 'America/New_York')).toEqual([
+        '2024-03-10T07:00:00.000Z',
+        '2024-03-11T06:30:15.000Z',
+      ]);
+    });
+  });
+
   describe('start/step', () => {
     it('reads N/step as N-max/step', () => {
       expect(walk('5/15 * * * *', '2024-01-01T12:00:00Z', 5)).toEqual([
