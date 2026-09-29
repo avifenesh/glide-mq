@@ -1248,7 +1248,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         entry.entryId,
         this.consumerGroup,
         this.broadcastMode ? true : undefined,
-        { pausedRestore: true, undoGroupClaim: entry.undoGroupClaim, consumer: this.consumerId },
+        {
+          pausedRestore: true,
+          undoGroupClaim: entry.undoGroupClaim,
+          // Broadcast only: marks the parked claim handed back when still owned.
+          consumer: this.broadcastMode ? this.consumerId : undefined,
+        },
       );
       if (this.broadcastMode && entry.entryId !== '') {
         this.pausedBroadcastEntries.set(entry.entryId, entry.jobId);
