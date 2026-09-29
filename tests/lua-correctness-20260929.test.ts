@@ -368,4 +368,36 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
       await queue.close();
     }
   });
+  it('a priority job promoted from its group into the stream is not treated as list-sourced', async () => {
+    const Q = uniqueQueue('lc-pri-stream');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const gates = new Map<string, ReturnType<typeof gate>>();
+    const started: string[] = [];
+    const worker = new Worker(
+      Q,
+      async (job) => {
+        const g = gate();
+        gates.set(job.name, g);
+        started.push(job.name);
+        await g.wait;
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 2, blockTimeout: 50, stalledInterval: 60_000, promotionInterval: 50 },
+    );
+    worker.on('error', () => {});
+    try {
+      await queue.add('a', {}, { ordering: { key: 'k', concurrency: 1 } });
+      await waitFor(() => started.includes('a'), 5000, 25);
+      await queue.add('b', {}, { ordering: { key: 'k', concurrency: 1 }, priority: 1 });
+      await new Promise((r) => setTimeout(r, 300));
+      gates.get('a')!.open();
+      await waitFor(() => started.includes('b'), 5000, 25);
+      const active = await queue.getJobs('active');
+      expect(active.map((j) => j.name)).toEqual(['b']);
+    } finally {
+      for (const g of gates.values()) g.open();
+      await worker.close(true);
+      await queue.close();
+    }
+  });
 });

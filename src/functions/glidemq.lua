@@ -18,6 +18,16 @@ local function decrListActive(listActiveKey)
   if la > 0 then redis.call('DECR', listActiveKey) end
 end
 
+-- Whether an active job was claimed from the priority/LIFO lists (no PEL
+-- entry, counted in list-active). Activation stamps listSourced; hashes
+-- activated by an older library fall back to the lifo/priority heuristic,
+-- which misreads priority jobs that a group promoted into the stream.
+local function isListSourced(listSourced, lifo, priority)
+  if listSourced == '1' then return true end
+  if listSourced == '0' then return false end
+  return lifo == '1' or (tonumber(priority) or 0) > 0
+end
+
 local function isQueuePaused(prefix)
   return redis.call('HGET', prefix .. 'meta', 'paused') == '1'
 end
@@ -1452,7 +1462,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
                     end
                   end
                 end
-                redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
+                redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
                 if not priReturning then
                   redis.call('HINCRBY', priGroupHashKey, 'active', 1)
                 end
@@ -1468,7 +1478,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
             end
           else
             -- Non-group job: activate directly
-            redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
+            redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
             if skipEvents ~= '1' then emitEvent(eventsKey, 'active', priJobId, nil) end
             local priJobFields = redis.call('HGETALL', priJobKey)
             redis.call('INCR', prefix .. 'list-active')
@@ -1496,7 +1506,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       if lifoMeta[2] ~= '1' then
         local lifoExpireAt = tonumber(lifoMeta[3])
         if not lifoExpireAt or lifoExpireAt <= 0 or timestamp <= lifoExpireAt then
-          redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
+          redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
           if skipEvents ~= '1' then emitEvent(eventsKey, 'active', lifoJobId, nil) end
           local lifoJobFields = redis.call('HGETALL', lifoJobKey)
           redis.call('INCR', prefix .. 'list-active')
@@ -1680,7 +1690,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       redis.call('ZREM', nextWaitListKey, nextJobId)
     end
   end
-  redis.call('HSET', nextJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp))
+  redis.call('HSET', nextJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '0')
   local nextHash = redis.call('HGETALL', nextJobKey)
   local out = {'NEXT_HASH', jobId, nextJobId, nextEntryId}
   for i = 1, #nextHash do
@@ -1938,9 +1948,9 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
       local jk = scannedKeys[i]
       local state = redis.call('HGET', jk, 'state')
       if state == 'active' then
-        local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority', 'opts')
+        local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority', 'opts', 'listSourced')
         local lastActive = tonumber(vals[1])
-        local isListSourced = vals[2] == '1' or (tonumber(vals[3]) or 0) > 0
+        local listClaim = isListSourced(vals[5], vals[2], vals[3])
         local jobLockDuration = extractLockDurationFromOpts(vals[4])
         local effectiveIdle
         if jobLockDuration > 0 then
@@ -1950,7 +1960,7 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
         else
           effectiveIdle = minIdleMs
         end
-        if isListSourced and lastActive and (timestamp - lastActive) >= effectiveIdle then
+        if listClaim and lastActive and (timestamp - lastActive) >= effectiveIdle then
           -- Claim this stalled check by refreshing lastActive. This preserves
           -- XAUTOCLAIM-like de-duplication semantics across worker schedulers
           -- so the same stale list job is counted at most once per interval.
@@ -2731,7 +2741,9 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
       redis.call('ZREM', waitListKey, jobId)
     end
   end
-  redis.call('HSET', jobKey, 'state', 'active', 'processedOn', timestampStr, 'lastActive', timestampStr)
+  -- A stream claim carries an entryId; list claims (popLists/rpopAndReserve) do not.
+  redis.call('HSET', jobKey, 'state', 'active', 'processedOn', timestampStr, 'lastActive', timestampStr,
+    'listSourced', entryId == '' and '1' or '0')
   if stateValueIndex ~= nil then
     fields[stateValueIndex] = 'active'
   else
@@ -3168,12 +3180,12 @@ redis.register_function('glidemq_removeJob', function(keys, args)
     end
   end
   -- DECR list-active if the job was active and list-sourced (LIFO or priority-list)
+  local activeListClaim = false
   if state == 'active' then
-    local jobLifo = redis.call('HGET', jobKey, 'lifo')
-    local jobPriority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
-    if jobLifo == '1' or jobPriority > 0 then
-      local prefix_r = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-      decrListActive(prefix_r .. 'list-active')
+    local src = redis.call('HMGET', jobKey, 'listSourced', 'lifo', 'priority')
+    activeListClaim = isListSourced(src[1], src[2], src[3])
+    if activeListClaim then
+      decrListActive(prefix .. 'list-active')
     end
   end
   redis.call('ZREM', scheduledKey, jobId)
@@ -3186,7 +3198,7 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   markOrderingDone(jobKey, jobId)
   -- An active stream job also has a PEL entry. Clear it so stalled recovery
   -- cannot redispatch the removed job.
-  if (state == 'waiting' or state == 'active') and removedLifo == 0 and removedPriority == 0 then
+  if (state == 'waiting' or (state == 'active' and not activeListClaim)) and removedLifo == 0 and removedPriority == 0 then
     local cursor = '-'
     local found = false
     while not found do
@@ -4084,14 +4096,9 @@ redis.register_function('glidemq_healListActive', function(keys, args)
       local jk = scannedKeys[i]
       local state = redis.call('HGET', jk, 'state')
       if state == 'active' then
-        local lifo = redis.call('HGET', jk, 'lifo')
-        if lifo == '1' then
+        local src = redis.call('HMGET', jk, 'listSourced', 'lifo', 'priority')
+        if isListSourced(src[1], src[2], src[3]) then
           actual = actual + 1
-        else
-          local pri = tonumber(redis.call('HGET', jk, 'priority')) or 0
-          if pri > 0 then
-            actual = actual + 1
-          end
         end
       end
     end
@@ -4103,7 +4110,7 @@ redis.register_function('glidemq_healListActive', function(keys, args)
   return drift
 end)
 
--- List active list-sourced jobIds (state='active' AND (lifo='1' OR priority>0)) via bounded SCAN.
+-- List active list-sourced jobIds (state='active' AND isListSourced) via bounded SCAN.
 -- Stream-backed active jobs are in the consumer group PEL (XPENDING) and listed separately.
 -- All prefix:job:* keys share the {queueName} hash tag, so SCAN runs on a single
 -- cluster slot and observes the full set on its local node.
@@ -4130,8 +4137,8 @@ redis.register_function('glidemq_getActiveListJobIds', function(keys, args)
       local jk = scanned[i]
       local state = redis.call('HGET', jk, 'state')
       if state == 'active' then
-        local vals = redis.call('HMGET', jk, 'lifo', 'priority')
-        if vals[1] == '1' or (tonumber(vals[2]) or 0) > 0 then
+        local vals = redis.call('HMGET', jk, 'listSourced', 'lifo', 'priority')
+        if isListSourced(vals[1], vals[2], vals[3]) then
           ids[#ids + 1] = string.sub(jk, #prefix + 5)
         end
       end
