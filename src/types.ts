@@ -215,6 +215,10 @@ export interface JobOptions {
    */
   jobId?: string;
   delay?: number;
+  /**
+   * Integer 0-2048. 1 is the highest priority. 0 (default) means no priority: those jobs
+   * run after any waiting job with priority > 0. Other values throw.
+   */
   priority?: number;
   /** Process jobs in LIFO (last-in-first-out) order. Cannot be combined with ordering keys. */
   lifo?: boolean;

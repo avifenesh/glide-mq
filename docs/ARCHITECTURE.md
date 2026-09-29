@@ -90,9 +90,10 @@ States map to Valkey structures:
 
 Score format: `(priority * 2^42) + timestamp_ms`
 
-- Priority 0 (highest) jobs always sort before priority 1, regardless of timestamp
+- Priority 1 is highest; lower numbers sort first, regardless of timestamp
+- Priority 0 means no priority: the job goes to the stream when due, and workers take any waiting priority > 0 job first
 - Within same priority, FIFO by timestamp
-- Priority must be an integer from 0 to 2048; other values are rejected at enqueue
+- Priority must be an integer from 0 to 2048; anything else throws at enqueue
 - Non-delayed priority jobs get score with timestamp = 0 so they promote immediately
 
 ## Server Functions (not EVAL scripts)
@@ -403,7 +404,7 @@ class Job<D = any, R = any> {
 interface JobOptions {
   jobId?: string;
   delay?: number;
-  priority?: number; // 0 (highest) to 2^21
+  priority?: number; // 1 (highest) to 2048; 0 = no priority (default)
   lifo?: boolean;
   ordering?: {
     key: string;

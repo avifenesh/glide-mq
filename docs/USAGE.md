@@ -45,7 +45,7 @@ await queue.add(
   { to: 'user@example.com' },
   {
     delay: 5_000, // run after 5 s
-    priority: 1, // lower = higher priority (default: 0)
+    priority: 1, // 1 = highest, up to 2048; 0 (default) = no priority, runs after prioritized jobs
     attempts: 3, // run at most 3 times total (initial + 2 retries)
     backoff: { type: 'exponential', delay: 1_000 },
     timeout: 30_000, // fail job if processor exceeds 30 s
