@@ -50,15 +50,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`prefetch` is capped at `concurrency`** (`concurrency * batch.size` in batch mode). Prefetch above concurrency ran more processors than `concurrency` allowed, or left entries without heartbeats to be reclaimed and run twice.
 - **Producer priority errors** are now plain `Error`s with the same messages as `Queue.add`, instead of `GlideMQError`.
 - **`Job.retry()` only retries failed jobs** and throws on any other state, as its documentation already stated. Server function library version is `125`.
+- **Cron day matching uses OR when both day-of-month and day-of-week are restricted**, like standard cron and cron-parser: `0 0 1 * 1` fires on every 1st and every Monday, not only on Mondays that fall on the 1st.
+- **Scheduler templates reject `jobId`** at upsert (a fixed id deduplicated every fire). Stored legacy entries keep working.
+- **Re-upserting an in-flight `repeatAfterComplete` scheduler no longer fires immediately.** Remove and re-add the scheduler to force a run.
 
 ### Security
 
 - **Dev dependencies**: `vitest` and `@vitest/coverage-v8` upgraded to 4.1.11 (path traversal via `@vitest/mocker` redirect mocks) and `@humanfs/node` to 0.16.8 (recursive copy followed symlinks). Test tooling only; no runtime dependency changed.
-### Changed
-
-- **Cron day matching uses OR when both day-of-month and day-of-week are restricted**, like standard cron and cron-parser: `0 0 1 * 1` fires on every 1st and every Monday, not only on Mondays that fall on the 1st.
-- **Scheduler templates reject `jobId`** at upsert (a fixed id deduplicated every fire). Stored legacy entries keep working.
-- **Re-upserting an in-flight `repeatAfterComplete` scheduler no longer fires immediately.** Remove and re-add the scheduler to force a run.
 
 ### Documentation
 
