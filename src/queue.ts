@@ -732,6 +732,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const timestamp = Date.now();
       const parentId = opts?.parent ? opts.parent.id : '';
       const parentQueue = opts?.parent ? opts.parent.queue : '';
+      if (parentQueue) validateQueueName(parentQueue);
       const maxAttempts = opts?.attempts ?? 0;
       const orderingKey = opts?.ordering?.key ?? '';
       const groupRateMax = opts?.ordering?.rateLimit?.max ?? 0;
@@ -956,6 +957,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const priority = opts.priority ?? 0;
       const parentId = opts.parent ? opts.parent.id : '';
       const parentQueue = opts.parent ? opts.parent.queue : '';
+      if (parentQueue) validateQueueName(parentQueue);
       const maxAttempts = opts.attempts ?? 0;
       const orderingKey = opts.ordering?.key ?? '';
       validateJobOptions(opts);
@@ -1072,20 +1074,22 @@ export class Queue<D = any, R = any> extends EventEmitter {
       ? await (client as GlideClusterClient).exec(batch as ClusterBatch, true)
       : await (client as GlideClient).exec(batch as Batch, true);
 
-    const builtJobs = await this.buildBulkJobs(client, prepared, rawResults, timestamp);
+    const { jobs: builtJobs, error: bulkError } = this.buildBulkJobs(client, prepared, rawResults, timestamp);
 
-    // Handle cross-queue parent deps registration (non-atomic, after batch)
+    // Handle cross-queue parent deps registration (non-atomic, after batch).
+    // builtJobs is index-aligned with prepared; null marks a job that was not created.
+    const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
     for (let i = 0; i < prepared.length; i++) {
       const p = prepared[i];
-      if (p.parentId && p.parentQueue && p.parentQueue !== this.name && builtJobs[i]) {
+      const job = builtJobs[i];
+      if (job && p.parentId && p.parentQueue && p.parentQueue !== this.name) {
         const parentKeys = buildKeys(p.parentQueue, this.opts.prefix);
-        const prefix = keyPrefix(this.opts.prefix ?? 'glide', this.name);
-        const depsMember = `${prefix}:${builtJobs[i].id}`;
-        await client.sadd(parentKeys.deps(p.parentId), [depsMember]);
+        await client.sadd(parentKeys.deps(p.parentId), [`${prefix}:${job.id}`]);
       }
     }
 
-    return builtJobs;
+    if (bulkError) throw bulkError;
+    return builtJobs.filter((job): job is Job<D, R> => job !== null);
   }
 
   private async latestEventCursor(client: Client): Promise<string> {
@@ -1235,31 +1239,44 @@ export class Queue<D = any, R = any> extends EventEmitter {
     throw new Error(`Job ${jobId} did not finish within ${waitTimeout}ms`);
   }
 
-  /** @internal Build Job objects from batch exec results. */
+  /**
+   * @internal Build Job objects from batch exec results.
+   * Returns one entry per prepared job (null when not created) so callers can
+   * correlate results by index, plus the first error seen in the batch.
+   */
   private buildBulkJobs(
     client: Client,
-    prepared: { entry: { name: string; data: D; opts?: JobOptions }; opts: JobOptions; parentId: string }[],
+    prepared: {
+      entry: { name: string; data: D; opts?: JobOptions };
+      opts: JobOptions;
+      parentId: string;
+      parentQueue: string;
+    }[],
     rawResults: unknown[] | null,
     timestamp: number,
-  ): Job<D, R>[] {
+  ): { jobs: (Job<D, R> | null)[]; error: Error | null } {
     if (!rawResults || rawResults.length !== prepared.length) {
       throw new Error(`addBulk batch returned ${rawResults?.length ?? 'null'} results, expected ${prepared.length}`);
     }
-    return prepared.flatMap((p, i) => {
+    let error: Error | null = null;
+    const jobs = prepared.map((p, i) => {
       const raw = String(rawResults[i]);
-      if (raw === 'skipped' || raw === 'duplicate') return [];
+      if (raw === 'skipped' || raw === 'duplicate') return null;
       if (raw === 'ERR:COST_EXCEEDS_CAPACITY') {
-        throw new Error('Job cost exceeds token bucket capacity');
+        error ??= new Error('Job cost exceeds token bucket capacity');
+        return null;
       }
       if (raw === 'ERR:ID_EXHAUSTED') {
-        throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
+        error ??= new Error('Failed to generate job ID: too many collisions with custom job IDs');
+        return null;
       }
-      const jobId = raw;
-      const job = new Job<D, R>(client, this.keys, jobId, p.entry.name, p.entry.data, p.opts, this.serializer);
+      const job = new Job<D, R>(client, this.keys, raw, p.entry.name, p.entry.data, p.opts, this.serializer);
       job.timestamp = timestamp;
       job.parentId = p.parentId || undefined;
-      return [job];
+      job.parentQueue = p.parentQueue || undefined;
+      return job;
     });
+    return { jobs, error };
   }
 
   /**
