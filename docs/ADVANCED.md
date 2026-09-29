@@ -351,7 +351,7 @@ interface Serializer {
 }
 ```
 
-Both methods must be synchronous. If `serialize` throws, the job is treated as a processor failure (in Worker) or skipped (in Scheduler).
+Both methods must be synchronous. If `serialize` throws, the job is treated as a processor failure (in Worker). A scheduler template whose data cannot be serialized, or exceeds the 1 MB limit, is rejected by `upsertJobScheduler`; a stored template that still fails at run time skips that run, reports the error through the worker `error` event and moves on to the next occurrence.
 
 ### Example: MessagePack serializer
 

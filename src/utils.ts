@@ -1,6 +1,6 @@
 import { gzipSync, gunzipSync } from 'zlib';
 import { randomBytes } from 'crypto';
-import type { JobOptions, JobTemplate, JobUsage, ScheduleOpts, SchedulerEntry } from './types';
+import type { JobOptions, JobTemplate, JobUsage, ScheduleOpts, SchedulerEntry, Serializer } from './types';
 
 const DEFAULT_PREFIX = 'glide';
 export const USAGE_BUCKET_MS = 60_000;
@@ -128,29 +128,52 @@ export function validateJobDataSize(serialized: string): void {
   }
 }
 
+function validateSchedulerTemplateOpts(opts: JobOptions): void {
+  validateJobOptions(opts);
+  if (opts.priority != null) validateJobPriority(opts.priority);
+  const tb = opts.ordering?.tokenBucket;
+  if (opts.ordering?.key && tb) {
+    // Same rule as glidemq_addJob: a missing or zero cost counts as 1.
+    const cost = opts.cost ? Math.round(opts.cost * 1000) : 1000;
+    if (cost > Math.round(tb.capacity * 1000)) throw new Error('Job cost exceeds token bucket capacity');
+  }
+}
+
+/** Serialize a scheduler template's data the way the tick stores it, enforcing the size limit. */
+function serializeSchedulerTemplateData(template: JobTemplate, serializer: Serializer): string {
+  const data = template.data !== undefined ? serializer.serialize(template.data) : '{}';
+  validateJobDataSize(data);
+  return data;
+}
+
 /**
  * Validate a scheduler job template at upsert time, so a bad template is
  * rejected once instead of failing or being dropped on every tick.
  */
-export function validateSchedulerTemplate(template: JobTemplate | undefined): void {
-  const opts = template?.opts as JobOptions | undefined;
-  if (!opts) return;
+export function validateSchedulerTemplate(template: JobTemplate | undefined, serializer: Serializer): void {
+  if (!template) return;
+  const opts = template.opts as JobOptions | undefined;
   try {
-    if (opts.jobId != null) {
+    if (opts?.jobId != null) {
       throw new Error(
         'jobId is not supported: every run gets a generated id, a fixed id would drop each run after the first as a duplicate',
       );
     }
-    validateJobOptions(opts);
-    const tb = opts.ordering?.tokenBucket;
-    if (opts.ordering?.key && tb) {
-      // Same rule as glidemq_addJob: a missing or zero cost counts as 1.
-      const cost = opts.cost ? Math.round(opts.cost * 1000) : 1000;
-      if (cost > Math.round(tb.capacity * 1000)) throw new Error('Job cost exceeds token bucket capacity');
-    }
+    if (opts) validateSchedulerTemplateOpts(opts);
+    serializeSchedulerTemplateData(template, serializer);
   } catch (err) {
     throw new Error(`Scheduler template: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/**
+ * Tick-time check of a stored template. Returns the serialized job data or
+ * throws when the template cannot produce a job. A stored jobId is ignored
+ * (never passed to addJob), so it is not rejected here.
+ */
+export function prepareSchedulerTemplateData(template: JobTemplate, serializer: Serializer): string {
+  if (template.opts) validateSchedulerTemplateOpts({ ...(template.opts as JobOptions), jobId: undefined });
+  return serializeSchedulerTemplateData(template, serializer);
 }
 
 /**

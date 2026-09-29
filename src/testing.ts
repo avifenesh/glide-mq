@@ -791,7 +791,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     const startDate = normalizeScheduleDate(schedule.startDate, 'startDate');
     const endDate = normalizeScheduleDate(schedule.endDate, 'endDate');
     validateSchedulerBounds(startDate, endDate, schedule.limit);
-    validateSchedulerTemplate(template);
+    validateSchedulerTemplate(template, this.serializer);
     const now = Date.now();
     let iterationCount = 0;
     let lastRun: number | undefined;

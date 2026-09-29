@@ -1466,7 +1466,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const startDate = normalizeScheduleDate(schedule.startDate, 'startDate');
     const endDate = normalizeScheduleDate(schedule.endDate, 'endDate');
     validateSchedulerBounds(startDate, endDate, schedule.limit);
-    validateSchedulerTemplate(template);
+    validateSchedulerTemplate(template, this.serializer);
 
     const lock = await this.acquireSchedulerMutationLock(client);
     try {

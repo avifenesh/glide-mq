@@ -21,8 +21,8 @@ import {
   buildKeys,
   computeFollowingSchedulerNextRun,
   isValidSchedulerEvery,
-  MAX_JOB_DATA_SIZE,
   parseCrossQueueParentNotification,
+  prepareSchedulerTemplateData,
 } from './utils';
 import { isClusterClient } from './connection';
 
@@ -489,12 +489,19 @@ export class Scheduler {
         const jobName = template.name ?? schedulerName;
         let jobData: string;
         try {
-          jobData = template.data !== undefined ? this.serializer.serialize(template.data) : '{}';
-        } catch {
-          continue;
-        }
-        const byteLen = Buffer.byteLength(jobData, 'utf8');
-        if (byteLen > MAX_JOB_DATA_SIZE) {
+          jobData = prepareSchedulerTemplateData(template, this.serializer);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          this.reportError(new Error(`Scheduler "${schedulerName}" skipped a run, invalid template: ${reason}`));
+          // Advance past this run so a bad template does not retry on every tick.
+          const nextRun = preparedNextRun ?? computeFollowingSchedulerNextRun(config, now);
+          if (nextRun == null) {
+            pendingDeletions.push(schedulerName);
+          } else {
+            config.nextRun = nextRun;
+            pendingUpdates[schedulerName] = JSON.stringify(config);
+            pendingUpdateCount++;
+          }
           continue;
         }
 

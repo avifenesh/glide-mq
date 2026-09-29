@@ -1072,4 +1072,76 @@ describeEachMode('Job schedulers', (CONNECTION) => {
       expect(await queue.getJobScheduler(name)).toBeNull();
     }
   });
+
+  it('upsertJobScheduler rejects oversized, unserializable or out-of-range templates', async () => {
+    const { MAX_JOB_DATA_SIZE } = require('../dist/utils') as typeof import('../src/utils');
+    await expect(
+      queue.upsertJobScheduler('tmpl-big', { every: 1000 }, { name: 'j', data: 'x'.repeat(MAX_JOB_DATA_SIZE + 1) }),
+    ).rejects.toThrow('Scheduler template: Job data exceeds maximum size');
+    await expect(
+      queue.upsertJobScheduler('tmpl-bigint', { every: 1000 }, { name: 'j', data: { n: BigInt(1) } }),
+    ).rejects.toThrow('Scheduler template:');
+    await expect(
+      queue.upsertJobScheduler('tmpl-priority', { every: 1000 }, { name: 'j', opts: { priority: 5000 } }),
+    ).rejects.toThrow('Scheduler template: Priority must be <= 2048');
+    for (const name of ['tmpl-big', 'tmpl-bigint', 'tmpl-priority']) {
+      expect(await queue.getJobScheduler(name)).toBeNull();
+    }
+  });
+
+  it('a stored template that cannot produce a job reports an error and advances nextRun', async () => {
+    const qName = Q + '-bad-template';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const k = buildKeys(qName);
+    const { MAX_JOB_DATA_SIZE } = require('../dist/utils') as typeof import('../src/utils');
+    const firstNextRun = Date.now() - 100;
+    await cleanupClient.hset(k.schedulers, {
+      oversized: JSON.stringify({
+        every: 60_000,
+        iterationCount: 0,
+        nextRun: firstNextRun,
+        template: { name: 'big', data: 'x'.repeat(MAX_JOB_DATA_SIZE + 1) },
+      }),
+      badpriority: JSON.stringify({
+        every: 60_000,
+        iterationCount: 0,
+        nextRun: firstNextRun,
+        template: { name: 'prio', opts: { priority: 5000 } },
+      }),
+    });
+
+    const errors: string[] = [];
+    const processed: string[] = [];
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        processed.push(job.name);
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 200, promotionInterval: 100, stalledInterval: 60000 },
+    );
+    worker.on('error', (err: Error) => errors.push(err.message));
+
+    try {
+      const deadline = Date.now() + 5000;
+      while (errors.filter((m) => m.includes('skipped a run')).length < 2 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      await new Promise((r) => setTimeout(r, 500));
+      const skipped = errors.filter((m) => m.includes('skipped a run'));
+      // One report per scheduler: nextRun moved a full interval ahead, so no retry on every tick
+      expect(skipped).toHaveLength(2);
+      expect(skipped.some((m) => m.includes('"oversized"') && m.includes('exceeds maximum size'))).toBe(true);
+      expect(skipped.some((m) => m.includes('"badpriority"') && m.includes('Priority must be <= 2048'))).toBe(true);
+      for (const name of ['oversized', 'badpriority']) {
+        const entry = await localQueue.getJobScheduler(name);
+        expect(entry!.nextRun).toBe(firstNextRun + 60_000);
+        expect(entry!.iterationCount).toBe(0);
+      }
+      expect(processed).toEqual([]);
+    } finally {
+      await worker.close(true);
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    }
+  }, 15000);
 });
