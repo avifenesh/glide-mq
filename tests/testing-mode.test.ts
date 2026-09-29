@@ -1749,6 +1749,19 @@ describe('TestQueue.add validation parity (T11)', () => {
   });
 });
 
+describe('TestQueue.upsertJobScheduler mode switch', () => {
+  it('switching every to repeatAfterComplete does not fire before the old nextRun', async () => {
+    const queue = new TestQueue('switch-mode');
+    await queue.upsertJobScheduler('s', { every: 60_000 }, { name: 'j' });
+    const before = await queue.getJobScheduler('s');
+    await queue.upsertJobScheduler('s', { repeatAfterComplete: 500 }, { name: 'j' });
+    const after = await queue.getJobScheduler('s');
+    expect(after!.repeatAfterComplete).toBe(500);
+    expect(after!.nextRun).toBe(before!.nextRun);
+    await queue.close();
+  });
+});
+
 describe('TestQueue.upsertJobScheduler template validation parity', () => {
   it('rejects the template options Queue.upsertJobScheduler rejects', async () => {
     const queue = new TestQueue('tmpl-validate');

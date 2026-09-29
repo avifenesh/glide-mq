@@ -938,6 +938,37 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     await queue.removeJobScheduler(name);
   });
 
+  it('switching every/pattern to repeatAfterComplete does not fire before the old nextRun', async () => {
+    for (const [name, schedule] of [
+      ['switch-every-rac', { every: 60_000 }],
+      ['switch-cron-rac', { pattern: '0 0 1 1 *' }],
+    ] as const) {
+      await queue.upsertJobScheduler(name, schedule, { name: 'switch' });
+      const before = await queue.getJobScheduler(name);
+      expect(before!.nextRun).toBeGreaterThan(Date.now() + 1000);
+
+      await queue.upsertJobScheduler(name, { repeatAfterComplete: 500 }, { name: 'switch' });
+      const after = await queue.getJobScheduler(name);
+      expect(after!.repeatAfterComplete).toBe(500);
+      expect(after!.nextRun).toBe(before!.nextRun);
+      await queue.removeJobScheduler(name);
+    }
+
+    // A later startDate still wins over the held nextRun.
+    await queue.upsertJobScheduler('switch-start-rac', { every: 60_000 }, { name: 'switch' });
+    const startDate = Date.now() + 120_000;
+    await queue.upsertJobScheduler('switch-start-rac', { repeatAfterComplete: 500, startDate }, { name: 'switch' });
+    expect((await queue.getJobScheduler('switch-start-rac'))!.nextRun).toBe(startDate);
+    await queue.removeJobScheduler('switch-start-rac');
+
+    // An endDate before the held nextRun leaves no occurrence.
+    await queue.upsertJobScheduler('switch-end-rac', { every: 60_000 }, { name: 'switch' });
+    await expect(
+      queue.upsertJobScheduler('switch-end-rac', { repeatAfterComplete: 500, endDate: Date.now() + 30_000 }),
+    ).rejects.toThrow('Schedule has no occurrences within the configured bounds');
+    await queue.removeJobScheduler('switch-end-rac');
+  });
+
   it('re-upserting a repeatAfterComplete scheduler while its job is in flight keeps the awaiting state', async () => {
     const k = buildKeys(Q);
     const name = 'rac-inflight-state';

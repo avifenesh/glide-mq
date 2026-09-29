@@ -222,6 +222,8 @@ This mode is useful for:
 
 Upserting a `repeatAfterComplete` scheduler while its job is running (for example from inside the processor) keeps waiting for that job: the next run is scheduled when it completes, using the new interval, and `iterationCount` is kept unless `tz`, `startDate` or `endDate` changed. It never starts a second, overlapping chain. To force an immediate run, remove the scheduler and upsert it again.
 
+Switching an existing `every` or `pattern` scheduler to `repeatAfterComplete` does not fire at once: the first run stays at the old mode's `nextRun` (or a later `startDate`). Jobs from the old mode are not tracked, so one that is still running past that time can overlap the first `repeatAfterComplete` run.
+
 `repeatAfterComplete` is mutually exclusive with `pattern` and `every`. Bounded options (`startDate`, `endDate`, `limit`) work normally with this mode.
 
 ### Bounded schedulers

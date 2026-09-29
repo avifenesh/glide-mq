@@ -863,6 +863,22 @@ export function computeInitialSchedulerNextRun(
   return nextRun;
 }
 
+/**
+ * First run after switching an every/pattern scheduler to repeatAfterComplete.
+ * repeatAfterComplete would fire at once, possibly next to a run of the old
+ * mode that is still active, so hold it to the old mode's nextRun.
+ */
+export function holdSchedulerModeSwitch(
+  existing: SchedulerEntry,
+  nextRun: number,
+  endDate: number | undefined,
+): number | null {
+  if (isValidSchedulerEvery(existing.repeatAfterComplete) || !(existing.nextRun > 0)) return nextRun;
+  if (!existing.pattern && !isValidSchedulerEvery(existing.every)) return nextRun;
+  const held = Math.max(nextRun, existing.nextRun);
+  return endDate != null && held > endDate ? null : held;
+}
+
 export function computeFollowingSchedulerNextRun(
   schedule: Pick<SchedulerEntry, 'pattern' | 'every' | 'repeatAfterComplete' | 'tz' | 'endDate'> &
     Partial<Pick<SchedulerEntry, 'nextRun'>>,

@@ -43,6 +43,7 @@ import {
   calculateBackoff,
   computeFollowingSchedulerNextRun,
   computeInitialSchedulerNextRun,
+  holdSchedulerModeSwitch,
   computeWeightedTotal,
   floorUsageBucket,
   normalizeScheduleDate,
@@ -819,6 +820,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
         iterationCount = existing.iterationCount ?? 0;
         lastRun = existing.lastRun;
         nextRun = existing.nextRun;
+      } else if (nextRun != null && schedule.repeatAfterComplete != null) {
+        nextRun = holdSchedulerModeSwitch(existing, nextRun, endDate);
       }
     }
     if (nextRun == null) {
