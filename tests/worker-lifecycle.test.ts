@@ -743,3 +743,64 @@ describe('prefetch above concurrency', () => {
     await worker.close(true);
   });
 });
+
+describe('suspend continuations', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('evicts the oldest continuation beyond the cap', async () => {
+    wireClients(makeMockClient(), makeMockClient());
+    const worker = new Worker('lifecycle-w10', vi.fn(), { connection, blockTimeout: 100 });
+    await worker.waitUntilReady();
+
+    const max = (Worker as any).MAX_SUSPEND_CONTINUATIONS as number;
+    const onResume = async () => 'x';
+    for (let i = 0; i < max + 5; i++) {
+      (worker as any).setSuspendContinuation(`s${i}`, { job: {}, onResume });
+    }
+    const map = (worker as any).suspendContinuations as Map<string, unknown>;
+    expect(map.size).toBe(max);
+    expect(map.has('s0')).toBe(false);
+    expect(map.has('s4')).toBe(false);
+    expect(map.has('s5')).toBe(true);
+    expect(map.has(`s${max + 4}`)).toBe(true);
+
+    await worker.close(true);
+    expect(map.size).toBe(0);
+  });
+
+  it('drops the continuation when the suspend call fails', async () => {
+    const command = makeMockClient({
+      fcall: routeFcall({ glidemq_suspend: () => 'error:not_active' }),
+    });
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult([['1-0', 'susp']]))
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+
+    const worker = new Worker(
+      'lifecycle-w10-fail',
+      async (job) => {
+        await job.suspend({ onResume: async () => 'resumed' });
+      },
+      { connection, blockTimeout: 100 },
+    );
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(command.fcall.mock.calls.some((c: any[]) => c[0] === 'glidemq_suspend')).toBe(true);
+    expect((worker as any).suspendContinuations.size).toBe(0);
+
+    await worker.close(true);
+  });
+});

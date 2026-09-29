@@ -148,6 +148,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected readonly hostname = os.hostname();
 
   private static readonly REVOCATION_POLL_INTERVAL = 1000;
+  /**
+   * Cap on in-process onResume continuations. An entry is only removed when
+   * its job returns to this worker, so jobs resumed elsewhere, timed out or
+   * removed would otherwise pin their closures forever. onResume is
+   * documented as best-effort: an evicted job runs the main processor.
+   */
+  static readonly MAX_SUSPEND_CONTINUATIONS = 10000;
   protected serializer: Serializer;
   protected readonly batchMode: boolean;
   protected readonly batchSize: number;
@@ -1594,7 +1601,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         if (!this.commandClient) return;
         try {
           if (suspendReq?.onResume) {
-            this.suspendContinuations.set(currentJobId, { job: continuationJob, onResume: suspendReq.onResume });
+            this.setSuspendContinuation(currentJobId, { job: continuationJob, onResume: suspendReq.onResume });
           }
           const suspResult = await suspendJob(
             this.commandClient,
@@ -1611,6 +1618,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             throw new Error(`Cannot suspend job: ${suspResult.slice(6)}`);
           }
         } catch (suspErr) {
+          // The job did not suspend, so no resume will ever consume this entry.
+          this.suspendContinuations.delete(currentJobId);
           const err = suspErr instanceof Error ? suspErr : new Error(String(suspErr));
           await this.handleJobFailure(job, currentJobId, currentEntryId, err);
         }
@@ -1815,6 +1824,19 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       currentJobId = fetchResult.nextJobId!;
       currentEntryId = fetchResult.nextEntryId!;
       currentHash = fetchResult.next as unknown as Record<string, string>;
+    }
+  }
+
+  private setSuspendContinuation(
+    jobId: string,
+    continuation: { job: Job<D, R>; onResume: (signals: SignalEntry[]) => Promise<any> },
+  ): void {
+    // Re-insert so a re-suspended job counts as the newest entry.
+    this.suspendContinuations.delete(jobId);
+    this.suspendContinuations.set(jobId, continuation);
+    while (this.suspendContinuations.size > BaseWorker.MAX_SUSPEND_CONTINUATIONS) {
+      const oldest = this.suspendContinuations.keys().next().value as string;
+      this.suspendContinuations.delete(oldest);
     }
   }
 
@@ -2234,6 +2256,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       clearInterval(timer);
     }
     this.heartbeatIntervals.clear();
+    this.suspendContinuations.clear();
 
     if (this.blockingClient) {
       this.blockingClient.close();
