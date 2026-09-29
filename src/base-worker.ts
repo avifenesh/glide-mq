@@ -55,6 +55,7 @@ import {
   completeChild,
   failJob,
   addJob,
+  casSchedulerEntry,
   rateLimit as rateLimitFn,
   rateLimitGroup as rateLimitGroupFn,
   moveToActive,
@@ -1436,7 +1437,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
     // Terminal failure: schedule next run for repeatAfterComplete schedulers
     if (failResult === 'failed' && job.schedulerName) {
-      await this.updateSchedulerAfterComplete(job.schedulerName, Date.now());
+      await this.updateSchedulerAfterComplete(job.schedulerName, job.id, Date.now());
     }
 
     return failResult === 'failed';
@@ -1535,7 +1536,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
     if (this.hasFailedListeners) this.emit('failed', job, error);
     if (terminal && job.schedulerName) {
-      await this.updateSchedulerAfterComplete(job.schedulerName, Date.now());
+      await this.updateSchedulerAfterComplete(job.schedulerName, job.id, Date.now());
     }
   }
 
@@ -1588,9 +1589,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    *    stuck at nextRun=0 (awaiting completion sentinel) indefinitely.
    * 2. Revoked jobs never trigger this update, leaving the scheduler permanently
    *    stuck.
-   * 3. Race conditions: The idempotency check (nextRun === 0) prevents duplicate
-   *    updates from stalled reclaim, but doesn't prevent races with concurrent
-   *    upsertJobScheduler/removeJobScheduler (those use scheduler lock, this doesn't).
+   * 3. The entry is written with a compare-and-set over the value read here, so a
+   *    concurrent upsertJobScheduler is not overwritten; the losing side retries.
    *
    * MITIGATION: Run multiple workers for redundancy. Manually remove/re-add the
    * scheduler to recover from stuck state.
@@ -1598,32 +1598,46 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * Stalled recovery, TTL expiry, suspend timeout, capacity rejection, and
    * group-rate failure advance the scheduler atomically in Lua.
    */
-  protected async updateSchedulerAfterComplete(schedulerName: string, now: number): Promise<void> {
+  protected async updateSchedulerAfterComplete(schedulerName: string, jobId: string, now: number): Promise<void> {
     if (!this.commandClient) return;
     try {
-      const raw = await this.commandClient.hget(this.queueKeys.schedulers, schedulerName);
-      if (raw == null) return; // scheduler was deleted while job was in flight
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const raw = await this.commandClient.hget(this.queueKeys.schedulers, schedulerName);
+        if (raw == null) return; // scheduler was deleted while job was in flight
 
-      let config: SchedulerEntry;
-      try {
-        config = JSON.parse(String(raw));
-      } catch {
-        return;
-      }
+        let config: SchedulerEntry;
+        try {
+          config = JSON.parse(String(raw));
+        } catch {
+          return;
+        }
 
-      if (!config.repeatAfterComplete) return;
+        if (!config.repeatAfterComplete) return;
 
-      // Idempotency: only update if nextRun is 0 (awaiting completion sentinel).
-      // This prevents duplicate updates from stalled reclaim or double-processing.
-      if (config.nextRun !== 0) return;
+        // Idempotency: only update if nextRun is 0 (awaiting completion sentinel).
+        // This prevents duplicate updates from stalled reclaim or double-processing.
+        if (config.nextRun !== 0) return;
+        // Only the job the tick fired (or the old-mode job it parked on) advances the entry.
+        if (config.inflightJobId && config.inflightJobId !== jobId) return;
 
-      const nextRun = computeFollowingSchedulerNextRun(config, now);
-      if (nextRun == null || (config.limit != null && (config.iterationCount ?? 0) >= config.limit)) {
-        await this.commandClient.hdel(this.queueKeys.schedulers, [schedulerName]);
-      } else {
+        const nextRun = computeFollowingSchedulerNextRun(config, now);
+        if (nextRun == null || (config.limit != null && (config.iterationCount ?? 0) >= config.limit)) {
+          await this.commandClient.hdel(this.queueKeys.schedulers, [schedulerName]);
+          return;
+        }
         config.nextRun = nextRun;
         // Don't overwrite lastRun - it was set by runSchedulers when the job was enqueued
-        await this.commandClient.hset(this.queueKeys.schedulers, { [schedulerName]: JSON.stringify(config) });
+        if (
+          await casSchedulerEntry(
+            this.commandClient,
+            this.queueKeys,
+            schedulerName,
+            String(raw),
+            JSON.stringify(config),
+          )
+        ) {
+          return;
+        }
       }
     } catch (err) {
       this.emit('error', err instanceof Error ? err : new Error(String(err)));
@@ -2024,7 +2038,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         }
 
         if (job.schedulerName) {
-          await this.updateSchedulerAfterComplete(job.schedulerName, now);
+          await this.updateSchedulerAfterComplete(job.schedulerName, job.id, now);
         }
       }
 

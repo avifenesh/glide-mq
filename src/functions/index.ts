@@ -1,7 +1,7 @@
 import { RequestError } from '@glidemq/speedkey';
 import type { GlideReturnType, GlideString } from '@glidemq/speedkey';
 import type { Client } from '../types';
-import { buildKeys, parseCrossQueueParentNotification } from '../utils';
+import { buildKeys, isFunctionNotFound, parseCrossQueueParentNotification } from '../utils';
 import { librarySourceFrom, loadLibraryFile } from './load-library-source';
 
 export const LIBRARY_NAME = 'glidemq';
@@ -118,7 +118,8 @@ export const LIBRARY_NAME = 'glidemq';
 //   and re-evaluates the exceeded flag; glidemq_failAndFetchNext fails a job and fetches the next one
 //   (the fetch phases of completeAndFetchNext) in one call; glidemq_trimBroadcast replies
 //   {trimmed, unread} instead of the trimmed count.
-export const LIBRARY_VERSION = '131';
+// Version 132: see per-function notes below (lua round 3).
+export const LIBRARY_VERSION = '132';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1601,6 +1602,31 @@ export async function casSchedulerEntry(
 ): Promise<boolean> {
   const result = await client.fcall('glidemq_casSchedulerEntry', [queueKeys.schedulers], [name, expected, value]);
   return Number(result) === 1;
+}
+
+/**
+ * Park a repeatAfterComplete entry (nextRun 0) while the job its previous mode
+ * fired is still running, in one step with the state check. Returns 'parked',
+ * 'finished' (the job is terminal or gone: fire normally) or 'changed' (the
+ * entry no longer matches `expected`). Libraries before 132 reply 'finished'.
+ */
+export async function schedulerAwaitInflight(
+  client: Client,
+  queueKeys: QueueKeys,
+  name: string,
+  expected: string,
+  jobId: string,
+): Promise<'parked' | 'finished' | 'changed'> {
+  const jobKey = `${queueKeys.id.slice(0, -2)}job:${jobId}`;
+  let result: unknown;
+  try {
+    result = await client.fcall('glidemq_schedulerAwaitInflight', [queueKeys.schedulers, jobKey], [name, expected]);
+  } catch (err) {
+    if (!isFunctionNotFound(err)) throw err;
+    return 'finished';
+  }
+  const code = Number(result);
+  return code === 1 ? 'parked' : code === 0 ? 'finished' : 'changed';
 }
 
 /**

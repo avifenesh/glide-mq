@@ -541,6 +541,8 @@ export interface SchedulerEntry {
   compression?: 'gzip';
   lastRun?: number;
   nextRun: number;
+  /** Id of the job the last tick fired. Only its completion advances a repeatAfterComplete entry. */
+  inflightJobId?: string;
 }
 
 /** A single per-minute metrics data point. */

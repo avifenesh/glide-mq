@@ -781,9 +781,10 @@ local function extractLockDurationFromOpts(optsJson)
   return lockDuration
 end
 
--- Advance a repeat-after-complete scheduler from its awaiting-completion
--- sentinel in the same FCALL as a terminal server-side failure.
-local function replaceTopLevelJsonZero(raw, field, replacement)
+-- Replace the numeric value of a top-level JSON field in place. Only that
+-- token changes, so Lua CJSON cannot round high-precision numbers nested in
+-- the job template. Returns nil when the field is absent or not a number.
+local function replaceTopLevelJsonNumber(raw, field, replacement)
   local target = '"' .. field .. '"'
   local depth = 0
   local inString = false
@@ -810,10 +811,13 @@ local function replaceTopLevelJsonZero(raw, field, replacement)
           while string.match(string.sub(raw, valueStart, valueStart), '%s') do
             valueStart = valueStart + 1
           end
-          local nextChar = string.sub(raw, valueStart + 1, valueStart + 1)
-          if string.sub(raw, valueStart, valueStart) == '0' and (nextChar == ',' or nextChar == '}') then
-            return string.sub(raw, 1, valueStart - 1) .. replacement .. string.sub(raw, valueStart + 1)
+          local _, valueEnd = string.find(raw, '^-?[%d%.eE%+%-]+', valueStart)
+          if not valueEnd then return nil end
+          local nextChar = string.sub(raw, valueEnd + 1, valueEnd + 1)
+          if nextChar == ',' or nextChar == '}' or string.match(nextChar, '%s') then
+            return string.sub(raw, 1, valueStart - 1) .. replacement .. string.sub(raw, valueEnd + 1)
           end
+          return nil
         end
       end
       inString = true
@@ -827,6 +831,16 @@ local function replaceTopLevelJsonZero(raw, field, replacement)
   return nil
 end
 
+local function schedulerJobId(jobKey, prefix)
+  local marker = prefix .. 'job:'
+  if string.sub(jobKey, 1, #marker) == marker then
+    return string.sub(jobKey, #marker + 1)
+  end
+  return jobKey
+end
+
+-- Advance a repeat-after-complete scheduler from its awaiting-completion
+-- sentinel in the same FCALL as a terminal server-side failure.
 advanceRepeatAfterComplete = function(jobKey, prefix, timestamp)
   local schedulerName = redis.call('HGET', jobKey, 'schedulerName')
   if not schedulerName or schedulerName == '' then return end
@@ -839,6 +853,10 @@ advanceRepeatAfterComplete = function(jobKey, prefix, timestamp)
   if not ok or type(config) ~= 'table' then return end
   local repeatMs = tonumber(config['repeatAfterComplete']) or 0
   if repeatMs <= 0 or tonumber(config['nextRun']) ~= 0 then return end
+  -- The tick records the job it fired (inflightJobId); a job from an earlier
+  -- chain or from the previous mode does not advance the entry.
+  local inflight = config['inflightJobId']
+  if type(inflight) == 'string' and inflight ~= '' and inflight ~= schedulerJobId(jobKey, prefix) then return end
 
   local nextRun = timestamp + repeatMs
   local endDate = tonumber(config['endDate'])
@@ -849,9 +867,7 @@ advanceRepeatAfterComplete = function(jobKey, prefix, timestamp)
     return
   end
 
-  -- Replace only the top-level sentinel so Lua CJSON cannot round
-  -- high-precision numbers nested in the job template.
-  local updated = replaceTopLevelJsonZero(raw, 'nextRun', tostring(nextRun))
+  local updated = replaceTopLevelJsonNumber(raw, 'nextRun', tostring(nextRun))
   if not updated then return end
   redis.call('HSET', schedulersKey, schedulerName, updated)
 end
@@ -3489,6 +3505,23 @@ redis.register_function('glidemq_casSchedulerEntry', function(keys, args)
   if not current then current = '' end
   if current ~= args[2] then return 0 end
   redis.call('HSET', keys[1], args[1], args[3])
+  return 1
+end)
+
+-- Mode switch to repeatAfterComplete while the job the old mode fired is
+-- still running: park the entry (nextRun 0) so that job's completion starts
+-- the chain. Check and write happen in one step, so a completion that landed
+-- first (and left the held nextRun alone) reads as terminal and the tick fires.
+-- keys: schedulers, in-flight job hash. args: name, entry as read.
+-- Reply: 1 parked, 0 job finished or gone (fire normally), -1 entry changed.
+redis.register_function('glidemq_schedulerAwaitInflight', function(keys, args)
+  local current = redis.call('HGET', keys[1], args[1])
+  if not current or current ~= args[2] then return -1 end
+  local state = redis.call('HGET', keys[2], 'state')
+  if not state or state == 'completed' or state == 'failed' then return 0 end
+  local updated = replaceTopLevelJsonNumber(current, 'nextRun', '0')
+  if not updated then return -1 end
+  redis.call('HSET', keys[1], args[1], updated)
   return 1
 end)
 
