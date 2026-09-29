@@ -139,11 +139,28 @@ describe('nextCronOccurrence', () => {
     expect(new Date(next).toISOString()).toBe('2024-01-08T00:00:00.000Z');
   });
 
-  it('matches specific date AND day of week', () => {
-    // 1st of month AND Monday - Apr 1 2024 is the next match
+  it('matches day of month OR day of week when both are restricted', () => {
+    // Standard cron: '0 0 1 * 1' fires on every 1st AND on every Monday
+    let t = new Date('2024-01-22T12:00:00Z').getTime();
+    const runs: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      t = nextCronOccurrence('0 0 1 * 1', t);
+      runs.push(new Date(t).toISOString().slice(0, 10));
+    }
+    // Jan 29 Mon, Feb 1 Thu, Feb 5 Mon, Feb 12 Mon
+    expect(runs).toEqual(['2024-01-29', '2024-02-01', '2024-02-05', '2024-02-12']);
+  });
+
+  it('treats * and */1 as unrestricted day fields (AND with the other field)', () => {
     const now = new Date('2024-01-01T12:00:00Z').getTime();
-    const next = nextCronOccurrence('0 0 1 * 1', now);
-    expect(new Date(next).toISOString()).toBe('2024-04-01T00:00:00.000Z');
+    // dom '*/1' is unrestricted: only Mondays match
+    expect(new Date(nextCronOccurrence('0 0 */1 * 1', now)).toISOString()).toBe('2024-01-08T00:00:00.000Z');
+    // dow '*/1' is unrestricted: only the 5th matches
+    expect(new Date(nextCronOccurrence('0 0 5 * */1', now)).toISOString()).toBe('2024-01-05T00:00:00.000Z');
+    // dom '*/2' is restricted: odd days OR Mondays
+    expect(new Date(nextCronOccurrence('0 0 */2 * 1', now)).toISOString()).toBe('2024-01-03T00:00:00.000Z');
+    // dow '0-6' is restricted (cron-parser and vixie): the 5th OR any weekday, so every day
+    expect(new Date(nextCronOccurrence('0 0 5 * 0-6', now)).toISOString()).toBe('2024-01-02T00:00:00.000Z');
   });
 
   it('throws error for impossible date (Feb 30)', () => {

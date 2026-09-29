@@ -530,6 +530,48 @@ function parseCronField(field: string, min: number, max: number): CronField {
   return { set: values, sorted };
 }
 
+interface CronPattern {
+  minute: CronField;
+  hour: CronField;
+  dom: CronField;
+  month: CronField;
+  dow: CronField;
+  /** Day-of-month field covers every day 1-31 ('*', '*\/1', '1-31'). */
+  domUnrestricted: boolean;
+  /** Day-of-week field is '*' or '*\/1'. An explicit '0-6' counts as restricted, as in cron-parser and vixie cron. */
+  dowUnrestricted: boolean;
+}
+
+function parseCronPattern(pattern: string): CronPattern {
+  const fields = pattern.trim().split(/\s+/);
+  if (fields.length !== 5) {
+    throw new Error(`Invalid cron pattern: expected 5 fields, got ${fields.length}`);
+  }
+  const dom = parseCronField(fields[2], 1, 31);
+  const dow = parseCronField(fields[4], 0, 6); // 0=Sunday
+  return {
+    minute: parseCronField(fields[0], 0, 59),
+    hour: parseCronField(fields[1], 0, 23),
+    dom,
+    month: parseCronField(fields[3], 1, 12),
+    dow,
+    domUnrestricted: dom.set.size === 31,
+    dowUnrestricted: dow.set.size === 7 && fields[4].includes('*'),
+  };
+}
+
+/**
+ * Standard cron day rule: when both day-of-month and day-of-week are restricted,
+ * a day matches if EITHER field matches. Otherwise both must match (the
+ * unrestricted one always does).
+ */
+function cronDayMatches(cron: CronPattern, day: number, dayOfWeek: number): boolean {
+  const domMatch = cron.dom.set.has(day);
+  const dowMatch = cron.dow.set.has(dayOfWeek);
+  if (!cron.domUnrestricted && !cron.dowUnrestricted) return domMatch || dowMatch;
+  return domMatch && dowMatch;
+}
+
 // Maximum search horizon in years to prevent infinite loops (e.g. Feb 30)
 // 10 years covers century non-leap-year gaps (e.g. Feb 29 after 2097 -> 2104)
 const MAX_SEARCH_YEARS = 10;
@@ -762,16 +804,10 @@ export function computeFollowingSchedulerNextRun(
 }
 
 function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
-  const fields = pattern.trim().split(/\s+/);
-  if (fields.length !== 5) {
-    throw new Error(`Invalid cron pattern: expected 5 fields, got ${fields.length}`);
-  }
-
-  const { set: minuteSet, sorted: minutesSorted } = parseCronField(fields[0], 0, 59);
-  const { set: hourSet, sorted: hoursSorted } = parseCronField(fields[1], 0, 23);
-  const { set: domSet } = parseCronField(fields[2], 1, 31);
-  const { set: monthSet, sorted: monthsSorted } = parseCronField(fields[3], 1, 12);
-  const { set: dowSet } = parseCronField(fields[4], 0, 6); // 0=Sunday
+  const cron = parseCronPattern(pattern);
+  const { set: minuteSet, sorted: minutesSorted } = cron.minute;
+  const { set: hourSet, sorted: hoursSorted } = cron.hour;
+  const { set: monthSet, sorted: monthsSorted } = cron.month;
 
   // Start from the next minute after afterMs (all operations in UTC)
   const d = new Date(afterMs);
@@ -798,7 +834,7 @@ function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
     // 2. Day check
     const currentDay = d.getUTCDate();
     const currentDayOfWeek = d.getUTCDay();
-    if (!domSet.has(currentDay) || !dowSet.has(currentDayOfWeek)) {
+    if (!cronDayMatches(cron, currentDay, currentDayOfWeek)) {
       d.setUTCDate(d.getUTCDate() + 1);
       d.setUTCHours(0, 0, 0, 0);
       continue;
@@ -845,16 +881,10 @@ function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
  * - Fall-back: if a wall-clock time is ambiguous (overlap), pick the first (earlier) UTC instant
  */
 function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): number {
-  const fields = pattern.trim().split(/\s+/);
-  if (fields.length !== 5) {
-    throw new Error(`Invalid cron pattern: expected 5 fields, got ${fields.length}`);
-  }
-
-  const { set: minuteSet, sorted: minutesSorted } = parseCronField(fields[0], 0, 59);
-  const { set: hourSet, sorted: hoursSorted } = parseCronField(fields[1], 0, 23);
-  const { set: domSet } = parseCronField(fields[2], 1, 31);
-  const { set: monthSet, sorted: monthsSorted } = parseCronField(fields[3], 1, 12);
-  const { set: dowSet } = parseCronField(fields[4], 0, 6);
+  const cron = parseCronPattern(pattern);
+  const { set: minuteSet, sorted: minutesSorted } = cron.minute;
+  const { set: hourSet, sorted: hoursSorted } = cron.hour;
+  const { set: monthSet, sorted: monthsSorted } = cron.month;
 
   // Get the wall-clock time in the target timezone for "afterMs + 1 minute"
   const startParts = utcToTzParts(afterMs, tz);
@@ -915,7 +945,7 @@ function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): num
       continue;
     }
     const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
-    if (!domSet.has(day) || !dowSet.has(dow)) {
+    if (!cronDayMatches(cron, day, dow)) {
       day++;
       hour = 0;
       minute = 0;

@@ -192,6 +192,12 @@ const schedulers = await queue.getRepeatableJobs();
 await queue.removeJobScheduler('cleanup');
 ```
 
+### Cron syntax
+
+Patterns use the standard 5 fields: `minute hour day-of-month month day-of-week` (0 = Sunday). Each field accepts `*`, numbers, ranges (`1-5`), steps (`*/15`, `10-40/10`) and lists (`1,15`). Patterns run in UTC unless `tz` is set.
+
+- **Day-of-month and day-of-week**: when both fields are restricted, a day matches if either field matches. `0 0 1 * 1` fires on every 1st of the month and on every Monday. When one of them is unrestricted, only the other one decides. A field is unrestricted when it is `*` or `*/1` (day-of-month also when it covers `1-31`). An explicit `0-6` day-of-week counts as restricted. This matches cron-parser (BullMQ) and vixie cron. Releases up to 0.15.5 required both fields to match.
+
 ### Repeat-after-complete mode
 
 `repeatAfterComplete` schedules the next job only after the current one completes (or terminally fails). Unlike `every`, which fires at fixed intervals regardless of processing time, `repeatAfterComplete` ensures no overlap between successive runs.
