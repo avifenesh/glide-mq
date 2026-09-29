@@ -2,60 +2,49 @@
 
 ## Current State
 
-- **Security hardening**: The CodeQL fix branch covers six alerts with keyed, length-framed in-memory credential fingerprints, complete connection and producer cache keys, safe object-property keys, sanitized proxy log fields, and a private fuzzer temp directory. Regression tests cover credential-field and connection-option collisions, unsafe keys, and log controls.
-- **Coverage PR**: `test/integration-coverage-gaps` (fork #25 / upstream #280) — rebased onto v0.15.5. Live Valkey/proxy integration tests only. Source fixes: proxy `lockDuration` allowlist, `Job.getParents()` last-colon parse, proxy SSE loops exit on `draining`, `getSharedClient` gated on drain.
-- **In flight**: `fix/close-fetch-next` (fork #18 / upstream #282) — rebased onto v0.15.5. close() must not strand CAF or poll claims; grouped CAF undo skips `retainedSlot` active rewind. Lua library 124. Close-fetch tests share helpers so Sonar new-code duplication stays under the 3% gate. tb-idle-refill now uses a 250ms promotion interval and 12s waitFor so the default 5s promotion ceiling cannot starve the second job.
-- **Audit fix**: `fix/repeat-after-stalled` atomically advances repeat-after-complete schedulers during terminal stalled recovery.
-- **Branch**: `automation/cover-open-fixes-20260825` consolidates the reviewed correctness queue.
-- **Revoke/timeout safety**: revoked active jobs cannot complete; each batch job owns its abort signal, and timeouts remain retryable.
-- **Coverage CI**: fuzzer exclusion is quoted and integration/Lua uploads use Codecov OIDC (`id-token: write`, `use_oidc: true`).
-- **Pause sweep**: `Queue.pause()` immediately expires suspended jobs whose timeouts elapsed.
-- **Version**: 0.15.5 release candidate on `release/v0.15.5`; GitHub tag and npm publish pending merge.
-- **CI**: green across all six fork/upstream stack PRs after the 2026-08-22 packaging update.
-- **Ordered-group recovery**: retained rate-limit slots are tracked per job and released on terminal paths; oversized token-bucket heads are cleaned iteratively through bounded sweeps.
-- **Local branches**: `refactor/extract-lua-library` -> `ci/ts-coverage` -> `ci/lua-coverage`.
-- **Coverage**: CI-included internal pause-worker regressions cover worker/broadcast pause guards, pending-read reset, and batch-refill stops. Standalone TS coverage and focused Lua coverage were verified on an isolated Valkey instance; changed executable lines are hit.
-- **Broadcast pause recovery**: a queue-pause activation race records only its parked PEL IDs. Resume uses targeted `XCLAIM`; it never rewinds `XREADGROUP` to `0`, which could redeliver live work from the same consumer's PEL.
-- **Stalled recovery**: `XAUTOCLAIM` persists a per-group cursor. Full 100-entry pages continue on a guarded zero-delay timer, yielding to I/O between pages without waiting another stalled interval.
-- **Unreleased**: `getJobs('waiting')` reads priority, LIFO, and non-pending FIFO sources; revoke/remove clean list entries. Removal and revocation route FIFO cleanup by actual list membership so list-backed jobs skip the scan while stale source fields cannot orphan stream entries. Server-function library identity is `112`.
-- **Review gate**: automatic Claude review is retired; the Revuto GitHub App check reviews pull requests.
-- **Dependency security**: the lockfile carries protobufjs 7.6.5, brace-expansion 5.0.9, PostCSS 8.5.25, and body-parser 2.3.0.
+- **Audit series (2026-09-29)**: four read-only audits (Lua, worker, API, proxy/sandbox/testing), two follow-up audits (schedulers/broadcast, hot path) and a docs-vs-code audit produced about 90 verified findings. Every fix landed with a failing-first test, one PR per lane, self-review comment, revuto verdict and green CI. Merged: #295 sandbox, #296 testing-mode parity, #297 proxy hardening, #298 worker lifecycle, #300 API correctness, #301 Lua round 1, #302 scheduler/cron, #303 vitest 4.1.11 security bump, #304 worker round 2, #305 Lua round 2, #306 scheduler/flow follow-ups, #307 docs (25 claims), #308 Lua/worker follow-ups.
+- **Open**: #309 broadcast recovery and retention (`fix/broadcast-recovery-20260929`, library 130). Lane L15 (`fix/backlog-round4-20260929`, based on #309) is working the last backlog items: batch-mode budget charging, rate-limit requeues not consuming attempts, a bounded re-check for `onExceeded: 'pause'`, `glidemq_failAndFetchNext`, and a Broadcast `trimmed` event.
+- **Server function library**: `LIBRARY_VERSION` is `129` on main, `130` on #309. Every function added in this series keeps existing KEYS/ARGS layouts; new inputs are optional trailing args, new replies are parsed with a fallback for the old shape, and new functions have a TS fallback on "function not found" so rolling upgrades work in both directions.
+- **Behavior changes since 0.15.5** (all in CHANGELOG `[Unreleased]` Changed): `prefetch` capped at `concurrency`; `Job.retry()` only from `failed`; proxy `maxPageSize` (default 1000) bounds list, replay-all and clean requests and 5xx bodies are generic; cron ORs day-of-month and day-of-week and fires through DST transitions like cronie; scheduler templates reject `jobId`, `delay`, `deduplication` and `parent`; re-upserting an in-flight `repeatAfterComplete` scheduler does not fire; server-side priority validation; testing-mode dedup applies without `{ dedup: true }`; graceful `close()` waits up to `blockTimeout` for the in-flight read; `Broadcast.publish` rejects `priority`/`lifo`; `maxMessages` stays a hard cap that can drop unread messages.
+- **Version**: package.json is still 0.15.5. The Unreleased section carries about 50 fixes plus behavior changes, so the next release is the owner's call between 0.15.6 and 0.16.0. Skill metadata versions (skills/*/SKILL.md) must move with it.
+- **Test infrastructure**: vitest 4.1.11. `tests/helpers/fixture.ts` runs each describe block in standalone (:6379) and cluster (:7000-7005) mode. Cluster clients always `FUNCTION LOAD REPLACE`, so parallel test runs on one server clobber each other's library: serialize Valkey-backed runs (`flock /tmp/gmq-test.lock npx vitest run ...`). Standalone skips the reload when `LIBRARY_VERSION` matches, so iterating on Lua without a bump needs a force load. Unit coverage uploads under the `unit` Codecov flag; patch target 80%.
+- **Review gate**: revuto reviews at most two rounds per PR. After the cap, the author self-review comment on the final push plus green CI is the merge gate, with the missing tool half noted in the PR body. Answered inline threads must be resolved or branch protection blocks the merge button.
+- **Upstream**: `@glidemq/speedkey` (valkey-glide fork) `close()` does not end a blocked `XREADGROUP` on the server. glide-mq works around it by waiting for the in-flight read on graceful close. The real fix belongs in glide/speedkey. speedkey itself is temporary until valkey-glide publishes the NAPI client and Windows builds.
 
 ## What Was Done (0.15.x series since 0.14.0)
 
 ### Released
 
 - **0.15.5**: queue correctness and lifecycle fixes accumulated since 0.15.4, including pause/revoke/reclaim behavior, cross-queue parent completion, reconnect client lifetime, list-job resume semantics, token-bucket clock consistency, partial test-worker batch flushing, and empty-dependency waiting-children handling. `LIBRARY_VERSION` 122.
-
 - **0.15.0** (#192, #205): HTTP proxy parity expansion (queue events SSE, per-job lifecycle SSE, `jobs/wait`, workers, metrics, scheduler CRUD, rolling usage summary, broadcast publish/SSE, DLQ inspection/replay, suspended-job inspection, revoke, queue global rate-limit HTTP management). Flow HTTP API: `POST /flows`, `GET /flows/:id`, `GET /flows/:id/tree`, `DELETE /flows/:id` for tree flows and DAGs. `queue.getUsageSummary()` plus `/usage/summary`.
 - **0.15.1** (#206): debounce + ordering.key deadlock fix via lightweight skip markers. `LIBRARY_VERSION` 81.
-- **0.15.2** (#212, #213, #216-219): priority/LIFO in batch-mode workers, `list-active` underflow guards (12 sites through one `decrListActive` helper), priority/LIFO active visibility via `glidemq_getActiveListJobIds`, lockDuration-aware stall reclaim (`stalledInterval` no longer conflated with threshold). `LIBRARY_VERSION` 84. **Behavior change**: workers that relied on short `stalledInterval` without setting `lockDuration` now see slower stall recovery; set `lockDuration` explicitly to match if needed.
+- **0.15.2** (#212, #213, #216-219): priority/LIFO in batch-mode workers, `list-active` underflow guards, priority/LIFO active visibility via `glidemq_getActiveListJobIds`, lockDuration-aware stall reclaim. `LIBRARY_VERSION` 84. **Behavior change**: workers that relied on short `stalledInterval` without setting `lockDuration` now see slower stall recovery.
 - **0.15.3** (#222-#246): DAG dependency direction/tree rendering/multi-dependent leaf fixes, `addDAG` level batching, stalled-job redispatch semantics, large-key `UNLINK` cleanup, bounded ordering skip-marker advancement, serverless credential cache scoping, flow ID-collision guards, proxy strict opts validation, long-running job heartbeats, broadcast retry isolation, queue client single-flight, and dependency CVE fixes. `LIBRARY_VERSION` 93.
-- **0.15.4**: interval scheduler anchoring prevents late worker ticks from accumulating drift, `npm test` now runs the intended non-fuzzer suite, and CI/local compose coverage use stable Valkey 9.1.0 images.
-- **Unreleased**: list-backed workers now reserve `list-active` in `glidemq_popListsReserve`; legacy `glidemq_popLists` remains non-reserving and new workers fall back to it plus typed `INCRBY` during rolling upgrades. `LIBRARY_VERSION` 98 follows stalled-cursor 94.
+- **0.15.4**: interval scheduler anchoring, `npm test` runs the intended non-fuzzer suite, CI/local compose use stable Valkey 9.1.0 images.
 
-### In flight (fork)
+### Unreleased (audit series, 2026-09-29)
 
-- **Reconnect lockDuration**: Scheduler rebuilt after reconnect keeps worker `lockDuration`. Branch `fix/reconnect-lock-duration`.
+See CHANGELOG `[Unreleased]` for the full list. Highlights by area:
 
-### In flight (fork)
-
-- **Nested/cross-queue parents**: test-first regression `a39d87a`; implementation spans `5603dc0` through `32f1395`, followed by the Sonar cleanup in `79a573a`. The branch is independent of `upstream/main`, uses `LIBRARY_VERSION` 110, reconciles removed children including nested and DAG exists-to-HSET TOCTOU races with ghost parent-set cleanup, JSON-encodes retryable child-slot notifications, eagerly delivers completion-time cross-queue notifications without adding a steady-state RTT, deduplicates overlapping tree/DAG edges, and removes `xq-pending` during obliterate. Standalone and cluster integration CI are green.
-
-### 0.15.4 Release Notes
-
-See CHANGELOG.md `0.15.4` for the full list. Highlights:
-
-- **Scheduler interval anchoring**: `every` schedulers advance from the previous due slot instead of the late worker tick timestamp, preventing CI/event-loop jitter from accumulating drift while still skipping missed slots.
-- **Release gate correctness**: `npm test` now passes the fuzzer exclusion as a single Vitest argument, so it covers the intended 2,414-test non-fuzzer suite.
-- **Valkey CI images**: standalone, cluster, and search coverage now use stable Valkey 9.1.0 images instead of release-candidate images.
+- **Lua correctness**: removed flow children resolve their parents; `drain` closes ordering holes; stale claims are rejected (`STALE`); removed active jobs cannot corrupt group or list counters or come back as ghost hashes; `Job.retry()` is atomic and only from `failed`; `changePriority`/`changeDelay` handle list-held jobs; cross-queue children that finish before registration are parked, not counted; flow budgets are created before their jobs and `budgetKey` is written atomically; `list-active-ids` replaces keyspace SCANs.
+- **Worker lifecycle**: reconnect after `close()` no longer leaks clients or timers; heartbeats cannot leak; `pause()` stops chaining; broadcast batch reads are capped; `close()` hands back in-flight claims; `close(true)` aborts running jobs; a second signal during a hung shutdown exits; batch activation and completion are pipelined.
+- **Schedulers**: cron DST and OR day matching; in-flight `repeatAfterComplete` re-upsert keeps state and writes through compare-and-set; templates carry ordering, limits, cost and compression; bad templates are rejected at upsert.
+- **Proxy**: SSE cleanup on early disconnect, one shared command client, bounded requests, generic 5xx bodies, flow node limit.
+- **Sandbox**: hung or aborted jobs free their pool slot (5s grace, then terminate); no host crash on a dead child.
+- **Testing mode**: validation, ordering, retention, retries with backoff, dedup modes and `moveToDelayed` match production.
+- **Broadcast** (#309): stalled messages are re-run per subscription with per-subscription stall counts; trimmed messages have their job data deleted; `priority`/`lifo` are rejected.
 
 ## Open Threads
 
-- **Ordered groups**: pre-activation removal, revoke, and expiry close ordering holes; rejected token-bucket enqueue operations do not consume IDs or sequences; rate-limit requeues preserve their slot and use explicit returning-job markers; priority-list fast fetches apply token-bucket and fixed-window gates; oversized token failures close holes across activation, completion, and promotion paths. `LIBRARY_VERSION` 117.
-- **Bun/Deno NAPI compatibility testing**: still pending from 0.14.0 handover.
-- **Valkey CI images**: CI is off release candidates. Standalone and cluster coverage use stable `valkey/valkey:9.1.0`; search coverage uses stable `valkey/valkey-bundle:9.1.0`, which carries Valkey Search 1.2.x and keeps the Search 1.1+ option tests active.
-- **Coverage**: Codecov project status is informational; patch target 80%. Integration and Lua coverage remain separate CI flags.
+- **Release**: pick 0.15.6 or 0.16.0, move package.json and the three skill versions, turn `[Unreleased]` into the dated section, tag and publish. A release branch and PR, not a direct push.
+- **Broadcast**: `lastActive` is still shared across subscriptions, so stall detection waits while another subscription processes the same message. A worker that reclaims a message and then closes before running it costs one extra stall. A retry entry promoted by a pre-130 library has no `bcastEntry` and is dropped if its original entry is trimmed.
+- **Budgets**: `onExceeded: 'pause'` re-delays jobs by 24h until L15 lands its bounded re-check. There is no API to raise a flow budget after creation unless L15 adds one.
+- **Scheduler mode switch**: a job from the old `every`/`pattern` mode still running past the old `nextRun` can overlap the first `repeatAfterComplete` run; closing it needs Lua tracking of the in-flight job.
+- **Cost overflow inside `completeAndFetchNext`** gets no DLQ copy; the reply does not identify the failed job.
+- **Global concurrency** on the stream path is a separate call before `XREADGROUP`, so concurrent workers can briefly overshoot.
+- **Cron**: no names, day-of-week 7, `L`/`W`/`#` or seconds field.
+- **Bun/Deno NAPI compatibility testing**: still pending from 0.14.0.
+- **Coverage**: Codecov project status is informational; patch target 80%. Integration, unit and Lua coverage are separate flags.
 
 ## API Design Decisions (locked)
 
@@ -68,4 +57,6 @@ See CHANGELOG.md `0.15.4` for the full list. Highlights:
 - streamChunk: thin wrapper over stream(), not new infrastructure.
 - Search 1.1+ options: forward-compatible types, graceful skip on older servers.
 - Plugins: AI endpoints under `/flows/:id/usage`, `/flows/:id/budget`, `/jobs/:id/stream`.
-- **In flight**: `Queue.getJobs('waiting')` follows worker dispatch order across priority, LIFO, and FIFO sources; it pages FIFO stream reads and excludes entries in the consumer-group PEL.
+- Priority: 0 means no priority and runs after every prioritized job; 1 is highest; integers 1-2048. This is the opposite of BullMQ and is marked Changed in MIGRATION.md.
+- Broadcast `maxMessages` is an exact hard cap, not a MINID-safe trim.
+- `Queue.getJobs('waiting')` follows worker dispatch order across priority, LIFO, and FIFO sources.
