@@ -680,43 +680,59 @@ function utcToTzParts(epochMs: number, tz: string): TzParts {
   return { year, month, day, hour, minute, dayOfWeek: dow };
 }
 
+const MINUTE_MS = 60_000;
+// Upper bound on a DST shift and on the distance searched around one.
+const DST_WINDOW_MS = 3 * 60 * 60 * 1000;
+
+/** Offset of `tz` from UTC (wall clock minus UTC, ms) at the given instant. */
+function tzOffsetMs(epochMs: number, tz: string): number {
+  const floored = Math.floor(epochMs / MINUTE_MS) * MINUTE_MS;
+  const p = utcToTzParts(floored, tz);
+  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute) - floored;
+}
+
 /**
- * Convert wall-clock parts in a timezone to a UTC epoch.
- * For spring-forward gaps (wall-clock time doesn't exist), returns -1.
- * For fall-back overlaps (ambiguous), returns the first (earlier) UTC instant.
+ * All UTC instants whose wall clock in `tz` is the given minute, ascending.
+ * Empty for a time skipped by spring-forward, two entries for a time repeated
+ * by fall-back.
  */
-function tzPartsToUtc(year: number, month: number, day: number, hour: number, minute: number, tz: string): number {
-  // Start with a naive UTC estimate using the same wall-clock components
+function tzWallToInstants(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  tz: string,
+): number[] {
   const naive = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
-  // Get the actual wall-clock time at our naive estimate to compute the offset
-  const naiveParts = utcToTzParts(naive, tz);
-  // Compute the offset in ms: how much the timezone differs from UTC at this point
-  const naiveWall = Date.UTC(
-    naiveParts.year,
-    naiveParts.month - 1,
-    naiveParts.day,
-    naiveParts.hour,
-    naiveParts.minute,
-    0,
-    0,
+  const guess = tzOffsetMs(naive, tz);
+  const offsets = new Set([
+    guess,
+    tzOffsetMs(naive - guess - DST_WINDOW_MS, tz),
+    tzOffsetMs(naive - guess, tz),
+    tzOffsetMs(naive - guess + DST_WINDOW_MS, tz),
+  ]);
+  const instants: number[] = [];
+  for (const offset of offsets) {
+    const candidate = naive - offset;
+    if (tzOffsetMs(candidate, tz) === offset && !instants.includes(candidate)) instants.push(candidate);
+  }
+  return instants.sort((a, b) => a - b);
+}
+
+/** Vixie cron wildcard rule: the minute or hour field contains '*'. */
+function isWildcardCronTime(pattern: string): boolean {
+  const fields = pattern.trim().split(/\s+/);
+  return fields[0].includes('*') || fields[1].includes('*');
+}
+
+function cronWallMatches(cron: CronPattern, p: TzParts): boolean {
+  return (
+    cron.month.set.has(p.month) &&
+    cronDayMatches(cron, p.day, p.dayOfWeek) &&
+    cron.hour.set.has(p.hour) &&
+    cron.minute.set.has(p.minute)
   );
-  const offsetMs = naiveWall - naive;
-  // Apply offset to get a candidate
-  const candidate = naive - offsetMs;
-  const cp = utcToTzParts(candidate, tz);
-  if (cp.year === year && cp.month === month && cp.day === day && cp.hour === hour && cp.minute === minute) {
-    return candidate;
-  }
-  // Offset might be wrong near DST transitions - try +/- 1 hour
-  for (const delta of [-3600000, 3600000, -7200000, 7200000]) {
-    const alt = candidate + delta;
-    const ap = utcToTzParts(alt, tz);
-    if (ap.year === year && ap.month === month && ap.day === day && ap.hour === hour && ap.minute === minute) {
-      return alt;
-    }
-  }
-  // Wall-clock time doesn't exist (spring-forward gap)
-  return -1;
 }
 
 /**
@@ -876,15 +892,36 @@ function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
  * Timezone-aware cron search. Evaluates the cron expression in wall-clock time
  * of the specified timezone, then converts the result to UTC epoch.
  *
- * DST handling:
- * - Spring-forward: if a candidate wall-clock time doesn't exist (gap), skip to next candidate
- * - Fall-back: if a wall-clock time is ambiguous (overlap), pick the first (earlier) UTC instant
+ * DST handling follows vixie cron / cronie. A pattern whose minute or hour
+ * field contains '*' (e.g. '*\/15 * * * *', '0 * * * *') is a wildcard
+ * pattern; any other pattern is a fixed-time pattern.
+ * - Fall-back (a wall-clock hour repeats): wildcard patterns fire in both
+ *   instances of the repeated hour; fixed-time patterns fire once, at the
+ *   earlier instant.
+ * - Spring-forward (a wall-clock hour is skipped): wildcard patterns skip the
+ *   missing times.
  */
 function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): number {
   const cron = parseCronPattern(pattern);
   const { set: minuteSet, sorted: minutesSorted } = cron.minute;
   const { set: hourSet, sorted: hoursSorted } = cron.hour;
   const { set: monthSet, sorted: monthsSorted } = cron.month;
+  const wildcardTime = isWildcardCronTime(pattern);
+
+  if (wildcardTime) {
+    // A fall-back transition within the next few hours means wall-clock order
+    // and instant order diverge: the second instance of a wall time already
+    // passed comes later than afterMs. Scan instants directly across it.
+    const offsetNow = tzOffsetMs(afterMs, tz);
+    const offsetLater = tzOffsetMs(afterMs + DST_WINDOW_MS, tz);
+    if (offsetLater < offsetNow) {
+      const repeatMs = offsetNow - offsetLater;
+      const scanEnd = afterMs + repeatMs;
+      for (let t = Math.floor(afterMs / MINUTE_MS) * MINUTE_MS + MINUTE_MS; t <= scanEnd; t += MINUTE_MS) {
+        if (cronWallMatches(cron, utcToTzParts(t, tz))) return t;
+      }
+    }
+  }
 
   // Get the wall-clock time in the target timezone for "afterMs + 1 minute"
   const startParts = utcToTzParts(afterMs, tz);
@@ -978,26 +1015,15 @@ function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): num
       }
     }
 
-    // Found a candidate wall-clock time - convert to UTC
-    const utcMs = tzPartsToUtc(year, month, day, hour, minute, tz);
-    if (utcMs === -1) {
-      // Spring-forward gap: this wall-clock time doesn't exist, advance 1 minute
-      minute++;
-      if (minute >= 60) {
-        minute = 0;
-        hour++;
-        if (hour >= 24) {
-          hour = 0;
-          day++;
-        }
-      }
-      continue;
+    // Found a candidate wall-clock time - convert to UTC. A skipped wall time
+    // has no instant; a repeated one has two and only wildcard patterns use
+    // the second.
+    const instants = tzWallToInstants(year, month, day, hour, minute, tz);
+    const eligible = wildcardTime ? instants : instants.slice(0, 1);
+    const next = eligible.find((t) => t > afterMs);
+    if (next !== undefined) {
+      return next;
     }
-    // Ensure the result is strictly after afterMs
-    if (utcMs > afterMs) {
-      return utcMs;
-    }
-    // Edge case: the UTC result is not after afterMs (possible during fall-back overlap)
     minute++;
     if (minute >= 60) {
       minute = 0;

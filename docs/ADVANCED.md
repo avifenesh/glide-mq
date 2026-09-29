@@ -196,7 +196,8 @@ await queue.removeJobScheduler('cleanup');
 
 Patterns use the standard 5 fields: `minute hour day-of-month month day-of-week` (0 = Sunday). Each field accepts `*`, numbers, ranges (`1-5`), steps (`*/15`, `10-40/10`) and lists (`1,15`). Patterns run in UTC unless `tz` is set.
 
-- **Day-of-month and day-of-week**: when both fields are restricted, a day matches if either field matches. `0 0 1 * 1` fires on every 1st of the month and on every Monday. When one of them is unrestricted, only the other one decides. A field is unrestricted when it is `*` or `*/1` (day-of-month also when it covers `1-31`). An explicit `0-6` day-of-week counts as restricted. This matches cron-parser (BullMQ) and vixie cron. Releases up to 0.15.5 required both fields to match.
+- **Day-of-month and day-of-week**: when both fields are restricted, a day matches if either field matches. `0 0 1 * 1` fires on every 1st of the month and on every Monday. When one of them is unrestricted, only the other one decides. A field is unrestricted when it is `*` or `*/1` (day-of-month also when it covers `1-31`). An explicit `0-6` day-of-week counts as restricted. This matches cron-parser (BullMQ). Vixie cron differs only for stepped wildcards such as `*/2`, which it treats as unrestricted. Releases up to 0.15.5 required both fields to match.
+- **Daylight saving time** (with `tz`): follows vixie cron. A pattern whose minute or hour field contains `*` (`*/15 * * * *`, `0 * * * *`) is a wildcard pattern and runs on elapsed time: when clocks fall back it fires in both instances of the repeated hour. Any other pattern is fixed-time (`30 1 * * *`, `0,30 1-3 * * *`) and fires once, at the earlier instant.
 
 ### Repeat-after-complete mode
 

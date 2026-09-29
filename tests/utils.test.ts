@@ -287,6 +287,69 @@ describe('nextCronOccurrence with timezone', () => {
     expect(new Date(next).toISOString()).toBe('2024-11-03T05:30:00.000Z');
   });
 
+  function walkCron(pattern: string, fromIso: string, count: number, tz: string): string[] {
+    let t = new Date(fromIso).getTime();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      t = nextCronOccurrence(pattern, t, tz);
+      out.push(new Date(t).toISOString());
+    }
+    return out;
+  }
+
+  it('fall-back: sub-hourly wildcard pattern fires in both instances of the repeated hour', () => {
+    // 2026-11-01 America/New_York: 01:00-01:59 happens twice (EDT 05:xx UTC, then EST 06:xx UTC)
+    expect(walkCron('*/15 * * * *', '2026-11-01T05:30:00Z', 7, 'America/New_York')).toEqual([
+      '2026-11-01T05:45:00.000Z', // 01:45 EDT
+      '2026-11-01T06:00:00.000Z', // 01:00 EST
+      '2026-11-01T06:15:00.000Z',
+      '2026-11-01T06:30:00.000Z',
+      '2026-11-01T06:45:00.000Z',
+      '2026-11-01T07:00:00.000Z', // 02:00 EST
+      '2026-11-01T07:15:00.000Z',
+    ]);
+  });
+
+  it('fall-back: hourly wildcard pattern fires every elapsed hour', () => {
+    expect(walkCron('0 * * * *', '2026-11-01T04:30:00Z', 4, 'America/New_York')).toEqual([
+      '2026-11-01T05:00:00.000Z', // 01:00 EDT
+      '2026-11-01T06:00:00.000Z', // 01:00 EST
+      '2026-11-01T07:00:00.000Z', // 02:00 EST
+      '2026-11-01T08:00:00.000Z',
+    ]);
+  });
+
+  it('fall-back: fixed-time pattern fires once, including when resumed inside the repeated hour', () => {
+    // After the 01:30 EDT run, the 01:30 EST repeat is not fired again
+    expect(walkCron('30 1 * * *', '2026-11-01T04:00:00Z', 2, 'America/New_York')).toEqual([
+      '2026-11-01T05:30:00.000Z',
+      '2026-11-02T06:30:00.000Z',
+    ]);
+    // Searching from 01:10 EST (second instance) goes to the next day
+    expect(walkCron('30 1 * * *', '2026-11-01T06:10:00Z', 1, 'America/New_York')).toEqual(['2026-11-02T06:30:00.000Z']);
+  });
+
+  it('fall-back: ambiguous fixed time resolves to the earlier instant in positive-offset zones', () => {
+    // 2026-10-25 Europe/Berlin: 02:30 CEST = 00:30 UTC, 02:30 CET = 01:30 UTC
+    expect(walkCron('30 2 * * *', '2026-10-25T00:00:00Z', 1, 'Europe/Berlin')).toEqual(['2026-10-25T00:30:00.000Z']);
+    // 2026-04-05 Australia/Sydney: 02:30 AEDT = 15:30 UTC (Apr 4), 02:30 AEST = 16:30 UTC
+    expect(walkCron('30 2 * * *', '2026-04-04T14:00:00Z', 2, 'Australia/Sydney')).toEqual([
+      '2026-04-04T15:30:00.000Z',
+      '2026-04-05T16:30:00.000Z',
+    ]);
+  });
+
+  it('fall-back: wildcard pattern in a positive-offset zone keeps a steady cadence', () => {
+    expect(walkCron('*/30 * * * *', '2026-10-24T23:00:00Z', 6, 'Europe/Berlin')).toEqual([
+      '2026-10-24T23:30:00.000Z',
+      '2026-10-25T00:00:00.000Z', // 02:00 CEST
+      '2026-10-25T00:30:00.000Z',
+      '2026-10-25T01:00:00.000Z', // 02:00 CET
+      '2026-10-25T01:30:00.000Z',
+      '2026-10-25T02:00:00.000Z',
+    ]);
+  });
+
   it('midnight cron in positive-offset timezone', () => {
     // "0 0 * * *" in Asia/Kolkata (UTC+5:30) = previous day 18:30 UTC
     const now = new Date('2024-06-15T17:00:00Z').getTime(); // 22:30 IST
