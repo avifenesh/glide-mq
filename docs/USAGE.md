@@ -240,6 +240,10 @@ worker.on('error', (err) => {
   console.error('Worker error', err);
 });
 
+worker.on('stalled', (jobId, prev) => {
+  console.warn(`Job ${jobId} stalled (was ${prev}) and was re-queued`);
+});
+
 worker.on('drained', () => {
   console.log('Queue is empty — no more jobs waiting');
 });
@@ -251,11 +255,12 @@ worker.on('drained', () => {
 | `completed` | `(job, result)` | Fired when a job finishes successfully          |
 | `failed`    | `(job, err)`    | Fired when a job throws or times out            |
 | `error`     | `(err)`         | Internal worker error (connection issues, etc.) |
+| `stalled`   | `(jobId, prev)` | Job exceeded lock duration and was re-queued    |
 | `drained`   | `()`            | Queue transitioned from non-empty to empty      |
 | `closing`   | `()`            | Worker is beginning to close                    |
 | `closed`    | `()`            | Worker has fully closed                         |
 
-Workers do not emit `stalled`. Stalled recovery writes a `stalled` event to the events stream; listen with `QueueEvents` (`events.on('stalled', ({ jobId }) => ...)`, see below).
+A worker emits `stalled` for each job its own stalled check returned to waiting (`prev` is `'active'`). A job past `maxStalledCount` is failed instead and gets no `stalled`. Every stalled recovery also writes a `stalled` event to the events stream, so `QueueEvents` (`events.on('stalled', ({ jobId }) => ...)`) sees stalls found by any worker.
 
 ### Pausing / closing a worker
 

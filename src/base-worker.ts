@@ -381,6 +381,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       consumerGroup: this.consumerGroup,
       broadcastMode: this.broadcastMode,
       onPromotionTick: () => this.refreshMetaFlags(),
+      onStalled: (jobId) => {
+        this.emit('stalled', jobId, 'active');
+      },
       onError: (err) => {
         if (!this.closing) {
           this.emit('error', err);

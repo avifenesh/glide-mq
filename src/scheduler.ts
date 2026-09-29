@@ -8,6 +8,8 @@ import {
   promoteRateLimited,
   reclaimStalled,
   reclaimStalledListJobs as reclaimStalledListJobsCmd,
+  reclaimStalledWithIds,
+  reclaimStalledListJobsWithIds,
   addJobArgs,
   nextDueAt,
   tryLock,
@@ -46,6 +48,8 @@ export interface SchedulerOptions {
   consumerGroup?: string;
   /** When true, stalled reclaim skips XDEL so other consumer groups can still consume the entry. */
   broadcastMode?: boolean;
+  /** Called for each job this scheduler's reclaim found stalled and returned to waiting. */
+  onStalled?: (jobId: string) => void;
 }
 
 /**
@@ -68,6 +72,7 @@ export class Scheduler {
   private broadcastMode: boolean;
   private onPromotionTick?: () => void;
   private onError?: (err: Error) => void;
+  private onStalled?: (jobId: string) => void;
   private serializer: Serializer;
   private promotionTimer: ReturnType<typeof setInterval> | null = null;
   private promotionWakeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -93,6 +98,7 @@ export class Scheduler {
     this.broadcastMode = opts.broadcastMode ?? false;
     this.onPromotionTick = opts.onPromotionTick;
     this.onError = opts.onError;
+    this.onStalled = opts.onStalled;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
   }
 
@@ -348,7 +354,20 @@ export class Scheduler {
    * Calls FCALL glidemq_reclaimStalled via XAUTOCLAIM semantics in Lua.
    */
   async reclaimStalledJobs(): Promise<number> {
-    return reclaimStalled(
+    if (!this.onStalled) {
+      return reclaimStalled(
+        this.client,
+        this.queueKeys,
+        this.consumerId,
+        this.stalledInterval,
+        this.maxStalledCount,
+        Date.now(),
+        this.consumerGroup,
+        this.broadcastMode,
+        this.lockDuration,
+      );
+    }
+    const { count, stalledIds } = await reclaimStalledWithIds(
       this.client,
       this.queueKeys,
       this.consumerId,
@@ -359,6 +378,18 @@ export class Scheduler {
       this.broadcastMode,
       this.lockDuration,
     );
+    this.reportStalled(stalledIds);
+    return count;
+  }
+
+  private reportStalled(jobIds: string[]): void {
+    for (const jobId of jobIds) {
+      try {
+        this.onStalled?.(jobId);
+      } catch (err) {
+        this.reportError(err);
+      }
+    }
   }
 
   /**
@@ -366,7 +397,17 @@ export class Scheduler {
    * Uses bounded SCAN to detect active list jobs with stale lastActive.
    */
   private async reclaimStalledListJobs(): Promise<number> {
-    return reclaimStalledListJobsCmd(
+    if (!this.onStalled) {
+      return reclaimStalledListJobsCmd(
+        this.client,
+        this.queueKeys,
+        this.stalledInterval,
+        this.maxStalledCount,
+        Date.now(),
+        this.lockDuration,
+      );
+    }
+    const { count, stalledIds } = await reclaimStalledListJobsWithIds(
       this.client,
       this.queueKeys,
       this.stalledInterval,
@@ -374,6 +415,8 @@ export class Scheduler {
       Date.now(),
       this.lockDuration,
     );
+    this.reportStalled(stalledIds);
+    return count;
   }
 
   private schedulerLockKey(name: string): string {

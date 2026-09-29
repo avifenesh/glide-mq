@@ -1981,7 +1981,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   -- XAUTOCLAIM them while paused; doing so would make stale claims look like
   -- stalled work and can fail them before resume. This guard is intentionally
   -- before the bounded XAUTOCLAIM scan so paused recovery has no side effects.
-  if isQueuePaused(prefix) then return 0 end
+  if isQueuePaused(prefix) then return args[9] == '1' and {0} or 0 end
   local group = args[1]
   local consumer = args[2]
   local minIdleMs = tonumber(args[3])
@@ -1993,6 +1993,17 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   -- job has no opts.lockDuration of its own. Falls back to minIdleMs (the
   -- stalledInterval cadence) when neither is set, matching old behavior. (#213)
   local workerLockDuration = tonumber(args[8]) or 0
+  -- Optional: '1' replies {count, stalledId...} so the worker can emit
+  -- 'stalled' for the jobs this call returned to waiting. Older callers omit
+  -- it and keep the integer reply.
+  local returnIds = args[9] == '1'
+  local stalledIds = {}
+  local function reply(count)
+    if not returnIds then return count end
+    local out = {count}
+    for i = 1, #stalledIds do out[#out + 1] = stalledIds[i] end
+    return out
+  end
   local prefix = string.sub(streamKey, 1, #streamKey - 6)
   local metaKey = prefix .. 'meta'
   local cursorField = 'stalledCursor:' .. group
@@ -2005,7 +2016,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   redis.call('HSET', metaKey, cursorField, nextCursor)
   local entries = result[2]
   if not entries or #entries == 0 then
-    return 0
+    return reply(0)
   end
   local count = 0
   for i = 1, #entries do
@@ -2047,6 +2058,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
         count = count + 1
       else
       local failed = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp)
+      if not failed then stalledIds[#stalledIds + 1] = jobId end
       if failed then
         if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
         if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
@@ -2073,7 +2085,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       end
     end
   end
-  return count
+  return reply(count)
 end)
 
 local function isActiveListClaim(jobKey)
@@ -2137,14 +2149,23 @@ end
 -- stall logic. A bounded SCAN may not see jobs past its bound on a very large
 -- keyspace; it only acts on jobs it saw, so a partial scan never corrupts state.
 -- KEYS: [streamKey, eventsKey]
--- ARGS: [minIdleMs, maxStalledCount, timestamp, failedKey]
+-- ARGS: [minIdleMs, maxStalledCount, timestamp, failedKey, workerLockDuration?, returnIds?]
+-- returnIds '1' replies {count, stalledId...} instead of the integer count.
 redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
   local streamKey = keys[1]
   local eventsKey = keys[2]
   local minIdleMs = tonumber(args[1])
   local maxStalledCount = tonumber(args[2]) or 1
   local timestamp = tonumber(args[3])
-  if not minIdleMs or not timestamp then return 0 end
+  local returnIds = args[6] == '1'
+  local stalledIds = {}
+  local function reply(count)
+    if not returnIds then return count end
+    local out = {count}
+    for i = 1, #stalledIds do out[#out + 1] = stalledIds[i] end
+    return out
+  end
+  if not minIdleMs or not timestamp then return reply(0) end
   local failedKey = args[4]
   -- Worker-level lockDuration; per-entry threshold when opts.lockDuration unset. (#213)
   local workerLockDuration = tonumber(args[5]) or 0
@@ -2152,10 +2173,10 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
   -- Paused list claims retain their list-active reservation until resume.
   -- Skip the scan entirely so the reclaimer cannot redispatch or fail
   -- a claim that was deliberately parked by a pause-race activation.
-  if isQueuePaused(prefix) then return 0 end
+  if isQueuePaused(prefix) then return reply(0) end
   local listActiveKey = prefix .. 'list-active'
   local currentActive = tonumber(redis.call('GET', listActiveKey)) or 0
-  if currentActive <= 0 then return 0 end
+  if currentActive <= 0 then return reply(0) end
   local ids = activeListIds(prefix, 1000, 500)
   local count = 0
   for i = 1, #ids do
@@ -2188,6 +2209,7 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
           -- healthy worker picks it up. LIFO -> RPUSH lifo, priority ->
           -- LPUSH priority (RPOP returns highest priority first). Decrement
           -- the list-active counter because the job is no longer active.
+          stalledIds[#stalledIds + 1] = jobId
           local isLifo = vals[2] == '1'
           local pri = tonumber(vals[3]) or 0
           redis.call('HSET', jk, 'state', 'waiting')
@@ -2212,7 +2234,7 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
       count = count + 1
     end
   end
-  return count
+  return reply(count)
 end)
 
 redis.register_function('glidemq_pause', function(keys, args)
