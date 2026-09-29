@@ -1871,6 +1871,8 @@ redis.register_function('glidemq_fail', function(keys, args)
   local removeCount = tonumber(args[9]) or 0
   local removeAge = tonumber(args[10]) or 0
   local broadcastMode = args[11] or '0'
+  local skipEvents = args[12] or '0'
+  local skipMetrics = args[13] or '0'
   local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
@@ -1918,11 +1920,13 @@ redis.register_function('glidemq_fail', function(keys, args)
     else
       releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
     end
-    emitEvent(eventsKey, 'retrying', jobId, {
-      'failedReason', failedReason,
-      'attemptsMade', tostring(attemptsMade),
-      'delay', tostring(backoffDelay)
-    })
+    if skipEvents ~= '1' then
+      emitEvent(eventsKey, 'retrying', jobId, {
+        'failedReason', failedReason,
+        'attemptsMade', tostring(attemptsMade),
+        'delay', tostring(backoffDelay)
+      })
+    end
     if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active', jobId) end
     return 'retrying'
   else
@@ -1940,8 +1944,8 @@ redis.register_function('glidemq_fail', function(keys, args)
     end
     markOrderingDone(jobKey, jobId)
     releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
-    emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
-    recordMetrics(metricsKey, timestamp, timestamp - processedOn)
+    if skipEvents ~= '1' then emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason}) end
+    if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     -- In broadcast mode, skip job hash deletion: the job must persist for all subscriptions
     if broadcastMode ~= '1' then

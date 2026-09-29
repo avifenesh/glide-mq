@@ -438,11 +438,11 @@ const queue = new Queue('tasks', { connection, events: false });
 // Producer - same option
 const producer = new Producer('tasks', { connection, events: false });
 
-// Worker - skip XADD 'completed' (and list-pop 'active') events on process
+// Worker - skip XADD 'completed'/'failed'/'retrying' events on process
 const worker = new Worker('tasks', handler, { connection, events: false });
 ```
 
-A worker with `events: false` still writes `failed` and `retrying` events, and stalled recovery still writes `stalled`. This only affects the Valkey events stream. TS-side `EventEmitter` events (`worker.on('completed', ...)`) are unaffected.
+With `metrics: false` a worker also skips the completed and failed metrics. Stalled recovery and delayed-job promotion still write their events (`stalled`, `promoted`). This only affects the Valkey events stream. TS-side `EventEmitter` events (`worker.on('completed', ...)`) are unaffected.
 
 ### `QueueEvents` — stream-based lifecycle events
 

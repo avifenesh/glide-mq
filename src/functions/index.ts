@@ -106,7 +106,8 @@ export const LIBRARY_NAME = 'glidemq';
 //   broadcast retry counters expire 24h past the retry; removeOnComplete/removeOnFail skip writes to
 //   the deleted hash; list claims are tracked in list-active-ids so list-active scans skip SCAN.
 // Version 128: version 127 (casSchedulerEntry) plus the version 126 changes above.
-// Version 129: reclaimStalled/reclaimStalledListJobs reply stalled IDs on an optional returnIds arg.
+// Version 129: reclaimStalled/reclaimStalledListJobs reply stalled IDs on an optional returnIds arg;
+//   glidemq_fail honors optional skipEvents/skipMetrics args.
 export const LIBRARY_VERSION = '129';
 
 // Consumer group name used by workers
@@ -635,24 +636,31 @@ export async function failJob(
   group: string = CONSUMER_GROUP,
   removeOnFail?: boolean | number | { age: number; count: number },
   broadcastMode?: boolean,
+  skipEvents?: boolean,
+  skipMetrics?: boolean,
 ): Promise<string> {
   const { mode, count, age } = encodeRetention(removeOnFail);
+  const args = [
+    jobId,
+    entryId,
+    failedReason,
+    timestamp.toString(),
+    maxAttempts.toString(),
+    backoffDelay.toString(),
+    group,
+    mode,
+    count.toString(),
+    age.toString(),
+  ];
+  if (skipEvents || skipMetrics) {
+    args.push(broadcastMode ? '1' : '0', skipEvents ? '1' : '0', skipMetrics ? '1' : '0');
+  } else if (broadcastMode) {
+    args.push('1');
+  }
   const result = await client.fcall(
     'glidemq_fail',
     [k.stream, k.failed, k.scheduled, k.events, k.job(jobId), k.metricsFailed],
-    [
-      jobId,
-      entryId,
-      failedReason,
-      timestamp.toString(),
-      maxAttempts.toString(),
-      backoffDelay.toString(),
-      group,
-      mode,
-      count.toString(),
-      age.toString(),
-      ...(broadcastMode ? ['1'] : []),
-    ],
+    args,
   );
   return result as string;
 }

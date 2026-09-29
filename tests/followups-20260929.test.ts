@@ -6,10 +6,11 @@
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './helpers/fixture';
 
+const { InfBoundary } = require('@glidemq/speedkey') as typeof import('@glidemq/speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { moveToActive, popLists, reclaimStalled, CONSUMER_GROUP } =
+const { failJob, moveToActive, popLists, reclaimStalled, CONSUMER_GROUP } =
   require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Follow-ups 2026-09-29', (CONNECTION) => {
@@ -112,5 +113,53 @@ describeEachMode('Follow-ups 2026-09-29', (CONNECTION) => {
     } finally {
       await queue.close();
     }
+  });
+
+  async function eventTypes(Q: string): Promise<string[]> {
+    const entries = await cleanupClient.xrange(
+      buildKeys(Q).events,
+      InfBoundary.NegativeInfinity,
+      InfBoundary.PositiveInfinity,
+    );
+    const types: string[] = [];
+    for (const fields of Object.values(entries ?? {}) as [string, string][][]) {
+      for (const [f, v] of fields) if (String(f) === 'event') types.push(String(v));
+    }
+    return types;
+  }
+
+  it('F3: a worker with events:false and metrics:false writes no retrying/failed events or failure metrics', async () => {
+    const Q = uniqueQueue('fu-fail-skip');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION, events: false });
+    const worker = new Worker(
+      Q,
+      async () => {
+        throw new Error('boom');
+      },
+      { connection: CONNECTION, events: false, metrics: false, promotionInterval: 100 },
+    );
+    const failed: string[] = [];
+    worker.on('failed', (job: any) => failed.push(job.id));
+    try {
+      await worker.waitUntilReady();
+      const job = await queue.add('a', {}, { attempts: 2 });
+      await waitFor(async () => (await queue.getJobCounts()).failed === 1, 8000);
+      expect(failed).toEqual([job!.id, job!.id]);
+      expect((await eventTypes(Q)).filter((t) => t === 'retrying' || t === 'failed')).toEqual([]);
+      expect(await cleanupClient.hlen(k.metricsFailed)).toBe(0);
+    } finally {
+      await worker.close();
+      await queue.close();
+    }
+  });
+
+  it('F3: glidemq_fail without the skip args still writes events and metrics', async () => {
+    const Q = uniqueQueue('fu-fail-default');
+    const k = buildKeys(Q);
+    await cleanupClient.hset(k.job('j'), { id: 'j', name: 'j', state: 'active', processedOn: '1' });
+    expect(await failJob(cleanupClient, k, 'j', '', 'boom', Date.now(), 0, 0)).toBe('failed');
+    expect(await eventTypes(Q)).toEqual(['failed']);
+    expect(await cleanupClient.hlen(k.metricsFailed)).toBeGreaterThan(0);
   });
 });

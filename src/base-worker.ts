@@ -1134,6 +1134,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           this.consumerGroup,
           undefined,
           this.broadcastMode ? true : undefined,
+          this.skipEvents,
+          this.skipMetrics,
         );
       } catch (err) {
         this.emit('error', err);
@@ -1329,6 +1331,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           this.consumerGroup,
           undefined,
           this.broadcastMode ? true : undefined,
+          this.skipEvents,
+          this.skipMetrics,
         );
       } catch (e) {
         this.emit('error', e);
@@ -1361,6 +1365,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.consumerGroup,
       job.opts.removeOnFail,
       this.broadcastMode ? true : undefined,
+      this.skipEvents,
+      this.skipMetrics,
     );
 
     if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
@@ -1939,6 +1945,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
               this.consumerGroup,
               undefined,
               this.broadcastMode ? true : undefined,
+              this.skipEvents,
+              this.skipMetrics,
             );
           } catch (err) {
             this.emit('error', err);
