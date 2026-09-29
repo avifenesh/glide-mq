@@ -254,45 +254,36 @@ describe('Job', () => {
   });
 
   describe('retry', () => {
-    it('should add job to scheduled ZSet and update state using batch', async () => {
+    it('should retry through glidemq_retryJob and reset local fields on success', async () => {
       const job = new Job(mockClient as any, keys, '3', 'job', {}, { priority: 0 });
+      job.attemptsMade = 2;
+      job.failedReason = 'boom';
+      mockClient.fcall.mockResolvedValueOnce('ok');
 
       await job.retry();
 
-      expect(mockBatch.zrem).toHaveBeenCalledTimes(1);
-      expect(mockBatch.zrem).toHaveBeenCalledWith('glide:{test-queue}:failed', ['3']);
-
-      expect(mockBatch.zadd).toHaveBeenCalledTimes(1);
-      const zaddCall = mockBatch.zadd.mock.calls[0];
-      expect(zaddCall[0]).toBe('glide:{test-queue}:scheduled');
-      // Score should be timestamp (priority=0, so score = 0 + now)
-      const score = zaddCall[1]['3'];
-      expect(score).toBeGreaterThan(0);
-      expect(score).toBeLessThan(Date.now() + 1000); // should be roughly now
-
-      expect(mockBatch.hset).toHaveBeenCalledWith('glide:{test-queue}:job:3', {
-        state: 'delayed',
-        attemptsMade: '0',
-        failedReason: '',
-        finishedOn: '',
-      });
-      expect(mockClient.exec).toHaveBeenCalledWith(mockBatch, false);
+      expect(mockClient.fcall).toHaveBeenCalledTimes(1);
+      const call = mockClient.fcall.mock.calls[0];
+      expect(call[0]).toBe('glidemq_retryJob');
+      expect(call[1]).toEqual([
+        'glide:{test-queue}:job:3',
+        'glide:{test-queue}:failed',
+        'glide:{test-queue}:scheduled',
+      ]);
+      expect(call[2][0]).toBe('3');
+      expect(Number(call[2][1])).toBeLessThanOrEqual(Date.now());
       expect(job.attemptsMade).toBe(0);
       expect(job.failedReason).toBeUndefined();
       expect(job.finishedOn).toBeUndefined();
     });
 
-    it('should encode priority into the score', async () => {
-      const job = new Job(mockClient as any, keys, '3', 'job', {}, { priority: 2 });
+    it('should throw and keep local fields when the job is not failed', async () => {
+      const job = new Job(mockClient as any, keys, '3', 'job', {}, {});
+      job.attemptsMade = 2;
+      mockClient.fcall.mockResolvedValueOnce('error:not_failed');
 
-      await job.retry();
-
-      expect(mockBatch.zrem).toHaveBeenCalledWith('glide:{test-queue}:failed', ['3']);
-
-      const score = mockBatch.zadd.mock.calls[0][1]['3'];
-      const PRIORITY_SHIFT = 2 ** 42;
-      // Score should include priority * PRIORITY_SHIFT
-      expect(score).toBeGreaterThanOrEqual(2 * PRIORITY_SHIFT);
+      await expect(job.retry()).rejects.toThrow('Cannot retry: not_failed');
+      expect(job.attemptsMade).toBe(2);
     });
   });
 

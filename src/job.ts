@@ -4,7 +4,7 @@ import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
 import type { JobOptions, JobUsage, Client, Serializer, SuspendOptions, SignalEntry } from './types';
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
-import { changeDelay, changePriority, failJob, promoteJob, removeJob, tryLock, unlock } from './functions/index';
+import { changeDelay, changePriority, failJob, promoteJob, removeJob, retryJob, tryLock, unlock } from './functions/index';
 import {
   GlideMQError,
   DelayedError,
@@ -793,32 +793,15 @@ export class Job<D = any, R = any> {
   }
 
   /**
-   * Retry this job by moving it back to the scheduled ZSet with a score of now
-   * (so it gets promoted immediately on the next promote cycle).
-   * Removes the job from the failed ZSet first to prevent dual membership.
+   * Retry this failed job by moving it back to the scheduled ZSet with a score
+   * of now (so it gets promoted immediately on the next promote cycle).
+   * Throws if the job does not exist or is not in the failed state.
    */
   async retry(): Promise<void> {
-    const now = Date.now();
-    const priority = this.opts.priority ?? 0;
-    const PRIORITY_SHIFT = 2 ** 42;
-    const score = priority * PRIORITY_SHIFT + now;
-
-    const isCluster = isClusterClient(this.client);
-    const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
-
-    batch.zrem(this.queueKeys.failed, [this.id]);
-    batch.zadd(this.queueKeys.scheduled, { [this.id]: score });
-    batch.hset(this.queueKeys.job(this.id), {
-      state: 'delayed',
-      attemptsMade: '0',
-      failedReason: '',
-      finishedOn: '',
-    });
-
-    if (isCluster) {
-      await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false);
-    } else {
-      await (this.client as GlideClient).exec(batch as Batch, false);
+    const result = await retryJob(this.client, this.queueKeys, this.id, Date.now());
+    if (result !== 'ok') {
+      const reason = result.startsWith('error:') ? result.slice(6) : result;
+      throw new Error(`Cannot retry: ${reason}`);
     }
 
     this.attemptsMade = 0;

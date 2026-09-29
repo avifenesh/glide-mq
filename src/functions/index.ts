@@ -1009,6 +1009,20 @@ export async function retryJobs(client: Client, k: QueueKeys, count: number, tim
 }
 
 /**
+ * Retry one failed job: move it to the scheduled ZSet (promoted on the next
+ * cycle), reset attempts and re-arm its TTL. Ordered jobs get a fresh sequence.
+ * Returns 'ok', 'error:not_found' or 'error:not_failed'.
+ */
+export async function retryJob(client: Client, k: QueueKeys, jobId: string, timestamp: number): Promise<string> {
+  const result = await client.fcall(
+    'glidemq_retryJob',
+    [k.job(jobId), k.failed, k.scheduled],
+    [jobId, timestamp.toString()],
+  );
+  return String(result);
+}
+
+/**
  * Revoke a job. Sets 'revoked' flag on the job hash.
  * If the job is waiting/delayed/prioritized, removes from stream/scheduled and moves to failed.
  * If the job is active (being processed), just sets the flag - worker checks it cooperatively.

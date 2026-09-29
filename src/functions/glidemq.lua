@@ -4043,9 +4043,18 @@ end)
 
 -- Move one failed job to scheduled for a fresh run.
 local function retryFailedJob(prefix, jobKey, jobId, scheduledKey, timestamp)
-  local vals = redis.call('HMGET', jobKey, 'priority', 'orderingSeq', 'orderingKey', 'groupKey')
+  local vals = redis.call('HMGET', jobKey, 'priority', 'orderingSeq', 'orderingKey', 'groupKey', 'opts')
   local priority = tonumber(vals[1]) or 0
   local fields = {'state', 'delayed', 'attemptsMade', '0', 'failedReason', '', 'finishedOn', ''}
+  -- Re-arm the TTL from the retry time. The old expireAt would fail an
+  -- expired job again before it could run.
+  local ttl = extractTtlFromOpts(vals[5])
+  if ttl > 0 then
+    fields[#fields + 1] = 'expireAt'
+    fields[#fields + 1] = tostring(timestamp + ttl)
+  else
+    redis.call('HDEL', jobKey, 'expireAt')
+  end
   -- A terminal ordered job already closed its sequence and released its group
   -- slot. With the old sequence, activation would treat it as a returning job
   -- that holds a slot: it would skip the concurrency gate and never take the
@@ -4096,6 +4105,25 @@ redis.register_function('glidemq_retryJobs', function(keys, args)
     emitEvent(eventsKey, 'retried', tostring(retried), nil)
   end
   return retried
+end)
+
+-- Retry one failed job. KEYS: [jobKey, failedKey, scheduledKey]
+-- ARGS: [jobId, timestamp]. Returns 'ok', 'error:not_found' or 'error:not_failed'.
+redis.register_function('glidemq_retryJob', function(keys, args)
+  local jobKey = keys[1]
+  local failedKey = keys[2]
+  local scheduledKey = keys[3]
+  local jobId = args[1]
+  local timestamp = tonumber(args[2])
+  if not timestamp then return redis.error_reply('ERR invalid timestamp') end
+  assert(string.sub(jobKey, -(4 + #jobId)) == 'job:' .. jobId, 'unexpected key format: ' .. jobKey)
+  local state = redis.call('HGET', jobKey, 'state')
+  if not state then return 'error:not_found' end
+  if state ~= 'failed' then return 'error:not_failed' end
+  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+  redis.call('ZREM', failedKey, jobId)
+  retryFailedJob(prefix, jobKey, jobId, scheduledKey, timestamp)
+  return 'ok'
 end)
 
 redis.register_function('glidemq_healListActive', function(keys, args)

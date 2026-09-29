@@ -437,4 +437,56 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
       await queue.close();
     }
   });
+  it('Job.retry only retries failed jobs', async () => {
+    const Q = uniqueQueue('lc-job-retry-state');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const g = gate();
+    let started = false;
+    const worker = new Worker(
+      Q,
+      async () => {
+        started = true;
+        await g.wait;
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 50, stalledInterval: 60_000 },
+    );
+    worker.on('error', () => {});
+    try {
+      const job = await queue.add('x', {});
+      await waitFor(() => started, 5000, 25);
+      const live = (await queue.getJob(job.id!))!;
+      await expect(live.retry()).rejects.toThrow(/not_failed/);
+      expect(await cleanupClient.zscore(k.scheduled, job.id!)).toBeNull();
+      expect(await hget(k.job(job.id!), 'state')).toBe('active');
+      g.open();
+      await waitFor(async () => (await hget(k.job(job.id!), 'state')) === 'completed', 5000, 25);
+      await expect(live.retry()).rejects.toThrow(/not_failed/);
+      expect(await cleanupClient.zscore(k.scheduled, job.id!)).toBeNull();
+      expect(await cleanupClient.zscore(k.completed, job.id!)).not.toBeNull();
+    } finally {
+      g.open();
+      await worker.close(true);
+      await queue.close();
+    }
+  });
+
+  it('Job.retry re-arms the TTL of an expired job', async () => {
+    const Q = uniqueQueue('lc-job-retry-ttl');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      const job = await queue.add('x', {}, { ttl: 60_000 });
+      await cleanupClient.hset(k.job(job.id!), { expireAt: String(Date.now() - 1000) });
+      const processed = await processedBy(Q, ['never'], 500);
+      expect(processed).toEqual([]);
+      expect(await hget(k.job(job.id!), 'state')).toBe('failed');
+      await (await queue.getJob(job.id!))!.retry();
+      expect(Number(await hget(k.job(job.id!), 'expireAt'))).toBeGreaterThan(Date.now());
+      expect(await processedBy(Q, ['x'])).toEqual(['x']);
+    } finally {
+      await queue.close();
+    }
+  });
 });
