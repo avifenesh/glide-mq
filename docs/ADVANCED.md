@@ -498,7 +498,7 @@ await queue.add('bulk-export', data, {
 
 **Check order**: when both concurrency, token bucket, and sliding window are configured, the gates are checked in order: concurrency -> token bucket -> sliding window. All applicable limits must pass. Strict FIFO is maintained - jobs never skip ahead of earlier jobs in the same group.
 
-**Cost validation**: a job with `cost` greater than `capacity` is rejected at enqueue time. If a previously valid job becomes invalid (e.g., capacity was lowered), it is moved to the DLQ at activation.
+**Cost validation**: a job with `cost` greater than `capacity` is rejected at enqueue time. If a previously valid job becomes invalid (e.g., capacity was lowered), it is failed at activation with `cost exceeds token bucket capacity`. It is not copied to the DLQ.
 
 **Differences from sliding window** (`rateLimit`):
 
@@ -553,8 +553,10 @@ const job = await queue.add(
 | ------------------ | ---------------------------------------------------- |
 | `Queue.add`        | Returns `null` (silent skip)                         |
 | `Queue.addBulk`    | Silently omits the duplicate from the returned array |
-| `FlowProducer.add` | Throws - flows cannot be partially created           |
+| `FlowProducer.add` | Throws `Duplicate job ID in flow`                    |
 | `TestQueue.add`    | Returns `null` (mirrors production)                  |
+
+`FlowProducer.add` checks every custom ID in a level before writing it, so the level holding the duplicate is not created. Nested sub-flows are separate calls made first, so sub-flows created before the failing level stay in place.
 
 **Interaction with deduplication**
 
@@ -622,7 +624,7 @@ await queue.setGlobalConcurrency(20);
 await queue.setGlobalConcurrency(0);
 ```
 
-Workers check this limit atomically before picking up each job via the `checkConcurrency` server function.
+Workers read the limit from queue metadata on each scheduler tick. Priority and LIFO jobs are popped with an atomic check (`glidemq_rpopAndReserve`). For stream jobs, the `glidemq_checkConcurrency` call runs before `XREADGROUP` as a separate call, so workers polling at the same time can briefly overshoot the limit.
 
 ---
 
@@ -644,7 +646,7 @@ const limit = await queue.getGlobalRateLimit();
 await queue.removeGlobalRateLimit();
 ```
 
-- Global rate limit takes precedence over `WorkerOptions.limiter`. When both are set, the stricter limit wins.
+- While a global rate limit is set, it replaces `WorkerOptions.limiter` on every worker, even if the worker limiter is stricter. Removing it restores the worker limiter.
 - Changes are picked up by workers within one scheduler tick (no restart needed).
 
 ---
@@ -752,13 +754,13 @@ await queue.add('api-call', data, {
 });
 ```
 
-When `attempts` is exhausted the job moves to the `failed` state (or the DLQ if configured).
+When `attempts` is exhausted the job moves to the `failed` state. If the worker has a DLQ configured, a copy also goes to the DLQ.
 
 ---
 
 ## Dead Letter Queues
 
-Route permanently failed jobs to a separate queue for later inspection or manual retry.
+Copy permanently failed jobs to a separate queue for later inspection. Configure it on the Worker; `deadLetterQueue` on a `Queue` only tells `getDeadLetterJobs()` which queue to read.
 
 ```typescript
 const worker = new Worker('tasks', processor, {
@@ -774,7 +776,9 @@ const failedJobs = await dlqQueue.getJobs('waiting');
 const dlqJobs = await queue.getDeadLetterJobs(0, 49);
 ```
 
-Jobs in the DLQ are ordinary jobs — you can inspect, retry, or remove them like any other job.
+The DLQ entry is a best-effort copy. The original job stays in the `failed` state of its own queue (subject to `removeOnFail`), and if writing the copy fails the worker emits `error` and moves on. The entry is added to the DLQ queue as a new waiting job named like the original, whose data is a JSON envelope: `{ originalQueue, originalJobId, data, failedReason, attemptsMade }`. A worker on the DLQ queue would process these entries.
+
+Because the entry is waiting, not failed, `Job.retry()` on it throws. To retry, call `retry()` on the original failed job (`queue.getJob(originalJobId)`), or re-add the envelope's `data` to the original queue.
 
 ---
 
@@ -784,7 +788,7 @@ Configure ordered fallback models/providers on a per-job basis. On each retryabl
 
 - job.fallbackIndex starts at 0. currentFallback returns undefined (use your default model).
 - On the first retry failure, glidemq_fail sets fallbackIndex to 1. currentFallback returns fallbacks[0].
-- If fallbackIndex exceeds the array length, currentFallback returns the last entry (sticky).
+- Once fallbackIndex passes the end of the array, currentFallback returns undefined (back to your default model).
 - Each entry supports metadata for provider-specific parameters.
 
 See [USAGE.md](./USAGE.md#fallback-chains) for usage examples.

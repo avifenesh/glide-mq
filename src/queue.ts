@@ -1359,7 +1359,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   /**
    * Set a global rate limit for this queue.
    * All workers will respect this limit dynamically (picked up within one scheduler tick).
-   * Takes precedence over WorkerOptions.limiter when set.
+   * While set, it replaces WorkerOptions.limiter on every worker (the limits are not combined).
    */
   async setGlobalRateLimit(config: RateLimitConfig): Promise<void> {
     const client = await this.getClient();

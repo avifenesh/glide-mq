@@ -18,7 +18,7 @@
 
 ## FlowProducer
 
-`FlowProducer` lets you atomically enqueue a tree of parent and child jobs. A parent job only becomes runnable once **all** of its children have successfully completed; failed or dead-lettered children do not unblock the parent.
+`FlowProducer` enqueues a tree of parent and child jobs. Each level (a parent and its leaf children) is created in one atomic call. Nested sub-flows are separate calls made bottom-up, and in cluster mode leaf children in another queue are created and wired to the parent separately, so a failure part way can leave the lower levels created. A parent job only becomes runnable once **all** of its children have successfully completed; failed or dead-lettered children do not unblock the parent.
 
 ```typescript
 import { FlowProducer } from 'glide-mq';

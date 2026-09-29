@@ -751,7 +751,7 @@ BullMQ resolves with the return value and rejects when the job fails. glide-mq r
 
 **`job.retry()` only retries failed jobs.** BullMQ's `retry(state?)` also accepts completed jobs. glide-mq throws `Cannot retry: <reason>` for any state other than `failed`.
 
-**Custom `jobId`** - glide-mq supports custom job IDs, matching BullMQ's `opts.jobId`. Max 256 characters, must not contain control characters, curly braces (`{`, `}`), or colons (`:`). Adding a job with a duplicate custom ID returns `null` (silent skip) from `Queue.add`; `FlowProducer.add` throws on duplicates since flows cannot be partially created:
+**Custom `jobId`** - glide-mq supports custom job IDs, matching BullMQ's `opts.jobId`. Max 256 characters, must not contain control characters, curly braces (`{`, `}`), or colons (`:`). Adding a job with a duplicate custom ID returns `null` (silent skip) from `Queue.add`; `FlowProducer.add` throws on duplicates. Each flow level is atomic, but nested sub-flows are separate calls, so sub-flows created before the failing level stay in place:
 
 ```ts
 // BullMQ
@@ -1033,7 +1033,7 @@ const limit = await queue.getGlobalRateLimit(); // { max, duration } or null
 await queue.removeGlobalRateLimit();
 ```
 
-When both global rate limit and `WorkerOptions.limiter` are set, the stricter limit wins.
+While a global rate limit is set, it replaces `WorkerOptions.limiter`, even if the worker limiter is stricter.
 
 **Per-group rate limiting** - glide-mq supports rate limiting per ordering key (N jobs per time window), equivalent to BullMQ Pro's group rate limiting:
 
