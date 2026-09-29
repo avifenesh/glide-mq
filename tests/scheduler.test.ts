@@ -904,6 +904,40 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     }
   }, 15000);
 
+  it('re-upserting an in-flight repeatAfterComplete scheduler does not overwrite a completion that lands mid-upsert', async () => {
+    const k = buildKeys(Q);
+    const name = 'rac-inflight-race';
+    await queue.upsertJobScheduler(name, { repeatAfterComplete: 500 }, { name: 'rac-race' });
+    const inFlight = { repeatAfterComplete: 500, iterationCount: 1, nextRun: 0, template: { name: 'rac-race' } };
+    await cleanupClient.hset(k.schedulers, { [name]: JSON.stringify(inFlight) });
+    const advancedNextRun = Date.now() + 500;
+
+    // Simulate the in-flight job completing right after upsert read the entry:
+    // completion advances nextRun in Lua without the scheduler mutation lock.
+    const client = await (queue as any).getClient();
+    const originalHget = client.hget.bind(client);
+    let raced = false;
+    client.hget = async (key: string, field: string) => {
+      const value = await originalHget(key, field);
+      if (!raced && key === k.schedulers && field === name) {
+        raced = true;
+        await cleanupClient.hset(k.schedulers, {
+          [name]: JSON.stringify({ ...inFlight, nextRun: advancedNextRun }),
+        });
+      }
+      return value;
+    };
+    try {
+      await queue.upsertJobScheduler(name, { repeatAfterComplete: 500 }, { name: 'rac-race' });
+    } finally {
+      client.hget = originalHget;
+    }
+    expect(raced).toBe(true);
+    const entry = await queue.getJobScheduler(name);
+    expect(entry!.nextRun).toBe(advancedNextRun);
+    await queue.removeJobScheduler(name);
+  });
+
   it('re-upserting a repeatAfterComplete scheduler while its job is in flight keeps the awaiting state', async () => {
     const k = buildKeys(Q);
     const name = 'rac-inflight-state';

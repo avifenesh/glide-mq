@@ -3209,6 +3209,17 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   return cjson.encode(result)
 end)
 
+-- Write a scheduler entry only if it still holds the value the caller read
+-- ('' = absent). Completion advances repeatAfterComplete entries without the
+-- TS mutation lock, so upsert must not overwrite a concurrent advance.
+redis.register_function('glidemq_casSchedulerEntry', function(keys, args)
+  local current = redis.call('HGET', keys[1], args[1])
+  if not current then current = '' end
+  if current ~= args[2] then return 0 end
+  redis.call('HSET', keys[1], args[1], args[3])
+  return 1
+end)
+
 redis.register_function('glidemq_completeChild', function(keys, args)
   local depsKey = keys[1]
   local parentJobKey = keys[2]

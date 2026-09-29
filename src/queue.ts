@@ -94,6 +94,7 @@ import {
   signalJob,
   sweepSuspended,
   getActiveListJobIds,
+  casSchedulerEntry,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -106,6 +107,7 @@ const SUSPEND_SWEEP_INTERVAL_MS = 1000;
 const SUSPEND_SWEEP_IDLE_POLL_MS = 5000;
 const SUSPEND_SWEEP_LOCK_TTL_MS = 5000;
 const SUSPEND_SWEEP_BATCH_SIZE = 100;
+const SCHEDULER_CAS_ATTEMPTS = 5;
 const SUSPEND_NO_TIMEOUT_SCORE = 9_999_999_999_999;
 const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
 const MAX_USAGE_SUMMARY_KEY_READS = 100_000;
@@ -1470,75 +1472,82 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
     const lock = await this.acquireSchedulerMutationLock(client);
     try {
-      const now = Date.now();
-      let iterationCount = 0;
-      let lastRun: number | undefined;
-      let nextRun = computeInitialSchedulerNextRun(
-        {
+      // Job completion advances repeatAfterComplete entries without this lock,
+      // so write only over the exact entry this computation read.
+      for (let attempt = 0; ; attempt++) {
+        const now = Date.now();
+        let iterationCount = 0;
+        let lastRun: number | undefined;
+        let nextRun = computeInitialSchedulerNextRun(
+          {
+            pattern: schedule.pattern,
+            every: schedule.every,
+            repeatAfterComplete: schedule.repeatAfterComplete,
+            tz: schedule.tz,
+            startDate,
+            endDate,
+          },
+          now,
+        );
+        const existingRaw = await client.hget(this.keys.schedulers, name);
+        if (existingRaw != null) {
+          try {
+            const existing = JSON.parse(String(existingRaw)) as SchedulerEntry;
+            const boundsUnchanged =
+              existing.tz === schedule.tz && existing.startDate === startDate && existing.endDate === endDate;
+            const scheduleUnchanged =
+              boundsUnchanged &&
+              existing.pattern === schedule.pattern &&
+              existing.every === schedule.every &&
+              existing.repeatAfterComplete === schedule.repeatAfterComplete;
+            // nextRun 0 is the repeatAfterComplete sentinel: a job is in flight and
+            // its completion schedules the next one. Keep waiting for it instead of
+            // firing a second, overlapping chain. A changed interval applies from
+            // that completion on.
+            const awaitingCompletion =
+              existing.nextRun === 0 &&
+              isValidSchedulerEvery(existing.repeatAfterComplete) &&
+              schedule.repeatAfterComplete != null;
+            if (awaitingCompletion) {
+              // Bounds that leave no occurrence still reject the upsert below.
+              if (nextRun != null) nextRun = 0;
+              if (boundsUnchanged) {
+                iterationCount = existing.iterationCount ?? 0;
+                lastRun = existing.lastRun;
+              }
+            } else if (scheduleUnchanged && existing.nextRun) {
+              iterationCount = existing.iterationCount ?? 0;
+              lastRun = existing.lastRun;
+              nextRun = existing.nextRun;
+            }
+          } catch {
+            // Ignore malformed existing state and treat as a fresh upsert.
+          }
+        }
+        if (nextRun == null) {
+          throw new Error('Schedule has no occurrences within the configured bounds');
+        }
+
+        const entry: SchedulerEntry = {
           pattern: schedule.pattern,
           every: schedule.every,
           repeatAfterComplete: schedule.repeatAfterComplete,
           tz: schedule.tz,
           startDate,
           endDate,
-        },
-        now,
-      );
-      const existingRaw = await client.hget(this.keys.schedulers, name);
-      if (existingRaw != null) {
-        try {
-          const existing = JSON.parse(String(existingRaw)) as SchedulerEntry;
-          const boundsUnchanged =
-            existing.tz === schedule.tz && existing.startDate === startDate && existing.endDate === endDate;
-          const scheduleUnchanged =
-            boundsUnchanged &&
-            existing.pattern === schedule.pattern &&
-            existing.every === schedule.every &&
-            existing.repeatAfterComplete === schedule.repeatAfterComplete;
-          // nextRun 0 is the repeatAfterComplete sentinel: a job is in flight and
-          // its completion schedules the next one. Keep waiting for it instead of
-          // firing a second, overlapping chain. A changed interval applies from
-          // that completion on.
-          const awaitingCompletion =
-            existing.nextRun === 0 &&
-            isValidSchedulerEvery(existing.repeatAfterComplete) &&
-            schedule.repeatAfterComplete != null;
-          if (awaitingCompletion) {
-            // Bounds that leave no occurrence still reject the upsert below.
-            if (nextRun != null) nextRun = 0;
-            if (boundsUnchanged) {
-              iterationCount = existing.iterationCount ?? 0;
-              lastRun = existing.lastRun;
-            }
-          } else if (scheduleUnchanged && existing.nextRun) {
-            iterationCount = existing.iterationCount ?? 0;
-            lastRun = existing.lastRun;
-            nextRun = existing.nextRun;
-          }
-        } catch {
-          // Ignore malformed existing state and treat as a fresh upsert.
+          limit: schedule.limit,
+          iterationCount,
+          template,
+          lastRun,
+          nextRun,
+        };
+
+        const expected = existingRaw == null ? '' : String(existingRaw);
+        if (await casSchedulerEntry(client, this.keys, name, expected, JSON.stringify(entry))) break;
+        if (attempt >= SCHEDULER_CAS_ATTEMPTS - 1) {
+          throw new Error(`Scheduler "${name}" changed concurrently; upsert not applied`);
         }
       }
-      if (nextRun == null) {
-        throw new Error('Schedule has no occurrences within the configured bounds');
-      }
-
-      const entry: SchedulerEntry = {
-        pattern: schedule.pattern,
-        every: schedule.every,
-        repeatAfterComplete: schedule.repeatAfterComplete,
-        tz: schedule.tz,
-        startDate,
-        endDate,
-        limit: schedule.limit,
-        iterationCount,
-        template,
-        lastRun,
-        nextRun,
-      };
-
-      const schedulerFields = Object.fromEntries([[name, JSON.stringify(entry)]]);
-      await client.hset(this.keys.schedulers, schedulerFields);
     } finally {
       await this.releaseSchedulerMutationLock(client, lock);
     }
