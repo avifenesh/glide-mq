@@ -168,7 +168,7 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
         processed.push(job.name);
         return 'ok';
       },
-      { connection: CONNECTION, concurrency: 1, blockTimeout: 50, stalledInterval: 60_000 },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 50, stalledInterval: 60_000, promotionInterval: 50 },
     );
     worker.on('error', () => {});
     try {
@@ -476,19 +476,31 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
     const Q = uniqueQueue('lc-job-retry-ttl');
     const k = buildKeys(Q);
     const queue = new Queue(Q, { connection: CONNECTION });
+    const job = await queue.add('x', {}, { ttl: 60_000 });
+    await cleanupClient.hset(k.job(job.id!), { expireAt: String(Date.now() - 1000) });
+    const processed: string[] = [];
+    const worker = new Worker(
+      Q,
+      async (active) => {
+        processed.push(active.name);
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 50, stalledInterval: 60_000, promotionInterval: 50 },
+    );
+    worker.on('error', () => {});
     try {
-      const job = await queue.add('x', {}, { ttl: 60_000 });
-      await cleanupClient.hset(k.job(job.id!), { expireAt: String(Date.now() - 1000) });
-      const processed = await processedBy(Q, ['never'], 500);
+      await waitFor(async () => (await hget(k.job(job.id!), 'state')) === 'failed', 5000, 25);
       expect(processed).toEqual([]);
-      expect(await hget(k.job(job.id!), 'state')).toBe('failed');
       await (await queue.getJob(job.id!))!.retry();
       expect(Number(await hget(k.job(job.id!), 'expireAt'))).toBeGreaterThan(Date.now());
-      expect(await processedBy(Q, ['x'])).toEqual(['x']);
+      await waitFor(() => processed.length === 1, 5000, 25);
+      expect(await hget(k.job(job.id!), 'state')).toBe('completed');
     } finally {
+      await worker.close(true);
       await queue.close();
     }
   });
+
   it('changePriority and changeDelay handle waiting jobs held in the priority and LIFO lists', async () => {
     const Q = uniqueQueue('lc-change-list');
     const k = buildKeys(Q);
@@ -522,6 +534,29 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
       expect(await listHas(k.lifo, c.id!)).toBe(false);
       expect(await cleanupClient.zscore(k.scheduled, c.id!)).not.toBeNull();
     } finally {
+      await queue.close();
+    }
+  });
+  it('debounce replacing a flow child does not leave the parent waiting on the old child', async () => {
+    const Q = uniqueQueue('lc-debounce-parent');
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      const node = await flow.add({
+        name: 'parent',
+        queueName: Q,
+        data: {},
+        children: [{ name: 'c1', queueName: Q, data: {} }],
+      });
+      const parent = { queue: Q, id: node.job.id };
+      const dedupOpts = { parent, delay: 60_000, deduplication: { id: 'd', mode: 'debounce' as const } };
+      await queue.add('d', { v: 1 }, dedupOpts);
+      const second = await queue.add('d', { v: 2 }, dedupOpts);
+      await (await queue.getJob(second!.id!))!.promote();
+      const processed = await processedBy(Q, ['c1', 'd', 'parent']);
+      expect(processed).toContain('parent');
+    } finally {
+      await flow.close();
       await queue.close();
     }
   });

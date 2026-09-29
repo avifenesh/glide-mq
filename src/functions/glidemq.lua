@@ -490,6 +490,54 @@ local function addParentNotification(notifications, seen, member)
   end
 end
 
+-- Resolve the parents of a child that is deleted before it completes (job
+-- removal, debounce replacement) so they do not wait for it forever.
+-- Same-queue tree and DAG parents are resolved here; cross-queue parents are
+-- recorded in xq-pending and their members returned for eager delivery.
+-- readChildParents captures the edges before the child hash and its parents
+-- SET are deleted.
+local function readChildParents(prefix, jobKey, jobId)
+  local parent = redis.call('HMGET', jobKey, 'parentQueue', 'parentId')
+  return {
+    parentQueue = parent[1],
+    parentId = parent[2],
+    dagParents = redis.call('SMEMBERS', prefix .. 'parents:' .. jobId),
+  }
+end
+
+local function resolveRemovedChildParents(prefix, jobId, eventsKey, edges)
+  local notifications = {}
+  local seen = {}
+  local queuePrefix = string.sub(prefix, 1, #prefix - 1)
+  local depsMember = queuePrefix .. ':' .. jobId
+  local storedParentQueue = edges.parentQueue
+  local storedParentId = edges.parentId
+  if storedParentId and storedParentId ~= '' then
+    if storedParentQueue == extractQueueTag(queuePrefix) then
+      completeParentDependency(prefix .. 'deps:' .. storedParentId, prefix .. 'job:' .. storedParentId,
+        prefix .. 'stream', eventsKey, depsMember, storedParentId)
+    else
+      addParentNotification(notifications, seen,
+        enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId))
+    end
+  end
+  local dagParents = edges.dagParents
+  for pi = 1, #dagParents do
+    local pEntry = dagParents[pi]
+    local pSep = pEntry:find(':([^:]+)$')
+    if pSep then
+      local pQueue = string.sub(pEntry, 1, pSep - 1)
+      local pId = string.sub(pEntry, pSep + 1)
+      if pQueue == queuePrefix then
+        completeParentDependency(prefix .. 'deps:' .. pId, prefix .. 'job:' .. pId, prefix .. 'stream', eventsKey, depsMember, pId)
+      else
+        addParentNotification(notifications, seen, enqueueCrossQueueParentNotify(prefix, jobId, extractQueueTag(pQueue), pId))
+      end
+    end
+  end
+  return notifications
+end
+
 local function expireJob(jobKey, jobId, prefix, now, curState, hintOrderingKey, hintOrderingSeq, hintGroupKey)
   if curState == 'failed' then return true end
   local wasActive = (curState == 'active')
@@ -2073,6 +2121,8 @@ redis.register_function('glidemq_dedup', function(keys, args)
     return 'ERR:COST_EXCEEDS_CAPACITY'
   end
   local existing = redis.call('HGET', dedupKey, dedupId)
+  local replacedJobId = nil
+  local replacedEdges = nil
   if mode == 'simple' then
     if existing then
       local sep = string.find(existing, ':')
@@ -2110,7 +2160,11 @@ redis.register_function('glidemq_dedup', function(keys, args)
           if delGroupKey and delGroupKey ~= '' and delOrderingSeq > 0 then
             closeOrderingHoleAndPromote(jobKey, existingJobId, timestamp)
           end
-          redis.call('UNLINK', jobKey)
+          -- Resolve the replaced job's parents after the replacement is
+          -- registered, so a parent cannot be released in between.
+          replacedJobId = existingJobId
+          replacedEdges = readChildParents(prefix, jobKey, existingJobId)
+          redis.call('UNLINK', jobKey, prefix .. 'parents:' .. existingJobId)
           if skipEvents ~= '1' then emitEvent(eventsKey, 'removed', existingJobId, nil) end
         elseif state and state ~= 'completed' and state ~= 'failed' then
           return 'skipped'
@@ -2123,6 +2177,8 @@ redis.register_function('glidemq_dedup', function(keys, args)
   if customJobId ~= '' then
     jobKey = prefix .. 'job:' .. customJobId
     if redis.call('EXISTS', jobKey) == 1 then
+      -- No replacement is registered, so the replaced job's parents must not wait for it.
+      if replacedJobId then resolveRemovedChildParents(prefix, replacedJobId, eventsKey, replacedEdges) end
       return 'duplicate'
     end
     jobIdStr = customJobId
@@ -2242,6 +2298,10 @@ redis.register_function('glidemq_dedup', function(keys, args)
     local queuePrefix = string.sub(prefix, 1, #prefix - 1)
     local depsMember = queuePrefix .. ':' .. jobIdStr
     redis.call('SADD', parentDepsKey, depsMember)
+  end
+  if replacedJobId then
+    -- Cross-queue parents are delivered by the scheduler from xq-pending.
+    resolveRemovedChildParents(prefix, replacedJobId, eventsKey, replacedEdges)
   end
   if delay > 0 then
     local score = priority * PRIORITY_SHIFT + (timestamp + delay)
@@ -3269,48 +3329,8 @@ redis.register_function('glidemq_removeJob', function(keys, args)
   -- A removed child counts as resolved for its parents. Completed children
   -- were already counted, and the depdone marker keeps this idempotent.
   local parentNotifications = {}
-  local parentNotificationSet = {}
   if state ~= 'completed' then
-    local queuePrefix = string.sub(prefix, 1, #prefix - 1)
-    local depsMember = queuePrefix .. ':' .. jobId
-    local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
-    local storedParentId = redis.call('HGET', jobKey, 'parentId')
-    if storedParentId and storedParentId ~= '' then
-      if storedParentQueue == extractQueueTag(queuePrefix) then
-        completeParentDependency(
-          prefix .. 'deps:' .. storedParentId,
-          prefix .. 'job:' .. storedParentId,
-          prefix .. 'stream',
-          eventsKey,
-          depsMember,
-          storedParentId
-        )
-      else
-        addParentNotification(
-          parentNotifications,
-          parentNotificationSet,
-          enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
-        )
-      end
-    end
-    local dagParents = redis.call('SMEMBERS', parentsKey)
-    for pi = 1, #dagParents do
-      local pEntry = dagParents[pi]
-      local pSep = pEntry:find(':([^:]+)$')
-      if pSep then
-        local pQueue = string.sub(pEntry, 1, pSep - 1)
-        local pId = string.sub(pEntry, pSep + 1)
-        if pQueue == queuePrefix then
-          completeParentDependency(prefix .. 'deps:' .. pId, prefix .. 'job:' .. pId, prefix .. 'stream', eventsKey, depsMember, pId)
-        else
-          addParentNotification(
-            parentNotifications,
-            parentNotificationSet,
-            enqueueCrossQueueParentNotify(prefix, jobId, extractQueueTag(pQueue), pId)
-          )
-        end
-      end
-    end
+    parentNotifications = resolveRemovedChildParents(prefix, jobId, eventsKey, readChildParents(prefix, jobKey, jobId))
   end
   -- Clean up deps and DAG parents SETs, per-job streaming channel, and signals.
   -- Job hash + log can be MB-sized; parents/jstream/signals carry per-step
