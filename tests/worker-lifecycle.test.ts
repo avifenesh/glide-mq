@@ -804,3 +804,67 @@ describe('suspend continuations', () => {
     await worker.close(true);
   });
 });
+
+describe('limiter waits during close()', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function closeDuringWait(opts: Record<string, unknown>, routes: Parameters<typeof routeFcall>[0]) {
+    const command = makeMockClient({ fcall: routeFcall(routes) });
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult([['1-0', 'limited']]))
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+
+    const processor = vi.fn().mockResolvedValue(opts.batch ? ['ok'] : 'ok');
+    const worker = new Worker('lifecycle-w11-limiter', processor, { connection, blockTimeout: 100, ...opts });
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(100);
+
+    let closed = false;
+    const closing = worker.close().then(() => {
+      closed = true;
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(closed).toBe(true);
+    await closing;
+
+    expect(processor).not.toHaveBeenCalled();
+    const deferCalls = command.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_deferActive');
+    expect(deferCalls).toHaveLength(1);
+    expect(deferCalls[0][2]).toEqual(['limited', '1-0', 'workers', '0', '1', '1']);
+  }
+
+  it('wakes a rate limiter sleep and hands the job back', async () => {
+    await closeDuringWait({ limiter: { max: 1, duration: 60000 } }, { glidemq_rateLimit: () => 60000 });
+  });
+
+  it('wakes a batch rate limiter sleep and hands the batch back', async () => {
+    await closeDuringWait(
+      { limiter: { max: 1, duration: 60000 }, batch: { size: 1 } },
+      { glidemq_rateLimit: () => 60000 },
+    );
+  });
+
+  it('wakes a token limiter sleep and hands the job back', async () => {
+    const realNow = Date.now;
+    // Local counter already at the cap for the current window.
+    const spy = vi.spyOn(Worker.prototype as any, 'waitForTokenLimit');
+    spy.mockImplementationOnce(async function (this: any) {
+      this.tpmLocalCounter = 10;
+      this.tpmWindowStart = realNow() - (realNow() % 60000);
+      spy.mockRestore();
+      return this.waitForTokenLimit();
+    });
+    await closeDuringWait({ tokenLimiter: { maxTokens: 10, duration: 60000, scope: 'worker' } }, {});
+  });
+});

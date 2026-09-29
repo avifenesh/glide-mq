@@ -742,39 +742,17 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     let results: R[] | undefined;
     let batchError: BatchError | undefined;
     let thrownError: Error | undefined;
+    let handBack = false;
 
+    const limited = !!(this.opts.limiter || this.globalRateLimitEnabled || this.opts.tokenLimiter);
     try {
       // Rate limit check (once per batch). Controllers must already be active
       // so revocation during this wait is visible to the batch processor.
       if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
       if (this.opts.tokenLimiter) await this.waitForTokenLimit();
-
-      // Calculate batch timeout: max timeout across all jobs in the batch
-      let maxTimeout = 0;
-      for (const entry of batch) {
-        const t = entry.job.opts.timeout;
-        if (t && t > 0 && t > maxTimeout) maxTimeout = t;
-      }
-
-      const jobs = batch.map((e) => e.job);
-      if (maxTimeout > 0) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          results = await Promise.race([
-            this.batchProcessor(jobs),
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(() => {
-                abortBatch();
-                reject(new Error('Batch timeout exceeded'));
-              }, maxTimeout);
-            }),
-          ]);
-        } finally {
-          if (timer !== undefined) clearTimeout(timer);
-        }
-      } else {
-        results = await this.batchProcessor(jobs);
-      }
+      // close() cut the limiter wait short; hand the batch back unprocessed.
+      handBack = limited && this.closing;
+      if (!handBack) results = await this.runBatchProcessor(batch, abortBatch);
     } catch (err) {
       if (err instanceof BatchError || (err instanceof Error && err.name === 'BatchError')) {
         batchError = err as BatchError;
@@ -790,6 +768,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
 
     if (!this.commandClient) return;
+
+    if (handBack) {
+      for (const entry of batch) {
+        await this.deferPausedActivation({ jobId: entry.jobId, entryId: entry.entryId, undoGroupClaim: true });
+      }
+      return;
+    }
 
     if (results) {
       // Success path: validate results is array with correct length
@@ -944,6 +929,35 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
   }
 
+  private async runBatchProcessor(
+    batch: { jobId: string; entryId: string; job: Job<D, R> }[],
+    abortBatch: () => void,
+  ): Promise<R[]> {
+    // Calculate batch timeout: max timeout across all jobs in the batch
+    let maxTimeout = 0;
+    for (const entry of batch) {
+      const t = entry.job.opts.timeout;
+      if (t && t > 0 && t > maxTimeout) maxTimeout = t;
+    }
+
+    const jobs = batch.map((e) => e.job);
+    if (maxTimeout <= 0) return this.batchProcessor!(jobs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.batchProcessor!(jobs),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            abortBatch();
+            reject(new Error('Batch timeout exceeded'));
+          }, maxTimeout);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
   // ---- Job processing helpers ----
 
   /**
@@ -1089,12 +1103,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected async runProcessor(
     job: Job<D, R>,
     jobId: string,
-  ): Promise<{ result?: R; error?: Error; aborted: boolean }> {
+  ): Promise<{ result?: R; error?: Error; aborted: boolean; handBack?: boolean }> {
     const ac = new AbortController();
     this.activeAbortControllers.set(jobId, ac);
     job.abortSignal = ac.signal;
     this.startHeartbeat(jobId, job.opts.lockDuration);
 
+    const limited = !!(this.opts.limiter || this.globalRateLimitEnabled || this.opts.tokenLimiter);
     try {
       if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
       if (this.opts.tokenLimiter) await this.waitForTokenLimit();
@@ -1104,6 +1119,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.stopHeartbeat(jobId);
       this.activeAbortControllers.delete(jobId);
       throw err;
+    }
+
+    // close() cut the limiter wait short. The processor has not run, so give
+    // the job back instead of running it past the limit or holding close().
+    if (limited && this.closing && !ac.signal.aborted) {
+      this.stopHeartbeat(jobId);
+      this.activeAbortControllers.delete(jobId);
+      return { aborted: false, handBack: true };
     }
 
     // Short-circuit if the job was revoked/aborted during the limiter wait.
@@ -1525,7 +1548,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         aborted = ac.signal.aborted;
       } else {
         this.suspendContinuations.delete(currentJobId);
-        ({ result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId));
+        const run = await this.runProcessor(job, currentJobId);
+        if (run.handBack) {
+          await this.deferPausedActivation({ jobId: currentJobId, entryId: currentEntryId, undoGroupClaim: true });
+          return;
+        }
+        ({ result: processResult, error: processError, aborted } = run);
       }
 
       if (await this.skipMovedToFailed(job)) return;
@@ -1918,6 +1946,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   /**
    * Check the server-side rate limiter and wait if the limit is exceeded.
    * Also respects any manual rate limit set via rateLimit(ms).
+   * Returns early once close() starts; callers must check `closing`.
    */
   protected async waitForRateLimit(): Promise<void> {
     if (!this.commandClient) return;
@@ -1925,7 +1954,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     // First, respect any manual rate limit
     const now = Date.now();
     if (this.rateLimitUntil > now) {
-      await new Promise<void>((resolve) => setTimeout(resolve, this.rateLimitUntil - now));
+      await this.sleepUnlessClosing(this.rateLimitUntil - now);
+      if (this.closing) return;
     }
 
     // Determine effective rate limit config.
@@ -1945,19 +1975,21 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
 
     // Server-side sliding window check
-    while (true) {
+    while (!this.closing) {
       const delayMs = await rateLimitFn(this.commandClient, this.queueKeys, max, duration, Date.now());
 
       if (delayMs <= 0) break;
 
       // Wait for the delay, then re-check
-      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      await this.sleepUnlessClosing(delayMs);
+      if (this.closing) return;
     }
   }
 
   /**
    * Check the TPM (token-per-minute) rate limit and wait if either the local or
    * per-queue counter exceeds the configured maxTokens for the current window.
+   * Returns early once close() starts; callers must check `closing`.
    */
   protected async waitForTokenLimit(): Promise<void> {
     const tl = this.opts.tokenLimiter;
@@ -1965,7 +1997,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
     const scope = tl.scope ?? 'both';
 
-    while (true) {
+    while (!this.closing) {
       const now = Date.now();
 
       // Reset local counter if the window has expired
@@ -1979,7 +2011,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         if (this.tpmLocalCounter >= tl.maxTokens) {
           const sleepMs = this.tpmWindowStart + tl.duration - now;
           if (sleepMs > 0) {
-            await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+            await this.sleepUnlessClosing(sleepMs);
+            if (this.closing) return;
             continue;
           }
         }
@@ -1995,7 +2028,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           const windowEndMs = (windowId + 1) * tl.duration;
           const sleepMs = windowEndMs - now;
           if (sleepMs > 0) {
-            await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+            await this.sleepUnlessClosing(sleepMs);
+            if (this.closing) return;
             continue;
           }
         }
