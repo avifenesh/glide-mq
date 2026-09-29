@@ -1,0 +1,438 @@
+/**
+ * Server-function correctness regressions, round 2 (2026-09-29 audit).
+ *
+ * Run: npx vitest run tests/lua-round2-20260929.test.ts
+ */
+import { afterAll, beforeAll, expect, it } from 'vitest';
+import { createCleanupClient, describeEachMode, flushQueue } from './helpers/fixture';
+
+const { InfBoundary } = require('@glidemq/speedkey') as typeof import('@glidemq/speedkey');
+const { Queue } = require('../dist/queue') as typeof import('../src/queue');
+const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
+const { buildKeys, keyPrefix, parseCrossQueueParentNotification } =
+  require('../dist/utils') as typeof import('../src/utils');
+const {
+  addJob,
+  completeAndFetchNext,
+  completeChild,
+  completeJob,
+  dedup,
+  failJob,
+  getActiveListJobIds,
+  healListActive,
+  moveToActive,
+  popLists,
+  reclaimStalledListJobs,
+  registerChildDep,
+  CONSUMER_GROUP,
+} = require('../dist/functions') as typeof import('../src/functions');
+
+describeEachMode('Lua round 2 2026-09-29', (CONNECTION) => {
+  let cleanupClient: any;
+  const queues: string[] = [];
+
+  function uniqueQueue(prefix: string): string {
+    const name = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    queues.push(name);
+    return name;
+  }
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await Promise.all(queues.map((q) => flushQueue(cleanupClient, q).catch(() => {})));
+    cleanupClient.close();
+  });
+
+  async function hget(key: string, field: string): Promise<string | null> {
+    const v = await cleanupClient.hget(key, field);
+    return v == null ? null : String(v);
+  }
+
+  // Parent in PQ waiting on one pending cross-queue child c1 (c1 waits on its
+  // own child, so it cannot complete during the test). The nested child keeps
+  // the flow slot-safe in cluster mode.
+  async function parentWithPendingChild(PQ: string, CQ: string) {
+    const flow = new FlowProducer({ connection: CONNECTION });
+    try {
+      const node = await flow.add({
+        name: 'parent',
+        queueName: PQ,
+        data: {},
+        children: [{ name: 'c1', queueName: CQ, data: {}, children: [{ name: 'gc', queueName: CQ, data: {} }] }],
+      });
+      return { parentId: node.job.id, c1Member: `${keyPrefix('glide', CQ)}:${node.children![0].job.id}` };
+    } finally {
+      await flow.close();
+    }
+  }
+
+  async function addUnregisteredChild(CQ: string, PQ: string, parentId: string): Promise<string> {
+    const id = await addJob(
+      cleanupClient,
+      buildKeys(CQ),
+      'c2',
+      '{}',
+      '{}',
+      Date.now(),
+      60_000,
+      0,
+      parentId,
+      0,
+      '',
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      '',
+      0,
+      PQ,
+    );
+    return `${keyPrefix('glide', CQ)}:${id}`;
+  }
+
+  async function deliverXqPending(CQ: string): Promise<void> {
+    const members = await cleanupClient.smembers(buildKeys(CQ).xqPending);
+    for (const raw of members) {
+      const [parentQueue, parentId, depsMember] = parseCrossQueueParentNotification(String(raw))!;
+      await completeChild(cleanupClient, buildKeys(parentQueue), parentId, depsMember);
+      await cleanupClient.srem(buildKeys(CQ).xqPending, [String(raw)]);
+    }
+  }
+
+  it('A-11: a cross-queue child finishing before registration does not release the parent early', async () => {
+    const PQ = uniqueQueue('r2-xq-early-p');
+    const CQ = uniqueQueue('r2-xq-early-c');
+    const pk = buildKeys(PQ);
+    const { parentId, c1Member } = await parentWithPendingChild(PQ, CQ);
+    const c2Member = await addUnregisteredChild(CQ, PQ, parentId);
+
+    // Eager notification of c2's completion arrives before Queue.add registers it.
+    await completeChild(cleanupClient, pk, parentId, c2Member);
+    expect(await hget(pk.job(parentId), 'state')).toBe('waiting-children');
+
+    await registerChildDep(cleanupClient, pk, parentId, c2Member);
+    expect(await hget(pk.job(parentId), 'state')).toBe('waiting-children');
+    expect(await hget(pk.job(parentId), 'depsCompleted')).toBe('1');
+
+    await completeChild(cleanupClient, pk, parentId, c1Member);
+    expect(await hget(pk.job(parentId), 'state')).toBe('waiting');
+    expect(await hget(pk.job(parentId), 'depsCompleted')).toBe('2');
+  });
+
+  it('A-11: an early completion registered by a plain SADD is counted by the next completion', async () => {
+    const PQ = uniqueQueue('r2-xq-legacy-p');
+    const CQ = uniqueQueue('r2-xq-legacy-c');
+    const pk = buildKeys(PQ);
+    const { parentId, c1Member } = await parentWithPendingChild(PQ, CQ);
+    const c2Member = await addUnregisteredChild(CQ, PQ, parentId);
+
+    await completeChild(cleanupClient, pk, parentId, c2Member);
+    await cleanupClient.sadd(pk.deps(parentId), [c2Member]);
+    expect(await hget(pk.job(parentId), 'state')).toBe('waiting-children');
+
+    await completeChild(cleanupClient, pk, parentId, c1Member);
+    expect(await hget(pk.job(parentId), 'state')).toBe('waiting');
+    expect(await hget(pk.job(parentId), 'depsCompleted')).toBe('2');
+  });
+
+  it('A-11: a debounce replacement of a cross-queue child holds the parent until it finishes', async () => {
+    const PQ = uniqueQueue('r2-xq-debounce-p');
+    const CQ = uniqueQueue('r2-xq-debounce-c');
+    const pk = buildKeys(PQ);
+    const ck = buildKeys(CQ);
+    const { parentId, c1Member } = await parentWithPendingChild(PQ, CQ);
+    const childQueue = new Queue(CQ, { connection: CONNECTION });
+    try {
+      const dedupOpts = { id: 'deb', mode: 'debounce' as const };
+      const d1 = await childQueue.add(
+        'd',
+        {},
+        { parent: { id: parentId, queue: PQ }, deduplication: dedupOpts, delay: 60_000 },
+      );
+      expect(d1).not.toBeNull();
+      await completeChild(cleanupClient, pk, parentId, c1Member);
+      expect(await hget(pk.job(parentId), 'state')).toBe('waiting-children');
+
+      // Replace d1 but stop before the caller registers d2 in the parent deps.
+      const d2 = await dedup(
+        cleanupClient,
+        ck,
+        'deb',
+        0,
+        'debounce',
+        'd',
+        '{}',
+        '{}',
+        Date.now(),
+        60_000,
+        0,
+        parentId,
+        0,
+        '',
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        '',
+        0,
+        PQ,
+      );
+      await deliverXqPending(CQ);
+      expect(await hget(pk.job(parentId), 'state')).toBe('waiting-children');
+
+      const d2Member = `${keyPrefix('glide', CQ)}:${d2}`;
+      await registerChildDep(cleanupClient, pk, parentId, d2Member);
+      expect(await hget(pk.job(parentId), 'state')).toBe('waiting-children');
+
+      const notifications = await completeJob(cleanupClient, ck, d2, '', 'null', Date.now());
+      for (const member of notifications) {
+        const [parentQueue, pid, depsMember] = parseCrossQueueParentNotification(member)!;
+        await completeChild(cleanupClient, buildKeys(parentQueue), pid, depsMember);
+      }
+      expect(await hget(pk.job(parentId), 'state')).toBe('waiting');
+      expect(await hget(pk.job(parentId), 'depsCompleted')).toBe('3');
+    } finally {
+      await childQueue.close();
+    }
+  });
+
+  it('A-10: a budgeted flow creates the budget first and writes budgetKey with each job', async () => {
+    const Q = uniqueQueue('r2-budget');
+    const k = buildKeys(Q);
+    let budgetBeforeJobs: number | null = null;
+    let removedChild = '';
+    // A worker that finishes (removeOnComplete) a child right after creation.
+    const client = new Proxy(cleanupClient, {
+      get(target, prop) {
+        if (prop === 'fcall') {
+          return async (fn: string, keys: string[], args: string[]) => {
+            if (fn === 'glidemq_addFlow') budgetBeforeJobs = await target.exists([k.budget(args[8])]);
+            const result = await target.fcall(fn, keys, args);
+            if (fn === 'glidemq_addFlow') {
+              removedChild = JSON.parse(String(result))[1];
+              await target.del([k.job(removedChild)]);
+            }
+            return result;
+          };
+        }
+        const value = target[prop];
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const flow = new FlowProducer({ client, connection: CONNECTION });
+    try {
+      const node = await flow.add(
+        { name: 'parent', queueName: Q, data: {}, children: [{ name: 'c1', queueName: Q, data: {} }] },
+        { budget: { maxTotalTokens: 100 } },
+      );
+      expect(budgetBeforeJobs).toBe(1);
+      expect(removedChild).toBe(node.children![0].job.id);
+      expect(await cleanupClient.exists([k.job(removedChild)])).toBe(0);
+      expect(await hget(k.job(node.job.id), 'budgetKey')).toBe(k.budget(node.job.id));
+      expect(node.children![0].job.budgetKey).toBe(k.budget(node.job.id));
+    } finally {
+      await flow.close();
+    }
+  });
+
+  it('R2-11: completeAndFetchNext advances the ordering frontier of a group-key job', async () => {
+    const Q = uniqueQueue('r2-caf-order');
+    const k = buildKeys(Q);
+    await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true });
+    await cleanupClient.hset(k.group('g'), { maxConcurrency: '1', active: '1', nextSeq: '2' });
+    await cleanupClient.hset(k.job('o1'), { id: 'o1', name: 'o', state: 'active', groupKey: 'g', orderingSeq: '1' });
+    // The worker passes the hints it read from the job hash, which stores only groupKey.
+    await completeAndFetchNext(
+      cleanupClient,
+      k,
+      'o1',
+      '',
+      'null',
+      Date.now(),
+      CONSUMER_GROUP,
+      'c1',
+      undefined,
+      undefined,
+      {
+        orderingKey: undefined,
+        orderingSeq: 1,
+        groupKey: 'g',
+      },
+    );
+    expect(await hget(k.meta, 'orderdone:g')).toBe('1');
+    expect(await cleanupClient.exists([`${keyPrefix('glide', Q)}:orderdone:pending:g`])).toBe(0);
+  });
+
+  async function eventTypes(Q: string): Promise<string[]> {
+    const entries = await cleanupClient.xrange(
+      buildKeys(Q).events,
+      InfBoundary.NegativeInfinity,
+      InfBoundary.PositiveInfinity,
+    );
+    const types: string[] = [];
+    for (const fields of Object.values(entries ?? {}) as [string, string][][]) {
+      for (const [f, v] of fields) if (String(f) === 'event') types.push(String(v));
+    }
+    return types;
+  }
+
+  it('R2-12: completeAndFetchNext activation emits no active event from any phase', async () => {
+    const Q = uniqueQueue('r2-caf-active');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true });
+      await queue.add('fifo', {});
+      await queue.add('lifo', {}, { lifo: true });
+      await cleanupClient.hset(k.job('pri'), { id: 'pri', name: 'pri', state: 'waiting', priority: '1' });
+      await cleanupClient.lpush(k.priority, ['pri']);
+      await cleanupClient.hset(k.job('cur'), { id: 'cur', name: 'cur', state: 'active' });
+      let current = 'cur';
+      const activated: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const r = await completeAndFetchNext(cleanupClient, k, current, '', 'null', Date.now(), CONSUMER_GROUP, 'c1');
+        expect(r.next).not.toBe(false);
+        current = r.nextJobId!;
+        activated.push((r.next as Record<string, string>).name);
+      }
+      expect(activated).toEqual(['pri', 'lifo', 'fifo']);
+      expect(await eventTypes(Q)).not.toContain('active');
+    } finally {
+      await queue.close();
+    }
+  });
+
+  it('R2-13: a broadcast retry counter outlives a backoff longer than 24h', async () => {
+    const Q = uniqueQueue('r2-sub-ttl');
+    const k = buildKeys(Q);
+    await cleanupClient.hset(k.job('b1'), { id: 'b1', name: 'b', state: 'active' });
+    const twoDaysMs = 2 * 86_400_000;
+    const r = await failJob(cleanupClient, k, 'b1', '', 'boom', Date.now(), 3, twoDaysMs, 'subA', undefined, true);
+    expect(r).toBe('retrying');
+    const ttl = Number(await cleanupClient.ttl(`${k.job('b1')}:sub:subA`));
+    expect(ttl).toBeGreaterThan(twoDaysMs / 1000);
+  });
+
+  it('P4/P5: complete and CAF with removeOnComplete still report the parent and free the group slot', async () => {
+    const Q = uniqueQueue('r2-rm-complete');
+    const k = buildKeys(Q);
+    await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true });
+    await cleanupClient.hset(k.group('g'), { maxConcurrency: '2', active: '2', nextSeq: '3' });
+    const edge = { groupKey: 'g', parentQueue: 'other-q', parentId: 'p1', replacedIds: '["old"]' };
+    await cleanupClient.hset(k.job('a'), { id: 'a', name: 'a', state: 'active', orderingSeq: '1', ...edge });
+    await cleanupClient.hset(k.job('b'), { id: 'b', name: 'b', state: 'active', orderingSeq: '2', ...edge });
+    const hints = { orderingKey: undefined, orderingSeq: 1, groupKey: 'g' };
+    const caf = await completeAndFetchNext(
+      cleanupClient,
+      k,
+      'a',
+      '',
+      'rv',
+      Date.now(),
+      CONSUMER_GROUP,
+      'c1',
+      true,
+      undefined,
+      hints,
+    );
+    const viaComplete = await completeJob(cleanupClient, k, 'b', '', 'rv', Date.now(), CONSUMER_GROUP, true);
+    for (const notifications of [caf.parentNotifications, viaComplete]) {
+      expect(notifications.map((m: string) => parseCrossQueueParentNotification(m)![2]).sort()).toHaveLength(2);
+    }
+    expect(caf.parentNotifications.map((m: string) => parseCrossQueueParentNotification(m)![2]).sort()).toEqual([
+      `${keyPrefix('glide', Q)}:a`,
+      `${keyPrefix('glide', Q)}:old`,
+    ]);
+    expect(await cleanupClient.exists([k.job('a'), k.job('b')])).toBe(0);
+    expect(Number(await cleanupClient.zcard(k.completed))).toBe(0);
+    expect(await hget(k.group('g'), 'active')).toBe('0');
+    expect(await hget(k.meta, 'orderdone:g')).toBe('2');
+    const events = await eventTypes(Q);
+    expect(events.filter((e) => e === 'completed')).toHaveLength(2);
+  });
+
+  it('P5: fail with removeOnFail frees the group slot, emits failed and leaves nothing behind', async () => {
+    const Q = uniqueQueue('r2-rm-fail');
+    const k = buildKeys(Q);
+    await cleanupClient.hset(k.group('g'), { maxConcurrency: '1', active: '1', nextSeq: '2' });
+    await cleanupClient.hset(k.job('f'), { id: 'f', name: 'f', state: 'active', groupKey: 'g', orderingSeq: '1' });
+    expect(await failJob(cleanupClient, k, 'f', '', 'boom', Date.now(), 0, 0, CONSUMER_GROUP, true)).toBe('failed');
+    expect(await cleanupClient.exists([k.job('f')])).toBe(0);
+    expect(Number(await cleanupClient.zcard(k.failed))).toBe(0);
+    expect(await hget(k.group('g'), 'active')).toBe('0');
+    expect(await hget(k.meta, 'orderdone:g')).toBe('1');
+    expect(await eventTypes(Q)).toContain('failed');
+  });
+
+  async function members(key: string): Promise<string[]> {
+    return [...(await cleanupClient.smembers(key))].map(String).sort();
+  }
+
+  it('P3: list claims are tracked in list-active-ids from reservation to release', async () => {
+    const Q = uniqueQueue('r2-la-ids');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      const a = await queue.add('a', {}, { lifo: true });
+      const b = await queue.add('b', {}, { lifo: true });
+      const popped = await popLists(cleanupClient, k, 2);
+      expect(popped.sort()).toEqual([a!.id, b!.id].sort());
+      expect(await members(k.listActiveIds)).toEqual([a!.id, b!.id].sort());
+      await moveToActive(cleanupClient, k, a!.id, Date.now());
+      await moveToActive(cleanupClient, k, b!.id, Date.now());
+      // CAF completes a list claim and activates the next priority claim.
+      await cleanupClient.hset(k.job('pri'), { id: 'pri', name: 'pri', state: 'waiting', priority: '1' });
+      await cleanupClient.lpush(k.priority, ['pri']);
+      const r = await completeAndFetchNext(cleanupClient, k, a!.id, '', 'null', Date.now(), CONSUMER_GROUP, 'c1');
+      expect(r.nextJobId).toBe('pri');
+      expect(await members(k.listActiveIds)).toEqual([b!.id, 'pri'].sort());
+      expect(await failJob(cleanupClient, k, b!.id, '', 'boom', Date.now(), 0, 0)).toBe('failed');
+      expect(await members(k.listActiveIds)).toEqual(['pri']);
+      expect(String(await cleanupClient.get(k.listActive))).toBe('1');
+    } finally {
+      await queue.close();
+    }
+  });
+
+  it('P3: scans read list-active-ids once seeded and fall back to SCAN when it is short', async () => {
+    const Q = uniqueQueue('r2-la-scan');
+    const k = buildKeys(Q);
+    const active = { name: 'x', state: 'active', listSourced: '1', lastActive: '1' };
+    // A claim activated by an older library: counted, not in the set.
+    await cleanupClient.hset(k.job('old'), { id: 'old', ...active });
+    await cleanupClient.set(k.listActive, '1');
+    expect(await getActiveListJobIds(cleanupClient, k, 0, -1)).toEqual(['old']);
+    // The complete scan seeded the set.
+    expect(await members(k.listActiveIds)).toEqual(['old']);
+
+    // Once seeded, an untracked claim is not found while SCARD covers the counter...
+    await cleanupClient.hset(k.job('rogue'), { id: 'rogue', ...active });
+    expect(await getActiveListJobIds(cleanupClient, k, 0, -1)).toEqual(['old']);
+    // ...and the scan runs again when the counter exceeds the set.
+    await cleanupClient.set(k.listActive, '2');
+    expect((await getActiveListJobIds(cleanupClient, k, 0, -1)).sort()).toEqual(['old', 'rogue']);
+    expect(await members(k.listActiveIds)).toEqual(['old', 'rogue']);
+
+    // Heal corrects drift from the set and drops released members.
+    await cleanupClient.hset(k.job('rogue'), { state: 'completed' });
+    await cleanupClient.set(k.listActive, '3');
+    expect(await healListActive(cleanupClient, k)).toBe(2);
+    expect(String(await cleanupClient.get(k.listActive))).toBe('1');
+    expect(await members(k.listActiveIds)).toEqual(['old']);
+
+    // Stalled reclaim finds the tracked claim and releases it.
+    expect(await reclaimStalledListJobs(cleanupClient, k, 1000, 5, Date.now())).toBe(1);
+    expect(await hget(k.job('old'), 'state')).toBe('waiting');
+    expect(await members(k.listActiveIds)).toEqual([]);
+    expect(String(await cleanupClient.get(k.listActive))).toBe('0');
+  });
+});

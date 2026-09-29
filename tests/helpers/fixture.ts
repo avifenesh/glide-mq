@@ -114,6 +114,7 @@ export async function flushQueue(client: any, queueName: string, prefix = 'glide
     k.lifo,
     k.priority,
     k.listActive,
+    k.listActiveIds,
     k.suspended,
   ];
   try {

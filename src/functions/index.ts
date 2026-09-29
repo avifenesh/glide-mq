@@ -99,7 +99,14 @@ export const LIBRARY_NAME = 'glidemq';
 //   changePriority/changeDelay handle list-held jobs; debounce resolves replaced children;
 //   glidemq_updateJobFields writes only existing job hashes.
 // Version 127: glidemq_casSchedulerEntry lets upsertJobScheduler write only over the entry it read.
-export const LIBRARY_VERSION = '127';
+// Version 126: cross-queue child completions that reach the parent before registration are parked
+//   (depearly) and counted by glidemq_registerChildDep; debounce replacements inherit the replaced
+//   cross-queue parent dependency (replacedIds); addJob/addFlow accept an optional trailing budgetKey;
+//   CAF marks ordering done from the groupKey hint and no longer emits list-phase 'active' events;
+//   broadcast retry counters expire 24h past the retry; removeOnComplete/removeOnFail skip writes to
+//   the deleted hash; list claims are tracked in list-active-ids so list-active scans skip SCAN.
+// Version 128: version 127 (casSchedulerEntry) plus the version 126 changes above.
+export const LIBRARY_VERSION = '128';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -143,6 +150,7 @@ export function addJobArgs(
   parentDepsKey: string = '',
   schedulerName: string = '',
   skipEvents: boolean = false,
+  budgetKey: string = '',
 ): { keys: string[]; args: string[] } {
   const keys = [k.id, k.stream, k.scheduled, k.events];
   if (parentDepsKey) {
@@ -172,6 +180,8 @@ export function addJobArgs(
       parentQueue,
       schedulerName,
       skipEvents ? '1' : '0',
+      // Appended optional arg: older libraries ignore it.
+      ...(budgetKey ? [budgetKey] : []),
     ],
   };
 }
@@ -201,6 +211,7 @@ export async function addJob(
   parentDepsKey: string = '',
   schedulerName: string = '',
   skipEvents: boolean = false,
+  budgetKey: string = '',
 ): Promise<string> {
   const { keys, args } = addJobArgs(
     k,
@@ -226,6 +237,7 @@ export async function addJob(
     parentDepsKey,
     schedulerName,
     skipEvents,
+    budgetKey,
   );
   const result = await client.fcall('glidemq_addJob', keys, args);
   return result as string;
@@ -1213,6 +1225,7 @@ export async function addFlow(
   }[],
   extraDeps: string[] = [],
   parentCustomId: string = '',
+  budgetKey: string = '',
 ): Promise<string[]> {
   const keys: string[] = [parentKeys.id, parentKeys.stream, parentKeys.scheduled, parentKeys.events];
   const args: string[] = [
@@ -1247,6 +1260,8 @@ export async function addFlow(
   for (const dep of extraDeps) {
     args.push(dep);
   }
+  // Appended optional arg: older libraries ignore it.
+  if (budgetKey) args.push(budgetKey);
 
   const result = await client.fcall('glidemq_addFlow', keys, args);
   return JSON.parse(result as string) as string[];
@@ -1283,6 +1298,30 @@ export async function casSchedulerEntry(
 ): Promise<boolean> {
   const result = await client.fcall('glidemq_casSchedulerEntry', [queueKeys.schedulers], [name, expected, value]);
   return Number(result) === 1;
+}
+
+/**
+ * Register a cross-queue child in its parent's deps set after the child was
+ * added. A completion that reached the parent first is counted here, so the
+ * parent is not released early. Falls back to a plain SADD when the loaded
+ * library predates glidemq_registerChildDep (rolling upgrade).
+ */
+export async function registerChildDep(
+  client: Client,
+  parentKeys: QueueKeys,
+  parentId: string,
+  depsMember: string,
+): Promise<void> {
+  try {
+    await client.fcall(
+      'glidemq_registerChildDep',
+      [parentKeys.deps(parentId), parentKeys.job(parentId), parentKeys.stream, parentKeys.events],
+      [depsMember, parentId],
+    );
+  } catch (error) {
+    if (!(error instanceof RequestError) || !/function\s+not\s+found/i.test(error.message)) throw error;
+    await client.sadd(parentKeys.deps(parentId), [depsMember]);
+  }
 }
 
 /**

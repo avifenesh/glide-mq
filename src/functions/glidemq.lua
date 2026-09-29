@@ -12,10 +12,24 @@ local advanceRepeatAfterComplete
 -- recover from a negative counter (its early-out at <= 0 is intentional - it
 -- only repairs positive drift from worker crashes), so a duplicate decrement
 -- would latch the counter negative forever.
-local function decrListActive(listActiveKey)
+-- list-active-ids is a same-slot SET of the job IDs counted in list-active
+-- (reserved or active list claims). It lets the list-active scans read the
+-- claims instead of SCANning the keyspace. Every counter increment adds the
+-- job and every decrement removes it.
+local function listActiveIdsKey(listActiveKey)
+  return listActiveKey .. '-ids'
+end
+
+local function decrListActive(listActiveKey, jobId)
   if not listActiveKey or listActiveKey == '' then return end
+  if jobId then redis.call('SREM', listActiveIdsKey(listActiveKey), jobId) end
   local la = tonumber(redis.call('GET', listActiveKey)) or 0
   if la > 0 then redis.call('DECR', listActiveKey) end
+end
+
+local function incrListActive(listActiveKey, jobIds)
+  redis.call('INCRBY', listActiveKey, #jobIds)
+  redis.call('SADD', listActiveIdsKey(listActiveKey), unpack(jobIds))
 end
 
 -- Whether an active job was claimed from the priority/LIFO lists (no PEL
@@ -201,6 +215,43 @@ local function xaddJob(streamKey, jobId, jobName)
   redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name', jobName or '')
 end
 
+local function releaseParentIfReady(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, parentId)
+  local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
+  local remaining = redis.call('SCARD', parentDepsKey) - doneCount
+  if remaining <= 0 and redis.call('HGET', parentJobKey, 'state') == 'waiting-children' then
+    redis.call('HSET', parentJobKey, 'state', 'waiting')
+    xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
+    emitEvent(parentEventsKey, 'active', parentId, nil)
+  end
+  return remaining
+end
+
+-- A cross-queue child is registered in its parent's deps after the child
+-- exists, so it can finish first. Counting that completion before the member
+-- is in deps lets SCARD - depsCompleted reach 0 while other children are
+-- pending. Such a completion is parked as depearly:<member> and counted once
+-- the member is registered.
+local function countEarlyDeps(parentDepsKey, parentJobKey)
+  if (tonumber(redis.call('HGET', parentJobKey, 'depsEarly')) or 0) <= 0 then return false end
+  local counted = false
+  local fields = redis.call('HKEYS', parentJobKey)
+  for i = 1, #fields do
+    local f = fields[i]
+    if string.sub(f, 1, 9) == 'depearly:' then
+      local member = string.sub(f, 10)
+      if redis.call('SISMEMBER', parentDepsKey, member) == 1 then
+        redis.call('HDEL', parentJobKey, f)
+        redis.call('HINCRBY', parentJobKey, 'depsEarly', -1)
+        if redis.call('HSETNX', parentJobKey, 'depdone:' .. member, '1') == 1 then
+          redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+          counted = true
+        end
+      end
+    end
+  end
+  return counted
+end
+
 -- Complete one parent dependency without recreating a parent removed while its
 -- child was still in flight. All callers run inside a single FCALL, so the
 -- EXISTS/HSETNX sequence is atomic with respect to removal and completion.
@@ -208,20 +259,24 @@ local function completeParentDependency(parentDepsKey, parentJobKey, parentStrea
   if redis.call('EXISTS', parentJobKey) == 0 then
     return -1
   end
-  local depMarker = 'depdone:' .. depsMember
-  if redis.call('HSETNX', parentJobKey, depMarker, '1') == 0 then
+  if redis.call('SISMEMBER', parentDepsKey, depsMember) == 0 then
+    if redis.call('HSETNX', parentJobKey, 'depearly:' .. depsMember, '1') == 1 then
+      redis.call('HINCRBY', parentJobKey, 'depsEarly', 1)
+    end
     local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
     return redis.call('SCARD', parentDepsKey) - doneCount
   end
-  local doneCount = redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
-  local totalDeps = redis.call('SCARD', parentDepsKey)
-  local remaining = totalDeps - doneCount
-  if remaining <= 0 and redis.call('HGET', parentJobKey, 'state') == 'waiting-children' then
-    redis.call('HSET', parentJobKey, 'state', 'waiting')
-    xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
-    emitEvent(parentEventsKey, 'active', parentId, nil)
+  local counted = countEarlyDeps(parentDepsKey, parentJobKey)
+  local depMarker = 'depdone:' .. depsMember
+  if redis.call('HSETNX', parentJobKey, depMarker, '1') == 1 then
+    redis.call('HINCRBY', parentJobKey, 'depsCompleted', 1)
+    counted = true
   end
-  return remaining
+  if not counted then
+    local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
+    return redis.call('SCARD', parentDepsKey) - doneCount
+  end
+  return releaseParentIfReady(parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey, parentId)
 end
 
 local function groupqScore(jobKey, jobId)
@@ -490,6 +545,28 @@ local function addParentNotification(notifications, seen, member)
   end
 end
 
+-- A debounce replacement of a cross-queue child inherits the replaced
+-- children's parent dependency (replacedIds, JSON array of job IDs), so the
+-- parent is not released between the replacement and its registration.
+local function decodeReplacedIds(raw)
+  if not raw or raw == '' then return nil end
+  local ok, ids = pcall(cjson.decode, raw)
+  if ok and type(ids) == 'table' then return ids end
+  return nil
+end
+
+-- Record the cross-queue tree-parent notifications of a finished child and of
+-- every child it replaced.
+local function enqueueTreeParentNotifies(prefix, jobId, parentQueue, parentId, replacedRaw, notifications, seen)
+  addParentNotification(notifications, seen, enqueueCrossQueueParentNotify(prefix, jobId, parentQueue, parentId))
+  local ids = decodeReplacedIds(replacedRaw)
+  if not ids then return end
+  for i = 1, #ids do
+    addParentNotification(notifications, seen,
+      enqueueCrossQueueParentNotify(prefix, tostring(ids[i]), parentQueue, parentId))
+  end
+end
+
 -- Resolve the parents of a child that is deleted before it completes (job
 -- removal, debounce replacement) so they do not wait for it forever.
 -- Same-queue tree and DAG parents are resolved here; cross-queue parents are
@@ -497,10 +574,11 @@ end
 -- readChildParents captures the edges before the child hash and its parents
 -- SET are deleted.
 local function readChildParents(prefix, jobKey, jobId)
-  local parent = redis.call('HMGET', jobKey, 'parentQueue', 'parentId')
+  local parent = redis.call('HMGET', jobKey, 'parentQueue', 'parentId', 'replacedIds')
   return {
     parentQueue = parent[1],
     parentId = parent[2],
+    replacedIds = parent[3],
     dagParents = redis.call('SMEMBERS', prefix .. 'parents:' .. jobId),
   }
 end
@@ -517,8 +595,8 @@ local function resolveRemovedChildParents(prefix, jobId, eventsKey, edges)
       completeParentDependency(prefix .. 'deps:' .. storedParentId, prefix .. 'job:' .. storedParentId,
         prefix .. 'stream', eventsKey, depsMember, storedParentId)
     else
-      addParentNotification(notifications, seen,
-        enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId))
+      enqueueTreeParentNotifies(prefix, jobId, storedParentQueue, storedParentId, edges.replacedIds,
+        notifications, seen)
     end
   end
   local dagParents = edges.dagParents
@@ -804,6 +882,53 @@ local function removeExcessJobs(setKey, prefix, ids)
   end
 end
 
+-- Upsert the group config an ordered job carries (concurrency, sliding-window
+-- rate limit, token bucket). The current values are read in one HMGET.
+local function upsertGroupConfig(prefix, orderingKey, orderingSeq, groupConcurrency, groupRateMax, groupRateDuration,
+    tbCapacity, tbRefillRate, timestamp)
+  if groupConcurrency < 1 then groupConcurrency = 1 end
+  local groupHashKey = groupHashKey(prefix, orderingKey)
+  local cur = redis.call('HMGET', groupHashKey,
+    'maxConcurrency', 'nextSeq', 'rateMax', 'rateDuration', 'tbCapacity', 'tbRefillRate')
+  if (tonumber(cur[1]) or 0) ~= groupConcurrency then
+    redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
+  end
+  -- Initialize nextSeq for ordered promotion
+  if orderingSeq > 0 and not cur[2] then
+    redis.call('HSET', groupHashKey, 'nextSeq', '1')
+  end
+  local curRateMax = tonumber(cur[3]) or 0
+  if groupRateMax > 0 then
+    if curRateMax ~= groupRateMax then
+      redis.call('HSET', groupHashKey, 'rateMax', tostring(groupRateMax))
+    end
+    if (tonumber(cur[4]) or 0) ~= groupRateDuration then
+      redis.call('HSET', groupHashKey, 'rateDuration', tostring(groupRateDuration))
+    end
+  elseif curRateMax > 0 then
+    -- Clear stale rate limit fields if group was previously rate-limited
+    redis.call('HDEL', groupHashKey, 'rateMax', 'rateDuration', 'rateWindowStart', 'rateCount')
+  end
+  local curTbCap = tonumber(cur[5]) or 0
+  if tbCapacity > 0 then
+    if curTbCap ~= tbCapacity then
+      redis.call('HSET', groupHashKey, 'tbCapacity', tostring(tbCapacity))
+    end
+    if (tonumber(cur[6]) or 0) ~= tbRefillRate then
+      redis.call('HSET', groupHashKey, 'tbRefillRate', tostring(tbRefillRate))
+    end
+    -- Initialize tokens on first setup
+    if curTbCap == 0 then
+      redis.call('HSET', groupHashKey,
+        'tbTokens', tostring(tbCapacity),
+        'tbLastRefill', tostring(timestamp),
+        'tbRefillRemainder', '0')
+    end
+  elseif curTbCap > 0 then
+    redis.call('HDEL', groupHashKey, 'tbCapacity', 'tbRefillRate', 'tbTokens', 'tbLastRefill', 'tbRefillRemainder')
+  end
+end
+
 redis.register_function('glidemq_version', function(keys, args)
   return '__LIBRARY_VERSION__'
 end)
@@ -835,6 +960,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local parentQueue = args[19] or ''
   local schedulerName = args[20] or ''
   local skipEvents = args[21] or '0'
+  local budgetKey = args[22] or ''
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local effectiveCost = (jobCost > 0) and jobCost or 1000
   if orderingKey ~= '' and tbCapacity > 0 and effectiveCost > tbCapacity then
@@ -861,57 +987,8 @@ redis.register_function('glidemq_addJob', function(keys, args)
     orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
   end
   if useGroupConcurrency then
-    if groupConcurrency < 1 then groupConcurrency = 1 end
-    local groupHashKey = groupHashKey(prefix, orderingKey)
-    local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
-    if curMax ~= groupConcurrency then
-      redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
-    end
-    -- Initialize nextSeq for ordered promotion
-    if orderingSeq > 0 and redis.call('HEXISTS', groupHashKey, 'nextSeq') == 0 then
-      redis.call('HSET', groupHashKey, 'nextSeq', '1')
-    end
-    -- Upsert rate limit fields on group hash
-    if groupRateMax > 0 then
-      local curRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
-      if curRateMax ~= groupRateMax then
-        redis.call('HSET', groupHashKey, 'rateMax', tostring(groupRateMax))
-      end
-      local curRateDuration = tonumber(redis.call('HGET', groupHashKey, 'rateDuration')) or 0
-      if curRateDuration ~= groupRateDuration then
-        redis.call('HSET', groupHashKey, 'rateDuration', tostring(groupRateDuration))
-      end
-    else
-      -- Clear stale rate limit fields if group was previously rate-limited
-      local oldRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
-      if oldRateMax > 0 then
-        redis.call('HDEL', groupHashKey, 'rateMax', 'rateDuration', 'rateWindowStart', 'rateCount')
-      end
-    end
-    -- Upsert token bucket fields on group hash
-    if tbCapacity > 0 then
-      local curTbCap = tonumber(redis.call('HGET', groupHashKey, 'tbCapacity')) or 0
-      if curTbCap ~= tbCapacity then
-        redis.call('HSET', groupHashKey, 'tbCapacity', tostring(tbCapacity))
-      end
-      local curTbRate = tonumber(redis.call('HGET', groupHashKey, 'tbRefillRate')) or 0
-      if curTbRate ~= tbRefillRate then
-        redis.call('HSET', groupHashKey, 'tbRefillRate', tostring(tbRefillRate))
-      end
-      -- Initialize tokens on first setup
-      if curTbCap == 0 then
-        redis.call('HSET', groupHashKey,
-          'tbTokens', tostring(tbCapacity),
-          'tbLastRefill', tostring(timestamp),
-          'tbRefillRemainder', '0')
-      end
-    else
-      -- Clear stale tb fields
-      local oldTbCap = tonumber(redis.call('HGET', groupHashKey, 'tbCapacity')) or 0
-      if oldTbCap > 0 then
-        redis.call('HDEL', groupHashKey, 'tbCapacity', 'tbRefillRate', 'tbTokens', 'tbLastRefill', 'tbRefillRemainder')
-      end
-    end
+    upsertGroupConfig(prefix, orderingKey, orderingSeq, groupConcurrency, groupRateMax, groupRateDuration,
+      tbCapacity, tbRefillRate, timestamp)
   end
   local hashFields = {
     'id', jobIdStr,
@@ -951,6 +1028,10 @@ redis.register_function('glidemq_addJob', function(keys, args)
   if schedulerName ~= '' then
     hashFields[#hashFields + 1] = 'schedulerName'
     hashFields[#hashFields + 1] = schedulerName
+  end
+  if budgetKey ~= '' then
+    hashFields[#hashFields + 1] = 'budgetKey'
+    hashFields[#hashFields + 1] = budgetKey
   end
   if lifo > 0 then
     hashFields[#hashFields + 1] = 'lifo'
@@ -1138,7 +1219,7 @@ redis.register_function('glidemq_complete', function(keys, args)
   local broadcastMode = args[11] or '0'
   local skipEvents = args[12] or '0'
   local skipMetrics = args[13] or '0'
-  local cur = redis.call('HMGET', jobKey, 'revoked', 'state', 'processedOn')
+  local cur = redis.call('HMGET', jobKey, 'revoked', 'state', 'processedOn', 'parentQueue', 'parentId', 'replacedIds')
   if cur[1] == '1' then
     return 'REVOKED'
   end
@@ -1147,30 +1228,36 @@ redis.register_function('glidemq_complete', function(keys, args)
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   -- The job was removed while active: removeJob already released its slot,
   -- list reservation and parents. Do not recreate the hash.
-  if not cur[2] then return '' end
-  redis.call('ZADD', completedKey, timestamp, jobId)
-  redis.call('HSET', jobKey,
-    'state', 'completed',
-    'returnvalue', returnvalue,
-    'finishedOn', tostring(timestamp)
-  )
+  if not cur[2] then
+    if entryId == '' then
+      redis.call('SREM', string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active-ids', jobId)
+    end
+    return ''
+  end
+  -- removeOnComplete:true deletes the hash below; nothing in this script reads
+  -- the completed state, returnvalue or finishedOn, so skip those writes.
+  local removeNow = removeMode == 'true' and broadcastMode ~= '1'
+  if not removeNow then
+    redis.call('ZADD', completedKey, timestamp, jobId)
+    redis.call('HSET', jobKey,
+      'state', 'completed',
+      'returnvalue', returnvalue,
+      'finishedOn', tostring(timestamp)
+    )
+  end
   markOrderingDone(jobKey, jobId)
   releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
   if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
   if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-  local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
-  local storedParentId = redis.call('HGET', jobKey, 'parentId')
+  local storedParentQueue = cur[4]
+  local storedParentId = cur[5]
   local parentNotifications = {}
   local parentNotificationSet = {}
-  addParentNotification(
-    parentNotifications,
-    parentNotificationSet,
-    enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
-  )
+  enqueueTreeParentNotifies(prefix, jobId, storedParentQueue, storedParentId,
+    cur[6], parentNotifications, parentNotificationSet)
   if broadcastMode ~= '1' then
-    if removeMode == 'true' then
-      redis.call('ZREM', completedKey, jobId)
+    if removeNow then
       redis.call('UNLINK', jobKey)
     elseif removeMode == 'count' and removeCount > 0 then
       local total = redis.call('ZCARD', completedKey)
@@ -1245,7 +1332,7 @@ redis.register_function('glidemq_complete', function(keys, args)
       end
     end
   end
-  if entryId == '' then decrListActive(prefix .. 'list-active') end
+  if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
   return #parentNotifications > 0 and cjson.encode(parentNotifications) or ''
 end)
 
@@ -1276,7 +1363,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local skipMetrics = args[19] or '0'
 
   -- Phase 1: Complete current job (same as glidemq_complete)
-  local cur = redis.call('HMGET', jobKey, 'revoked', 'state', 'processedOn')
+  local cur = redis.call('HMGET', jobKey, 'revoked', 'state', 'processedOn', 'parentQueue', 'parentId', 'replacedIds')
   if cur[1] == '1' then
     return {'CURRENT_REVOKED', jobId}
   end
@@ -1292,35 +1379,41 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local parentNotifications = {}
   -- A job removed while active was already released by removeJob. Skip the
   -- completion so the hash and group/list accounting are not touched again.
+  if not cur[2] and entryId == '' then redis.call('SREM', prefix .. 'list-active-ids', jobId) end
   if cur[2] then
-    redis.call('ZADD', completedKey, timestamp, jobId)
-    redis.call('HSET', jobKey,
-      'state', 'completed',
-      'returnvalue', returnvalue,
-      'finishedOn', tostring(timestamp)
-    )
+    -- removeOnComplete:true deletes the hash below; nothing in this script
+    -- reads the completed state, returnvalue or finishedOn.
+    local removeNow = removeMode == 'true' and broadcastMode ~= '1'
+    if not removeNow then
+      redis.call('ZADD', completedKey, timestamp, jobId)
+      redis.call('HSET', jobKey,
+        'state', 'completed',
+        'returnvalue', returnvalue,
+        'finishedOn', tostring(timestamp)
+      )
+    end
     if currentOrderingKey ~= '__' then
       markOrderingDone(jobKey, jobId, currentOrderingKey, currentOrderingSeq)
+    elseif currentGroupKey ~= '__' then
+      -- Job hashes store the ordering key as groupKey, so the worker hint
+      -- for orderingKey is absent for ordered jobs. Fall back like complete.
+      markOrderingDone(jobKey, jobId, currentGroupKey, currentOrderingSeq)
     end
     if currentGroupKey ~= '__' then
       releaseGroupSlotAndPromote(jobKey, jobId, timestamp, currentGroupKey)
     end
     if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
     if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
-    local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
-    local storedParentId = redis.call('HGET', jobKey, 'parentId')
+    local storedParentQueue = cur[4]
+    local storedParentId = cur[5]
     local parentNotificationSet = {}
-    addParentNotification(
-      parentNotifications,
-      parentNotificationSet,
-      enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
-    )
-    if entryId == '' then decrListActive(prefix .. 'list-active') end
+    enqueueTreeParentNotifies(prefix, jobId, storedParentQueue, storedParentId,
+      cur[6], parentNotifications, parentNotificationSet)
+    if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
 
     -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
     if broadcastMode ~= '1' then
-      if removeMode == 'true' then
-        redis.call('ZREM', completedKey, jobId)
+      if removeNow then
         redis.call('UNLINK', jobKey)
       elseif removeMode == 'count' and removeCount > 0 then
         local total = redis.call('ZCARD', completedKey)
@@ -1425,19 +1518,19 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
 
     local priJobKey = prefix .. 'job:' .. priJobId
     -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' (3 → 1)
-    local priMeta = redis.call('HMGET', priJobKey, 'state', 'revoked', 'expireAt')
+    local priMeta = redis.call('HMGET', priJobKey, 'state', 'revoked', 'expireAt', 'groupKey', 'orderingSeq')
     if priMeta[1] and isActivatableState(priMeta[1]) then
       if priMeta[2] ~= '1' then
         local priExpireAt = tonumber(priMeta[3])
         if not priExpireAt or priExpireAt <= 0 or timestamp <= priExpireAt then
           -- Check ordering/group gates for priority-list jobs
-          local priGroupKey = redis.call('HGET', priJobKey, 'groupKey')
+          local priGroupKey = priMeta[4]
           if priGroupKey and priGroupKey ~= '' then
             local priGroupHashKey = prefix .. 'group:' .. priGroupKey
             local priGrpFields = redis.call('HGETALL', priGroupHashKey)
             local priGrp = {}
             for pf = 1, #priGrpFields, 2 do priGrp[priGrpFields[pf]] = priGrpFields[pf + 1] end
-            local priOrdSeq = tonumber(redis.call('HGET', priJobKey, 'orderingSeq')) or 0
+            local priOrdSeq = tonumber(priMeta[5]) or 0
             local priNextSeq = tonumber(priGrp.nextSeq) or 0
             if priNextSeq > 0 then
               local priAdv = advancePastSkips(priGroupHashKey, priNextSeq)
@@ -1526,18 +1619,16 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
                   redis.call('HSET', priGroupHashKey, 'nextSeq', tostring(priOrdSeq + 1))
                   redis.call('ZREM', priWaitListKey, priJobId)
                 end
-                if skipEvents ~= '1' then emitEvent(eventsKey, 'active', priJobId, nil) end
                 local priJobFields = redis.call('HGETALL', priJobKey)
-                redis.call('INCR', prefix .. 'list-active')
+                incrListActive(prefix .. 'list-active', {priJobId})
                 return appendParentNotifications({'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}, parentNotifications)
               end
             end
           else
             -- Non-group job: activate directly
             redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
-            if skipEvents ~= '1' then emitEvent(eventsKey, 'active', priJobId, nil) end
             local priJobFields = redis.call('HGETALL', priJobKey)
-            redis.call('INCR', prefix .. 'list-active')
+            incrListActive(prefix .. 'list-active', {priJobId})
             return appendParentNotifications({'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}, parentNotifications)
           end
         else
@@ -1563,9 +1654,8 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         local lifoExpireAt = tonumber(lifoMeta[3])
         if not lifoExpireAt or lifoExpireAt <= 0 or timestamp <= lifoExpireAt then
           redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
-          if skipEvents ~= '1' then emitEvent(eventsKey, 'active', lifoJobId, nil) end
           local lifoJobFields = redis.call('HGETALL', lifoJobKey)
-          redis.call('INCR', prefix .. 'list-active')
+          incrListActive(prefix .. 'list-active', {lifoJobId})
           return appendParentNotifications({'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}, parentNotifications)
         else
           expireJob(lifoJobKey, lifoJobId, prefix, timestamp, lifoMeta[1], nil, nil, nil)
@@ -1577,6 +1667,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   -- Phase 2: Fetch next job (non-blocking XREADGROUP), skip expired (up to 3 attempts)
   local nextJobId, nextEntryId, nextJobKey
   local nextGroupKey = nil
+  local nextOrderingSeq = nil
   for _fetchAttempt = 1, 3 do
     local nextEntries = redis.call('XREADGROUP', 'GROUP', group, consumer, 'COUNT', 1, 'STREAMS', streamKey, '>')
     if not nextEntries or #nextEntries == 0 then
@@ -1602,7 +1693,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     end
     nextJobKey = prefix .. 'job:' .. nextJobId
     -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' + HGET 'groupKey' (4 → 1)
-    local nextMeta = redis.call('HMGET', nextJobKey, 'state', 'revoked', 'expireAt', 'groupKey')
+    local nextMeta = redis.call('HMGET', nextJobKey, 'state', 'revoked', 'expireAt', 'groupKey', 'orderingSeq')
     if not nextMeta[1] then
       -- state is nil: job hash does not exist
       return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
@@ -1625,6 +1716,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
       nextJobId = nil
     else
       nextGroupKey = nextMeta[4]
+      nextOrderingSeq = nextMeta[5]
       break
     end
   end
@@ -1643,7 +1735,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local nextActive = tonumber(nGrp.active) or 0
     local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
     -- Ordering gate
-    local nextJobOrderingSeq = tonumber(redis.call('HGET', nextJobKey, 'orderingSeq')) or 0
+    local nextJobOrderingSeq = tonumber(nextOrderingSeq) or 0
     local nextReturning = false
     if nextJobOrderingSeq > 0 then
       local nextExpectedSeq = tonumber(nGrp.nextSeq) or 0
@@ -1783,12 +1875,19 @@ redis.register_function('glidemq_fail', function(keys, args)
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   -- Removed while active: do not recreate the hash or schedule a retry.
-  if redis.call('EXISTS', jobKey) == 0 then return 'removed' end
+  if redis.call('EXISTS', jobKey) == 0 then
+    if entryId == '' then
+      redis.call('SREM', string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active-ids', jobId)
+    end
+    return 'removed'
+  end
   local attemptsMade
   if broadcastMode == '1' then
     local subKey = jobKey .. ':sub:' .. group
     attemptsMade = redis.call('HINCRBY', subKey, 'a', 1)
-    redis.call('EXPIRE', subKey, 86400)
+    -- Keep the counter for 24h past the scheduled retry, so a backoff longer
+    -- than 24h does not reset the attempts.
+    redis.call('EXPIRE', subKey, 86400 + math.ceil(math.max(backoffDelay, 0) / 1000))
   else
     attemptsMade = redis.call('HINCRBY', jobKey, 'attemptsMade', 1)
   end
@@ -1824,16 +1923,21 @@ redis.register_function('glidemq_fail', function(keys, args)
       'attemptsMade', tostring(attemptsMade),
       'delay', tostring(backoffDelay)
     })
-    if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
+    if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active', jobId) end
     return 'retrying'
   else
-    redis.call('ZADD', failedKey, timestamp, jobId)
-    redis.call('HSET', jobKey,
-      'state', 'failed',
-      'failedReason', failedReason,
-      'finishedOn', tostring(timestamp),
-      'processedOn', tostring(timestamp)
-    )
+    -- removeOnFail:true deletes the hash below; nothing in this script reads
+    -- the failed state, reason or timestamps, so skip those writes.
+    local removeNow = removeMode == 'true' and broadcastMode ~= '1'
+    if not removeNow then
+      redis.call('ZADD', failedKey, timestamp, jobId)
+      redis.call('HSET', jobKey,
+        'state', 'failed',
+        'failedReason', failedReason,
+        'finishedOn', tostring(timestamp),
+        'processedOn', tostring(timestamp)
+      )
+    end
     markOrderingDone(jobKey, jobId)
     releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
@@ -1841,8 +1945,7 @@ redis.register_function('glidemq_fail', function(keys, args)
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     -- In broadcast mode, skip job hash deletion: the job must persist for all subscriptions
     if broadcastMode ~= '1' then
-      if removeMode == 'true' then
-        redis.call('ZREM', failedKey, jobId)
+      if removeNow then
         redis.call('UNLINK', jobKey)
       elseif removeMode == 'count' and removeCount > 0 then
         local total = redis.call('ZCARD', failedKey)
@@ -1865,7 +1968,7 @@ redis.register_function('glidemq_fail', function(keys, args)
         end
       end
     end
-    if entryId == '' then decrListActive(prefix .. 'list-active') end
+    if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
     return 'failed'
   end
 end)
@@ -1973,11 +2076,66 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   return count
 end)
 
+local function isActiveListClaim(jobKey)
+  local vals = redis.call('HMGET', jobKey, 'state', 'listSourced', 'lifo', 'priority')
+  return vals[1] == 'active' and isListSourced(vals[2], vals[3], vals[4])
+end
+
+-- Bounded SCAN for active list-sourced jobs. All prefix:job:* keys share the
+-- queue hash tag, so SCAN sees the whole set on the local node. Returns the
+-- job IDs and whether the scan completed.
+local function scanActiveListIds(prefix, maxIter, count)
+  local pattern = prefix .. 'job:*'
+  local cursor = '0'
+  local iter = 0
+  local ids = {}
+  repeat
+    iter = iter + 1
+    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', count)
+    cursor = sr[1]
+    local scanned = sr[2]
+    for i = 1, #scanned do
+      local jk = scanned[i]
+      if isActiveListClaim(jk) then
+        ids[#ids + 1] = string.sub(jk, #prefix + 5)
+      end
+    end
+  until cursor == '0' or iter >= maxIter
+  return ids, cursor == '0'
+end
+
+-- Active list-sourced job IDs, read from list-active-ids when it covers every
+-- claim counted in list-active, else from a bounded SCAN. A set is trusted
+-- only after one complete SCAN seeded it (claims activated by an older
+-- library are not in it) and while SCARD >= list-active (an older worker
+-- that does not maintain it). Returns the IDs and whether they are complete.
+local function activeListIds(prefix, maxIter, count)
+  local listActiveKey = prefix .. 'list-active'
+  local idsKey = listActiveIdsKey(listActiveKey)
+  local metaKey = prefix .. 'meta'
+  local counter = tonumber(redis.call('GET', listActiveKey)) or 0
+  if redis.call('HGET', metaKey, 'listActiveIds') == '1' and redis.call('SCARD', idsKey) >= counter then
+    local ids = {}
+    local members = redis.call('SMEMBERS', idsKey)
+    for i = 1, #members do
+      if isActiveListClaim(prefix .. 'job:' .. members[i]) then ids[#ids + 1] = members[i] end
+    end
+    return ids, true
+  end
+  local ids, complete = scanActiveListIds(prefix, maxIter, count)
+  if complete then
+    for i = 1, #ids, 1000 do
+      redis.call('SADD', idsKey, unpack(ids, i, math.min(i + 999, #ids)))
+    end
+    redis.call('HSET', metaKey, 'listActiveIds', '1')
+  end
+  return ids, complete
+end
+
 -- Reclaim stalled list-sourced jobs (LIFO/priority) that are invisible to XAUTOCLAIM.
--- Uses bounded SCAN to find active list jobs with stale lastActive, then applies stall logic.
--- Each call starts at cursor 0 and stops after maxIter SCAN steps, so on a very
--- large keyspace jobs past that bound are not reclaimed by this call. It only
--- acts on jobs it saw, so a partial scan never corrupts state.
+-- Finds active list jobs with stale lastActive (see activeListIds), then applies
+-- stall logic. A bounded SCAN may not see jobs past its bound on a very large
+-- keyspace; it only acts on jobs it saw, so a partial scan never corrupts state.
 -- KEYS: [streamKey, eventsKey]
 -- ARGS: [minIdleMs, maxStalledCount, timestamp, failedKey]
 redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
@@ -1992,81 +2150,68 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
   local workerLockDuration = tonumber(args[5]) or 0
   local prefix = string.sub(streamKey, 1, #streamKey - 6)
   -- Paused list claims retain their list-active reservation until resume.
-  -- Skip the bounded SCAN entirely so the reclaimer cannot redispatch or fail
+  -- Skip the scan entirely so the reclaimer cannot redispatch or fail
   -- a claim that was deliberately parked by a pause-race activation.
   if isQueuePaused(prefix) then return 0 end
   local listActiveKey = prefix .. 'list-active'
   local currentActive = tonumber(redis.call('GET', listActiveKey)) or 0
   if currentActive <= 0 then return 0 end
-  local pattern = prefix .. 'job:*'
-  local cursor = '0'
-  local maxIter = 1000
-  local iter = 0
+  local ids = activeListIds(prefix, 1000, 500)
   local count = 0
-  repeat
-    iter = iter + 1
-    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 500)
-    cursor = sr[1]
-    local scannedKeys = sr[2]
-    for i = 1, #scannedKeys do
-      local jk = scannedKeys[i]
-      local state = redis.call('HGET', jk, 'state')
-      if state == 'active' then
-        local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority', 'opts', 'listSourced')
-        local lastActive = tonumber(vals[1])
-        local listClaim = isListSourced(vals[5], vals[2], vals[3])
-        local jobLockDuration = extractLockDurationFromOpts(vals[4])
-        local effectiveIdle
-        if jobLockDuration > 0 then
-          effectiveIdle = jobLockDuration
-        elseif workerLockDuration > 0 then
-          effectiveIdle = workerLockDuration
+  for i = 1, #ids do
+    local jobId = ids[i]
+    local jk = prefix .. 'job:' .. jobId
+    local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority', 'opts')
+    local lastActive = tonumber(vals[1])
+    local jobLockDuration = extractLockDurationFromOpts(vals[4])
+    local effectiveIdle
+    if jobLockDuration > 0 then
+      effectiveIdle = jobLockDuration
+    elseif workerLockDuration > 0 then
+      effectiveIdle = workerLockDuration
+    else
+      effectiveIdle = minIdleMs
+    end
+    if lastActive and (timestamp - lastActive) >= effectiveIdle then
+      -- Claim this stalled check by refreshing lastActive. This preserves
+      -- XAUTOCLAIM-like de-duplication semantics across worker schedulers
+      -- so the same stale list job is counted at most once per interval.
+      redis.call('HSET', jk, 'lastActive', tostring(timestamp))
+      local shouldDecr = false
+      if checkExpired(jk, jobId, prefix, timestamp) then
+        shouldDecr = true
+      else
+        if applyStalledLogic(jk, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp) then
+          shouldDecr = true
         else
-          effectiveIdle = minIdleMs
-        end
-        if listClaim and lastActive and (timestamp - lastActive) >= effectiveIdle then
-          -- Claim this stalled check by refreshing lastActive. This preserves
-          -- XAUTOCLAIM-like de-duplication semantics across worker schedulers
-          -- so the same stale list job is counted at most once per interval.
-          redis.call('HSET', jk, 'lastActive', tostring(timestamp))
-          local jobId = string.sub(jk, #prefix + 5)
-          local shouldDecr = false
-          if checkExpired(jk, jobId, prefix, timestamp) then
-            shouldDecr = true
+          -- Under threshold: re-queue the job onto its source list so a
+          -- healthy worker picks it up. LIFO -> RPUSH lifo, priority ->
+          -- LPUSH priority (RPOP returns highest priority first). Decrement
+          -- the list-active counter because the job is no longer active.
+          local isLifo = vals[2] == '1'
+          local pri = tonumber(vals[3]) or 0
+          redis.call('HSET', jk, 'state', 'waiting')
+          redis.call('HDEL', jk, 'processedOn', 'lastActive')
+          if isLifo then
+            redis.call('RPUSH', prefix .. 'lifo', jobId)
+          elseif pri > 0 then
+            redis.call('LPUSH', prefix .. 'priority', jobId)
           else
-            if applyStalledLogic(jk, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp) then
-              shouldDecr = true
-            else
-              -- Under threshold: re-queue the job onto its source list so a
-              -- healthy worker picks it up. LIFO -> RPUSH lifo, priority ->
-              -- LPUSH priority (RPOP returns highest priority first). Decrement
-              -- the list-active counter because the job is no longer active.
-              local isLifo = vals[2] == '1'
-              local pri = tonumber(vals[3]) or 0
-              redis.call('HSET', jk, 'state', 'waiting')
-              redis.call('HDEL', jk, 'processedOn', 'lastActive')
-              if isLifo then
-                redis.call('RPUSH', prefix .. 'lifo', jobId)
-              elseif pri > 0 then
-                redis.call('LPUSH', prefix .. 'priority', jobId)
-              else
-                -- Stream-sourced fallback (shouldn't normally hit this branch
-                -- because XAUTOCLAIM handles stream entries, but redispatch
-                -- safely if someone misclassifies).
-                redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name',
-                  redis.call('HGET', jk, 'name') or '')
-              end
-              shouldDecr = true
-            end
+            -- Stream-sourced fallback (shouldn't normally hit this branch
+            -- because XAUTOCLAIM handles stream entries, but redispatch
+            -- safely if someone misclassifies).
+            redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name',
+              redis.call('HGET', jk, 'name') or '')
           end
-          if shouldDecr then
-            decrListActive(listActiveKey)
-          end
-          count = count + 1
+          shouldDecr = true
         end
       end
+      if shouldDecr then
+        decrListActive(listActiveKey, jobId)
+      end
+      count = count + 1
     end
-  until cursor == '0' or iter >= maxIter
+  end
   return count
 end)
 
@@ -2195,55 +2340,8 @@ redis.register_function('glidemq_dedup', function(keys, args)
     orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
   end
   if useGroupConcurrency then
-    if groupConcurrency < 1 then groupConcurrency = 1 end
-    local groupHashKey = groupHashKey(prefix, orderingKey)
-    local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
-    if curMax ~= groupConcurrency then
-      redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
-    end
-    -- Initialize nextSeq for ordered promotion
-    if orderingSeq > 0 and redis.call('HEXISTS', groupHashKey, 'nextSeq') == 0 then
-      redis.call('HSET', groupHashKey, 'nextSeq', '1')
-    end
-    if groupRateMax > 0 then
-      local curRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
-      if curRateMax ~= groupRateMax then
-        redis.call('HSET', groupHashKey, 'rateMax', tostring(groupRateMax))
-      end
-      local curRateDuration = tonumber(redis.call('HGET', groupHashKey, 'rateDuration')) or 0
-      if curRateDuration ~= groupRateDuration then
-        redis.call('HSET', groupHashKey, 'rateDuration', tostring(groupRateDuration))
-      end
-    else
-      local oldRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
-      if oldRateMax > 0 then
-        redis.call('HDEL', groupHashKey, 'rateMax', 'rateDuration', 'rateWindowStart', 'rateCount')
-      end
-    end
-    -- Upsert token bucket fields on group hash
-    if tbCapacity > 0 then
-      local curTbCap = tonumber(redis.call('HGET', groupHashKey, 'tbCapacity')) or 0
-      if curTbCap ~= tbCapacity then
-        redis.call('HSET', groupHashKey, 'tbCapacity', tostring(tbCapacity))
-      end
-      local curTbRate = tonumber(redis.call('HGET', groupHashKey, 'tbRefillRate')) or 0
-      if curTbRate ~= tbRefillRate then
-        redis.call('HSET', groupHashKey, 'tbRefillRate', tostring(tbRefillRate))
-      end
-      -- Initialize tokens on first setup
-      if curTbCap == 0 then
-        redis.call('HSET', groupHashKey,
-          'tbTokens', tostring(tbCapacity),
-          'tbLastRefill', tostring(timestamp),
-          'tbRefillRemainder', '0')
-      end
-    else
-      -- Clear stale tb fields
-      local oldTbCap = tonumber(redis.call('HGET', groupHashKey, 'tbCapacity')) or 0
-      if oldTbCap > 0 then
-        redis.call('HDEL', groupHashKey, 'tbCapacity', 'tbRefillRate', 'tbTokens', 'tbLastRefill', 'tbRefillRemainder')
-      end
-    end
+    upsertGroupConfig(prefix, orderingKey, orderingSeq, groupConcurrency, groupRateMax, groupRateDuration,
+      tbCapacity, tbRefillRate, timestamp)
   end
   local hashFields = {
     'id', jobIdStr,
@@ -2279,6 +2377,23 @@ redis.register_function('glidemq_dedup', function(keys, args)
       hashFields[#hashFields + 1] = 'parentQueue'
       hashFields[#hashFields + 1] = parentQueue
     end
+  end
+  -- The caller registers a cross-queue replacement in its parent's deps only
+  -- after this FCALL. Resolving the replaced child now could release the
+  -- parent in between, so the replacement inherits that dependency and
+  -- resolves it when it finishes.
+  if replacedJobId and parentId ~= '' and parentQueue ~= '' and
+     parentQueue ~= extractQueueTag(string.sub(prefix, 1, #prefix - 1)) and
+     replacedEdges.parentQueue == parentQueue and replacedEdges.parentId == parentId then
+    local inherited = decodeReplacedIds(replacedEdges.replacedIds) or {}
+    -- A same-id replacement already owns the replaced deps member.
+    if replacedJobId ~= jobIdStr then inherited[#inherited + 1] = replacedJobId end
+    if #inherited > 0 then
+      hashFields[#hashFields + 1] = 'replacedIds'
+      hashFields[#hashFields + 1] = cjson.encode(inherited)
+    end
+    replacedEdges.parentId = nil
+    replacedEdges.replacedIds = nil
   end
   if lifo > 0 then
     hashFields[#hashFields + 1] = 'lifo'
@@ -2630,12 +2745,12 @@ redis.register_function('glidemq_rpopAndReserve', function(keys, args)
     results[#results + 1] = jobId
   end
   if #results > 0 then
-    redis.call('INCRBY', listActiveKey, #results)
+    incrListActive(listActiveKey, results)
   end
   return results
 end)
 
-redis.register_function('glidemq_moveToActive', function(keys, args)
+local function moveToActiveClaim(keys, args)
   local jobKey = keys[1]
   local streamKey = keys[2] or ''
   local timestamp = args[1]
@@ -2717,7 +2832,7 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     local waitListKey = prefix .. 'groupq:' .. groupKey
     -- Ordering gate: park future jobs (seq > nextSeq) in sorted groupq.
     -- Returning step-jobs (seq <= nextSeq) are allowed through.
-    local jobOrderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
+    local jobOrderingSeq = tonumber(orderingSeq) or 0
     local isReturningStepJob = false
     if jobOrderingSeq > 0 then
       local nextSeq = tonumber(grp.nextSeq) or 0
@@ -2860,6 +2975,30 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     fields[#fields + 1] = timestampStr
   end
   return fields
+end
+
+-- Results after which the worker releases a list reservation itself (typed
+-- DECRBY on list-active), so the claim leaves list-active-ids here.
+local RELEASED_LIST_CLAIM = {
+  [''] = true, STALE = true, EXPIRED = true, GROUP_ORDERED = true, GROUP_FULL = true,
+  GROUP_RATE_LIMITED = true, GROUP_TOKEN_LIMITED = true, ['ERR:COST_EXCEEDS_CAPACITY'] = true,
+}
+
+redis.register_function('glidemq_moveToActive', function(keys, args)
+  local result = moveToActiveClaim(keys, args)
+  local jobId = args[4] or ''
+  -- List claims carry no entryId. Activation also tracks claims popped by the
+  -- legacy non-reserving glidemq_popLists.
+  if (args[2] or '') == '' and jobId ~= '' then
+    local jobKey = keys[1]
+    local idsKey = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active-ids'
+    if type(result) == 'table' then
+      redis.call('SADD', idsKey, jobId)
+    elseif RELEASED_LIST_CLAIM[result] then
+      redis.call('SREM', idsKey, jobId)
+    end
+  end
+  return result
 end)
 
 redis.register_function('glidemq_deferActive', function(keys, args)
@@ -2880,7 +3019,10 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   -- List-sourced jobs (entryId='') were counted in list-active; DECR to stay balanced.
-  if entryId == '' then decrListActive(listActiveKey) end
+  if entryId == '' then
+    decrListActive(listActiveKey, jobId)
+    redis.call('SREM', string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active-ids', jobId)
+  end
   if exists == 0 then
     return 0
   end
@@ -2944,6 +3086,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   local parentMaxAttempts = tonumber(args[7]) or 0
   local numChildren = tonumber(args[8])
   local parentCustomId = args[9] or ''
+  -- Optional trailing arg after the extra deps: budget hash key written on
+  -- every job hash created here.
+  local extraDepsCount = tonumber(args[9 + numChildren * 9 + 1]) or 0
+  local budgetKey = args[9 + numChildren * 9 + 1 + extraDepsCount + 1] or ''
   local parentPrefix = string.sub(parentIdKey, 1, #parentIdKey - 2)
   local parentOrderingKey = extractOrderingKeyFromOpts(parentOpts)
   local parentGroupConc = extractGroupConcurrencyFromOpts(parentOpts)
@@ -3063,6 +3209,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     parentHash[#parentHash + 1] = 'expireAt'
     parentHash[#parentHash + 1] = tostring(timestamp + parentTtl)
   end
+  if budgetKey ~= '' then
+    parentHash[#parentHash + 1] = 'budgetKey'
+    parentHash[#parentHash + 1] = budgetKey
+  end
   redis.call('HSET', parentJobKey, unpack(parentHash))
   local childArgOffset = 9
   local childKeyOffset = 4
@@ -3171,6 +3321,10 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       childHash[#childHash + 1] = 'lifo'
       childHash[#childHash + 1] = '1'
     end
+    if budgetKey ~= '' then
+      childHash[#childHash + 1] = 'budgetKey'
+      childHash[#childHash + 1] = budgetKey
+    end
     if childDelay > 0 or childPriority > 0 then
       childHash[#childHash + 1] = 'state'
       childHash[#childHash + 1] = childDelay > 0 and 'delayed' or 'prioritized'
@@ -3228,6 +3382,28 @@ redis.register_function('glidemq_completeChild', function(keys, args)
   local depsMember = args[1]
   local parentId = args[2]
   return completeParentDependency(depsKey, parentJobKey, parentStreamKey, parentEventsKey, depsMember, parentId)
+end)
+
+-- Register a cross-queue child in its parent's deps after the child was added.
+-- A completion that arrived first was parked as depearly and is counted now.
+-- KEYS: [parentDepsKey, parentJobKey, parentStreamKey, parentEventsKey]
+-- ARGS: [depsMember, parentId]
+-- Returns the parent's remaining dependency count, or -1 if the parent is gone.
+redis.register_function('glidemq_registerChildDep', function(keys, args)
+  local depsKey = keys[1]
+  local parentJobKey = keys[2]
+  local depsMember = args[1]
+  local parentId = args[2]
+  redis.call('SADD', depsKey, depsMember)
+  -- A parent that does not exist yet (children added first, parent later
+  -- calling moveToWaitingChildren) keeps the plain registration; early
+  -- completions are only parked on an existing parent hash.
+  if redis.call('EXISTS', parentJobKey) == 0 then return redis.call('SCARD', depsKey) end
+  if countEarlyDeps(depsKey, parentJobKey) then
+    return releaseParentIfReady(depsKey, parentJobKey, keys[3], keys[4], parentId)
+  end
+  local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
+  return redis.call('SCARD', depsKey) - doneCount
 end)
 
 redis.register_function('glidemq_registerParent', function(keys, args)
@@ -3293,7 +3469,7 @@ redis.register_function('glidemq_removeJob', function(keys, args)
     local src = redis.call('HMGET', jobKey, 'listSourced', 'lifo', 'priority')
     activeListClaim = isListSourced(src[1], src[2], src[3])
     if activeListClaim then
-      decrListActive(prefix .. 'list-active')
+      decrListActive(prefix .. 'list-active', jobId)
     end
   end
   redis.call('ZREM', scheduledKey, jobId)
@@ -3714,7 +3890,7 @@ redis.register_function('glidemq_moveActiveToDelayed', function(keys, args)
   else
     redis.call('HSET', jobKey, 'state', 'delayed', 'delay', tostring(delay))
   end
-  if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
+  if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active', jobId) end
   -- Only release group slot if this is NOT an ordering-key step-job.
   -- Ordering-key jobs hold the slot until full completion to preserve per-key order.
   local jobOrdSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
@@ -3759,6 +3935,9 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
   -- Race condition check: children may have already completed before this call
   local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
   local depsKey = prefix .. 'deps:' .. jobId
+  -- An older producer registers with a plain SADD, which cannot count a
+  -- completion that arrived before it.
+  countEarlyDeps(depsKey, jobKey)
   local totalDeps = redis.call('SCARD', depsKey)
   local depsCompleted = tonumber(redis.call('HGET', jobKey, 'depsCompleted')) or 0
   -- totalDeps == 0 is already complete: do not park with no children to wait on.
@@ -3766,11 +3945,11 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
     redis.call('HSET', jobKey, 'state', 'waiting')
     xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
     emitEvent(eventsKey, 'active', jobId, nil)
-    if entryId == '' then decrListActive(prefix .. 'list-active') end
+    if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
     return 'completed'
   end
 
-  if entryId == '' then decrListActive(prefix .. 'list-active') end
+  if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
   emitEvent(eventsKey, 'waiting-children', jobId, nil)
   return 'ok'
 end)
@@ -3803,7 +3982,7 @@ redis.register_function('glidemq_rateLimitGroup', function(keys, args)
 
   if entryId ~= '' then pcall(redis.call, 'XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
-  if entryId == '' then decrListActive(prefix .. 'list-active') end
+  if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
 
   local orderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
   local keepSlot = (currentJob == 'requeue' and orderingSeq > 0)
@@ -4191,43 +4370,30 @@ redis.register_function('glidemq_healListActive', function(keys, args)
   if counter <= 0 then
     return 0
   end
-  local pattern = prefix .. 'job:*'
-  local cursor = '0'
-  local actual = 0
-  local maxIter = 500
-  local iter = 0
-  repeat
-    iter = iter + 1
-    local scanResult = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 100)
-    cursor = scanResult[1]
-    local scannedKeys = scanResult[2]
-    for i = 1, #scannedKeys do
-      local jk = scannedKeys[i]
-      local state = redis.call('HGET', jk, 'state')
-      if state == 'active' then
-        local src = redis.call('HMGET', jk, 'listSourced', 'lifo', 'priority')
-        if isListSourced(src[1], src[2], src[3]) then
-          actual = actual + 1
-        end
-      end
-    end
-  until cursor == '0' or iter >= maxIter
+  local ids, complete = activeListIds(prefix, 500, 100)
   -- A partial scan undercounts active list jobs. Correcting from it would
   -- lower list-active below the true count and let globalConcurrency
-  -- overcommit, so only a completed scan may correct the counter.
-  if cursor ~= '0' then return 0 end
-  local drift = counter - actual
+  -- overcommit, so only a complete view may correct the counter.
+  if not complete then return 0 end
+  local drift = counter - #ids
   if drift > 0 then
     redis.call('DECRBY', listActiveKey, drift)
+    -- Mirror the correction in list-active-ids: keep only the active claims.
+    local idsKey = listActiveIdsKey(listActiveKey)
+    local active = {}
+    for i = 1, #ids do active[ids[i]] = true end
+    local members = redis.call('SMEMBERS', idsKey)
+    for i = 1, #members do
+      if not active[members[i]] then redis.call('SREM', idsKey, members[i]) end
+    end
   end
   return drift
 end)
 
--- List active list-sourced jobIds (state='active' AND isListSourced) via bounded SCAN.
--- Stream-backed active jobs are in the consumer group PEL (XPENDING) and listed separately.
--- All prefix:job:* keys share the {queueName} hash tag, so SCAN runs on a single
--- cluster slot and observes the full set on its local node. The scan is capped
--- at maxIter steps; past that bound on a very large keyspace the result is partial.
+-- List active list-sourced jobIds (state='active' AND isListSourced), see
+-- activeListIds. Stream-backed active jobs are in the consumer group PEL
+-- (XPENDING) and listed separately. A bounded SCAN on a very large keyspace
+-- may return a partial result.
 -- KEYS: [idKey]
 -- ARGS: [start, end] (inclusive 0-indexed bounds; end < 0 means unbounded)
 -- Returns: array of jobId strings.
@@ -4237,27 +4403,7 @@ redis.register_function('glidemq_getActiveListJobIds', function(keys, args)
   local startIdx = tonumber(args[1]) or 0
   local endIdx = tonumber(args[2])
   if endIdx == nil then endIdx = -1 end
-  local pattern = prefix .. 'job:*'
-  local cursor = '0'
-  local maxIter = 1000
-  local iter = 0
-  local ids = {}
-  repeat
-    iter = iter + 1
-    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 500)
-    cursor = sr[1]
-    local scanned = sr[2]
-    for i = 1, #scanned do
-      local jk = scanned[i]
-      local state = redis.call('HGET', jk, 'state')
-      if state == 'active' then
-        local vals = redis.call('HMGET', jk, 'listSourced', 'lifo', 'priority')
-        if isListSourced(vals[1], vals[2], vals[3]) then
-          ids[#ids + 1] = string.sub(jk, #prefix + 5)
-        end
-      end
-    end
-  until cursor == '0' or iter >= maxIter
+  local ids = activeListIds(prefix, 1000, 500)
   if endIdx >= 0 then
     local lastIdx = endIdx + 1
     if lastIdx > #ids then lastIdx = #ids end
@@ -4332,7 +4478,7 @@ redis.register_function('glidemq_popListsReserve', function(keys, args)
     end
   end
   if #results > 0 and listActiveKey and listActiveKey ~= '' then
-    redis.call('INCRBY', listActiveKey, #results)
+    incrListActive(listActiveKey, results)
   end
   return results
 end)
@@ -4380,7 +4526,7 @@ redis.register_function('glidemq_suspend', function(keys, args)
 
   if entryId == '' then
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-    decrListActive(prefix .. 'list-active')
+    decrListActive(prefix .. 'list-active', jobId)
   end
 
   emitEvent(eventsKey, 'suspended', jobId, nil)

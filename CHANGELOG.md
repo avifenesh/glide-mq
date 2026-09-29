@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Cross-queue parent released early**: `Queue.add`/`Producer.add` registered a cross-queue child in the parent's deps only after creating it, so a fast child could release a parent that still had pending children. Such completions are now parked and counted when the child is registered through `glidemq_registerChildDep`. Debounce replacing a cross-queue child inherits the replaced child's dependency.
+- **Flow budgets applied late**: the budget hash and each job's `budgetKey` were written after the flow's jobs were runnable. The budget is now created first and `budgetKey` is written in the same call that creates each job.
+- **Ordered group jobs completed via `completeAndFetchNext` skipped ordering bookkeeping** when only `groupKey` was stored.
+- **BroadcastWorker retry counters reset after 24h**: the per-subscription counter expired before long backoffs elapsed.
 - **Reconnect after close() leaked clients and timers**: a reconnect that finished after `close()` installed new clients, a new scheduler and a heartbeat timer that kept the process alive. Reconnect now checks `closing` after every await and closes what it created (Worker and QueueEvents). The first reconnect attempt now waits out its backoff, so persistent non-connection errors no longer spin.
 - **Leaked heartbeat kept a job active forever**: if a rate-limit or token-limit call threw, the job's heartbeat interval kept refreshing `lastActive`, so stalled recovery never reclaimed it. Limiter failures and partial batch activations now stop their heartbeats.
 - **`Worker.pause()` did not stop chaining under a backlog**: completion kept fetching the next job through `completeAndFetchNext`, so `pause()` resolved only when the queue drained. Paused workers complete without fetch-next, and entries delivered by an in-flight read are handed back instead of run.
@@ -46,10 +50,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Server function library version is `128`.** Workers and producers reload it on connect.
+- **`completeAndFetchNext` no longer emits `active` events** from its priority and LIFO paths, matching the stream path and `moveToActive`. Workers still emit their local `active` event.
 - **Proxy request bounds (`maxPageSize`, default 1000)**: `GET /jobs`, `/dlq` and `/suspended` without `end` (or `end=-1`) return at most `maxPageSize` items from `start`, and larger explicit spans return 400. `dlq/replay-all` replays at most `maxPageSize` per call, and `clean` rejects a `limit` above it. `POST /flows` rejects flows with more than 1000 nodes.
 - **`prefetch` is capped at `concurrency`** (`concurrency * batch.size` in batch mode). Prefetch above concurrency ran more processors than `concurrency` allowed, or left entries without heartbeats to be reclaimed and run twice.
 - **Producer priority errors** are now plain `Error`s with the same messages as `Queue.add`, instead of `GlideMQError`.
-- **`Job.retry()` only retries failed jobs** and throws on any other state, as its documentation already stated. Server function library version is `125`.
+- **`Job.retry()` only retries failed jobs** and throws on any other state, as its documentation already stated.
 - **Cron day matching uses OR when both day-of-month and day-of-week are restricted**, like standard cron and cron-parser: `0 0 1 * 1` fires on every 1st and every Monday, not only on Mondays that fall on the 1st.
 - **Scheduler templates reject `jobId`** at upsert (a fixed id deduplicated every fire). Stored legacy entries keep working.
 - **Re-upserting an in-flight `repeatAfterComplete` scheduler no longer fires immediately.** Remove and re-add the scheduler to force a run.
@@ -57,6 +63,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Security
 
 - **Dev dependencies**: `vitest` and `@vitest/coverage-v8` upgraded to 4.1.11 (path traversal via `@vitest/mocker` redirect mocks) and `@humanfs/node` to 0.16.8 (recursive copy followed symlinks). Test tooling only; no runtime dependency changed.
+
+### Performance
+
+- **List-active scans** (heal, list stall reclaim, active list job lookup) read a same-slot `list-active-ids` set instead of scanning the keyspace, falling back to SCAN when the set is incomplete (legacy workers).
+- **Fewer hash reads** in `complete`, `completeAndFetchNext`, `moveToActive`, `addJob` and `dedup`, and `removeOnComplete`/`removeOnFail: true` skip terminal writes to a hash deleted in the same call.
 
 ### Documentation
 
