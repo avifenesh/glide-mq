@@ -162,4 +162,44 @@ describeEachMode('Follow-ups 2026-09-29', (CONNECTION) => {
     expect(await eventTypes(Q)).toEqual(['failed']);
     expect(await cleanupClient.hlen(k.metricsFailed)).toBeGreaterThan(0);
   });
+
+  it('F5: a job failed at activation for cost over capacity gets a DLQ copy', async () => {
+    const Q = uniqueQueue('fu-cost-dlq');
+    const DLQ = uniqueQueue('fu-cost-dlq-dead');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const dlq = new Queue(DLQ, { connection: CONNECTION });
+    const processed: string[] = [];
+    try {
+      const job = await queue.add(
+        'costly',
+        { n: 1 },
+        { ordering: { key: 'g', tokenBucket: { capacity: 10, refillRate: 1 } }, cost: 5 },
+      );
+      // The group capacity shrank after the job was added.
+      await cleanupClient.hset(k.group('g'), { tbCapacity: '1', tbTokens: '1' });
+      const worker = new Worker(Q, async (j: any) => processed.push(j.id), {
+        connection: CONNECTION,
+        deadLetterQueue: { name: DLQ },
+      });
+      try {
+        await waitFor(async () => (await dlq.getJobCounts()).waiting === 1, 8000);
+      } finally {
+        await worker.close();
+      }
+      expect(processed).toEqual([]);
+      expect(await cleanupClient.hget(k.job(job!.id), 'state')).toBe('failed');
+      const [dead] = await dlq.getJobs('waiting');
+      expect(dead.name).toBe('costly');
+      expect(dead.data).toMatchObject({
+        originalQueue: Q,
+        originalJobId: job!.id,
+        data: { n: 1 },
+        failedReason: 'cost exceeds token bucket capacity',
+      });
+    } finally {
+      await dlq.close();
+      await queue.close();
+    }
+  });
 });

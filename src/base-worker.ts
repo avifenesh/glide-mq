@@ -19,6 +19,7 @@ import {
   calculateBackoff,
   computeFollowingSchedulerNextRun,
   computeWeightedTotal,
+  hashDataToRecord,
   nextReconnectDelay,
   parseCrossQueueParentNotification,
   parseJsonRecord,
@@ -1159,6 +1160,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
       return true;
     }
+    if (moveResult === 'ERR:COST_EXCEEDS_CAPACITY' && this.opts.deadLetterQueue) {
+      // moveToActive failed the job terminally; give it the DLQ copy that
+      // worker-side terminal failures get.
+      await this.moveFailedJobToDLQ(jobId);
+    }
     if (
       moveResult === 'GROUP_FULL' ||
       moveResult === 'GROUP_RATE_LIMITED' ||
@@ -2085,6 +2091,19 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (timer) {
       clearInterval(timer);
       this.heartbeatIntervals.delete(jobId);
+    }
+  }
+
+  /** DLQ copy of a job the server already failed, read back from its hash. */
+  private async moveFailedJobToDLQ(jobId: string): Promise<void> {
+    if (!this.commandClient) return;
+    try {
+      const hash = hashDataToRecord(await this.commandClient.hgetall(this.queueKeys.job(jobId)));
+      if (!hash) return;
+      const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, jobId, hash, this.serializer);
+      await this.moveToDLQ(job, new Error(job.failedReason ?? 'failed'));
+    } catch (err) {
+      this.emit('error', err);
     }
   }
 
