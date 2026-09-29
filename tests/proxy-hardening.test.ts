@@ -564,5 +564,75 @@ describe('HTTP proxy hardening - broadcast publish options', () => {
     });
     expect(res.status).toBe(400);
     expect((await res.json()).error).toMatch(/priority or lifo/);
+describe('HTTP proxy hardening - bounded retry', () => {
+  const { Queue: DistQueue } = require('../dist/queue') as typeof import('../src/queue');
+  const { Worker: DistWorker } = require('../dist/worker') as typeof import('../src/worker');
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+  const queueName = `proxy-hard-${RUN_ID}-retry`;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    const proxy = createProxyServer({ connection: CONNECTION, maxPageSize: 2 });
+    proxyClose = proxy.close;
+    ({ baseUrl, server } = await listen(proxy.app));
+
+    const worker = new DistWorker(
+      queueName,
+      async () => {
+        throw new Error('boom');
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+    );
+    const queue = new DistQueue(queueName, { connection: CONNECTION });
+    try {
+      await worker.waitUntilReady();
+      for (let i = 0; i < 3; i++) {
+        await queue.add(`fail-${i}`, {}, { attempts: 1 });
+      }
+      await waitFor(async () => (await queue.getJobCounts()).failed === 3, 15000);
+    } finally {
+      await worker.close(true);
+      await queue.close();
+    }
+  }, 30000);
+
+  afterAll(async () => {
+    server.closeAllConnections?.();
+    await proxyClose();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  }, 30000);
+
+  async function retry(body?: unknown): Promise<Response> {
+    return fetch(`${baseUrl}/queues/${queueName}/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body ?? {}),
+    });
+  }
+
+  it('rejects a count above maxPageSize and the retry-all sentinel 0', async () => {
+    const oversized = await retry({ count: 3 });
+    expect(oversized.status).toBe(400);
+    expect((await oversized.json()).error).toMatch(/maximum page size \(2\)/);
+
+    const zero = await retry({ count: 0 });
+    expect(zero.status).toBe(400);
+
+    const zeroQuery = await fetch(`${baseUrl}/queues/${queueName}/retry?count=0`, { method: 'POST' });
+    expect(zeroQuery.status).toBe(400);
+  });
+
+  it('retries at most maxPageSize jobs when count is omitted and returns the retried count', async () => {
+    const res = await retry();
+    expect(res.status).toBe(200);
+    expect((await res.json()).retried).toBe(2);
+
+    const counts = await (await fetch(`${baseUrl}/queues/${queueName}/counts`)).json();
+    expect(counts.failed).toBe(1);
   });
 });

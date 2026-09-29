@@ -30,8 +30,8 @@ export interface ProxyOptions {
   compression?: 'none' | 'gzip';
   /**
    * Maximum items per list or batch request: `start`/`end` spans on job, DLQ, and suspended
-   * listings, `count` on DLQ replay-all, and `limit` on clean. An omitted `end` (or `end=-1`)
-   * returns at most this many items. Default: 1000.
+   * listings, `count` on DLQ replay-all and retry, and `limit` on clean. An omitted `end` (or
+   * `end=-1`) returns at most this many items. Default: 1000.
    */
   maxPageSize?: number;
   /**
@@ -178,6 +178,7 @@ export interface DrainResponse {
 
 /** Response body for POST /queues/:name/retry. */
 export interface RetryJobsResponse {
+  /** Number of failed jobs moved back to delayed, at most `count` (default `maxPageSize`). */
   retried: number;
 }
 

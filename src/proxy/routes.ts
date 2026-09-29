@@ -1821,9 +1821,12 @@ export function createRoutes(
       if (!checkAllowlist(req, res)) return;
       const body = req.body as { count?: unknown } | undefined;
       const countRaw = typeof body?.count === 'number' ? String(body.count) : queryValue(req, 'count');
-      const count = countRaw !== undefined ? parseInteger(countRaw, 'count', { min: 0 }) : undefined;
+      const count = countRaw !== undefined ? parseInteger(countRaw, 'count', { min: 1 }) : maxPageSize;
+      if (count > maxPageSize) {
+        throw httpError(400, `count exceeds maximum page size (${maxPageSize})`);
+      }
       const queue = await getQueue(param(req, 'name'));
-      const retried = await queue.retryJobs(count !== undefined ? { count } : undefined);
+      const retried = await queue.retryJobs({ count });
       res.status(200).json({ retried });
     } catch (err) {
       const { status, message } = resolveError(err, req);
