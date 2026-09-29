@@ -55,11 +55,11 @@ import {
   hmgetArrayToRecord,
   extractJobIdsFromStreamEntries,
   compress,
-  MAX_JOB_DATA_SIZE,
   JOB_METADATA_FIELDS,
   validateQueueName,
-  MAX_ORDERING_KEY_LENGTH,
-  validateJobId,
+  validateJobDataSize,
+  validateJobOptions,
+  validateJobPriority,
   floorUsageBucket,
   usageQueuesKey,
   USAGE_BUCKET_MS,
@@ -107,8 +107,6 @@ const SUSPEND_SWEEP_BATCH_SIZE = 100;
 const SUSPEND_NO_TIMEOUT_SCORE = 9_999_999_999_999;
 const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
 const MAX_USAGE_SUMMARY_KEY_READS = 100_000;
-const MIN_JOB_LOCK_DURATION_MS = 1000;
-const MAX_JOB_LOCK_DURATION_MS = 86_400_000;
 const USAGE_MODEL_FIELD_PREFIX = 'models:';
 const USAGE_TOKEN_FIELD_PREFIX = 'tokens:';
 const USAGE_COST_FIELD_PREFIX = 'costs:';
@@ -229,15 +227,6 @@ function resolveUsageWindow(opts?: UsageSummaryOptions): {
   }
 
   return { startTime, endTime, bucketStarts };
-}
-
-function validateOrderingKey(orderingKey: string): void {
-  if (orderingKey.length > MAX_ORDERING_KEY_LENGTH) {
-    throw new Error(`Ordering key exceeds maximum length (${orderingKey.length} > ${MAX_ORDERING_KEY_LENGTH}).`);
-  }
-  if (orderingKey === '__') {
-    throw new Error("Ordering key '__' is reserved as an internal sentinel.");
-  }
 }
 
 /** Check if all key-value pairs in filter exist in data (shallow match). */
@@ -732,9 +721,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
   async add(name: string, data: D, opts?: JobOptions): Promise<Job<D, R> | null> {
     const delay = opts?.delay ?? 0;
     const priority = opts?.priority ?? 0;
-    if (priority > 2048) {
-      throw new Error('Priority must be <= 2048');
-    }
+    validateJobPriority(priority);
 
     return withSpan('glide-mq.queue.add', async (span) => {
       span.setAttribute('glide-mq.queue', this.name);
@@ -749,63 +736,21 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const orderingKey = opts?.ordering?.key ?? '';
       const groupRateMax = opts?.ordering?.rateLimit?.max ?? 0;
       const groupRateDuration = opts?.ordering?.rateLimit?.duration ?? 0;
+      validateJobOptions(opts);
       const tb = opts?.ordering?.tokenBucket;
-      let tbCapacity = 0;
-      let tbRefillRate = 0;
-      if (tb) {
-        if (!Number.isFinite(tb.capacity) || tb.capacity <= 0)
-          throw new Error('tokenBucket.capacity must be a positive finite number');
-        if (!Number.isFinite(tb.refillRate) || tb.refillRate <= 0)
-          throw new Error('tokenBucket.refillRate must be a positive finite number');
-        tbCapacity = Math.round(tb.capacity * 1000);
-        tbRefillRate = Math.round(tb.refillRate * 1000);
-      }
-      let jobCost = 0;
-      if (opts?.cost != null) {
-        if (!Number.isFinite(opts.cost) || opts.cost < 0) throw new Error('cost must be a non-negative finite number');
-        jobCost = Math.round(opts.cost * 1000);
-      }
+      const tbCapacity = tb ? Math.round(tb.capacity * 1000) : 0;
+      const tbRefillRate = tb ? Math.round(tb.refillRate * 1000) : 0;
+      const jobCost = opts?.cost != null ? Math.round(opts.cost * 1000) : 0;
       let groupConcurrency = opts?.ordering?.concurrency ?? 0;
       if (orderingKey && groupConcurrency < 1) {
         groupConcurrency = 1;
       }
-      validateOrderingKey(orderingKey);
-
-      if (opts?.lifo && orderingKey) {
-        throw new Error('lifo and ordering.key cannot be used together');
-      }
       const lifo = opts?.lifo ?? false;
-
       const customJobId = opts?.jobId ?? '';
-      if (customJobId !== '') validateJobId(customJobId);
-
-      if (opts?.ttl != null) {
-        if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
-      }
-
-      if (opts?.lockDuration != null) {
-        if (
-          !Number.isFinite(opts.lockDuration) ||
-          opts.lockDuration < MIN_JOB_LOCK_DURATION_MS ||
-          opts.lockDuration > MAX_JOB_LOCK_DURATION_MS
-        ) {
-          throw new Error(
-            `lockDuration must be a finite number between ${MIN_JOB_LOCK_DURATION_MS} and ${MAX_JOB_LOCK_DURATION_MS}`,
-          );
-        }
-      }
 
       // Payload size validation - prevent DoS via oversized jobs
       let serialized = this.serializer.serialize(data);
-      // UTF-8 worst case: 4 bytes per char. Skip Buffer.byteLength for small strings.
-      if (serialized.length > MAX_JOB_DATA_SIZE / 4) {
-        const byteLen = Buffer.byteLength(serialized, 'utf8');
-        if (byteLen > MAX_JOB_DATA_SIZE) {
-          throw new Error(
-            `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
-          );
-        }
-      }
+      validateJobDataSize(serialized);
 
       if (this.opts.compression === 'gzip') {
         serialized = compress(serialized);
@@ -1013,38 +958,12 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const parentQueue = opts.parent ? opts.parent.queue : '';
       const maxAttempts = opts.attempts ?? 0;
       const orderingKey = opts.ordering?.key ?? '';
-      validateOrderingKey(orderingKey);
-
-      if (opts.lifo && orderingKey) {
-        throw new Error('lifo and ordering.key cannot be used together');
-      }
-      if (opts.ttl != null) {
-        if (!Number.isFinite(opts.ttl) || opts.ttl < 0) throw new Error('ttl must be a non-negative finite number');
-      }
-      if (opts.lockDuration != null) {
-        if (
-          !Number.isFinite(opts.lockDuration) ||
-          opts.lockDuration < MIN_JOB_LOCK_DURATION_MS ||
-          opts.lockDuration > MAX_JOB_LOCK_DURATION_MS
-        ) {
-          throw new Error(
-            `lockDuration must be a finite number between ${MIN_JOB_LOCK_DURATION_MS} and ${MAX_JOB_LOCK_DURATION_MS}`,
-          );
-        }
-      }
+      validateJobOptions(opts);
       const deduplication = opts.deduplication;
       const customJobId = opts.jobId ?? '';
-      if (customJobId !== '') validateJobId(customJobId);
 
       let serializedData = this.serializer.serialize(entry.data);
-      if (serializedData.length > MAX_JOB_DATA_SIZE / 4) {
-        const byteLen = Buffer.byteLength(serializedData, 'utf8');
-        if (byteLen > MAX_JOB_DATA_SIZE) {
-          throw new Error(
-            `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
-          );
-        }
-      }
+      validateJobDataSize(serializedData);
       if (this.opts.compression === 'gzip') {
         serializedData = compress(serializedData);
       }
@@ -1052,21 +971,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
       const groupRateMax = opts.ordering?.rateLimit?.max ?? 0;
       const groupRateDuration = opts.ordering?.rateLimit?.duration ?? 0;
       const bulkTb = opts.ordering?.tokenBucket;
-      let tbCapacity = 0;
-      let tbRefillRate = 0;
-      if (bulkTb) {
-        if (!Number.isFinite(bulkTb.capacity) || bulkTb.capacity <= 0)
-          throw new Error('tokenBucket.capacity must be a positive finite number');
-        if (!Number.isFinite(bulkTb.refillRate) || bulkTb.refillRate <= 0)
-          throw new Error('tokenBucket.refillRate must be a positive finite number');
-        tbCapacity = Math.round(bulkTb.capacity * 1000);
-        tbRefillRate = Math.round(bulkTb.refillRate * 1000);
-      }
-      let jobCost = 0;
-      if (opts.cost != null) {
-        if (!Number.isFinite(opts.cost) || opts.cost < 0) throw new Error('cost must be a non-negative finite number');
-        jobCost = Math.round(opts.cost * 1000);
-      }
+      const tbCapacity = bulkTb ? Math.round(bulkTb.capacity * 1000) : 0;
+      const tbRefillRate = bulkTb ? Math.round(bulkTb.refillRate * 1000) : 0;
+      const jobCost = opts.cost != null ? Math.round(opts.cost * 1000) : 0;
       let groupConcurrency = opts.ordering?.concurrency ?? 0;
       if (orderingKey && groupConcurrency < 1) {
         groupConcurrency = 1;

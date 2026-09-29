@@ -132,7 +132,7 @@ describe('email processor', () => {
 | --------------------- | --------------------------------------------------------- |
 | `on('active', fn)`    | Fired when a job starts processing — args: `(job, jobId)` |
 | `on('completed', fn)` | Fired when a job finishes successfully                    |
-| `on('failed', fn)`    | Fired when a job throws                                   |
+| `on('failed', fn)`    | Fired on every failed attempt, including retried ones     |
 | `on('drained', fn)`   | Fired when the queue transitions from non-empty to empty  |
 | `close()`             | Stop the worker                                           |
 
@@ -165,7 +165,7 @@ const byName = await queue.searchJobs({ name: 'send-email' });
 
 ## Retry Behaviour in Tests
 
-Retries work the same as in production. Configure them via job options:
+Retries follow the production state machine. Every failed attempt sets `job.failedReason` and fires the worker `failed` event. A retryable failure parks the job in `delayed` for the backoff delay (`fixed`, `exponential`, `jitter`, or a custom type from the `backoffStrategies` worker option) and the queue emits `retrying`; the job then returns to `waiting`. Only the terminal failure moves the job to `failed` and fires the queue `failed` event. Backoff uses real timers, so keep delays small in unit tests.
 
 ```typescript
 const worker = new TestWorker(queue, async (job) => {
@@ -175,6 +175,7 @@ const worker = new TestWorker(queue, async (job) => {
 
 await queue.add('flaky', {}, { attempts: 3, backoff: { type: 'fixed', delay: 0 } });
 
+await new Promise((r) => worker.once('completed', r));
 const done = await queue.searchJobs({ state: 'completed', name: 'flaky' });
 expect(done[0]?.attemptsMade).toBe(2);
 ```
@@ -259,50 +260,34 @@ expect(failed[0]?.failedReason).toMatch('bad input');
 
 ## Deduplication Testing
 
-`TestQueue` honours all three deduplication modes — `simple`, `throttle`, and `debounce` — so you can verify dedup logic without Valkey:
+`TestQueue` applies `deduplication` exactly like `Queue.add()`, with no extra flag. It mirrors the `glidemq_dedup` server function:
+
+- `simple` (default): skipped while the job that claimed the id still exists and is not `completed` or `failed`. Once it finishes, or is removed (for example by `removeOnComplete`), the id is free again.
+- `throttle`: skipped while less than `ttl` ms have passed since the id was claimed, whatever the job state. Without `ttl` nothing is throttled.
+- `debounce`: if the tracked job is `delayed`, it is removed (the queue emits `removed`) and the new job is added. Skipped while the tracked job is `waiting` or `active`.
+
+Skipped adds return `null`.
 
 ```typescript
-// Simple mode: second add with the same dedup id is rejected
-const a = await queue.add(
-  'task',
-  { v: 1 },
-  {
-    deduplication: { id: 'dedup-1', mode: 'simple' },
-  },
-);
-const b = await queue.add(
-  'task',
-  { v: 2 },
-  {
-    deduplication: { id: 'dedup-1', mode: 'simple' },
-  },
-);
+const queue = new TestQueue('tasks');
 
+// Simple mode: second add with the same dedup id is rejected while the first is pending
+const a = await queue.add('task', { v: 1 }, { deduplication: { id: 'dedup-1', mode: 'simple' } });
+const b = await queue.add('task', { v: 2 }, { deduplication: { id: 'dedup-1', mode: 'simple' } });
 expect(a).not.toBeNull();
-expect(b).toBeNull(); // deduplicated
+expect(b).toBeNull();
 
-// Throttle mode with TTL: after the TTL window expires the same id is accepted again
-const c = await queue.add(
-  'task',
-  { v: 3 },
-  {
-    deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 },
-  },
-);
+// Throttle mode: the same id is accepted again after the ttl window
+const c = await queue.add('task', { v: 3 }, { deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 } });
 expect(c).not.toBeNull();
-
-// Wait for TTL to expire
 await new Promise((r) => setTimeout(r, 60));
-
-const d = await queue.add(
-  'task',
-  { v: 4 },
-  {
-    deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 },
-  },
-);
-expect(d).not.toBeNull(); // accepted — window expired
+const d = await queue.add('task', { v: 4 }, { deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 } });
+expect(d).not.toBeNull();
 ```
+
+Limitations: `delay` is not honoured in test mode, so the only `delayed` jobs a debounce can replace are retries waiting out their backoff. Production also replaces a `prioritized` job that has not been promoted yet; test mode has no `prioritized` state.
+
+Pass `new TestQueue(name, { dedup: false })` to ignore `deduplication` options (the pre-parity default). `{ dedup: true }` is still accepted and changes nothing.
 
 ---
 
@@ -390,8 +375,11 @@ Call job.suspend() inside the processor, then queue.signal() from outside. Use g
 ## Tips
 
 - **No connection config needed.** `TestQueue` takes only a name — no `connection` option.
+- **Options are validated like production.** `TestQueue.add()` runs the same checks as `Queue.add()` (priority <= 2048, payload size, `ttl`, `lockDuration`, `cost`, `jobId`, ordering key, `lifo` with ordering) and throws the same errors. `job.updateData()` and `job.updateProgress()` persist to the stored job, so `queue.getJob()` sees the new values.
 - **Processing is synchronous-ish.** `TestWorker` processes jobs immediately when they are added via `queue.add()`. In most tests you can check state right after the `await queue.add(...)` call.
-- **Delayed jobs are enqueued as waiting.** The `delay` option is accepted but not honoured in test mode — jobs start as `waiting` and are processed immediately.
+- **Dispatch order matches the worker.** Jobs with `priority > 0` run first (lower number = higher priority, FIFO within a priority), then `lifo` jobs (newest first), then plain FIFO jobs. A `lifo` job with a priority is dispatched as LIFO, like production. `queue.getJobs('waiting')` still lists jobs in insertion order.
+- **Retention is applied.** `removeOnComplete` / `removeOnFail` accept `true`, a count, or `{ age, count }` (age in seconds) and trim the completed / failed jobs exactly as the server functions do, before the `completed` / `failed` event fires. Jobs failed as `expired` by `ttl` are not removed, same as production.
+- **Delayed jobs are enqueued as waiting.** The `delay` option is accepted but not honoured in test mode — jobs start as `waiting` and are processed immediately. The only jobs in `delayed` are retries waiting out their backoff. Rate-limit errors thrown by a processor are treated as ordinary failures.
 - **Swap without changing processors.** Because `TestQueue` and `TestWorker` share the same interface as `Queue` and `Worker`, you can parameterise your processor code and pass either implementation.
 
 ```typescript

@@ -390,10 +390,10 @@ describe('TestWorker', () => {
     });
 
     await queue.add('exhaust-task', {}, { attempts: 2 });
-    await waitFor(() => failures.length === 1, 5000);
+    await waitFor(() => failures.length === 2, 5000);
 
-    // attempts=2 means max 2 tries. 2 failures = exhausted.
-    expect(failures).toHaveLength(1);
+    // attempts=2 means max 2 tries. The worker emits 'failed' on each attempt, like production.
+    expect(failures).toHaveLength(2);
 
     const record = queue.jobs.get('1')!;
     expect(record.state).toBe('failed');
@@ -1164,6 +1164,8 @@ describe('TestQueue scheduler runtime', () => {
   it('consumes testing-mode scheduler iterations even when the templated add is deduplicated', async () => {
     queue = new TestQueue('sched-runtime-dedup', { dedup: true });
     worker = new TestWorker(queue, async () => 'ok');
+    // Keep the seed job waiting: simple dedup releases the id once the job completes.
+    await queue.pause();
 
     await queue.add('seed', { ok: true }, { deduplication: { id: 'dup-key', mode: 'simple' } });
     await queue.upsertJobScheduler(
@@ -1717,4 +1719,392 @@ describe('TestWorker - event payloads (T2)', () => {
     await worker.close();
     await queue.close();
   }, 15000);
+});
+
+describe('TestQueue.add validation parity (T11)', () => {
+  let queue: TestQueue;
+
+  afterEach(async () => {
+    if (queue) await queue.close();
+  });
+
+  it('rejects the same invalid options as Queue.add', async () => {
+    queue = new TestQueue('validation-parity');
+    await expect(queue.add('j', {}, { priority: 2049 })).rejects.toThrow('Priority must be <= 2048');
+    await expect(queue.add('j', {}, { ttl: -1 })).rejects.toThrow('ttl must be a non-negative finite number');
+    await expect(queue.add('j', {}, { lockDuration: 10 })).rejects.toThrow('lockDuration must be a finite number');
+    await expect(queue.add('j', {}, { cost: -1 })).rejects.toThrow('cost must be a non-negative finite number');
+    await expect(queue.add('j', {}, { lifo: true, ordering: { key: 'k' } })).rejects.toThrow(
+      'lifo and ordering.key cannot be used together',
+    );
+    await expect(queue.add('j', {}, { ordering: { key: '__' } })).rejects.toThrow('reserved');
+    await expect(
+      queue.add('j', {}, { ordering: { key: 'k', tokenBucket: { capacity: 0, refillRate: 1 } } }),
+    ).rejects.toThrow('tokenBucket.capacity must be a positive finite number');
+    await expect(queue.add('j', 'x'.repeat(MAX_JOB_DATA_SIZE + 1))).rejects.toThrow('Job data exceeds maximum size');
+    await expect(queue.addBulk([{ name: 'j', data: {}, opts: { ttl: Number.NaN } }])).rejects.toThrow(
+      'ttl must be a non-negative finite number',
+    );
+    expect(queue.jobs.size).toBe(0);
+  });
+});
+
+describe('TestJob.updateData / updateProgress persistence (T11)', () => {
+  it('persists updateData and updateProgress to the stored job', async () => {
+    const queue = new TestQueue<{ v: number }>('persist-updates');
+    const worker = new TestWorker(queue, async (job) => {
+      await job.updateProgress(50);
+      await job.updateData({ v: 2 });
+      await job.updateProgress({ step: 'done' });
+      return 'ok';
+    });
+    const added = await queue.add('j', { v: 1 });
+    await waitFor(async () => (await queue.getJob(added!.id))?.returnvalue === 'ok', 2000, 5);
+
+    const stored = await queue.getJob(added!.id);
+    expect(stored!.data).toEqual({ v: 2 });
+    expect(stored!.progress).toEqual({ step: 'done' });
+
+    const outside = await queue.getJob(added!.id);
+    await outside!.updateData({ v: 3 });
+    expect((await queue.getJob(added!.id))!.data).toEqual({ v: 3 });
+    await expect(outside!.updateData({ v: 'x'.repeat(MAX_JOB_DATA_SIZE) } as any)).rejects.toThrow(
+      'Job data exceeds maximum size',
+    );
+    await expect(outside!.updateProgress({ big: 'x'.repeat(MAX_JOB_DATA_SIZE) })).rejects.toThrow(
+      'Progress data exceeds maximum size',
+    );
+
+    await worker.close();
+    await queue.close();
+  });
+});
+
+describe('TestWorker ordering and retention parity (T9)', () => {
+  it('dispatches priority (lowest number first), then LIFO, then FIFO', async () => {
+    const queue = new TestQueue('ordering-parity');
+    await queue.add('fifo-a', {});
+    await queue.add('p5', {}, { priority: 5 });
+    await queue.add('lifo-x', {}, { lifo: true });
+    await queue.add('p1-a', {}, { priority: 1 });
+    await queue.add('fifo-b', {});
+    await queue.add('lifo-y', {}, { lifo: true });
+    await queue.add('p1-b', {}, { priority: 1 });
+
+    const order: string[] = [];
+    const worker = new TestWorker(queue, async (job) => {
+      order.push(job.name);
+      return 'ok';
+    });
+    await waitFor(() => order.length === 7, 2000, 5);
+    expect(order).toEqual(['p1-a', 'p1-b', 'p5', 'lifo-y', 'lifo-x', 'fifo-a', 'fifo-b']);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('removeOnComplete: true deletes the job before the completed event', async () => {
+    const queue = new TestQueue('roc-true');
+    const seen: (TestJob | null)[] = [];
+    const worker = new TestWorker(queue, async () => 'ok');
+    worker.on('completed', async (job: TestJob) => {
+      seen.push(await queue.getJob(job.id));
+    });
+    await queue.add('keep', {});
+    await queue.add('drop', {}, { removeOnComplete: true });
+    await waitFor(() => seen.length === 2, 2000, 5);
+    expect(seen[0]).not.toBeNull();
+    expect(seen[1]).toBeNull();
+    expect((await queue.getJobCounts()).completed).toBe(1);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('removeOnComplete: number keeps only the newest N completed jobs', async () => {
+    const queue = new TestQueue('roc-count');
+    let done = 0;
+    const worker = new TestWorker(queue, async () => 'ok');
+    worker.on('completed', () => done++);
+    for (let i = 0; i < 5; i++) {
+      await queue.add(`j${i}`, {}, { removeOnComplete: 2 });
+      await waitFor(() => done === i + 1, 2000, 1);
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    const completed = await queue.getJobs('completed');
+    expect(completed.map((j) => j.name).sort()).toEqual(['j3', 'j4']);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('removeOnComplete: { age } removes completed jobs older than age seconds', async () => {
+    const queue = new TestQueue('roc-age');
+    let done = 0;
+    const worker = new TestWorker(queue, async () => 'ok');
+    worker.on('completed', () => done++);
+    const old = await queue.add('old', {});
+    await waitFor(() => done === 1, 2000, 1);
+    queue.jobs.get(old!.id)!.finishedOn = Date.now() - 10_000;
+    await queue.add('new', {}, { removeOnComplete: { age: 5, count: 0 } });
+    await waitFor(() => done === 2, 2000, 1);
+    expect(await queue.getJob(old!.id)).toBeNull();
+    expect((await queue.getJobs('completed')).map((j) => j.name)).toEqual(['new']);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('removeOnFail applies on terminal failure only', async () => {
+    const queue = new TestQueue('rof');
+    let terminal = 0;
+    queue.on('failed', () => terminal++);
+    const worker = new TestWorker(queue, async () => {
+      throw new Error('boom');
+    });
+    const kept = await queue.add('kept', {});
+    const dropped = await queue.add('dropped', {}, { removeOnFail: true });
+    await waitFor(() => terminal === 2, 2000, 5);
+    expect(await queue.getJob(kept!.id)).not.toBeNull();
+    expect(await queue.getJob(dropped!.id)).toBeNull();
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('batch mode applies removeOnComplete', async () => {
+    const queue = new TestQueue('roc-batch');
+    let done = 0;
+    const worker = new TestWorker(queue, async (jobs: TestJob[]) => jobs.map(() => 'ok'), { batch: { size: 2 } });
+    worker.on('completed', () => done++);
+    await queue.addBulk([
+      { name: 'a', data: {}, opts: { removeOnComplete: true } },
+      { name: 'b', data: {} },
+    ]);
+    await waitFor(() => done === 2, 2000, 5);
+    expect((await queue.getJobs('completed')).map((j) => j.name)).toEqual(['b']);
+
+    await worker.close();
+    await queue.close();
+  });
+});
+
+describe('TestWorker retry parity (T8)', () => {
+  it('emits worker failed on every attempt and parks retries in delayed with failedReason', async () => {
+    const queue = new TestQueue('retry-parity');
+    const workerFailed: string[] = [];
+    const queueFailed: string[] = [];
+    const retrying: string[] = [];
+    queue.on('failed', (_job: TestJob, err: Error) => queueFailed.push(err.message));
+    queue.on('retrying', (_job: TestJob, err: Error) => retrying.push(err.message));
+    let calls = 0;
+    const worker = new TestWorker(queue, async () => {
+      calls++;
+      throw new Error(`fail-${calls}`);
+    });
+    worker.on('failed', (job: TestJob, err: Error) => {
+      workerFailed.push(err.message);
+      expect(job.failedReason).toBe(err.message);
+    });
+
+    const job = await queue.add('flaky', {}, { attempts: 3, backoff: { type: 'fixed', delay: 150 } });
+    await waitFor(() => workerFailed.length === 1, 2000, 2);
+
+    const afterFirst = await queue.getJob(job!.id);
+    expect(afterFirst!.failedReason).toBe('fail-1');
+    expect(afterFirst!.attemptsMade).toBe(1);
+    expect((await queue.getJobCounts()).delayed).toBe(1);
+    expect((await queue.getJobs('delayed')).map((j) => j.id)).toEqual([job!.id]);
+
+    // Backoff holds the job in delayed until the delay elapses.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(calls).toBe(1);
+
+    await waitFor(() => workerFailed.length === 3, 3000, 5);
+    expect(workerFailed).toEqual(['fail-1', 'fail-2', 'fail-3']);
+    expect(retrying).toEqual(['fail-1', 'fail-2']);
+    expect(queueFailed).toEqual(['fail-3']);
+    const final = await queue.getJob(job!.id);
+    expect(final!.failedReason).toBe('fail-3');
+    expect((await queue.getJobCounts()).failed).toBe(1);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('uses exponential backoff and custom backoffStrategies', async () => {
+    const queue = new TestQueue('retry-backoff');
+    const delays: number[] = [];
+    const worker = new TestWorker(
+      queue,
+      async () => {
+        throw new Error('x');
+      },
+      { backoffStrategies: { custom: (attemptsMade) => attemptsMade * 7 } },
+    );
+    const origSchedule = queue.scheduleRetry.bind(queue);
+    queue.scheduleRetry = (record, delay) => {
+      delays.push(delay);
+      origSchedule(record, delay);
+    };
+    let failed = 0;
+    worker.on('failed', () => failed++);
+    await queue.add('exp', {}, { attempts: 3, backoff: { type: 'exponential', delay: 10 } });
+    await waitFor(() => failed === 3, 2000, 2);
+    await queue.add('custom', {}, { attempts: 3, backoff: { type: 'custom', delay: 0 } });
+    await waitFor(() => failed === 6, 2000, 2);
+    expect(delays).toEqual([10, 20, 7, 14]);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('drain(true) removes jobs parked in delayed for retry', async () => {
+    const queue = new TestQueue('retry-drain');
+    let calls = 0;
+    const worker = new TestWorker(queue, async () => {
+      calls++;
+      throw new Error('x');
+    });
+    await queue.add('j', {}, { attempts: 2, backoff: { type: 'fixed', delay: 50 } });
+    await waitFor(() => calls === 1, 2000, 2);
+    await queue.drain(true);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(calls).toBe(1);
+    expect(queue.jobs.size).toBe(0);
+
+    await worker.close();
+    await queue.close();
+  });
+});
+
+describe('TestQueue deduplication parity (T10)', () => {
+  let queue: TestQueue;
+
+  afterEach(async () => {
+    if (queue) await queue.close();
+  });
+
+  it('dedups without the dedup flag, like Queue.add', async () => {
+    queue = new TestQueue('dedup-default');
+    const a = await queue.add('t', {}, { deduplication: { id: 'd' } });
+    const b = await queue.add('t', {}, { deduplication: { id: 'd' } });
+    expect(a).not.toBeNull();
+    expect(b).toBeNull();
+  });
+
+  it('dedup: false keeps the legacy opt-out', async () => {
+    queue = new TestQueue('dedup-off', { dedup: false });
+    expect(await queue.add('t', {}, { deduplication: { id: 'd' } })).not.toBeNull();
+    expect(await queue.add('t', {}, { deduplication: { id: 'd' } })).not.toBeNull();
+  });
+
+  it('simple mode releases the id once the job completes, fails, or is removed', async () => {
+    queue = new TestQueue('dedup-simple');
+    let done = 0;
+    const worker = new TestWorker(queue, async (job) => {
+      if (job.data.fail) throw new Error('boom');
+      return 'ok';
+    });
+    worker.on('completed', () => done++);
+    worker.on('failed', () => done++);
+
+    expect(await queue.add('t', {}, { deduplication: { id: 'd', mode: 'simple' } })).not.toBeNull();
+    await waitFor(() => done === 1, 2000, 2);
+    expect(await queue.add('t', { fail: true }, { deduplication: { id: 'd', mode: 'simple' } })).not.toBeNull();
+    await waitFor(() => done === 2, 2000, 2);
+    const third = await queue.add('t', {}, { deduplication: { id: 'd', mode: 'simple' }, removeOnComplete: true });
+    expect(third).not.toBeNull();
+    await waitFor(() => done === 3, 2000, 2);
+    expect(await queue.getJob(third!.id)).toBeNull();
+    expect(await queue.add('t', {}, { deduplication: { id: 'd', mode: 'simple' } })).not.toBeNull();
+
+    await worker.close();
+  });
+
+  it('throttle mode skips inside ttl and accepts after it, regardless of job state', async () => {
+    queue = new TestQueue('dedup-throttle');
+    const opts = { deduplication: { id: 'd', mode: 'throttle' as const, ttl: 50 } };
+    expect(await queue.add('t', { v: 1 }, opts)).not.toBeNull();
+    expect(await queue.add('t', { v: 2 }, opts)).toBeNull();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(await queue.add('t', { v: 3 }, opts)).not.toBeNull();
+
+    const noTtl = { deduplication: { id: 'n', mode: 'throttle' as const } };
+    expect(await queue.add('t', {}, noTtl)).not.toBeNull();
+    expect(await queue.add('t', {}, noTtl)).not.toBeNull();
+  });
+
+  it('debounce mode skips while waiting and replaces a delayed job', async () => {
+    queue = new TestQueue('dedup-debounce');
+    const opts = { deduplication: { id: 'd', mode: 'debounce' as const } };
+    const first = await queue.add('t', { v: 1 }, opts);
+    expect(await queue.add('t', { v: 2 }, opts)).toBeNull();
+
+    const removed: string[] = [];
+    queue.on('removed', (id: string) => removed.push(id));
+    queue.jobs.get(first!.id)!.state = 'delayed';
+    const replacement = await queue.add('t', { v: 3 }, opts);
+    expect(replacement).not.toBeNull();
+    expect(await queue.getJob(first!.id)).toBeNull();
+    expect(removed).toEqual([first!.id]);
+  });
+
+  it('a duplicate custom jobId does not claim the dedup id', async () => {
+    queue = new TestQueue('dedup-custom-id');
+    await queue.add('t', {}, { jobId: 'x' });
+    expect(await queue.add('t', {}, { jobId: 'x', deduplication: { id: 'd' } })).toBeNull();
+    expect(await queue.add('t', {}, { deduplication: { id: 'd' } })).not.toBeNull();
+  });
+});
+
+describe('TestWorker failure paths (coverage)', () => {
+  it('fails a job whose flow budget is already exceeded with onExceeded fail', async () => {
+    const queue = new TestQueue('budget-fail-parity');
+    queue.setBudget('flow-1', { maxTotalTokens: 1, onExceeded: 'fail' });
+    queue.recordBudgetUsage('flow-1', { input: 5 }, {}, 5, 0);
+    await queue.pause();
+    const job = await queue.add('capped', {});
+    queue.jobs.get(job!.id)!.budgetKey = 'flow-1';
+    const failed: string[] = [];
+    const worker = new TestWorker(queue, async () => 'never');
+    worker.on('failed', (_job: TestJob, err: Error) => failed.push(err.message));
+    await queue.resume();
+    await waitFor(() => failed.length === 1, 2000, 2);
+    expect(failed).toEqual(['Budget exceeded']);
+    const final = await queue.getJob(job!.id);
+    expect(final!.failedReason).toBe('Budget exceeded');
+    await worker.close();
+    await queue.close();
+  });
+
+  it('advances the fallback chain on each retry', async () => {
+    const queue = new TestQueue('fallback-retry-parity');
+    const seen: (string | undefined)[] = [];
+    const worker = new TestWorker(queue, async (job: TestJob) => {
+      seen.push(job.currentFallback?.model);
+      if (seen.length < 3) throw new Error('retry');
+      return 'ok';
+    });
+    await queue.add(
+      'fb',
+      {},
+      { attempts: 3, backoff: { type: 'fixed', delay: 1 }, fallbacks: [{ model: 'a' }, { model: 'b' }] },
+    );
+    await waitFor(() => seen.length === 3, 2000, 2);
+    expect(seen).toEqual([undefined, 'a', 'b']);
+    await worker.close();
+    await queue.close();
+  });
+
+  it('rejects the same invalid options as Queue.add', async () => {
+    const queue = new TestQueue('validation-coverage');
+    await expect(queue.add('x', {}, { ordering: { key: 'k'.repeat(257) } })).rejects.toThrow(/Ordering key exceeds/);
+    await expect(queue.add('x', {}, { ordering: { key: '__' } })).rejects.toThrow(/reserved/);
+    await expect(
+      queue.add('x', {}, { ordering: { key: 'k', tokenBucket: { capacity: 1, refillRate: 0 } } }),
+    ).rejects.toThrow(/refillRate/);
+    await expect(queue.add('x', 'a'.repeat(MAX_JOB_DATA_SIZE + 1))).rejects.toThrow(/exceeds maximum size/);
+    await queue.close();
+  });
 });

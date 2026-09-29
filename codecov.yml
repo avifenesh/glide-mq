@@ -15,6 +15,10 @@ flag_management:
       paths:
         - src/
       carryforward: true
+    - name: unit
+      paths:
+        - src/
+      carryforward: true
     - name: lua
       paths:
         - src/functions/glidemq.lua
