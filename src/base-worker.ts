@@ -1101,6 +1101,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   ): Promise<boolean> {
     if (!this.commandClient) return true;
     if (moveResult === null) {
+      // The job hash is gone (removed before activation). A list claim has no
+      // stream entry to settle, but its list-active reservation is still held:
+      // removeJob releases list claims only once they are active.
+      if (entryId === '') {
+        await this.releaseListActiveSlot();
+        return true;
+      }
       try {
         await completeJob(
           this.commandClient,

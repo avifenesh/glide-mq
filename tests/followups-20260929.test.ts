@@ -262,4 +262,31 @@ describeEachMode('Follow-ups 2026-09-29', (CONNECTION) => {
     );
     expect(await cleanupClient.exists([k.id, k.stream, k.scheduled])).toBe(0);
   });
+
+  it('F7: a list reservation whose job was removed before activation releases list-active', async () => {
+    const Q = uniqueQueue('fu-removed-reserved');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      const job = await queue.add('a', {}, { lifo: true });
+      expect(await popLists(cleanupClient, k, 1)).toEqual([job!.id]);
+      await (await queue.getJob(job!.id))!.remove();
+      expect(String(await cleanupClient.get(k.listActive))).toBe('1');
+      expect(await moveToActive(cleanupClient, k, job!.id, Date.now(), k.stream, '', CONSUMER_GROUP)).toBeNull();
+
+      // The worker handles the null activation of its reserved claim.
+      await queue.pause();
+      const worker = new Worker(Q, async () => 'ok', { connection: CONNECTION });
+      try {
+        await worker.waitUntilReady();
+        expect(await (worker as any).handleMoveToActiveEdgeCase(null, job!.id, '')).toBe(true);
+      } finally {
+        await worker.close();
+      }
+      expect(Number(await cleanupClient.get(k.listActive))).toBe(0);
+      expect(await cleanupClient.sismember(k.listActiveIds, job!.id)).toBe(false);
+    } finally {
+      await queue.close();
+    }
+  });
 });
