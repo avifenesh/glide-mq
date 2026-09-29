@@ -564,14 +564,9 @@ describe('HTTP proxy hardening - broadcast publish options', () => {
     });
     expect(res.status).toBe(400);
     expect((await res.json()).error).toMatch(/priority or lifo/);
-describe('HTTP proxy hardening - bounded retry', () => {
-  const { Queue: DistQueue } = require('../dist/queue') as typeof import('../src/queue');
-  const { Worker: DistWorker } = require('../dist/worker') as typeof import('../src/worker');
-describe("HTTP proxy hardening - bounded retry", () => {
-  const { Queue: DistQueue } =
-    require("../dist/queue") as typeof import("../src/queue");
-  const { Worker: DistWorker } =
-    require("../dist/worker") as typeof import("../src/worker");
+  });
+});
+
 describe('HTTP proxy hardening - bounded retry', () => {
   const { Queue: DistQueue } = require('../dist/queue') as typeof import('../src/queue');
   const { Worker: DistWorker } = require('../dist/worker') as typeof import('../src/worker');
