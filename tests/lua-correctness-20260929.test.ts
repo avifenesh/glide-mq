@@ -10,7 +10,7 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { completeAndFetchNext, reclaimStalled, CONSUMER_GROUP } =
+const { completeAndFetchNext, healListActive, reclaimStalled, CONSUMER_GROUP } =
   require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
@@ -399,5 +399,13 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
       await worker.close(true);
       await queue.close();
     }
+  });
+  it('healListActive still corrects drift after a completed scan', async () => {
+    const Q = uniqueQueue('lc-heal');
+    const k = buildKeys(Q);
+    await cleanupClient.hset(k.job('1'), { id: '1', name: 'x', state: 'active', listSourced: '1' });
+    await cleanupClient.set(k.listActive, '3');
+    expect(await healListActive(cleanupClient, k)).toBe(2);
+    expect(String(await cleanupClient.get(k.listActive))).toBe('1');
   });
 });

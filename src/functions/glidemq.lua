@@ -1914,6 +1914,9 @@ end)
 
 -- Reclaim stalled list-sourced jobs (LIFO/priority) that are invisible to XAUTOCLAIM.
 -- Uses bounded SCAN to find active list jobs with stale lastActive, then applies stall logic.
+-- Each call starts at cursor 0 and stops after maxIter SCAN steps, so on a very
+-- large keyspace jobs past that bound are not reclaimed by this call. It only
+-- acts on jobs it saw, so a partial scan never corrupts state.
 -- KEYS: [streamKey, eventsKey]
 -- ARGS: [minIdleMs, maxStalledCount, timestamp, failedKey]
 redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
@@ -4103,6 +4106,10 @@ redis.register_function('glidemq_healListActive', function(keys, args)
       end
     end
   until cursor == '0' or iter >= maxIter
+  -- A partial scan undercounts active list jobs. Correcting from it would
+  -- lower list-active below the true count and let globalConcurrency
+  -- overcommit, so only a completed scan may correct the counter.
+  if cursor ~= '0' then return 0 end
   local drift = counter - actual
   if drift > 0 then
     redis.call('DECRBY', listActiveKey, drift)
@@ -4113,7 +4120,8 @@ end)
 -- List active list-sourced jobIds (state='active' AND isListSourced) via bounded SCAN.
 -- Stream-backed active jobs are in the consumer group PEL (XPENDING) and listed separately.
 -- All prefix:job:* keys share the {queueName} hash tag, so SCAN runs on a single
--- cluster slot and observes the full set on its local node.
+-- cluster slot and observes the full set on its local node. The scan is capped
+-- at maxIter steps; past that bound on a very large keyspace the result is partial.
 -- KEYS: [idKey]
 -- ARGS: [start, end] (inclusive 0-indexed bounds; end < 0 means unbounded)
 -- Returns: array of jobId strings.
