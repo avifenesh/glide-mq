@@ -92,4 +92,25 @@ describe('gracefulShutdown', () => {
       killSpy.mockRestore();
     }
   });
+
+  it('the first signal after handle.shutdown() does not escalate', async () => {
+    const hung = makeMockComponent({ close: vi.fn().mockReturnValue(new Promise(() => {})) as any });
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const sigtermBefore = process.listenerCount('SIGTERM');
+    try {
+      const handle = gracefulShutdown([hung]);
+      void handle.shutdown();
+      expect(hung.close).toHaveBeenCalledTimes(1);
+
+      process.emit('SIGTERM', 'SIGTERM');
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(process.listenerCount('SIGTERM')).toBe(sigtermBefore + 1);
+
+      process.emit('SIGTERM', 'SIGTERM');
+      expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+      expect(hung.close).toHaveBeenCalledTimes(1);
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
 });

@@ -24,6 +24,9 @@ export type GracefulShutdownHandle = Promise<void> & {
 export function gracefulShutdown(components: Closeable[]): GracefulShutdownHandle {
   let done = false;
   let shutdownPromise: Promise<void> | null = null;
+  // Signals seen by this handler. Shutdown can also start from handle.shutdown()
+  // or another listener, so only a second signal here means escalation.
+  let signalsReceived = 0;
 
   let resolvePromise!: () => void;
   const promise = new Promise<void>((resolve) => {
@@ -48,7 +51,8 @@ export function gracefulShutdown(components: Closeable[]): GracefulShutdownHandl
   };
 
   const onSignal = (signal: NodeJS.Signals) => {
-    if (shutdownPromise && !done) {
+    signalsReceived++;
+    if (signalsReceived > 1 && !done) {
       process.off('SIGTERM', onSignal);
       process.off('SIGINT', onSignal);
       process.kill(process.pid, signal);
