@@ -60,6 +60,7 @@ import {
   rateLimitGroup as rateLimitGroupFn,
   moveToActive,
   moveToActiveCall,
+  type MoveToActiveResult,
   parseMoveToActiveResult,
   completeJobCall,
   parseCompleteJobResult,
@@ -967,6 +968,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           e.entryId,
           this.consumerGroup,
           broadcast,
+          this.globalConcurrencyEnabled,
         ),
       ];
     }
@@ -981,6 +983,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           e.entryId,
           this.consumerGroup,
           broadcast,
+          this.globalConcurrencyEnabled,
         );
         batch.fcall('glidemq_moveToActive', keys, args);
       }
@@ -1112,18 +1115,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * Returns true if the result was handled (caller should return), false if the hash is valid.
    */
   protected async handleMoveToActiveEdgeCase(
-    moveResult:
-      | Record<string, string>
-      | 'REVOKED'
-      | 'PAUSED'
-      | 'EXPIRED'
-      | 'GROUP_FULL'
-      | 'GROUP_RATE_LIMITED'
-      | 'GROUP_TOKEN_LIMITED'
-      | 'GROUP_ORDERED'
-      | 'ERR:COST_EXCEEDS_CAPACITY'
-      | 'STALE'
-      | null,
+    moveResult: MoveToActiveResult,
     jobId: string,
     entryId: string,
     deferPausedRestore = true,
@@ -1193,6 +1185,17 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       // For list-backed jobs (entryId=''), release the reserved list-active slot.
       if (entryId === '') {
         await this.releaseListActiveSlot();
+      }
+      return true;
+    }
+    if (moveResult === 'GLOBAL_FULL') {
+      // The claim is outside the queue's globalConcurrency: hand the entry
+      // back (XACK, re-add as waiting). The next poll's checkConcurrency waits
+      // for a slot.
+      try {
+        await this.deferOutOfOrderJob(jobId, entryId);
+      } catch (err) {
+        this.emit('error', err);
       }
       return true;
     }
@@ -1745,6 +1748,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           currentEntryId,
           this.consumerGroup,
           this.broadcastMode ? true : undefined,
+          this.globalConcurrencyEnabled,
         );
         if (await this.handleMoveToActiveEdgeCase(moveResult, currentJobId, currentEntryId)) return;
         currentHash = moveResult as Record<string, string>;

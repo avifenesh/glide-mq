@@ -634,7 +634,7 @@ await queue.setGlobalConcurrency(20);
 await queue.setGlobalConcurrency(0);
 ```
 
-Workers read the limit from queue metadata on each scheduler tick. Priority and LIFO jobs are popped with an atomic check (`glidemq_rpopAndReserve`). For stream jobs, the `glidemq_checkConcurrency` call runs before `XREADGROUP` as a separate call, so workers polling at the same time can briefly overshoot the limit.
+Workers read the limit from queue metadata on each scheduler tick. Priority and LIFO jobs are popped with an atomic check (`glidemq_rpopAndReserve`). Stream jobs are gated twice: `glidemq_checkConcurrency` before `XREADGROUP` keeps a worker from reading when the queue is full, and `glidemq_moveToActive` enforces the cap at activation. A stream claim counts in the consumer group's pending list as soon as `XREADGROUP` returns it, so activation ranks the pending claims by entry id: the oldest `globalConcurrency - listActive` claims keep their slots, a newer claim gets `GLOBAL_FULL` and the worker hands it back (`glidemq_deferActive`: XACK, re-added to the stream as waiting). Workers polling at the same time therefore never run more than `globalConcurrency` jobs; a handed-back job loses its stream position and is re-read once a slot frees. The rank check runs only when the pending count exceeds the free slots.
 
 ---
 

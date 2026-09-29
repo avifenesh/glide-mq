@@ -9,6 +9,7 @@ import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './he
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+const { completeJob, moveToActive, CONSUMER_GROUP } = require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Lua round 3 2026-09-30', (CONNECTION) => {
   let cleanupClient: any;
@@ -120,6 +121,75 @@ describeEachMode('Lua round 3 2026-09-30', (CONNECTION) => {
       release();
       await worker.close();
       await dlq.close();
+      await queue.close();
+    }
+  }, 20000);
+
+  // Item 3: two workers read the stream at the same time under
+  // globalConcurrency 1. Activation ranks the pending claims; the newer one
+  // is refused and handed back instead of running as a second active job.
+  it('moveToActive enforces globalConcurrency over concurrent stream claims', async () => {
+    const Q = uniqueQueue('r3-gc-claim');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      await queue.setGlobalConcurrency(1);
+      const j1 = await queue.add('a', {});
+      const j2 = await queue.add('b', {});
+      await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true }).catch(() => {});
+      const readEntry = async (consumer: string): Promise<string> => {
+        const res = await cleanupClient.xreadgroup(CONSUMER_GROUP, consumer, { [k.stream]: '>' }, { count: 1 });
+        return String(Object.keys(res[0].value)[0]);
+      };
+      const e1 = await readEntry('w1');
+      const e2 = await readEntry('w2');
+      const activate = (jobId: string, entryId: string) =>
+        moveToActive(cleanupClient, k, jobId, Date.now(), k.stream, entryId, CONSUMER_GROUP, undefined, true);
+
+      // The newer claim is outside the cap whether it activates first or second.
+      expect(await activate(j2!.id, e2)).toBe('GLOBAL_FULL');
+      expect(typeof (await activate(j1!.id, e1))).toBe('object');
+      expect(await activate(j2!.id, e2)).toBe('GLOBAL_FULL');
+      expect(await cleanupClient.hget(k.job(j2!.id), 'state')).toBe('waiting');
+
+      // Once the older job completes the slot is free.
+      await completeJob(cleanupClient, k, j1!.id, e1, 'null', Date.now(), CONSUMER_GROUP);
+      expect(typeof (await activate(j2!.id, e2))).toBe('object');
+
+      // Without the flag (older workers) the gate is off.
+      const j3 = await queue.add('c', {});
+      const e3 = await readEntry('w1');
+      expect(typeof (await moveToActive(cleanupClient, k, j3!.id, Date.now(), k.stream, e3, CONSUMER_GROUP))).toBe(
+        'object',
+      );
+    } finally {
+      await queue.close();
+    }
+  });
+
+  it('workers sharing globalConcurrency 1 never run two jobs at once', async () => {
+    const Q = uniqueQueue('r3-gc-workers');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    let active = 0;
+    let maxActive = 0;
+    const done: string[] = [];
+    const processor = async (job: any) => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 120));
+      active--;
+      done.push(job.id);
+    };
+    const opts = { connection: CONNECTION, concurrency: 3, blockTimeout: 200 };
+    await queue.setGlobalConcurrency(1);
+    const w1 = new Worker(Q, processor, opts);
+    const w2 = new Worker(Q, processor, opts);
+    try {
+      const jobs = await Promise.all(Array.from({ length: 6 }, (_, i) => queue.add('j', { i })));
+      await waitFor(() => done.length === jobs.length, 15000);
+      expect(maxActive).toBe(1);
+    } finally {
+      await Promise.all([w1.close(), w2.close()]);
       await queue.close();
     }
   }, 20000);

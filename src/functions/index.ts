@@ -118,7 +118,16 @@ export const LIBRARY_NAME = 'glidemq';
 //   and re-evaluates the exceeded flag; glidemq_failAndFetchNext fails a job and fetches the next one
 //   (the fetch phases of completeAndFetchNext) in one call; glidemq_trimBroadcast replies
 //   {trimmed, unread} instead of the trimmed count.
-// Version 132: see per-function notes below (lua round 3).
+// Version 132: scheduler entries record inflightJobId and glidemq_schedulerAwaitInflight parks a
+//   repeatAfterComplete entry while the old mode's job still runs; completeAndFetchNext/failAndFetchNext
+//   append optional trailing markers (__glidemq_failed_activations__ for jobs failed at activation,
+//   __glidemq_lists_empty__ when lists and stream were empty); glidemq_moveToActive enforces
+//   globalConcurrency for stream claims on an optional arg (GLOBAL_FULL); glidemq_removeIdleConsumer and
+//   an optional reclaimStalled arg delete consumers with no pending entry; broadcast heartbeats and stall
+//   checks use the per-subscription 'la' field, deferActive marks handed-back claims (hb) that reclaim
+//   does not count as stalls, glidemq_recoverBroadcastClaims re-takes only owned entries, trimBroadcast
+//   looks up pre-130 retry entries; glidemq_healEarlyDeps releases parents registered by a plain SADD;
+//   healListActive re-seeds list-active-ids from a complete scan; no 'active' event is written anywhere.
 export const LIBRARY_VERSION = '132';
 
 // Consumer group name used by workers
@@ -1095,6 +1104,8 @@ export async function popLists(client: Client, k: QueueKeys, count: number): Pro
  * - 'GROUP_RATE_LIMITED' if the job's group exceeded its rate limit (job was parked)
  * - 'GROUP_TOKEN_LIMITED' if the job's group has insufficient tokens (job was parked)
  * - 'ERR:COST_EXCEEDS_CAPACITY' if the job cost exceeds token bucket capacity (job was failed)
+ * - 'GLOBAL_FULL' if `enforceGlobalConcurrency` was set and this stream claim is outside the
+ *   queue's globalConcurrency (job left waiting in the PEL; the worker hands it back)
  * - Record<string, string> with all job fields otherwise
  */
 export async function moveToActive(
@@ -1106,7 +1117,22 @@ export async function moveToActive(
   entryId: string = '',
   group: string = '',
   broadcastMode?: boolean,
-): Promise<
+  enforceGlobalConcurrency?: boolean,
+): Promise<MoveToActiveResult> {
+  const { keys, args } = moveToActiveCall(
+    k,
+    jobId,
+    timestamp,
+    streamKey,
+    entryId,
+    group,
+    broadcastMode,
+    enforceGlobalConcurrency,
+  );
+  return parseMoveToActiveResult(await client.fcall('glidemq_moveToActive', keys, args));
+}
+
+export type MoveToActiveResult =
   | Record<string, string>
   | 'REVOKED'
   | 'PAUSED'
@@ -1117,11 +1143,8 @@ export async function moveToActive(
   | 'GROUP_ORDERED'
   | 'ERR:COST_EXCEEDS_CAPACITY'
   | 'STALE'
-  | null
-> {
-  const { keys, args } = moveToActiveCall(k, jobId, timestamp, streamKey, entryId, group, broadcastMode);
-  return parseMoveToActiveResult(await client.fcall('glidemq_moveToActive', keys, args));
-}
+  | 'GLOBAL_FULL'
+  | null;
 
 /** Keys and args of a glidemq_moveToActive call, for direct FCALL or a pipeline. */
 export function moveToActiveCall(
@@ -1132,32 +1155,24 @@ export function moveToActiveCall(
   entryId: string = '',
   group: string = '',
   broadcastMode?: boolean,
+  enforceGlobalConcurrency?: boolean,
 ): { keys: string[]; args: string[] } {
   const keys: string[] = [k.job(jobId)];
   const args: string[] = [timestamp.toString()];
   if (streamKey) {
     keys.push(streamKey);
     args.push(entryId, group, jobId);
+    // Appended optional args: broadcast flag, then the global concurrency
+    // gate (library 132; older libraries ignore it).
     if (broadcastMode) args.push('1');
+    else if (enforceGlobalConcurrency) args.push('0');
+    if (enforceGlobalConcurrency) args.push('1');
   }
   return { keys, args };
 }
 
 /** Parse a glidemq_moveToActive reply into a job hash or a status marker. */
-export function parseMoveToActiveResult(
-  result: GlideReturnType,
-):
-  | Record<string, string>
-  | 'REVOKED'
-  | 'PAUSED'
-  | 'EXPIRED'
-  | 'GROUP_FULL'
-  | 'GROUP_RATE_LIMITED'
-  | 'GROUP_TOKEN_LIMITED'
-  | 'GROUP_ORDERED'
-  | 'ERR:COST_EXCEEDS_CAPACITY'
-  | 'STALE'
-  | null {
+export function parseMoveToActiveResult(result: GlideReturnType): MoveToActiveResult {
   if (Array.isArray(result)) {
     if (result.length === 0) return null;
     const hash: Record<string, string> = Object.create(null);
@@ -1178,6 +1193,7 @@ export function parseMoveToActiveResult(
   if (str === 'GROUP_ORDERED') return 'GROUP_ORDERED';
   if (str === 'ERR:COST_EXCEEDS_CAPACITY') return 'ERR:COST_EXCEEDS_CAPACITY';
   if (str === 'STALE') return 'STALE';
+  if (str === 'GLOBAL_FULL') return 'GLOBAL_FULL';
   // Backward compatibility: older library returns cjson string
   const arr = JSON.parse(str) as string[];
   const hash: Record<string, string> = Object.create(null);

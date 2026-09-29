@@ -2979,6 +2979,27 @@ local function moveToActiveClaim(keys, args)
     end
     return 'EXPIRED'
   end
+  -- Global concurrency for stream claims (optional arg 6, library 132). The
+  -- XREADGROUP claim already counts in XPENDING, so the cap is decided here:
+  -- the oldest claims within the cap keep their slots, a newer one is handed
+  -- back by the worker (deferActive). List claims reserve in rpopAndReserve.
+  if (args[6] or '0') == '1' and streamKey ~= '' and entryId ~= '' and group ~= '' and broadcastMode ~= '1' then
+    local gc = tonumber(redis.call('HGET', prefix .. 'meta', 'globalConcurrency')) or 0
+    if gc > 0 then
+      local allowed = gc - (tonumber(redis.call('GET', prefix .. 'list-active')) or 0)
+      if allowed <= 0 then return 'GLOBAL_FULL' end
+      local ok_gp, pendingSummary = pcall(redis.call, 'XPENDING', streamKey, group)
+      local pendingCount = (ok_gp and pendingSummary and tonumber(pendingSummary[1])) or 0
+      if pendingCount > allowed then
+        local oldest = redis.call('XPENDING', streamKey, group, '-', '+', allowed)
+        local within = false
+        for oi = 1, #oldest do
+          if oldest[oi][1] == entryId then within = true break end
+        end
+        if not within then return 'GLOBAL_FULL' end
+      end
+    end
+  end
   if groupKey and groupKey ~= '' then
     local groupHashKey = prefix .. 'group:' .. groupKey
     -- Load all group fields in one call
