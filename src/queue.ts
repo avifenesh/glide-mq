@@ -1707,7 +1707,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   /**
    * Remove all data associated with this queue from the server.
-   * If force=false (default), fails if there are active jobs.
+   * If force=false (default), fails if the stream has pending (active) entries.
+   * Active priority/LIFO jobs have no pending entry and are not counted.
    * If force=true, deletes everything regardless of active jobs.
    */
   async obliterate(opts?: { force?: boolean }): Promise<void> {

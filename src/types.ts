@@ -161,6 +161,7 @@ export interface WorkerOptions extends QueueOptions {
   batch?: BatchOptions;
   /** Emit events to Valkey event stream on job completion/activation. Default: true.
    *  Set to false to skip XADD events in hot path (~1 fewer redis.call per job).
+   *  'failed', 'retrying' and 'stalled' stream events are still written.
    *  TS-side EventEmitter ('completed', 'failed', etc.) is unaffected. */
   events?: boolean;
   /** Record per-minute timing metrics in Valkey on job completion. Default: true.
