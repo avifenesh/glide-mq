@@ -205,7 +205,7 @@ const worker = new TestWorker(queue, async (jobs) => {
 
 - Processing is synchronous-ish - check state right after `await queue.add()`.
 - Delayed jobs become waiting immediately (delay not honored in test mode).
-- `moveToDelayed` not supported in test mode.
+- `moveToDelayed` parks the job in delayed until the timestamp, then it runs again.
 - Custom jobId returns `null` on duplicate (mirrors production).
 - All three dedup modes (`simple`, `throttle`, `debounce`) work.
 - Retries work normally with `attempts` and `backoff`.

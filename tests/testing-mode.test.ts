@@ -2153,3 +2153,69 @@ describe('TestWorker failure paths (coverage)', () => {
     await queue.close();
   });
 });
+
+describe('TestJob.moveToDelayed parity', () => {
+  let queue: TestQueue;
+  let worker: TestWorker;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    if (queue) await queue.close();
+  });
+
+  it('parks the job in delayed until the timestamp, then runs the next step', async () => {
+    queue = new TestQueue('move-to-delayed');
+    const steps: string[] = [];
+    const failed: string[] = [];
+    worker = new TestWorker(queue, async (job: any) => {
+      const step = job.data.step ?? 'start';
+      steps.push(step);
+      if (step === 'start') {
+        await job.moveToDelayed(Date.now() + 200, 'finish');
+      }
+      return { done: step };
+    });
+    worker.on('failed', (job: any) => failed.push(job.id));
+
+    const job = await queue.add('steps', { input: 1 });
+    await waitFor(() => queue.jobs.get(job!.id)!.state === 'delayed', 1000, 5);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(queue.jobs.get(job!.id)!.state).toBe('delayed');
+    expect(steps).toEqual(['start']);
+    expect(await queue.getJobCounts()).toMatchObject({ delayed: 1, waiting: 0, active: 0 });
+    expect(queue.jobs.get(job!.id)!.data).toEqual({ input: 1, step: 'finish' });
+
+    await waitFor(() => queue.jobs.get(job!.id)!.state === 'completed', 2000, 10);
+    expect(steps).toEqual(['start', 'finish']);
+    expect(failed).toEqual([]);
+    const done = queue.jobs.get(job!.id)!;
+    expect(done.attemptsMade).toBe(0);
+    expect(done.returnvalue).toEqual({ done: 'finish' });
+  });
+
+  it('validates the timestamp, the step payload and the active state like Job.moveToDelayed', async () => {
+    queue = new TestQueue('move-to-delayed-validate');
+    const errors: string[] = [];
+    worker = new TestWorker(queue, async (job: any) => {
+      for (const call of [() => job.moveToDelayed(Number.NaN), () => job.moveToDelayed(Date.now(), 'next')]) {
+        try {
+          await call();
+        } catch (err) {
+          errors.push((err as Error).message);
+        }
+      }
+      return 'ok';
+    });
+    const added = await queue.add('v', 'not-an-object' as any);
+    await waitFor(() => queue.jobs.get(added!.id)!.state === 'completed', 1000, 5);
+    expect(errors).toEqual([
+      'Timestamp must be a finite Unix millisecond value >= 0',
+      'moveToDelayed(nextStep) requires plain-object job data',
+    ]);
+
+    const idle = await queue.getJob(added!.id);
+    await expect(idle!.moveToDelayed(Date.now() + 1000)).rejects.toThrow(
+      'moveToDelayed() can only be used while the job is active in a Worker',
+    );
+  });
+});
