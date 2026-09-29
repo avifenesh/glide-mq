@@ -167,13 +167,39 @@ export class QueueEvents extends EventEmitter {
           }
         }
 
+        // Advance before dispatch so a throwing listener cannot make the
+        // next XREAD return this entry again and stall the stream forever.
+        this.lastId = String(entryId);
+
         if (!eventType) continue;
 
-        this.emit(eventType, payload);
-
-        // Update lastId to this entry so we don't re-read it
-        this.lastId = String(entryId);
+        this.dispatch(eventType, payload);
       }
+    }
+  }
+
+  /**
+   * Emit one stream event. A listener that throws must not stop delivery of
+   * the remaining events, so its error goes to 'error' listeners. With no
+   * 'error' listener (or when the 'error' listener itself threw) it is
+   * rethrown on the next tick, the same uncaught failure a throwing
+   * EventEmitter listener produces for its caller.
+   */
+  private dispatch(eventType: string, payload: Record<string, string>): void {
+    try {
+      this.emit(eventType, payload);
+    } catch (err) {
+      if (eventType !== 'error' && this.listenerCount('error') > 0) {
+        try {
+          this.emit('error', err);
+          return;
+        } catch (listenerErr) {
+          err = listenerErr;
+        }
+      }
+      process.nextTick(() => {
+        throw err;
+      });
     }
   }
 

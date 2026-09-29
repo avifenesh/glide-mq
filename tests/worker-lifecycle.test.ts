@@ -598,3 +598,92 @@ describe('QueueEvents init failure', () => {
     }
   });
 });
+
+describe('QueueEvents throwing listener', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function eventsClient() {
+    return makeMockClient({
+      xread: vi
+        .fn()
+        .mockResolvedValueOnce([
+          {
+            key: 'events',
+            value: {
+              '1-0': [
+                ['event', 'completed'],
+                ['jobId', 'a'],
+              ],
+              '2-0': [
+                ['event', 'completed'],
+                ['jobId', 'b'],
+              ],
+            },
+          },
+        ])
+        .mockImplementation(neverResolve),
+    });
+  }
+
+  it('advances past an event whose listener throws and routes the error', async () => {
+    const client = eventsClient();
+    vi.mocked(GlideClient.createClient).mockResolvedValue(client as any);
+
+    const qe = new QueueEvents('lifecycle-w7', { connection, blockTimeout: 100 });
+    const seen: string[] = [];
+    const errors: Error[] = [];
+    qe.on('completed', (payload: any) => {
+      seen.push(payload.jobId);
+      if (payload.jobId === 'a') throw new Error('listener bug');
+    });
+    qe.on('error', (err: Error) => errors.push(err));
+    await qe.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(seen).toEqual(['a', 'b']);
+    expect(errors.map((e) => e.message)).toEqual(['listener bug']);
+    expect(client.xread).toHaveBeenCalledTimes(2);
+    expect(Object.values(client.xread.mock.calls[1][0])).toEqual(['2-0']);
+
+    await qe.close();
+  });
+
+  it('rethrows a listener error asynchronously when there is no error listener', async () => {
+    const client = eventsClient();
+    vi.mocked(GlideClient.createClient).mockResolvedValue(client as any);
+    const ticks: (() => void)[] = [];
+    const realNextTick = process.nextTick;
+    const tickSpy = vi.spyOn(process, 'nextTick').mockImplementation(((fn: () => void, ...args: unknown[]) => {
+      if (fn.toString().includes('throw err')) {
+        ticks.push(fn);
+        return;
+      }
+      return realNextTick(fn, ...args);
+    }) as any);
+
+    try {
+      const qe = new QueueEvents('lifecycle-w7-noerr', { connection, blockTimeout: 100 });
+      const seen: string[] = [];
+      qe.on('completed', (payload: any) => {
+        seen.push(payload.jobId);
+        if (payload.jobId === 'a') throw new Error('listener bug');
+      });
+      await qe.waitUntilReady();
+      await vi.advanceTimersByTimeAsync(50);
+
+      expect(seen).toEqual(['a', 'b']);
+      expect(ticks).toHaveLength(1);
+      expect(() => ticks[0]()).toThrow('listener bug');
+      await qe.close();
+    } finally {
+      tickSpy.mockRestore();
+    }
+  });
+});
