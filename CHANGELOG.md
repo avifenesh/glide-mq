@@ -28,9 +28,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - **Proxy request bounds (`maxPageSize`, default 1000)**: `GET /jobs`, `/dlq` and `/suspended` without `end` (or `end=-1`) return at most `maxPageSize` items from `start`, and larger explicit spans return 400. `dlq/replay-all` replays at most `maxPageSize` per call, and `clean` rejects a `limit` above it. `POST /flows` rejects flows with more than 1000 nodes.
-
-### Changed
-
 - **`prefetch` is capped at `concurrency`** (`concurrency * batch.size` in batch mode). Prefetch above concurrency ran more processors than `concurrency` allowed, or left entries without heartbeats to be reclaimed and run twice.
 
 ### Documentation
