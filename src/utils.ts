@@ -318,7 +318,7 @@ export function floorUsageBucket(timestampMs: number): number {
 }
 
 // Priority encoding: (priority * 2^42) + timestamp_ms
-// Lower priority sorts first; 0 means no priority. Within same priority, FIFO by timestamp.
+// Lower priority numbers sort first; 0 means no priority. Within same priority, FIFO by timestamp.
 const PRIORITY_SHIFT = 2 ** 42;
 
 export function encodeScore(priority: number, timestampMs: number): number {
