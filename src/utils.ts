@@ -159,6 +159,12 @@ export function validateSchedulerTemplate(template: JobTemplate | undefined, ser
         'jobId is not supported: every run gets a generated id, a fixed id would drop each run after the first as a duplicate',
       );
     }
+    // The tick never applies these, so reject them instead of silently dropping them.
+    for (const field of ['delay', 'deduplication', 'parent'] as const) {
+      if (opts?.[field] != null) {
+        throw new Error(`${field} is not supported: scheduler runs do not apply it`);
+      }
+    }
     if (opts) validateSchedulerTemplateOpts(opts);
     serializeSchedulerTemplateData(template, serializer);
   } catch (err) {
@@ -855,6 +861,22 @@ export function computeInitialSchedulerNextRun(
     return null;
   }
   return nextRun;
+}
+
+/**
+ * First run after switching an every/pattern scheduler to repeatAfterComplete.
+ * repeatAfterComplete would fire at once, possibly next to a run of the old
+ * mode that is still active, so hold it to the old mode's nextRun.
+ */
+export function holdSchedulerModeSwitch(
+  existing: SchedulerEntry,
+  nextRun: number,
+  endDate: number | undefined,
+): number | null {
+  if (isValidSchedulerEvery(existing.repeatAfterComplete) || !(existing.nextRun > 0)) return nextRun;
+  if (!existing.pattern && !isValidSchedulerEvery(existing.every)) return nextRun;
+  const held = Math.max(nextRun, existing.nextRun);
+  return endDate != null && held > endDate ? null : held;
 }
 
 export function computeFollowingSchedulerNextRun(

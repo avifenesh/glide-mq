@@ -1165,11 +1165,14 @@ describe('TestQueue scheduler runtime', () => {
     await queue.pause();
 
     await queue.add('seed', { ok: true }, { deduplication: { id: 'dup-key', mode: 'simple' } });
+    // upsertJobScheduler rejects template deduplication, so seed a stored legacy entry directly.
     await queue.upsertJobScheduler(
       'dedup-scheduler',
       { every: 20, limit: 1 },
-      { name: 'dedup-job', data: { ok: true }, opts: { deduplication: { id: 'dup-key', mode: 'simple' } } },
+      { name: 'dedup-job', data: { ok: true } },
     );
+    const seeded = (queue as any).schedulers.get('dedup-scheduler');
+    seeded.template.opts = { deduplication: { id: 'dup-key', mode: 'simple' } };
 
     const deadline = Date.now() + 500;
     while ((await queue.getJobScheduler('dedup-scheduler')) && Date.now() < deadline) {
@@ -1746,6 +1749,19 @@ describe('TestQueue.add validation parity (T11)', () => {
   });
 });
 
+describe('TestQueue.upsertJobScheduler mode switch', () => {
+  it('switching every to repeatAfterComplete does not fire before the old nextRun', async () => {
+    const queue = new TestQueue('switch-mode');
+    await queue.upsertJobScheduler('s', { every: 60_000 }, { name: 'j' });
+    const before = await queue.getJobScheduler('s');
+    await queue.upsertJobScheduler('s', { repeatAfterComplete: 500 }, { name: 'j' });
+    const after = await queue.getJobScheduler('s');
+    expect(after!.repeatAfterComplete).toBe(500);
+    expect(after!.nextRun).toBe(before!.nextRun);
+    await queue.close();
+  });
+});
+
 describe('TestQueue.upsertJobScheduler template validation parity', () => {
   it('rejects the template options Queue.upsertJobScheduler rejects', async () => {
     const queue = new TestQueue('tmpl-validate');
@@ -1764,6 +1780,15 @@ describe('TestQueue.upsertJobScheduler template validation parity', () => {
     await expect(
       queue.upsertJobScheduler('e', { every: 1000 }, { name: 'j', data: 'a'.repeat(MAX_JOB_DATA_SIZE + 1) }),
     ).rejects.toThrow('Scheduler template: Job data exceeds maximum size');
+    for (const [opts, field] of [
+      [{ delay: 1000 }, 'delay'],
+      [{ deduplication: { id: 'd' } }, 'deduplication'],
+      [{ parent: { queue: 'p', id: '1' } }, 'parent'],
+    ] as const) {
+      await expect(queue.upsertJobScheduler('f', { every: 1000 }, { name: 'j', opts: opts as any })).rejects.toThrow(
+        `Scheduler template: ${field} is not supported`,
+      );
+    }
     expect(await queue.getRepeatableJobs()).toEqual([]);
     await queue.close();
   });
@@ -2126,5 +2151,71 @@ describe('TestWorker failure paths (coverage)', () => {
     ).rejects.toThrow(/refillRate/);
     await expect(queue.add('x', 'a'.repeat(MAX_JOB_DATA_SIZE + 1))).rejects.toThrow(/exceeds maximum size/);
     await queue.close();
+  });
+});
+
+describe('TestJob.moveToDelayed parity', () => {
+  let queue: TestQueue;
+  let worker: TestWorker;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    if (queue) await queue.close();
+  });
+
+  it('parks the job in delayed until the timestamp, then runs the next step', async () => {
+    queue = new TestQueue('move-to-delayed');
+    const steps: string[] = [];
+    const failed: string[] = [];
+    worker = new TestWorker(queue, async (job: any) => {
+      const step = job.data.step ?? 'start';
+      steps.push(step);
+      if (step === 'start') {
+        await job.moveToDelayed(Date.now() + 200, 'finish');
+      }
+      return { done: step };
+    });
+    worker.on('failed', (job: any) => failed.push(job.id));
+
+    const job = await queue.add('steps', { input: 1 });
+    await waitFor(() => queue.jobs.get(job!.id)!.state === 'delayed', 1000, 5);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(queue.jobs.get(job!.id)!.state).toBe('delayed');
+    expect(steps).toEqual(['start']);
+    expect(await queue.getJobCounts()).toMatchObject({ delayed: 1, waiting: 0, active: 0 });
+    expect(queue.jobs.get(job!.id)!.data).toEqual({ input: 1, step: 'finish' });
+
+    await waitFor(() => queue.jobs.get(job!.id)!.state === 'completed', 2000, 10);
+    expect(steps).toEqual(['start', 'finish']);
+    expect(failed).toEqual([]);
+    const done = queue.jobs.get(job!.id)!;
+    expect(done.attemptsMade).toBe(0);
+    expect(done.returnvalue).toEqual({ done: 'finish' });
+  });
+
+  it('validates the timestamp, the step payload and the active state like Job.moveToDelayed', async () => {
+    queue = new TestQueue('move-to-delayed-validate');
+    const errors: string[] = [];
+    worker = new TestWorker(queue, async (job: any) => {
+      for (const call of [() => job.moveToDelayed(Number.NaN), () => job.moveToDelayed(Date.now(), 'next')]) {
+        try {
+          await call();
+        } catch (err) {
+          errors.push((err as Error).message);
+        }
+      }
+      return 'ok';
+    });
+    const added = await queue.add('v', 'not-an-object' as any);
+    await waitFor(() => queue.jobs.get(added!.id)!.state === 'completed', 1000, 5);
+    expect(errors).toEqual([
+      'Timestamp must be a finite Unix millisecond value >= 0',
+      'moveToDelayed(nextStep) requires plain-object job data',
+    ]);
+
+    const idle = await queue.getJob(added!.id);
+    await expect(idle!.moveToDelayed(Date.now() + 1000)).rejects.toThrow(
+      'moveToDelayed() can only be used while the job is active in a Worker',
+    );
   });
 });

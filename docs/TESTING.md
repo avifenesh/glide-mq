@@ -285,32 +285,23 @@ Pass `new TestQueue(name, { dedup: false })` to ignore `deduplication` options (
 
 ## Step Jobs in Tests
 
-`moveToDelayed` is **not supported** in test mode. `TestJob` has no `moveToDelayed()` method, so calling it inside a processor throws a `TypeError` and fails the job. Delayed jobs also become waiting immediately in `TestQueue`.
-
-If your processor relies on `moveToDelayed` for step-job orchestration, use integration tests with a real Valkey instance instead:
+`job.moveToDelayed(timestamp, nextStep?)` works in test mode like in production: the job moves to `delayed` without counting an attempt, `nextStep` is written to `job.data.step`, and the job returns to `waiting` once the timestamp passes. It validates the same way and throws outside an active processor.
 
 ```typescript
-// Integration test (requires Valkey)
-import { Queue, Worker, DelayedError } from 'glide-mq';
+import { TestQueue, TestWorker } from 'glide-mq/testing';
 
-const queue = new Queue('steps', { connection });
-const worker = new Worker(
-  'steps',
-  async (job) => {
-    const step = job.data.step ?? 'start';
-    if (step === 'start') {
-      await job.updateData({ ...job.data, step: 'finish' });
-      await job.moveToDelayed(Date.now() + 1000, 'finish');
-    }
-    return { done: true };
-  },
-  { connection },
-);
+const queue = new TestQueue('steps');
+const worker = new TestWorker(queue, async (job) => {
+  const step = job.data.step ?? 'start';
+  if (step === 'start') {
+    await job.moveToDelayed(Date.now() + 100, 'finish');
+  }
+  return { done: true };
+});
+
+const job = await queue.add('flow', {});
+// state is 'delayed' until the timestamp, then the processor runs again with step 'finish'
 ```
-
-For unit-testing the logic _around_ steps (data transformations, branching decisions), you can still use `TestQueue` and `TestWorker` — just skip the `moveToDelayed` call in test mode or guard it behind an environment check.
-
----
 
 ---
 
@@ -320,13 +311,14 @@ All AI-native primitives have full testing mode parity - no Valkey needed.
 
 ### TestJob methods
 
-| Method                          | Description                                                                                  |
-| ------------------------------- | -------------------------------------------------------------------------------------------- |
-| `reportUsage(usage)`            | Store AI usage metadata (model, tokens, cost, latency). Validates non-negative token counts. |
-| `stream(chunk)`                 | Append a chunk to the in-memory streaming channel. Returns a synthetic stream entry ID.      |
-| `streamChunk(type, content?)`   | Convenience wrapper over `stream()` - emits `{ type, content }` fields for typed LLM chunks. |
-| `storeVector(field, embedding)` | Store a vector embedding for later similarity search. Accepts number[] or Float32Array.      |
-| `suspend(opts?)`                | Move the job to suspended state. Throws SuspendError to halt the processor.                  |
+| Method                          | Description                                                                                     |
+| ------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `reportUsage(usage)`            | Store AI usage metadata (model, tokens, cost, latency). Validates non-negative token counts.    |
+| `stream(chunk)`                 | Append a chunk to the in-memory streaming channel. Returns a synthetic stream entry ID.         |
+| `streamChunk(type, content?)`   | Convenience wrapper over `stream()` - emits `{ type, content }` fields for typed LLM chunks.    |
+| `storeVector(field, embedding)` | Store a vector embedding for later similarity search. Accepts number[] or Float32Array.         |
+| `suspend(opts?)`                | Move the job to suspended state. Throws SuspendError to halt the processor.                     |
+| `moveToDelayed(ts, nextStep?)`  | Park the active job in delayed until `ts`, optionally setting `data.step`. Throws DelayedError. |
 
 ### TestQueue methods
 

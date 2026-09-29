@@ -37,15 +37,17 @@ import type {
   VectorSearchOptions,
 } from './types';
 import { JSON_SERIALIZER } from './types';
-import { GlideMQError, UnrecoverableError, BatchError, SuspendError } from './errors';
+import { GlideMQError, UnrecoverableError, BatchError, SuspendError, DelayedError } from './errors';
 import {
   MAX_JOB_DATA_SIZE,
   calculateBackoff,
   computeFollowingSchedulerNextRun,
   computeInitialSchedulerNextRun,
+  holdSchedulerModeSwitch,
   computeWeightedTotal,
   floorUsageBucket,
   normalizeScheduleDate,
+  isPlainStepPayload,
   USAGE_BUCKET_MS,
   USAGE_RETENTION_MS,
   validateAndResolveUsage,
@@ -272,6 +274,28 @@ export class TestJob<D = any, R = any> {
 
   discard(): void {
     this.discarded = true;
+  }
+
+  /**
+   * Pause an active job and resume it after the given UNIX timestamp in ms,
+   * like Job.moveToDelayed. Optionally sets `job.data.step` first.
+   * Must be called from inside a TestWorker processor.
+   */
+  async moveToDelayed(timestamp: number, nextStep?: string): Promise<never> {
+    if (!Number.isFinite(timestamp) || timestamp < 0) {
+      throw new Error('Timestamp must be a finite Unix millisecond value >= 0');
+    }
+    if (this._record.state !== 'active') {
+      throw new Error('moveToDelayed() can only be used while the job is active in a Worker');
+    }
+    const delayedUntil = Math.trunc(timestamp);
+    if (nextStep !== undefined) {
+      if (!isPlainStepPayload(this.data)) {
+        throw new Error('moveToDelayed(nextStep) requires plain-object job data');
+      }
+      await this.updateData({ ...this.data, step: nextStep } as D);
+    }
+    throw new DelayedError(delayedUntil);
   }
 
   async reportUsage(usage: JobUsage): Promise<void> {
@@ -819,6 +843,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
         iterationCount = existing.iterationCount ?? 0;
         lastRun = existing.lastRun;
         nextRun = existing.nextRun;
+      } else if (nextRun != null && schedule.repeatAfterComplete != null) {
+        nextRun = holdSchedulerModeSwitch(existing, nextRun, endDate);
       }
     }
     if (nextRun == null) {
@@ -1215,8 +1241,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   }
 
   /**
-   * @internal Promote a job parked in 'delayed' by a retry back to 'waiting'
-   * once its backoff elapses (the in-memory equivalent of glidemq_promote).
+   * @internal Promote a job parked in 'delayed' by a retry or moveToDelayed back
+   * to 'waiting' once its delay elapses (the in-memory equivalent of glidemq_promote).
    */
   scheduleRetry(record: TestJobRecord<D, R>, delayMs: number): void {
     const existing = this.retryTimers.get(record.id);
@@ -1750,6 +1776,13 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           this.queue.scheduleSuspendedTimeout(record);
           // State already set to 'suspended' by TestJob.suspend(). Nothing more to do.
           this.queue.emit('suspended', job, record.suspendReason);
+          return;
+        }
+        // moveToDelayed: park without counting an attempt, promote at the timestamp.
+        if (err instanceof DelayedError) {
+          const delay = Math.max(0, err.delayedUntil - Date.now());
+          record.state = 'delayed';
+          this.queue.scheduleRetry(record, delay);
           return;
         }
 

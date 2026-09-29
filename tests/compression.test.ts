@@ -254,3 +254,50 @@ describeEachMode('Compression - addBulk', (CONNECTION) => {
     expect(f2!.data).toEqual({ i: 2, msg: 'second' });
   });
 });
+
+describeEachMode('Compression - scheduled jobs', (CONNECTION) => {
+  const Q = 'test-compress-sched-' + Date.now();
+  let queue: InstanceType<typeof Queue>;
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    queue = new Queue(Q, { connection: CONNECTION, compression: 'gzip' });
+  });
+
+  afterAll(async () => {
+    await queue.close();
+    await flushQueue(cleanupClient, Q);
+    cleanupClient.close();
+  });
+
+  it('scheduler runs store template data compressed like Queue.add', async () => {
+    const payload = { report: 'daily', rows: Array.from({ length: 50 }, (_, i) => `row-${i}`) };
+    await queue.upsertJobScheduler('gz-sched', { every: 200 }, { name: 'gz-run', data: payload });
+
+    const received: { id: string; data: any }[] = [];
+    const worker = new Worker(
+      Q,
+      async (j: any) => {
+        received.push({ id: j.id, data: j.data });
+        return 'ok';
+      },
+      { connection: CONNECTION, promotionInterval: 100 },
+    );
+    try {
+      await worker.waitUntilReady();
+      const deadline = Date.now() + 8000;
+      while (received.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    } finally {
+      await worker.close();
+      await queue.removeJobScheduler('gz-sched');
+    }
+
+    expect(received.length).toBeGreaterThan(0);
+    expect(received[0].data).toEqual(payload);
+    const rawData = await cleanupClient.hget(buildKeys(Q).job(received[0].id), 'data');
+    expect(String(rawData).startsWith('gz:')).toBe(true);
+  }, 15000);
+});

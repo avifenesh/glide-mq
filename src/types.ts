@@ -523,6 +523,8 @@ export interface SchedulerEntry {
   limit?: number;
   iterationCount?: number;
   template?: JobTemplate;
+  /** Set when the upserting Queue has `compression: 'gzip'`; each run stores its data compressed. */
+  compression?: 'gzip';
   lastRun?: number;
   nextRun: number;
 }

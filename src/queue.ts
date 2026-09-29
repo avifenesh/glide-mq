@@ -53,6 +53,7 @@ import {
   normalizeScheduleDate,
   validateSchedulerBounds,
   computeInitialSchedulerNextRun,
+  holdSchedulerModeSwitch,
   hashDataToRecord,
   hmgetArrayToRecord,
   extractJobIdsFromStreamEntries,
@@ -1520,6 +1521,8 @@ export class Queue<D = any, R = any> extends EventEmitter {
               iterationCount = existing.iterationCount ?? 0;
               lastRun = existing.lastRun;
               nextRun = existing.nextRun;
+            } else if (nextRun != null && schedule.repeatAfterComplete != null) {
+              nextRun = holdSchedulerModeSwitch(existing, nextRun, endDate);
             }
           } catch {
             // Ignore malformed existing state and treat as a fresh upsert.
@@ -1539,6 +1542,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           limit: schedule.limit,
           iterationCount,
           template,
+          compression: this.opts.compression === 'gzip' ? 'gzip' : undefined,
           lastRun,
           nextRun,
         };

@@ -222,6 +222,8 @@ This mode is useful for:
 
 Upserting a `repeatAfterComplete` scheduler while its job is running (for example from inside the processor) keeps waiting for that job: the next run is scheduled when it completes, using the new interval, and `iterationCount` is kept unless `tz`, `startDate` or `endDate` changed. It never starts a second, overlapping chain. To force an immediate run, remove the scheduler and upsert it again.
 
+Switching an existing `every` or `pattern` scheduler to `repeatAfterComplete` does not fire at once: the first run stays at the old mode's `nextRun` (or a later `startDate`). Jobs from the old mode are not tracked, so one that is still running past that time can overlap the first `repeatAfterComplete` run.
+
 `repeatAfterComplete` is mutually exclusive with `pattern` and `every`. Bounded options (`startDate`, `endDate`, `limit`) work normally with this mode.
 
 ### Bounded schedulers
@@ -264,7 +266,7 @@ await queue.upsertJobScheduler(
 
 The internal `Scheduler` class fires a promotion loop that converts due scheduler entries into real jobs, then re-registers the next occurrence.
 
-The template `opts` accept the same job options as `Queue.add` except `delay`, `deduplication`, `parent` and `jobId`, and `upsertJobScheduler` validates them the same way, so an invalid template is rejected at upsert. Ordering keys, group concurrency and rate limits, token buckets and `cost` apply to every scheduled job. `jobId` is rejected: each run gets a generated id, and a fixed id would drop every run after the first as a duplicate.
+The template `opts` accept the same job options as `Queue.add` except `delay`, `deduplication`, `parent` and `jobId`, and `upsertJobScheduler` validates them the same way, so an invalid template is rejected at upsert. Ordering keys, group concurrency and rate limits, token buckets and `cost` apply to every scheduled job. `jobId` is rejected: each run gets a generated id, and a fixed id would drop every run after the first as a duplicate. `delay`, `deduplication` and `parent` are rejected too, since the tick never applies them.
 
 ---
 
@@ -701,6 +703,8 @@ const queue = new Queue('tasks', {
 await queue.add('process-large', { report: '... 15 KB of data ...' });
 // Stored size: ~300 bytes (98% savings on repetitive data)
 ```
+
+Job schedulers follow the Queue that upserts them: `upsertJobScheduler` on a gzip Queue records `compression: 'gzip'` on the entry, and every run stores its template data compressed.
 
 **Payload size limit:** job data must be ≤ 1 MB _after_ serialisation but _before_ compression. Larger payloads throw immediately:
 
