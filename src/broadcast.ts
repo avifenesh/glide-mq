@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import type { BroadcastOptions, JobOptions, Client, RateLimitConfig } from './types';
 import { Queue } from './queue';
+import { GlideMQError } from './errors';
 import { buildKeys } from './utils';
 import { trimBroadcast } from './functions/index';
 import type { QueueKeys } from './functions/index';
@@ -64,6 +65,11 @@ export class Broadcast<D = any> extends EventEmitter {
    * @returns Message ID or null if skipped (e.g., due to dedup)
    */
   async publish(subject: string, data: D, opts?: JobOptions): Promise<string | null> {
+    // Priority and LIFO messages go to list queues that BroadcastWorker never
+    // reads, so they would never be delivered.
+    if ((opts?.priority ?? 0) > 0 || opts?.lifo) {
+      throw new GlideMQError('Broadcast messages do not support priority or lifo');
+    }
     const job = await this.queue.add(subject, data, opts);
 
     // maxMessages is a hard cap: the trim also drops messages a slow

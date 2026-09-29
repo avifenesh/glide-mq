@@ -533,3 +533,36 @@ describe('HTTP proxy hardening - flow node limit', () => {
     expect((await res.json()).error).toBe('Too many dag nodes (max 1000)');
   });
 });
+
+describe('HTTP proxy hardening - broadcast publish options', () => {
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+  const queueName = `proxy-hard-${RUN_ID}-bcast-opts`;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    const proxy = createProxyServer({ connection: CONNECTION });
+    proxyClose = proxy.close;
+    ({ baseUrl, server } = await listen(proxy.app));
+  });
+
+  afterAll(async () => {
+    server.closeAllConnections?.();
+    await proxyClose();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  }, 30000);
+
+  it.each([[{ priority: 2 }], [{ lifo: true }]])('rejects %j with 400', async (opts) => {
+    const res = await fetch(`${baseUrl}/broadcast/${queueName}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subject: 's', data: {}, opts }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/priority or lifo/);
+  });
+});

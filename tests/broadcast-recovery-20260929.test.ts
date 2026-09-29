@@ -33,6 +33,18 @@ describeEachMode('Broadcast recovery 2026-09-29', (CONNECTION) => {
 
   const recoveryOpts = { stalledInterval: 400, lockDuration: 400, maxStalledCount: 1, blockTimeout: 200 };
 
+  it('publish rejects priority and lifo, which BroadcastWorker would never read', async () => {
+    const Q = uniqueQueue('bcr-prio');
+    const broadcast = new Broadcast(Q, { connection: CONNECTION });
+    try {
+      await expect(broadcast.publish('s', {}, { priority: 3 })).rejects.toThrow(/priority or lifo/);
+      await expect(broadcast.publish('s', {}, { lifo: true })).rejects.toThrow(/priority or lifo/);
+      expect(await broadcast.publish('s', {})).not.toBeNull();
+    } finally {
+      await broadcast.close();
+    }
+  });
+
   it('R2-1: a subscription re-processes a message whose worker was killed mid-job', async () => {
     const Q = uniqueQueue('bcr-kill');
     const k = buildKeys(Q);

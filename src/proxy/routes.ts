@@ -2307,6 +2307,9 @@ export function createRoutes(
       if (validationError) {
         throw httpError(400, validationError);
       }
+      if ((Number(body.opts?.priority) || 0) > 0 || body.opts?.lifo) {
+        throw httpError(400, 'Broadcast messages do not support priority or lifo');
+      }
       const broadcast = await getBroadcast(param(req, 'name'));
       const id = await broadcast.publish(body.subject, body.data ?? null, body.opts as any);
       if (!id) {
