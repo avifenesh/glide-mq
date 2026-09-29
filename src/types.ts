@@ -488,7 +488,12 @@ export interface QueueEventsOptions {
 
 /** Options for defining a job schedule (cron, interval, or repeat-after-complete). */
 export interface ScheduleOpts {
-  /** Cron pattern (5 fields: minute hour dayOfMonth month dayOfWeek, dayOfWeek 0-6; no seconds field) */
+  /**
+   * Cron pattern: `minute hour dayOfMonth month dayOfWeek`, or 6 fields with a
+   * leading `second`. Accepts names (JAN-DEC, SUN-SAT), dayOfWeek 0-7 (0 and 7
+   * are Sunday), `?`, `L`, `W` and `#`. cron-parser (BullMQ) compatible; see
+   * docs/ADVANCED.md "Cron syntax".
+   */
   pattern?: string;
   /** Repeat interval in milliseconds */
   every?: number;

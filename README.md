@@ -104,7 +104,7 @@ See [Usage - AI-native primitives](docs/USAGE.md#ai-native-primitives) for full 
 - **1 RTT per job** - complete current + fetch next in a single server-side function call
 - **Cluster-native** - hash-tagged keys, zero cluster configuration
 - **Workflows** - FlowProducer trees, DAGs with fan-in, chain/group/chord, step jobs, dynamic children
-- **Scheduling** - 5-field cron with timezone, fixed intervals, bounded schedulers
+- **Scheduling** - cron (5 or 6 fields, names, `L`/`W`/`#`, cron-parser compatible) with timezone, fixed intervals, bounded schedulers
 - **Retries** - exponential, fixed, or custom backoff with dead-letter queues
 - **Rate limiting** - per-group sliding window, token bucket, global queue-wide limits
 - **Broadcast** - fan-out pub/sub with NATS-style subject filtering and independent subscriber retries
