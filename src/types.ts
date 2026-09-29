@@ -123,6 +123,7 @@ export interface WorkerOptions extends QueueOptions {
   globalConcurrency?: number;
   /** XREADGROUP COUNT per poll. Capped at `concurrency` (`concurrency * batch.size` in batch mode); only a lower value changes behavior. */
   prefetch?: number;
+  /** XREADGROUP BLOCK timeout in ms. A graceful `close()` of an idle worker waits up to this long for the in-flight read to return, so no job is claimed by a closed consumer. */
   blockTimeout?: number;
   stalledInterval?: number;
   maxStalledCount?: number;
