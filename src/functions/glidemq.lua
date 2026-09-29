@@ -3211,17 +3211,65 @@ redis.register_function('glidemq_removeJob', function(keys, args)
       end
     end
   end
-  -- Clean up DAG parents SET, per-job streaming channel, and signals.
+  local parentsKey = prefix .. 'parents:' .. jobId
+  -- A removed child counts as resolved for its parents. Completed children
+  -- were already counted, and the depdone marker keeps this idempotent.
+  local parentNotifications = {}
+  local parentNotificationSet = {}
+  if state ~= 'completed' then
+    local queuePrefix = string.sub(prefix, 1, #prefix - 1)
+    local depsMember = queuePrefix .. ':' .. jobId
+    local storedParentQueue = redis.call('HGET', jobKey, 'parentQueue')
+    local storedParentId = redis.call('HGET', jobKey, 'parentId')
+    if storedParentId and storedParentId ~= '' then
+      if storedParentQueue == extractQueueTag(queuePrefix) then
+        completeParentDependency(
+          prefix .. 'deps:' .. storedParentId,
+          prefix .. 'job:' .. storedParentId,
+          prefix .. 'stream',
+          eventsKey,
+          depsMember,
+          storedParentId
+        )
+      else
+        addParentNotification(
+          parentNotifications,
+          parentNotificationSet,
+          enqueueCrossQueueParentNotify(prefix, jobId, storedParentQueue, storedParentId)
+        )
+      end
+    end
+    local dagParents = redis.call('SMEMBERS', parentsKey)
+    for pi = 1, #dagParents do
+      local pEntry = dagParents[pi]
+      local pSep = pEntry:find(':([^:]+)$')
+      if pSep then
+        local pQueue = string.sub(pEntry, 1, pSep - 1)
+        local pId = string.sub(pEntry, pSep + 1)
+        if pQueue == queuePrefix then
+          completeParentDependency(prefix .. 'deps:' .. pId, prefix .. 'job:' .. pId, prefix .. 'stream', eventsKey, depsMember, pId)
+        else
+          addParentNotification(
+            parentNotifications,
+            parentNotificationSet,
+            enqueueCrossQueueParentNotify(prefix, jobId, extractQueueTag(pQueue), pId)
+          )
+        end
+      end
+    end
+  end
+  -- Clean up deps and DAG parents SETs, per-job streaming channel, and signals.
   -- Job hash + log can be MB-sized; parents/jstream/signals carry per-step
   -- data. Use UNLINK so the server reclaims memory off the main thread.
-  local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-  local parentsKey = prefix .. 'parents:' .. jobId
   local jstreamKey = prefix .. 'jstream:' .. jobId
   local signalsKey = prefix .. 'signals:' .. jobId
   local suspendedKey = prefix .. 'suspended'
-  redis.call('UNLINK', parentsKey, jstreamKey, signalsKey, jobKey, logKey)
+  redis.call('UNLINK', parentsKey, prefix .. 'deps:' .. jobId, jstreamKey, signalsKey, jobKey, logKey)
   redis.call('ZREM', suspendedKey, jobId)
   emitEvent(eventsKey, 'removed', jobId, nil)
+  -- Cross-queue parents cannot be updated here (different slot). The member
+  -- stays in xq-pending until the caller or the scheduler delivers it.
+  if #parentNotifications > 0 then return cjson.encode(parentNotifications) end
   return 1
 end)
 

@@ -1,6 +1,7 @@
 import { RequestError } from '@glidemq/speedkey';
 import type { GlideReturnType } from '@glidemq/speedkey';
 import type { Client } from '../types';
+import { buildKeys, parseCrossQueueParentNotification } from '../utils';
 import { librarySourceFrom, loadLibraryFile } from './load-library-source';
 
 export const LIBRARY_NAME = 'glidemq';
@@ -92,7 +93,8 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 122: moveToWaitingChildren unparks immediately when no child deps exist.
 // Version 123: glidemq_complete honors skipEvents/skipMetrics; deferActive can undo a CAF group reservation.
 // Version 124: undoGroupClaim skips active/nextSeq rewind when the job holds retainedSlot.
-export const LIBRARY_VERSION = '124';
+// Version 125: removeJob resolves parent dependencies of a removed child and unlinks its deps set.
+export const LIBRARY_VERSION = '125';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -914,6 +916,8 @@ export async function deferActive(
 
 /**
  * Remove a job from all data structures (hash, stream, scheduled, completed, failed).
+ * A removed child resolves its parents. Cross-queue parents are notified here;
+ * a failed delivery stays in xq-pending for the scheduler to retry.
  * Returns 1 if removed, 0 if not found.
  */
 export async function removeJob(client: Client, k: QueueKeys, jobId: string): Promise<number> {
@@ -922,7 +926,22 @@ export async function removeJob(client: Client, k: QueueKeys, jobId: string): Pr
     [k.job(jobId), k.stream, k.scheduled, k.completed, k.failed, k.events, k.log(jobId)],
     [jobId],
   );
-  return result as number;
+  if (typeof result !== 'string') return Number(result) || 0;
+  const suffix = `:{${k.name}}:id`;
+  if (!k.id.endsWith(suffix)) return 1;
+  const prefix = k.id.slice(0, -suffix.length);
+  for (const member of parseParentNotifications(result)) {
+    const notification = parseCrossQueueParentNotification(member);
+    if (!notification) continue;
+    const [parentQueue, parentId, depsMember] = notification;
+    try {
+      await completeChild(client, buildKeys(parentQueue, prefix), parentId, depsMember);
+      await client.srem(k.xqPending, [member]);
+    } catch {
+      // The scheduler retries members left in xq-pending.
+    }
+  }
+  return 1;
 }
 
 /**
