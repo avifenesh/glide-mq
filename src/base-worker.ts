@@ -1657,6 +1657,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           job.failedReason = continuation.job.failedReason;
         }
         if (continuation.job.discarded) job.discarded = true;
+        // onResume reports usage on the pre-suspend instance; the budget charge reads this one.
+        job.usage = continuation.job.usage;
+        job.usageBudgeted = continuation.job.usageBudgeted;
         const resumedDelayedRequest = continuation.job.consumeMoveToDelayedRequest();
         if (resumedDelayedRequest) job.moveToDelayedRequest = resumedDelayedRequest;
         if (continuation.job.consumeMoveToWaitingChildrenRequest()) job.moveToWaitingChildrenRequest = true;

@@ -443,6 +443,54 @@ describeEachMode('Budget middleware', (CONNECTION) => {
     expect((await queue.getFlowBudget(node.job.id))!.usedTokens).toBe(40);
   });
 
+  it('usage reported in onResume after a charged failed attempt is charged', async () => {
+    queueName = uid();
+    flow = new FlowProducer({ connection: CONNECTION });
+    queue = new Queue(queueName, { connection: CONNECTION });
+
+    const node = await flow.add(
+      {
+        name: 'parent',
+        queueName,
+        data: {},
+        children: [{ name: 'child-1', queueName, data: {}, opts: { attempts: 2 } }],
+      },
+      { budget: { maxTotalTokens: 100000 } },
+    );
+    const childId = node.children![0].job.id;
+
+    let attempts = 0;
+    let done = false;
+    worker = new Worker(
+      queueName,
+      async (job: any) => {
+        if (job.name !== 'child-1') return 'ok';
+        attempts++;
+        if (attempts === 1) {
+          await job.reportUsage({ tokens: { input: 100 } });
+          throw new Error('first attempt fails');
+        }
+        await job.suspend({
+          onResume: async () => {
+            await job.reportUsage({ tokens: { input: 50 } });
+            return 'resumed';
+          },
+        });
+      },
+      { connection: CONNECTION, promotionInterval: 100 },
+    );
+    worker.on('completed', (job: any) => {
+      if (job.name === 'child-1') done = true;
+    });
+    worker.on('error', () => {});
+
+    await waitFor(async () => (await (await queue.getJob(childId))!.getState()) === 'suspended', 10000);
+    await queue.signal(childId, 'go');
+    await waitFor(() => done, 10000);
+    await new Promise((r) => setTimeout(r, 200));
+    expect((await queue.getFlowBudget(node.job.id))!.usedTokens).toBe(150);
+  });
+
   it('budget not checked for jobs without budgetKey', async () => {
     queueName = uid();
     queue = new Queue(queueName, { connection: CONNECTION });
