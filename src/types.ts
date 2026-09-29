@@ -494,7 +494,7 @@ export interface ScheduleOpts {
 export interface JobTemplate {
   name?: string;
   data?: any;
-  opts?: Omit<JobOptions, 'delay' | 'deduplication' | 'parent'>;
+  opts?: Omit<JobOptions, 'delay' | 'deduplication' | 'parent' | 'jobId'>;
 }
 
 /** Stored state of a registered job scheduler. */

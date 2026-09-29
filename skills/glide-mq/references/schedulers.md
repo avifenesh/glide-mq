@@ -111,6 +111,7 @@ await queue.upsertJobScheduler('cleanup', { every: 10_000 }, { name: 'cleanup', 
 - `repeatAfterComplete` prevents overlap - next job only after current finishes or terminally fails.
 - Scheduler ID is unique per queue. `upsert` replaces if exists.
 - `removeJobScheduler` does not cancel jobs already in flight.
+- Template `opts` are validated at upsert like `Queue.add` (ordering, group limits, token bucket and cost apply to every run). `jobId` is rejected: every run gets a generated id.
 - Bounded options (`startDate`, `endDate`, `limit`) work with all three modes.
 - Internal `Scheduler` class fires a promotion loop that converts due entries into real jobs.
 - `getRepeatableJobs()` / `getJobScheduler()` expose `iterationCount` for inspection.

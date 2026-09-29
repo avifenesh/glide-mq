@@ -996,4 +996,80 @@ describeEachMode('Job schedulers', (CONNECTION) => {
       await flushQueue(cleanupClient, qName);
     }
   }, 20000);
+
+  it('scheduler jobs carry the template ordering key, group concurrency and cost', async () => {
+    const qName = Q + '-tmpl-ordering';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const k = buildKeys(qName);
+    await localQueue.upsertJobScheduler(
+      'ordered',
+      { every: 100, limit: 3 },
+      {
+        name: 'ordered-job',
+        opts: { ordering: { key: 'tenant-a', concurrency: 1 }, cost: 2 },
+      },
+    );
+
+    let active = 0;
+    let maxActive = 0;
+    const ids: string[] = [];
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        ids.push(job.id);
+        await new Promise((r) => setTimeout(r, 400));
+        active--;
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 5, blockTimeout: 200, promotionInterval: 100, stalledInterval: 60000 },
+    );
+    worker.on('error', () => {});
+
+    try {
+      const deadline = Date.now() + 8000;
+      while (ids.length < 3 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(ids.length).toBe(3);
+      // Group concurrency 1 serializes the scheduled jobs even with worker concurrency 5
+      expect(maxActive).toBe(1);
+      const fields = await cleanupClient.hmget(k.job(ids[0]), ['groupKey', 'cost']);
+      expect(fields.map((f: any) => (f == null ? null : String(f)))).toEqual(['tenant-a', '2000']);
+    } finally {
+      await worker.close(true);
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    }
+  }, 20000);
+
+  it('upsertJobScheduler validates template options like Queue.add', async () => {
+    await expect(
+      queue.upsertJobScheduler('tmpl-jobid', { every: 1000 }, { name: 'j', opts: { jobId: 'fixed' } as any }),
+    ).rejects.toThrow('Scheduler template: jobId is not supported');
+    await expect(
+      queue.upsertJobScheduler('tmpl-cost', { every: 1000 }, { name: 'j', opts: { cost: -1 } }),
+    ).rejects.toThrow('Scheduler template: cost must be a non-negative finite number');
+    await expect(
+      queue.upsertJobScheduler(
+        'tmpl-tb',
+        { every: 1000 },
+        { name: 'j', opts: { ordering: { key: 'g', tokenBucket: { capacity: 0, refillRate: 1 } } } },
+      ),
+    ).rejects.toThrow('Scheduler template: tokenBucket.capacity must be a positive finite number');
+    await expect(
+      queue.upsertJobScheduler(
+        'tmpl-over-capacity',
+        { every: 1000 },
+        { name: 'j', opts: { cost: 5, ordering: { key: 'g', tokenBucket: { capacity: 2, refillRate: 1 } } } },
+      ),
+    ).rejects.toThrow('Scheduler template: Job cost exceeds token bucket capacity');
+    await expect(
+      queue.upsertJobScheduler('tmpl-ttl', { every: 1000 }, { name: 'j', opts: { ttl: -5 } }),
+    ).rejects.toThrow('Scheduler template: ttl must be a non-negative finite number');
+    for (const name of ['tmpl-jobid', 'tmpl-cost', 'tmpl-tb', 'tmpl-over-capacity', 'tmpl-ttl']) {
+      expect(await queue.getJobScheduler(name)).toBeNull();
+    }
+  });
 });

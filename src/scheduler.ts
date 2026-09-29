@@ -498,11 +498,25 @@ export class Scheduler {
           continue;
         }
 
-        const jobOpts = template.opts ? JSON.stringify(template.opts) : '{}';
-        const priority = template.opts?.priority ?? 0;
-        const maxAttempts = template.opts?.attempts ?? 0;
-        const jobTtl = template.opts?.ttl ?? 0;
-        const lifo = template.opts?.lifo ? 1 : 0;
+        const opts = template.opts;
+        const jobOpts = opts ? JSON.stringify(opts) : '{}';
+        const priority = opts?.priority ?? 0;
+        const maxAttempts = opts?.attempts ?? 0;
+        const jobTtl = opts?.ttl ?? 0;
+        const lifo = opts?.lifo ? 1 : 0;
+        // Ordering, group limits and cost are read by glidemq_addJob only from
+        // args, so derive them from the template exactly like Queue.add does.
+        const orderingKey = opts?.ordering?.key ?? '';
+        let groupConcurrency = opts?.ordering?.concurrency ?? 0;
+        if (orderingKey && groupConcurrency < 1) {
+          groupConcurrency = 1;
+        }
+        const groupRateMax = opts?.ordering?.rateLimit?.max ?? 0;
+        const groupRateDuration = opts?.ordering?.rateLimit?.duration ?? 0;
+        const tb = opts?.ordering?.tokenBucket;
+        const tbCapacity = tb ? Math.round(tb.capacity * 1000) : 0;
+        const tbRefillRate = tb ? Math.round(tb.refillRate * 1000) : 0;
+        const jobCost = opts?.cost != null ? Math.round(opts.cost * 1000) : 0;
 
         const isRepeatAfterComplete = isValidSchedulerEvery(config.repeatAfterComplete);
 
@@ -517,13 +531,13 @@ export class Scheduler {
             priority,
             '',
             maxAttempts,
-            '',
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
+            orderingKey,
+            groupConcurrency,
+            groupRateMax,
+            groupRateDuration,
+            tbCapacity,
+            tbRefillRate,
+            jobCost,
             jobTtl,
             '',
             lifo,

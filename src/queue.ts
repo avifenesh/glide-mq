@@ -49,6 +49,7 @@ import {
   validateTimezone,
   validateSchedulerEvery,
   isValidSchedulerEvery,
+  validateSchedulerTemplate,
   normalizeScheduleDate,
   validateSchedulerBounds,
   computeInitialSchedulerNextRun,
@@ -1465,9 +1466,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
     const startDate = normalizeScheduleDate(schedule.startDate, 'startDate');
     const endDate = normalizeScheduleDate(schedule.endDate, 'endDate');
     validateSchedulerBounds(startDate, endDate, schedule.limit);
-    if (template?.opts?.lifo && template.opts.ordering?.key) {
-      throw new Error('Scheduler template: lifo and ordering.key cannot be used together');
-    }
+    validateSchedulerTemplate(template);
 
     const lock = await this.acquireSchedulerMutationLock(client);
     try {

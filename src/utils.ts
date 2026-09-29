@@ -1,6 +1,6 @@
 import { gzipSync, gunzipSync } from 'zlib';
 import { randomBytes } from 'crypto';
-import type { JobOptions, JobUsage, ScheduleOpts, SchedulerEntry } from './types';
+import type { JobOptions, JobTemplate, JobUsage, ScheduleOpts, SchedulerEntry } from './types';
 
 const DEFAULT_PREFIX = 'glide';
 export const USAGE_BUCKET_MS = 60_000;
@@ -125,6 +125,31 @@ export function validateJobDataSize(serialized: string): void {
         `Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller payloads or store large data externally.`,
       );
     }
+  }
+}
+
+/**
+ * Validate a scheduler job template at upsert time, so a bad template is
+ * rejected once instead of failing or being dropped on every tick.
+ */
+export function validateSchedulerTemplate(template: JobTemplate | undefined): void {
+  const opts = template?.opts as JobOptions | undefined;
+  if (!opts) return;
+  try {
+    if (opts.jobId != null) {
+      throw new Error(
+        'jobId is not supported: every run gets a generated id, a fixed id would drop each run after the first as a duplicate',
+      );
+    }
+    validateJobOptions(opts);
+    const tb = opts.ordering?.tokenBucket;
+    if (opts.ordering?.key && tb) {
+      // Same rule as glidemq_addJob: a missing or zero cost counts as 1.
+      const cost = opts.cost ? Math.round(opts.cost * 1000) : 1000;
+      if (cost > Math.round(tb.capacity * 1000)) throw new Error('Job cost exceeds token bucket capacity');
+    }
+  } catch (err) {
+    throw new Error(`Scheduler template: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

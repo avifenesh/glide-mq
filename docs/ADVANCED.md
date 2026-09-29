@@ -264,6 +264,8 @@ await queue.upsertJobScheduler(
 
 The internal `Scheduler` class fires a promotion loop that converts due scheduler entries into real jobs, then re-registers the next occurrence.
 
+The template `opts` accept the same job options as `Queue.add` except `delay`, `deduplication`, `parent` and `jobId`, and `upsertJobScheduler` validates them the same way, so an invalid template is rejected at upsert. Ordering keys, group concurrency and rate limits, token buckets and `cost` apply to every scheduled job. `jobId` is rejected: each run gets a generated id, and a fixed id would drop every run after the first as a duplicate.
+
 ---
 
 ## LIFO Mode

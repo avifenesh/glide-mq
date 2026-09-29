@@ -1749,6 +1749,23 @@ describe('TestQueue.add validation parity (T11)', () => {
   });
 });
 
+describe('TestQueue.upsertJobScheduler template validation parity', () => {
+  it('rejects the template options Queue.upsertJobScheduler rejects', async () => {
+    const queue = new TestQueue('tmpl-validate');
+    await expect(
+      queue.upsertJobScheduler('a', { every: 1000 }, { name: 'j', opts: { jobId: 'fixed' } as any }),
+    ).rejects.toThrow('Scheduler template: jobId is not supported');
+    await expect(
+      queue.upsertJobScheduler('b', { every: 1000 }, { name: 'j', opts: { lifo: true, ordering: { key: 'g' } } }),
+    ).rejects.toThrow('Scheduler template: lifo and ordering.key cannot be used together');
+    await expect(queue.upsertJobScheduler('c', { every: 1000 }, { name: 'j', opts: { cost: -1 } })).rejects.toThrow(
+      'Scheduler template: cost must be a non-negative finite number',
+    );
+    expect(await queue.getRepeatableJobs()).toEqual([]);
+    await queue.close();
+  });
+});
+
 describe('TestJob.updateData / updateProgress persistence (T11)', () => {
   it('persists updateData and updateProgress to the stored job', async () => {
     const queue = new TestQueue<{ v: number }>('persist-updates');
