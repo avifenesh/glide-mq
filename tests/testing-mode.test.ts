@@ -1777,3 +1777,112 @@ describe('TestJob.updateData / updateProgress persistence (T11)', () => {
     await queue.close();
   });
 });
+
+describe('TestWorker ordering and retention parity (T9)', () => {
+  it('dispatches priority (lowest number first), then LIFO, then FIFO', async () => {
+    const queue = new TestQueue('ordering-parity');
+    await queue.add('fifo-a', {});
+    await queue.add('p5', {}, { priority: 5 });
+    await queue.add('lifo-x', {}, { lifo: true });
+    await queue.add('p1-a', {}, { priority: 1 });
+    await queue.add('fifo-b', {});
+    await queue.add('lifo-y', {}, { lifo: true });
+    await queue.add('p1-b', {}, { priority: 1 });
+
+    const order: string[] = [];
+    const worker = new TestWorker(queue, async (job) => {
+      order.push(job.name);
+      return 'ok';
+    });
+    await waitFor(() => order.length === 7, 2000, 5);
+    expect(order).toEqual(['p1-a', 'p1-b', 'p5', 'lifo-y', 'lifo-x', 'fifo-a', 'fifo-b']);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('removeOnComplete: true deletes the job before the completed event', async () => {
+    const queue = new TestQueue('roc-true');
+    const seen: (TestJob | null)[] = [];
+    const worker = new TestWorker(queue, async () => 'ok');
+    worker.on('completed', async (job: TestJob) => {
+      seen.push(await queue.getJob(job.id));
+    });
+    await queue.add('keep', {});
+    await queue.add('drop', {}, { removeOnComplete: true });
+    await waitFor(() => seen.length === 2, 2000, 5);
+    expect(seen[0]).not.toBeNull();
+    expect(seen[1]).toBeNull();
+    expect((await queue.getJobCounts()).completed).toBe(1);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('removeOnComplete: number keeps only the newest N completed jobs', async () => {
+    const queue = new TestQueue('roc-count');
+    let done = 0;
+    const worker = new TestWorker(queue, async () => 'ok');
+    worker.on('completed', () => done++);
+    for (let i = 0; i < 5; i++) {
+      await queue.add(`j${i}`, {}, { removeOnComplete: 2 });
+      await waitFor(() => done === i + 1, 2000, 1);
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    const completed = await queue.getJobs('completed');
+    expect(completed.map((j) => j.name).sort()).toEqual(['j3', 'j4']);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('removeOnComplete: { age } removes completed jobs older than age seconds', async () => {
+    const queue = new TestQueue('roc-age');
+    let done = 0;
+    const worker = new TestWorker(queue, async () => 'ok');
+    worker.on('completed', () => done++);
+    const old = await queue.add('old', {});
+    await waitFor(() => done === 1, 2000, 1);
+    queue.jobs.get(old!.id)!.finishedOn = Date.now() - 10_000;
+    await queue.add('new', {}, { removeOnComplete: { age: 5, count: 0 } });
+    await waitFor(() => done === 2, 2000, 1);
+    expect(await queue.getJob(old!.id)).toBeNull();
+    expect((await queue.getJobs('completed')).map((j) => j.name)).toEqual(['new']);
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('removeOnFail applies on terminal failure only', async () => {
+    const queue = new TestQueue('rof');
+    let terminal = 0;
+    queue.on('failed', () => terminal++);
+    const worker = new TestWorker(queue, async () => {
+      throw new Error('boom');
+    });
+    const kept = await queue.add('kept', {});
+    const dropped = await queue.add('dropped', {}, { removeOnFail: true });
+    await waitFor(() => terminal === 2, 2000, 5);
+    expect(await queue.getJob(kept!.id)).not.toBeNull();
+    expect(await queue.getJob(dropped!.id)).toBeNull();
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('batch mode applies removeOnComplete', async () => {
+    const queue = new TestQueue('roc-batch');
+    let done = 0;
+    const worker = new TestWorker(queue, async (jobs: TestJob[]) => jobs.map(() => 'ok'), { batch: { size: 2 } });
+    worker.on('completed', () => done++);
+    await queue.addBulk([
+      { name: 'a', data: {}, opts: { removeOnComplete: true } },
+      { name: 'b', data: {} },
+    ]);
+    await waitFor(() => done === 2, 2000, 5);
+    expect((await queue.getJobs('completed')).map((j) => j.name)).toEqual(['b']);
+
+    await worker.close();
+    await queue.close();
+  });
+});

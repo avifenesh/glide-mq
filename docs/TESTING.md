@@ -392,6 +392,8 @@ Call job.suspend() inside the processor, then queue.signal() from outside. Use g
 - **No connection config needed.** `TestQueue` takes only a name — no `connection` option.
 - **Options are validated like production.** `TestQueue.add()` runs the same checks as `Queue.add()` (priority <= 2048, payload size, `ttl`, `lockDuration`, `cost`, `jobId`, ordering key, `lifo` with ordering) and throws the same errors. `job.updateData()` and `job.updateProgress()` persist to the stored job, so `queue.getJob()` sees the new values.
 - **Processing is synchronous-ish.** `TestWorker` processes jobs immediately when they are added via `queue.add()`. In most tests you can check state right after the `await queue.add(...)` call.
+- **Dispatch order matches the worker.** Jobs with `priority > 0` run first (lower number = higher priority, FIFO within a priority), then `lifo` jobs (newest first), then plain FIFO jobs. A `lifo` job with a priority is dispatched as LIFO, like production. `queue.getJobs('waiting')` still lists jobs in insertion order.
+- **Retention is applied.** `removeOnComplete` / `removeOnFail` accept `true`, a count, or `{ age, count }` (age in seconds) and trim the completed / failed jobs exactly as the server functions do, before the `completed` / `failed` event fires. Jobs failed as `expired` by `ttl` are not removed, same as production.
 - **Delayed jobs are enqueued as waiting.** The `delay` option is accepted but not honoured in test mode — jobs start as `waiting` and are processed immediately.
 - **Swap without changing processors.** Because `TestQueue` and `TestWorker` share the same interface as `Queue` and `Worker`, you can parameterise your processor code and pass either implementation.
 

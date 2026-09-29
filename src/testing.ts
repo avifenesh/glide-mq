@@ -1193,6 +1193,79 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     TestQueue.registry.delete(this.name);
   }
 
+  /**
+   * @internal Remove and return the next job to dispatch, mirroring the worker
+   * fetch order: priority list (lowest priority number first, FIFO within a
+   * priority), then LIFO (newest first), then the FIFO stream. A lifo job with a
+   * priority is dispatched from the LIFO list, like production promotion.
+   */
+  takeNextWaiting(): TestJobRecord<D, R> | undefined {
+    const q = this.waitingQueue;
+    let write = 0;
+    for (let read = 0; read < q.length; read++) {
+      const r = q[read];
+      if (r.state === 'waiting' && this.jobs.get(r.id) === r) q[write++] = r;
+    }
+    q.length = write;
+
+    let best = -1;
+    let bestPriority = Number.POSITIVE_INFINITY;
+    let lifo = -1;
+    for (let i = 0; i < q.length; i++) {
+      const opts = q[i].opts;
+      if (opts.lifo) {
+        lifo = i;
+        continue;
+      }
+      const priority = opts.priority ?? 0;
+      if (priority > 0 && priority < bestPriority) {
+        bestPriority = priority;
+        best = i;
+      }
+    }
+    if (best < 0) best = lifo;
+    if (best < 0) best = q.length > 0 ? 0 : -1;
+    if (best < 0) return undefined;
+    return q.splice(best, 1)[0];
+  }
+
+  /**
+   * @internal Apply removeOnComplete / removeOnFail retention after a job reaches
+   * a terminal state. Mirrors glidemq_complete / glidemq_fail: `true` deletes the
+   * job, a number keeps the newest N jobs in that state, `{ age, count }` first
+   * drops jobs finished more than `age` seconds ago, then keeps the newest `count`.
+   */
+  applyRetention(record: TestJobRecord<D, R>, state: 'completed' | 'failed'): void {
+    const opt = state === 'completed' ? record.opts.removeOnComplete : record.opts.removeOnFail;
+    if (!opt) return;
+    if (opt === true) {
+      this.jobs.delete(record.id);
+      return;
+    }
+    const now = record.finishedOn ?? Date.now();
+    const count = typeof opt === 'number' ? opt : (opt.count ?? 0);
+    const age = typeof opt === 'number' ? 0 : (opt.age ?? 0);
+    const MAX_REMOVALS = 1000;
+    // Sorted like the completed/failed ZSET: score finishedOn, ties by member (job id).
+    const inState = (): TestJobRecord<D, R>[] =>
+      [...this.jobs.values()]
+        .filter((r) => r.state === state)
+        .sort((a, b) => (a.finishedOn ?? 0) - (b.finishedOn ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    if (age > 0) {
+      const cutoff = now - age * 1000;
+      const old = inState()
+        .filter((r) => (r.finishedOn ?? 0) <= cutoff)
+        .slice(0, MAX_REMOVALS);
+      for (const r of old) this.jobs.delete(r.id);
+    }
+    if (count > 0) {
+      const all = inState();
+      if (all.length > count) {
+        for (const r of all.slice(0, Math.min(all.length - count, MAX_REMOVALS))) this.jobs.delete(r.id);
+      }
+    }
+  }
+
   /** @internal Called by TestWorker when it attaches. */
   onWorkerAttached(): void {
     this.ensureSchedulerLoop();
@@ -1516,13 +1589,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   }
 
   private findNextWaiting(): TestJobRecord<D, R> | undefined {
-    // Shift from the front of the waitingQueue, skipping stale entries
-    // (records whose state changed out of 'waiting' since they were enqueued).
-    while (this.queue.waitingQueue.length > 0) {
-      const record = this.queue.waitingQueue.shift()!;
-      if (record.state === 'waiting') return record;
-    }
-    return undefined;
+    return this.queue.takeNextWaiting();
   }
 
   private processJob(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
@@ -1563,6 +1630,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         record.finishedOn = Date.now();
         job.failedReason = 'Budget exceeded';
         job.finishedOn = record.finishedOn;
+        this.queue.applyRetention(record, 'failed');
         this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
         const err = new Error('Budget exceeded');
         this.emit('failed', job, err);
@@ -1585,6 +1653,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         record.finishedOn = Date.now();
         job.returnvalue = roundtripped;
         job.finishedOn = record.finishedOn;
+        this.queue.applyRetention(record, 'completed');
         this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
         this.emit('completed', job, roundtripped);
         this.queue.emit('completed', job, roundtripped);
@@ -1654,6 +1723,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           record.finishedOn = Date.now();
           job.failedReason = err.message;
           job.finishedOn = record.finishedOn;
+          this.queue.applyRetention(record, 'failed');
           this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
           this.emit('failed', job, err);
           this.queue.emit('failed', job, err);
@@ -1720,13 +1790,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   }
 
   private takeWaitingRecord(): TestJobRecord<D, R> | undefined {
-    while (this.queue.waitingQueue.length > 0) {
-      const record = this.queue.waitingQueue.shift()!;
-      if (record.state !== 'waiting') continue;
-      if (!this.queue.jobs.has(record.id)) continue;
-      return record;
-    }
-    return undefined;
+    return this.queue.takeNextWaiting();
   }
 
   private flushBatch(): void {
@@ -1776,6 +1840,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           record.finishedOn = Date.now();
           job.returnvalue = roundtripped;
           job.finishedOn = record.finishedOn;
+          this.queue.applyRetention(record, 'completed');
           this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
           this.emit('completed', job, roundtripped);
           this.queue.emit('completed', job, roundtripped);
@@ -1807,6 +1872,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
                 record.finishedOn = Date.now();
                 job.failedReason = result.message;
                 job.finishedOn = record.finishedOn;
+                this.queue.applyRetention(record, 'failed');
                 this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
                 this.emit('failed', job, result);
                 this.queue.emit('failed', job, result);
@@ -1820,6 +1886,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
               record.finishedOn = Date.now();
               job.returnvalue = roundtripped;
               job.finishedOn = record.finishedOn;
+              this.queue.applyRetention(record, 'completed');
               this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
               this.emit('completed', job, roundtripped);
               this.queue.emit('completed', job, roundtripped);
@@ -1846,6 +1913,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
               record.finishedOn = Date.now();
               job.failedReason = err.message;
               job.finishedOn = record.finishedOn;
+              this.queue.applyRetention(record, 'failed');
               this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
               this.emit('failed', job, err);
               this.queue.emit('failed', job, err);
