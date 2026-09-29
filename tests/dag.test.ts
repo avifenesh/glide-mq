@@ -933,4 +933,73 @@ describeEachMode('DAG flows', (CONNECTION) => {
       await flushQueue(cleanupClient, qName);
     }
   });
+
+  it('does not release a parent when a sibling dep completes before the others are wired', async () => {
+    const qName = Q + '-sibling-release';
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const k = buildKeys(qName);
+    let releaseB!: () => void;
+    const bGate = new Promise<void>((r) => (releaseB = r));
+    const started: string[] = [];
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        started.push(job.name);
+        if (job.name === 'B') await bGate;
+        return job.name;
+      },
+      { connection: CONNECTION, concurrency: 5, blockTimeout: 100, stalledInterval: 60000 },
+    );
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+
+    // A has one dependent (P) and registers with it on creation. B has two
+    // dependents, so it is wired in a later round trip. Hold that round trip
+    // until A has completed.
+    const client = await (flow as any).getClient();
+    const originalExec = client.exec.bind(client);
+    let held = false;
+    client.exec = async (...args: any[]) => {
+      const res = await originalExec(...args);
+      if (!held) {
+        const deadline = Date.now() + 1000;
+        while (!started.includes('A') && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+        if (started.includes('A')) {
+          held = true;
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      }
+      return res;
+    };
+
+    try {
+      const jobs = await flow.addDAG({
+        nodes: [
+          { name: 'A', queueName: qName, data: {} },
+          { name: 'B', queueName: qName, data: {} },
+          { name: 'P', queueName: qName, data: {}, deps: ['A', 'B'] },
+          { name: 'Q', queueName: qName, data: {}, deps: ['B'] },
+        ],
+      });
+      expect(held).toBe(true);
+      expect(String(await cleanupClient.hget(k.job(jobs.get('A')!.id), 'state'))).toBe('completed');
+      await new Promise((r) => setTimeout(r, 300));
+      expect(started).not.toContain('P');
+      expect(String(await cleanupClient.hget(k.job(jobs.get('P')!.id), 'state'))).toBe('waiting-children');
+
+      releaseB();
+      await waitFor(
+        async () =>
+          String(await cleanupClient.hget(k.job(jobs.get('P')!.id), 'state')) === 'completed' &&
+          String(await cleanupClient.hget(k.job(jobs.get('Q')!.id), 'state')) === 'completed',
+        10000,
+      );
+    } finally {
+      releaseB();
+      client.exec = originalExec;
+      await worker.close(true);
+      await flow.close();
+      await flushQueue(cleanupClient, qName);
+    }
+  }, 20000);
 });

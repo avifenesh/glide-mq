@@ -526,7 +526,10 @@ export class FlowProducer {
    * FCALLs are sent in one Batch (non-atomic pipeline), then a child-slot batch
    * persists parent metadata and cross-queue parent references. Same-queue
    * registerParent calls and cross-queue parent notifications are completed
-   * after that batch. RTT is O(levels) plus cross-slot notification wiring.
+   * after that batch. Before the leaf level is added, every leaf is put in its
+   * dependents' deps sets (auto ids are reserved first), so no leaf completion
+   * can release a parent while a sibling dependency is unregistered. RTT is
+   * O(levels) plus two for that pre-registration and cross-slot wiring.
    *
    * Returns a map of node name to Job instance.
    */
@@ -600,6 +603,47 @@ export class FlowProducer {
           const levelNodes = byLevel.get(lvl) ?? [];
           if (levelNodes.length === 0) continue;
 
+          // Leaves (level 0) are runnable once added, and a parent is released
+          // when its completed count reaches its deps SET size. Put every leaf
+          // into all of its dependents' deps SETs before any leaf exists, so a
+          // fast sibling cannot release a parent whose other deps are not yet
+          // registered. Auto ids are reserved from the queue counter, like
+          // glidemq_addJob does, and passed as the job id.
+          const presetIds = new Map<string, string>();
+          if (lvl === 0) {
+            const wiredLeaves = levelNodes.filter((n) => (dependents.get(n.name) ?? []).length > 0);
+            const autoIdLeaves = wiredLeaves.filter((n) => !n.opts?.jobId);
+            if (autoIdLeaves.length > 0) {
+              const idBatch = isCluster ? new ClusterBatch(false) : new Batch(false);
+              for (const n of autoIdLeaves) idBatch.incr(buildKeys(n.queueName, prefix).id);
+              const rawIds = isCluster
+                ? await (client as GlideClusterClient).exec(idBatch as ClusterBatch, true)
+                : await (client as GlideClient).exec(idBatch as Batch, true);
+              if (!Array.isArray(rawIds) || rawIds.length !== autoIdLeaves.length) {
+                throw new GlideMQError('addDAG id reservation returned unexpected result length');
+              }
+              autoIdLeaves.forEach((n, i) => presetIds.set(n.name, String(rawIds[i])));
+            }
+            const depsBatch = isCluster ? new ClusterBatch(false) : new Batch(false);
+            let depsCount = 0;
+            for (const n of wiredLeaves) {
+              const leafId = presetIds.get(n.name) ?? n.opts!.jobId!;
+              const depsMember = `${keyPrefix(prefix, n.queueName)}:${leafId}`;
+              for (const depName of dependents.get(n.name)!) {
+                const parentKeys = buildKeys(nodeByName.get(depName)!.queueName, prefix);
+                depsBatch.sadd(parentKeys.deps(result.get(depName)!.id), [depsMember]);
+                depsCount++;
+              }
+            }
+            if (depsCount > 0) {
+              if (isCluster) {
+                await (client as GlideClusterClient).exec(depsBatch as ClusterBatch, true);
+              } else {
+                await (client as GlideClient).exec(depsBatch as Batch, true);
+              }
+            }
+          }
+
           // Phase A: pipeline primary submissions (addFlow or addJob per node).
           const batchA = isCluster ? new ClusterBatch(false) : new Batch(false);
           const submits: Submit[] = [];
@@ -617,7 +661,7 @@ export class FlowProducer {
               );
             }
 
-            const customJobId = opts.jobId ?? '';
+            const customJobId = opts.jobId ? opts.jobId : (presetIds.get(node.name) ?? '');
             if (customJobId !== '') {
               if (customJobId.length > 256) throw new Error('jobId must be at most 256 characters');
               if (/[\x00-\x1f\x7f{}:]/.test(customJobId)) {
