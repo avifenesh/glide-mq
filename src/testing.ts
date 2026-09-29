@@ -1758,6 +1758,17 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
    * priority is dispatched from the LIFO list, like production promotion.
    */
   takeNextWaiting(): TestJobRecord<D, R> | undefined {
+    const best = this.nextWaitingIndex();
+    return best < 0 ? undefined : this.waitingQueue.splice(best, 1)[0];
+  }
+
+  /** @internal True when takeNextWaiting() would return a job. Does not pop anything. */
+  hasWaiting(): boolean {
+    return this.nextWaitingIndex() >= 0;
+  }
+
+  /** Compact the dispatch queue and return the index of the next job to dispatch, or -1. */
+  private nextWaitingIndex(): number {
     this.promotePrioritized();
     const q = this.waitingQueue;
     let write = 0;
@@ -1784,8 +1795,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
     if (best < 0) best = lifo;
     if (best < 0) best = q.length > 0 ? 0 : -1;
-    if (best < 0) return undefined;
-    return q.splice(best, 1)[0];
+    return best;
   }
 
   /**
@@ -2187,18 +2197,19 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
   /**
    * Take the next waiting job unless the worker is rate limited. Like
-   * BaseWorker.waitForRateLimit, a manual rateLimit(ms) / RateLimitError pause
-   * is honoured first, then the limiter window. When limited, the job stays
-   * at the front of the queue and a wake-up timer resumes dispatch.
+   * BaseWorker.waitForRateLimit before a fetch, a manual rateLimit(ms) /
+   * RateLimitError pause is honoured first, then the limiter window. While
+   * limited nothing is popped, so priority, LIFO and FIFO order are kept, and
+   * a wake-up timer resumes dispatch.
    */
   private findNextWaiting(): TestJobRecord<D, R> | undefined {
-    const record = this.queue.takeNextWaiting();
-    if (!record) return undefined;
+    if (!this.queue.hasWaiting()) return undefined;
     const wait = this.acquireRateSlot();
-    if (wait <= 0) return record;
-    this.queue.waitingQueue.unshift(record);
-    this.wakeAfterRateLimit(wait);
-    return undefined;
+    if (wait > 0) {
+      this.wakeAfterRateLimit(wait);
+      return undefined;
+    }
+    return this.queue.takeNextWaiting();
   }
 
   /** Returns 0 and counts a dispatch, or the ms to wait (mirrors glidemq_rateLimit). */

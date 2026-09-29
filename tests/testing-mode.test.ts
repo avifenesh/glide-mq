@@ -2934,3 +2934,57 @@ describe('TestWorker batch mode honours job.moveToFailed() (revuto #313)', () =>
     ]);
   });
 });
+
+describe('TestWorker rate limit keeps queue order (revuto #313)', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it('a rate-limited worker does not pop LIFO jobs, so LIFO order is kept', async () => {
+    queue = new TestQueue('rl-lifo-order');
+    const order: string[] = [];
+    await queue.pause();
+    worker = new TestWorker(
+      queue,
+      async (job) => {
+        order.push(job.name);
+        return 'ok';
+      },
+      { concurrency: 1, limiter: { max: 1, duration: 40 } },
+    );
+    await queue.add('A', {}, { lifo: true });
+    await queue.add('B', {}, { lifo: true });
+    await queue.add('C', {}, { lifo: true });
+    await queue.resume();
+    await waitFor(() => order.length === 3, 3000, 5);
+    expect(order).toEqual(['C', 'B', 'A']);
+  });
+
+  it('priority and FIFO order are kept across rate-limit windows', async () => {
+    queue = new TestQueue('rl-mixed-order');
+    const order: string[] = [];
+    await queue.pause();
+    worker = new TestWorker(
+      queue,
+      async (job) => {
+        order.push(job.name);
+        return 'ok';
+      },
+      { concurrency: 1, limiter: { max: 1, duration: 40 } },
+    );
+    await queue.add('fifo-a', {});
+    await queue.add('p5', {}, { priority: 5 });
+    await queue.add('lifo-x', {}, { lifo: true });
+    await queue.add('p1', {}, { priority: 1 });
+    await queue.add('fifo-b', {});
+    await queue.add('lifo-y', {}, { lifo: true });
+    await queue.resume();
+    await waitFor(() => order.length === 6, 4000, 5);
+    expect(order).toEqual(['p1', 'p5', 'lifo-y', 'lifo-x', 'fifo-a', 'fifo-b']);
+  });
+});
