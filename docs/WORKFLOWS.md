@@ -417,10 +417,10 @@ In a DAG, suspending a node does not block sibling branches. Other branches with
 
 FlowProducer.add() accepts an optional budget parameter that creates a shared budget hash for the entire flow. Every job in the flow (parent and children) shares this budget.
 
-Each child job has a budgetKey that points to the shared budget hash. When reportUsage() is called, the worker atomically increments the budget counters via glidemq_recordUsageAndCheckBudget. If limits are exceeded:
+Each child job has a budgetKey that points to the shared budget hash. The usage a job reports with reportUsage() is charged when the job completes: the worker then increments the budget counters via glidemq_recordUsageAndCheckBudget. Usage reported by an attempt that fails is not charged. Before each job runs, the worker checks the budget. If limits are exceeded:
 
-- **fail**: The current job completes normally, subsequent jobs fail with a budget error.
-- **pause**: Subsequent jobs are paused.
+- **fail**: The job that crossed the limit completes normally. Each later job fails with `Budget exceeded` when it starts (normal retry rules apply).
+- **pause**: Each later job is moved back to delayed for 24 hours when it starts, and again every time it is promoted while the budget stays exceeded.
 
 ---
 
