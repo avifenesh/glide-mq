@@ -162,6 +162,11 @@ export class SandboxJob<D = any, R = any> {
     method: 'log' | 'updateProgress' | 'updateData' | 'discard' | 'moveToDelayed',
     args: unknown[],
   ): Promise<unknown> {
+    // The abort (timeout or revocation) ends this processor's ownership of the
+    // job; the main thread refuses these writes too. log stays available.
+    if (this.abortSignal.aborted && method !== 'log' && method !== 'discard') {
+      return Promise.reject(new Error(`Job aborted: ${method}() is not allowed after the job's abort signal fired`));
+    }
     const id = `${this.invocationId}:${++this.proxySeq}`;
     return new Promise<unknown>((resolve, reject) => {
       this.pendingProxies.set(id, { resolve, reject });

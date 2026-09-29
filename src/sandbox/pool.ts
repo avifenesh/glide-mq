@@ -327,6 +327,12 @@ export class SandboxPool {
     msg: ChildToMain & { type: 'proxy-request' },
   ): Promise<void> {
     try {
+      // After the abort (timeout or revocation) the worker no longer owns the
+      // job, so writes to its state are refused during the grace window. log is
+      // allowed so the processor can record why it stopped.
+      if (job.abortSignal?.aborted && msg.method !== 'log' && msg.method !== 'discard') {
+        throw new Error(`Job aborted: ${msg.method}() is not allowed after the job's abort signal fired`);
+      }
       switch (msg.method) {
         case 'log':
           await job.log(msg.args[0] as string);

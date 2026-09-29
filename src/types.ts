@@ -108,7 +108,9 @@ export interface QueueOptions {
  * Options for sandboxed (file-path) processors running in worker threads or child processes.
  * When a job's abort signal fires (timeout or revocation), the abort is forwarded to the processor.
  * If it has not settled 5 seconds later, its worker thread is terminated (or its child process is
- * SIGKILLed) and replaced, so a hung processor cannot hold a sandbox slot.
+ * SIGKILLed) and replaced, so a hung processor cannot hold a sandbox slot. During that window the
+ * worker no longer owns the job: `job.updateProgress()`, `job.updateData()` and `job.moveToDelayed()`
+ * reject with `Job aborted`; `job.log()` still works.
  */
 export interface SandboxOptions {
   /** Use worker_threads (default: true). When false, uses child_process.fork. */
