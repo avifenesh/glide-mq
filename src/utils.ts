@@ -515,104 +515,270 @@ export async function reconnectWithBackoff(
   }
 }
 
-// ---- Simple 5-field cron parser ----
-// Format: minute hour dayOfMonth month dayOfWeek
-// Supports: *, specific numbers, ranges (1-5), steps (*/5), lists (1,3,5)
+// ---- Cron parser ----
+// Format: [second] minute hour dayOfMonth month dayOfWeek (5 or 6 fields, seconds default to 0)
+// Supports: *, ?, numbers, names (JAN-DEC, SUN-SAT), ranges (1-5), steps (*/5, 5/15, 1-30/10), lists (1,3,5)
+// Day modifiers: L and LW and <n>W in day-of-month, <d>L and <d>#<n> in day-of-week
 
 interface CronField {
   set: Set<number>;
   sorted: number[];
 }
 
-function parseCronField(field: string, min: number, max: number): CronField {
+interface CronFieldSpec {
+  min: number;
+  max: number;
+  /** Case-insensitive names accepted in place of numbers. */
+  names?: Record<string, number>;
+  /** '?' is accepted as a synonym for '*'. */
+  allowQuestion?: boolean;
+}
+
+const MONTH_NAMES: Record<string, number> = {
+  JAN: 1,
+  FEB: 2,
+  MAR: 3,
+  APR: 4,
+  MAY: 5,
+  JUN: 6,
+  JUL: 7,
+  AUG: 8,
+  SEP: 9,
+  OCT: 10,
+  NOV: 11,
+  DEC: 12,
+};
+
+const DOW_NAMES: Record<string, number> = { SUN: 0, MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6 };
+
+const CRON_SECOND: CronFieldSpec = { min: 0, max: 59 };
+const CRON_MINUTE: CronFieldSpec = { min: 0, max: 59 };
+const CRON_HOUR: CronFieldSpec = { min: 0, max: 23 };
+const CRON_DOM: CronFieldSpec = { min: 1, max: 31, allowQuestion: true };
+const CRON_MONTH: CronFieldSpec = { min: 1, max: 12, names: MONTH_NAMES };
+// 7 is accepted as a second Sunday and folded onto 0 after parsing.
+const CRON_DOW: CronFieldSpec = { min: 0, max: 7, names: DOW_NAMES, allowQuestion: true };
+
+/** Parse one value of a field: a number or a name. Returns undefined for anything else. */
+function parseCronValue(token: string, spec: CronFieldSpec): number | undefined {
+  if (/^\d+$/.test(token)) return parseInt(token, 10);
+  return spec.names?.[token.toUpperCase()];
+}
+
+/**
+ * Parse one cron field into its set of values. `special` consumes tokens the
+ * generic grammar does not cover (L, W, #) and returns true when it did.
+ */
+function parseCronField(field: string, spec: CronFieldSpec, special?: (token: string) => boolean): CronField {
   const values: Set<number> = new Set();
+  const { min, max } = spec;
+
+  const addRange = (from: number, to: number, step: number) => {
+    if (from < min || to > max) {
+      throw new Error(`Cron range out of bounds: ${from}-${to}`);
+    }
+    if (from > to) {
+      throw new Error(`Cron range reversed: ${from}-${to}`);
+    }
+    for (let i = from; i <= to; i += step) values.add(i);
+  };
 
   for (const part of field.split(',')) {
     const trimmed = part.trim();
 
-    if (trimmed === '*') {
-      for (let i = min; i <= max; i++) values.add(i);
+    if (trimmed === '*' || (spec.allowQuestion && trimmed === '?')) {
+      addRange(min, max, 1);
       continue;
     }
+    if (special?.(trimmed)) continue;
 
-    const stepMatch = trimmed.match(/^(\*|(\d+)-(\d+))\/(\d+)$/);
-    if (stepMatch) {
-      const step = parseInt(stepMatch[4], 10);
+    // Split once on '/', then once on '-'. More separators are malformed.
+    const slash = trimmed.split('/');
+    if (slash.length > 2 || slash.some((s) => s.length === 0)) {
+      throw new Error(`Invalid cron token: ${trimmed}`);
+    }
+    const [rangeText, stepText] = slash;
+    let step = 1;
+    if (stepText !== undefined) {
+      if (!/^\d+$/.test(stepText)) {
+        throw new Error(`Invalid cron token: ${trimmed}`);
+      }
+      step = parseInt(stepText, 10);
       if (step <= 0) {
         throw new Error(`Invalid cron step: ${step}`);
       }
-      let start = min;
-      let end = max;
-      if (stepMatch[2] !== undefined) {
-        start = parseInt(stepMatch[2], 10);
-        end = parseInt(stepMatch[3], 10);
-      }
-      if (start < min || end > max) {
-        throw new Error(`Cron range out of bounds: ${start}-${end}`);
-      }
-      if (start > end) {
-        throw new Error(`Cron range reversed: ${start}-${end}`);
-      }
-      for (let i = start; i <= end; i += step) values.add(i);
+    }
+
+    if (rangeText === '*') {
+      addRange(min, max, step);
       continue;
     }
 
-    const rangeMatch = trimmed.match(/^(\d+)-(\d+)$/);
-    if (rangeMatch) {
-      const from = parseInt(rangeMatch[1], 10);
-      const to = parseInt(rangeMatch[2], 10);
-      if (from < min || to > max) {
-        throw new Error(`Cron range out of bounds: ${from}-${to}`);
-      }
-      if (from > to) {
-        throw new Error(`Cron range reversed: ${from}-${to}`);
-      }
-      for (let i = from; i <= to; i++) values.add(i);
-      continue;
-    }
-
-    if (!/^\d+$/.test(trimmed)) {
+    const dash = rangeText.split('-');
+    if (dash.length > 2 || dash.some((s) => s.length === 0)) {
       throw new Error(`Invalid cron token: ${trimmed}`);
     }
-    const num = parseInt(trimmed, 10);
-    if (num < min || num > max) {
-      throw new Error(`Cron value out of bounds: ${num}`);
+    const from = parseCronValue(dash[0], spec);
+    if (from === undefined) {
+      throw new Error(`Invalid cron token: ${trimmed}`);
     }
-    values.add(num);
+    if (dash.length === 2) {
+      const to = parseCronValue(dash[1], spec);
+      if (to === undefined) {
+        throw new Error(`Invalid cron token: ${trimmed}`);
+      }
+      addRange(from, to, step);
+      continue;
+    }
+    if (stepText !== undefined) {
+      // 'N/step' runs from N to the end of the field, as in cron-parser and Quartz.
+      addRange(from, max, step);
+      continue;
+    }
+    if (from < min || from > max) {
+      throw new Error(`Cron value out of bounds: ${from}`);
+    }
+    values.add(from);
   }
 
   const sorted = [...values].sort((a, b) => a - b);
   return { set: values, sorted };
 }
 
-interface CronPattern {
+/** Quartz-style day modifiers. Each one adds days to its field's match. */
+interface CronDayModifiers {
+  /** 'L' in day-of-month: the last day of the month. */
+  domLast: boolean;
+  /** 'LW' in day-of-month: the last weekday (Mon-Fri) of the month. */
+  domLastWeekday: boolean;
+  /** '<n>W' in day-of-month: the weekday nearest to day n, inside the same month. */
+  domNearestWeekday: number[];
+  /** '<d>L' in day-of-week: the last such weekday of the month. */
+  dowLast: Set<number>;
+  /** '<d>#<n>' in day-of-week: the nth such weekday of the month, n in 1-5. */
+  dowNth: Array<[dow: number, nth: number]>;
+}
+
+function checkCronBound(value: number, min: number, max: number): number {
+  if (value < min || value > max) {
+    throw new Error(`Cron value out of bounds: ${value}`);
+  }
+  return value;
+}
+
+function parseDomModifier(mods: CronDayModifiers, token: string): boolean {
+  const upper = token.toUpperCase();
+  if (upper === 'L') {
+    mods.domLast = true;
+    return true;
+  }
+  if (upper === 'LW') {
+    mods.domLastWeekday = true;
+    return true;
+  }
+  const nearest = upper.match(/^(\d+)W$/);
+  if (nearest) {
+    mods.domNearestWeekday.push(checkCronBound(parseInt(nearest[1], 10), CRON_DOM.min, CRON_DOM.max));
+    return true;
+  }
+  return false;
+}
+
+function parseDowModifier(mods: CronDayModifiers, token: string): boolean {
+  const last = token.match(/^(.+)L$/i);
+  if (last) {
+    const dow = parseCronValue(last[1], CRON_DOW);
+    if (dow === undefined) return false;
+    mods.dowLast.add(checkCronBound(dow, CRON_DOW.min, CRON_DOW.max) % 7);
+    return true;
+  }
+  const nth = token.match(/^(.+)#(\d+)$/);
+  if (nth) {
+    const dow = parseCronValue(nth[1], CRON_DOW);
+    if (dow === undefined) return false;
+    mods.dowNth.push([checkCronBound(dow, CRON_DOW.min, CRON_DOW.max) % 7, checkCronBound(parseInt(nth[2], 10), 1, 5)]);
+    return true;
+  }
+  return false;
+}
+
+interface CronPattern extends CronDayModifiers {
+  second: CronField;
   minute: CronField;
   hour: CronField;
   dom: CronField;
   month: CronField;
   dow: CronField;
-  /** Day-of-month field covers every day 1-31 ('*', '*\/1', '1-31'). */
+  /** Six fields were given: the search runs at second granularity. */
+  hasSeconds: boolean;
+  /** Vixie cron wildcard rule: the minute or hour field contains '*'. Decides the DST behavior. */
+  wildcardTime: boolean;
+  /** Day-of-month field covers every day 1-31 ('*', '?', '*\/1', '1-31'). */
   domUnrestricted: boolean;
-  /** Day-of-week field is '*' or '*\/1'. An explicit '0-6' counts as restricted, as in cron-parser and vixie cron. */
+  /** Day-of-week field is '*', '?' or '*\/1'. An explicit '0-6' counts as restricted, as in cron-parser and vixie cron. */
   dowUnrestricted: boolean;
 }
 
 function parseCronPattern(pattern: string): CronPattern {
   const fields = pattern.trim().split(/\s+/);
-  if (fields.length !== 5) {
-    throw new Error(`Invalid cron pattern: expected 5 fields, got ${fields.length}`);
+  if (fields.length !== 5 && fields.length !== 6) {
+    throw new Error(`Invalid cron pattern: expected 5 or 6 fields, got ${fields.length}`);
   }
-  const dom = parseCronField(fields[2], 1, 31);
-  const dow = parseCronField(fields[4], 0, 6); // 0=Sunday
-  return {
-    minute: parseCronField(fields[0], 0, 59),
-    hour: parseCronField(fields[1], 0, 23),
-    dom,
-    month: parseCronField(fields[3], 1, 12),
-    dow,
-    domUnrestricted: dom.set.size === 31,
-    dowUnrestricted: dow.set.size === 7 && fields[4].includes('*'),
+  const hasSeconds = fields.length === 6;
+  const [secondText, minuteText, hourText, domText, monthText, dowText] = hasSeconds ? fields : ['0', ...fields];
+  const mods: CronDayModifiers = {
+    domLast: false,
+    domLastWeekday: false,
+    domNearestWeekday: [],
+    dowLast: new Set(),
+    dowNth: [],
   };
+  const dom = parseCronField(domText, CRON_DOM, (token) => parseDomModifier(mods, token));
+  const dow = parseCronField(dowText, CRON_DOW, (token) => parseDowModifier(mods, token));
+  if (dow.set.delete(7)) {
+    dow.set.add(0);
+    dow.sorted = [...dow.set].sort((a, b) => a - b);
+  }
+  return {
+    ...mods,
+    second: parseCronField(secondText, CRON_SECOND),
+    minute: parseCronField(minuteText, CRON_MINUTE),
+    hour: parseCronField(hourText, CRON_HOUR),
+    dom,
+    month: parseCronField(monthText, CRON_MONTH),
+    dow,
+    hasSeconds,
+    wildcardTime: minuteText.includes('*') || hourText.includes('*'),
+    domUnrestricted: dom.set.size === 31,
+    dowUnrestricted: dow.set.size === 7 && /[*?]/.test(dowText),
+  };
+}
+
+function daysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+/** Quartz 'W': the weekday (Mon-Fri) nearest to day n without leaving the month. */
+function nearestWeekday(n: number, dowOfN: number, monthLength: number): number {
+  if (dowOfN >= 1 && dowOfN <= 5) return n;
+  if (dowOfN === 6) return n > 1 ? n - 1 : n + 2;
+  return n < monthLength ? n + 1 : n - 2;
+}
+
+function cronDomMatches(cron: CronPattern, day: number, dayOfWeek: number, monthLength: number): boolean {
+  if (cron.dom.set.has(day)) return true;
+  if (cron.domLast && day === monthLength) return true;
+  // Day of week of another day n in the same month.
+  const dowOf = (n: number) => (((dayOfWeek + n - day) % 7) + 7) % 7;
+  if (cron.domLastWeekday && day === nearestWeekday(monthLength, dowOf(monthLength), monthLength)) return true;
+  return cron.domNearestWeekday.some((n) => n <= monthLength && nearestWeekday(n, dowOf(n), monthLength) === day);
+}
+
+function cronDowMatches(cron: CronPattern, day: number, dayOfWeek: number, monthLength: number): boolean {
+  if (cron.dow.set.has(dayOfWeek)) return true;
+  if (cron.dowLast.has(dayOfWeek) && day + 7 > monthLength) return true;
+  const nth = Math.ceil(day / 7);
+  return cron.dowNth.some(([d, n]) => d === dayOfWeek && n === nth);
 }
 
 /**
@@ -620,9 +786,9 @@ function parseCronPattern(pattern: string): CronPattern {
  * a day matches if EITHER field matches. Otherwise both must match (the
  * unrestricted one always does).
  */
-function cronDayMatches(cron: CronPattern, day: number, dayOfWeek: number): boolean {
-  const domMatch = cron.dom.set.has(day);
-  const dowMatch = cron.dow.set.has(dayOfWeek);
+function cronDayMatches(cron: CronPattern, day: number, dayOfWeek: number, monthLength: number): boolean {
+  const domMatch = cronDomMatches(cron, day, dayOfWeek, monthLength);
+  const dowMatch = cronDowMatches(cron, day, dayOfWeek, monthLength);
   if (!cron.domUnrestricted && !cron.dowUnrestricted) return domMatch || dowMatch;
   return domMatch && dowMatch;
 }
@@ -630,6 +796,9 @@ function cronDayMatches(cron: CronPattern, day: number, dayOfWeek: number): bool
 // Maximum search horizon in years to prevent infinite loops (e.g. Feb 30)
 // 10 years covers century non-leap-year gaps (e.g. Feb 29 after 2097 -> 2104)
 const MAX_SEARCH_YEARS = 10;
+// Every walker step advances at least one second or skips a whole field, so a
+// match inside the horizon takes far fewer steps than this. A guard against bugs.
+const MAX_SEARCH_STEPS = 200_000;
 
 const validTzCache = new Set<string>();
 
@@ -704,12 +873,17 @@ function getFormatter(tz: string): Intl.DateTimeFormat {
   return f;
 }
 
-interface TzParts {
+/** A wall-clock time in some timezone (or UTC). */
+interface Wall {
   year: number;
   month: number; // 1-12
   day: number;
   hour: number;
   minute: number;
+  second: number;
+}
+
+interface TzParts extends Wall {
   dayOfWeek: number; // 0=Sunday
 }
 
@@ -730,9 +904,32 @@ function utcToTzParts(epochMs: number, tz: string): TzParts {
   let hour = parseInt(p.hour, 10);
   if (hour === 24) hour = 0;
   const minute = parseInt(p.minute, 10);
+  const second = parseInt(p.second, 10);
   // Compute day of week from a UTC date constructed from these parts
   const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
-  return { year, month, day, hour, minute, dayOfWeek: dow };
+  return { year, month, day, hour, minute, second, dayOfWeek: dow };
+}
+
+/** Wall-clock components of a UTC instant. */
+function utcToWall(epochMs: number): Wall {
+  const d = new Date(epochMs);
+  return {
+    year: d.getUTCFullYear(),
+    month: d.getUTCMonth() + 1,
+    day: d.getUTCDate(),
+    hour: d.getUTCHours(),
+    minute: d.getUTCMinutes(),
+    second: d.getUTCSeconds(),
+  };
+}
+
+function wallToNaiveUtc(w: Wall): number {
+  return Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, w.second, 0);
+}
+
+/** The wall time one second later (calendar arithmetic through UTC dates). */
+function wallPlusOneSecond(w: Wall): Wall {
+  return utcToWall(wallToNaiveUtc(w) + 1000);
 }
 
 const MINUTE_MS = 60_000;
@@ -751,15 +948,8 @@ function tzOffsetMs(epochMs: number, tz: string): number {
  * Empty for a time skipped by spring-forward, two entries for a time repeated
  * by fall-back.
  */
-function tzWallToInstants(
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  minute: number,
-  tz: string,
-): number[] {
-  const naive = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+function tzWallToInstants(w: Wall, tz: string): number[] {
+  const naive = wallToNaiveUtc(w);
   const guess = tzOffsetMs(naive, tz);
   const offsets = new Set([
     guess,
@@ -779,8 +969,9 @@ function tzWallToInstants(
  * First instant after the spring-forward gap that skips the given wall time.
  * Only valid when tzWallToInstants returned no instants for it.
  */
-function tzGapEnd(year: number, month: number, day: number, hour: number, minute: number, tz: string): number {
-  const naive = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+function tzGapEnd(w: Wall, tz: string): number {
+  // Transitions are minute-aligned; drop the seconds so the bisection lands on the transition itself.
+  const naive = Math.floor(wallToNaiveUtc(w) / MINUTE_MS) * MINUTE_MS;
   const guess = tzOffsetMs(naive, tz);
   const offsetBefore = tzOffsetMs(naive - guess - DST_WINDOW_MS, tz);
   const offsetAfter = tzOffsetMs(naive - guess + DST_WINDOW_MS, tz);
@@ -795,29 +986,32 @@ function tzGapEnd(year: number, month: number, day: number, hour: number, minute
   return hi;
 }
 
-/** Vixie cron wildcard rule: the minute or hour field contains '*'. */
-function isWildcardCronTime(pattern: string): boolean {
-  const fields = pattern.trim().split(/\s+/);
-  return fields[0].includes('*') || fields[1].includes('*');
-}
-
 function cronWallMatches(cron: CronPattern, p: TzParts): boolean {
   return (
     cron.month.set.has(p.month) &&
-    cronDayMatches(cron, p.day, p.dayOfWeek) &&
+    cronDayMatches(cron, p.day, p.dayOfWeek, daysInMonth(p.year, p.month)) &&
     cron.hour.set.has(p.hour) &&
-    cron.minute.set.has(p.minute)
+    cron.minute.set.has(p.minute) &&
+    cron.second.set.has(p.second)
   );
 }
 
 /**
- * Compute the next occurrence of a cron pattern after `afterMs` (epoch ms).
- * Supports standard 5-field cron: minute hour dayOfMonth month dayOfWeek, with
- * `*`, numbers, ranges, steps and lists. No seconds field, no names, and
- * dayOfWeek is 0-6 (7 is rejected). When both day fields are restricted, a day
- * matching either one matches.
- * When `tz` is provided, the cron expression is evaluated in that IANA timezone.
- * Returns epoch ms of the next matching time (always in UTC).
+ * Compute the next occurrence of a cron pattern strictly after `afterMs`
+ * (epoch ms), at second granularity.
+ *
+ * Pattern: `minute hour dayOfMonth month dayOfWeek`, or six fields with a
+ * leading `second`. Fields take `*`, numbers, names (JAN-DEC, SUN-SAT,
+ * case-insensitive), ranges, steps (`*\/5`, `1-30/10`, `5/15`) and lists.
+ * dayOfWeek is 0-7 with 0 and 7 both Sunday. Day fields also take `?` (same
+ * as `*`); dayOfMonth takes `L` (last day), `LW` (last weekday) and `<n>W`
+ * (nearest weekday to n); dayOfWeek takes `<d>L` (last such weekday) and
+ * `<d>#<n>` (nth such weekday). When both day fields are restricted, a day
+ * matching either one matches. A superset of cron-parser 4.9 (BullMQ).
+ *
+ * When `tz` is provided, the pattern is evaluated in that IANA timezone with
+ * cronie DST rules (see nextCronOccurrenceTz). Returns epoch ms (UTC).
+ * Throws on a malformed pattern or when nothing matches within 10 years.
  */
 export function nextCronOccurrence(pattern: string, afterMs: number, tz?: string): number {
   if (tz) {
@@ -915,68 +1109,106 @@ export function computeFollowingSchedulerNextRun(
 
 function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
   const cron = parseCronPattern(pattern);
+  const start = utcToWall(Math.floor(afterMs / 1000) * 1000 + 1000);
+  return searchCronWall(cron, start, pattern, wallToNaiveUtc);
+}
+
+/**
+ * Walk wall-clock time from `start` upward, field by field, and hand every
+ * time the pattern matches to `resolve`, which turns it into an instant or
+ * returns undefined to keep walking. Each step either skips to the next
+ * matching value of one field or advances one second, so the walk is
+ * O(fields) per step and bounded by MAX_SEARCH_YEARS / MAX_SEARCH_STEPS.
+ */
+function searchCronWall(
+  cron: CronPattern,
+  start: Wall,
+  pattern: string,
+  resolve: (w: Wall) => number | undefined,
+): number {
+  const { set: secondSet, sorted: secondsSorted } = cron.second;
   const { set: minuteSet, sorted: minutesSorted } = cron.minute;
   const { set: hourSet, sorted: hoursSorted } = cron.hour;
   const { set: monthSet, sorted: monthsSorted } = cron.month;
 
-  // Start from the next minute after afterMs (all operations in UTC)
-  const d = new Date(afterMs);
-  d.setUTCSeconds(0, 0);
-  d.setUTCMinutes(d.getUTCMinutes() + 1);
+  let { year, month, day, hour, minute, second } = start;
+  const endYear = year + MAX_SEARCH_YEARS;
 
-  const endYear = d.getUTCFullYear() + MAX_SEARCH_YEARS;
-
-  while (d.getUTCFullYear() <= endYear) {
+  for (let steps = 0; year <= endYear && steps < MAX_SEARCH_STEPS; steps++) {
     // 1. Month check
-    const currentMonth = d.getUTCMonth() + 1;
-    if (!monthSet.has(currentMonth)) {
-      const nextMonth = monthsSorted.find((m) => m > currentMonth);
+    if (!monthSet.has(month)) {
+      const nextMonth = monthsSorted.find((m) => m > month);
       if (nextMonth != null) {
-        d.setUTCMonth(nextMonth - 1, 1);
-        d.setUTCHours(0, 0, 0, 0);
+        month = nextMonth;
       } else {
-        d.setUTCFullYear(d.getUTCFullYear() + 1, monthsSorted[0] - 1, 1);
-        d.setUTCHours(0, 0, 0, 0);
+        year++;
+        month = monthsSorted[0];
       }
+      day = 1;
+      hour = minute = second = 0;
       continue;
     }
 
-    // 2. Day check
-    const currentDay = d.getUTCDate();
-    const currentDayOfWeek = d.getUTCDay();
-    if (!cronDayMatches(cron, currentDay, currentDayOfWeek)) {
-      d.setUTCDate(d.getUTCDate() + 1);
-      d.setUTCHours(0, 0, 0, 0);
+    // 2. Day check - UTC dates give month length and day of week
+    const monthLength = daysInMonth(year, month);
+    if (day > monthLength) {
+      month++;
+      if (month > 12) {
+        month = 1;
+        year++;
+      }
+      day = 1;
+      hour = minute = second = 0;
+      continue;
+    }
+    const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+    if (!cronDayMatches(cron, day, dow, monthLength)) {
+      day++;
+      hour = minute = second = 0;
       continue;
     }
 
     // 3. Hour check
-    const currentHour = d.getUTCHours();
-    if (!hourSet.has(currentHour)) {
-      const nextHour = hoursSorted.find((h) => h > currentHour);
+    if (!hourSet.has(hour)) {
+      const nextHour = hoursSorted.find((h) => h > hour);
       if (nextHour != null) {
-        d.setUTCHours(nextHour, 0, 0, 0);
+        hour = nextHour;
       } else {
-        d.setUTCDate(d.getUTCDate() + 1);
-        d.setUTCHours(0, 0, 0, 0);
+        day++;
+        hour = 0;
       }
+      minute = second = 0;
       continue;
     }
 
     // 4. Minute check
-    const currentMinute = d.getUTCMinutes();
-    if (!minuteSet.has(currentMinute)) {
-      const nextMinute = minutesSorted.find((m) => m > currentMinute);
+    if (!minuteSet.has(minute)) {
+      const nextMinute = minutesSorted.find((m) => m > minute);
       if (nextMinute != null) {
-        d.setUTCMinutes(nextMinute, 0, 0);
-        return d.getTime();
+        minute = nextMinute;
       } else {
-        d.setUTCHours(d.getUTCHours() + 1, 0, 0, 0);
+        hour++;
+        minute = 0;
+      }
+      second = 0;
+      continue;
+    }
+
+    // 5. Second check
+    if (!secondSet.has(second)) {
+      const nextSecond = secondsSorted.find((sec) => sec > second);
+      if (nextSecond != null) {
+        second = nextSecond;
+      } else {
+        minute++;
+        second = 0;
         continue;
       }
     }
 
-    return d.getTime();
+    const found = resolve({ year, month, day, hour, minute, second });
+    if (found !== undefined) return found;
+    ({ year, month, day, hour, minute, second } = wallPlusOneSecond({ year, month, day, hour, minute, second }));
   }
 
   throw new Error(`No cron match found within ${MAX_SEARCH_YEARS} years for pattern: ${pattern}`);
@@ -998,10 +1230,7 @@ function nextCronOccurrenceUtc(pattern: string, afterMs: number): number {
  */
 function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): number {
   const cron = parseCronPattern(pattern);
-  const { set: minuteSet, sorted: minutesSorted } = cron.minute;
-  const { set: hourSet, sorted: hoursSorted } = cron.hour;
-  const { set: monthSet, sorted: monthsSorted } = cron.month;
-  const wildcardTime = isWildcardCronTime(pattern);
+  const { wildcardTime } = cron;
 
   if (wildcardTime) {
     // A fall-back transition within the next few hours means wall-clock order
@@ -1012,130 +1241,29 @@ function nextCronOccurrenceTz(pattern: string, afterMs: number, tz: string): num
     if (offsetLater < offsetNow) {
       const repeatMs = offsetNow - offsetLater;
       const scanEnd = afterMs + repeatMs;
-      for (let t = Math.floor(afterMs / MINUTE_MS) * MINUTE_MS + MINUTE_MS; t <= scanEnd; t += MINUTE_MS) {
+      const stepMs = cron.hasSeconds ? 1000 : MINUTE_MS;
+      for (let t = Math.floor(afterMs / stepMs) * stepMs + stepMs; t <= scanEnd; t += stepMs) {
         if (cronWallMatches(cron, utcToTzParts(t, tz))) return t;
       }
     }
   }
 
-  // Get the wall-clock time in the target timezone for "afterMs + 1 minute"
-  const startParts = utcToTzParts(afterMs, tz);
-  // Advance by 1 minute in wall-clock time
-  let year = startParts.year;
-  let month = startParts.month;
-  let day = startParts.day;
-  let hour = startParts.hour;
-  let minute = startParts.minute + 1;
+  // Start one second after afterMs in wall-clock time.
+  const start = wallPlusOneSecond(utcToTzParts(afterMs, tz));
 
-  // Normalize overflow
-  if (minute >= 60) {
-    minute = 0;
-    hour++;
-    if (hour >= 24) {
-      hour = 0;
-      // Advance day via UTC date arithmetic for correctness
-      const tmp = new Date(Date.UTC(year, month - 1, day + 1));
-      year = tmp.getUTCFullYear();
-      month = tmp.getUTCMonth() + 1;
-      day = tmp.getUTCDate();
-    }
-  }
-
-  const endYear = year + MAX_SEARCH_YEARS;
-
-  while (year <= endYear) {
-    // 1. Month check
-    if (!monthSet.has(month)) {
-      const nextMonth = monthsSorted.find((m) => m > month);
-      if (nextMonth != null) {
-        month = nextMonth;
-        day = 1;
-        hour = 0;
-        minute = 0;
-      } else {
-        year++;
-        month = monthsSorted[0];
-        day = 1;
-        hour = 0;
-        minute = 0;
-      }
-      continue;
-    }
-
-    // 2. Day check - use UTC Date for day-of-week and month-length
-    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    if (day > daysInMonth) {
-      // Overflowed month
-      month++;
-      day = 1;
-      hour = 0;
-      minute = 0;
-      if (month > 12) {
-        month = 1;
-        year++;
-      }
-      continue;
-    }
-    const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
-    if (!cronDayMatches(cron, day, dow)) {
-      day++;
-      hour = 0;
-      minute = 0;
-      continue;
-    }
-
-    // 3. Hour check
-    if (!hourSet.has(hour)) {
-      const nextHour = hoursSorted.find((h) => h > hour);
-      if (nextHour != null) {
-        hour = nextHour;
-        minute = 0;
-      } else {
-        day++;
-        hour = 0;
-        minute = 0;
-      }
-      continue;
-    }
-
-    // 4. Minute check
-    if (!minuteSet.has(minute)) {
-      const nextMinute = minutesSorted.find((m) => m > minute);
-      if (nextMinute != null) {
-        minute = nextMinute;
-      } else {
-        hour++;
-        minute = 0;
-        continue;
-      }
-    }
-
-    // Found a candidate wall-clock time - convert to UTC. A skipped wall time
-    // has no instant: fixed-time patterns run at the end of the gap instead.
-    // A repeated one has two and only wildcard patterns use the second.
-    const instants = tzWallToInstants(year, month, day, hour, minute, tz);
+  // A skipped wall time has no instant: fixed-time patterns run at the end of
+  // the gap instead. A repeated one has two and only wildcard patterns use the
+  // second.
+  return searchCronWall(cron, start, pattern, (w) => {
+    const instants = tzWallToInstants(w, tz);
     let eligible: number[];
     if (instants.length === 0) {
-      eligible = wildcardTime ? [] : [tzGapEnd(year, month, day, hour, minute, tz)];
+      eligible = wildcardTime ? [] : [tzGapEnd(w, tz)];
     } else {
       eligible = wildcardTime ? instants : instants.slice(0, 1);
     }
-    const next = eligible.find((t) => t > afterMs);
-    if (next !== undefined) {
-      return next;
-    }
-    minute++;
-    if (minute >= 60) {
-      minute = 0;
-      hour++;
-      if (hour >= 24) {
-        hour = 0;
-        day++;
-      }
-    }
-  }
-
-  throw new Error(`No cron match found within ${MAX_SEARCH_YEARS} years for pattern: ${pattern}`);
+    return eligible.find((t) => t > afterMs);
+  });
 }
 
 // ---- Subject matching for Broadcast filtering ----

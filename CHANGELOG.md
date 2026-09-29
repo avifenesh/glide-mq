@@ -14,6 +14,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Cron syntax parity with cron-parser**: month and weekday names, day-of-week `7`, `?`, `N/step`, an optional leading seconds field, `L`, `LW`, `<n>W` in day-of-month and `<d>L`, `<d>#<n>` in day-of-week. A test oracle compares `nextCronOccurrence` with cron-parser 4.9.0 (the version BullMQ uses) over 44 patterns in four zones: 0 mismatches outside DST transitions, where glide-mq keeps cronie's rules. Seconds patterns are honored by the parser; the scheduler still fires on its promotion tick, so sub-tick periods produce one job per tick.
 - **Bun and Deno support**: verified on Bun 1.4.2 and Deno 2.9.7 (NAPI client load, Queue/Worker/QueueEvents, gzip, worker_threads and forked sandboxes, flows, broadcast, signals). `npm run compat:bun` / `compat:deno` run the smoke against a local Valkey, CI runs both, and docs/COMPATIBILITY.md lists the required Deno permissions and the known gaps.
 
 ---

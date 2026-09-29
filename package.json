@@ -70,6 +70,7 @@
     "@vitest/coverage-v8": "^4.1.11",
     "ai": "^6.0.138",
     "bullmq": "^5.69.2",
+    "cron-parser": "4.9.0",
     "eslint": "^10.0.1",
     "eslint-config-prettier": "^10.1.8",
     "express": "^5.2.1",
