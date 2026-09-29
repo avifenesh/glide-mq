@@ -1966,8 +1966,10 @@ export function createRoutes(
         throw httpError(400, nestedOptsError);
       }
 
+      // The producer borrows the proxy's shared command client; close() releases the
+      // reference without closing the client, which the proxy owns.
       const producer = new FlowProducer({
-        client: opts.client,
+        client: await getSharedClient(),
         connection: opts.connection,
         prefix: opts.prefix,
       });
@@ -2180,7 +2182,7 @@ export function createRoutes(
           : undefined;
 
       const summary = await Queue.getUsageSummary({
-        client: opts.client,
+        client: await getSharedClient(),
         connection: opts.connection,
         endTime,
         prefix: opts.prefix,

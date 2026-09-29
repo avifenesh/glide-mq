@@ -636,3 +636,55 @@ describe('HTTP proxy hardening - bounded retry', () => {
     expect(counts.failed).toBe(1);
   });
 });
+
+describe('HTTP proxy hardening - shared client for flows and usage', () => {
+  let cleanupClient: any;
+  const queueName = `proxy-hard-${RUN_ID}-shared`;
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  });
+
+  it('POST /flows and GET /usage/summary reuse the shared command client', async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    const originalCreateClient = connectionModule.createClient;
+    let created = 0;
+    connectionModule.createClient = async (conn: any) => {
+      created += 1;
+      return originalCreateClient(conn);
+    };
+
+    const proxy = createProxyServer({ connection: CONNECTION });
+    const { baseUrl, server } = await listen(proxy.app);
+    try {
+      const counts = await fetch(`${baseUrl}/queues/${queueName}/counts`);
+      expect(counts.status).toBe(200);
+
+      for (let i = 0; i < 2; i++) {
+        const flow = await fetch(`${baseUrl}/flows`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            flow: { name: 'root', queueName, data: {}, children: [{ name: 'child', queueName, data: {} }] },
+          }),
+        });
+        expect(flow.status).toBe(201);
+        const dag = await fetch(`${baseUrl}/flows`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dag: { nodes: [{ name: `d${i}`, queueName, data: {} }] } }),
+        });
+        expect(dag.status).toBe(201);
+        const usage = await fetch(`${baseUrl}/usage/summary?windowMs=60000&queues=${queueName}`);
+        expect(usage.status).toBe(200);
+      }
+      expect(created).toBe(1);
+    } finally {
+      connectionModule.createClient = originalCreateClient;
+      server.closeAllConnections?.();
+      await proxy.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
