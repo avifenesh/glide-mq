@@ -71,4 +71,25 @@ describe('gracefulShutdown', () => {
     expect(b.close).toHaveBeenCalledTimes(1);
     expect(c.close).toHaveBeenCalledTimes(1);
   });
+
+  it('a second signal during a hung shutdown re-raises it instead of swallowing it', async () => {
+    const hung = makeMockComponent({ close: vi.fn().mockReturnValue(new Promise(() => {})) as any });
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const sigintBefore = process.listenerCount('SIGINT');
+    try {
+      gracefulShutdown([hung]);
+      expect(process.listenerCount('SIGINT')).toBe(sigintBefore + 1);
+
+      process.emit('SIGINT', 'SIGINT');
+      expect(hung.close).toHaveBeenCalledTimes(1);
+      expect(killSpy).not.toHaveBeenCalled();
+
+      process.emit('SIGINT', 'SIGINT');
+      expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGINT');
+      expect(process.listenerCount('SIGINT')).toBe(sigintBefore);
+      expect(hung.close).toHaveBeenCalledTimes(1);
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
 });

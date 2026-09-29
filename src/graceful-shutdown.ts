@@ -12,6 +12,9 @@ export type GracefulShutdownHandle = Promise<void> & {
 /**
  * Register SIGTERM and SIGINT handlers that gracefully close all provided components.
  * Returns a Promise that resolves when all components have been closed.
+ * A second signal while shutdown is still running removes these handlers and
+ * re-raises that signal, so the process gets its default handling (exit)
+ * instead of the signal being swallowed behind a hung close().
  *
  * Usage:
  *   const shutdown = gracefulShutdown([queue, worker, queueEvents]);
@@ -44,7 +47,13 @@ export function gracefulShutdown(components: Closeable[]): GracefulShutdownHandl
     return shutdownPromise;
   };
 
-  const onSignal = () => {
+  const onSignal = (signal: NodeJS.Signals) => {
+    if (shutdownPromise && !done) {
+      process.off('SIGTERM', onSignal);
+      process.off('SIGINT', onSignal);
+      process.kill(process.pid, signal);
+      return;
+    }
     void shutdown();
   };
 
