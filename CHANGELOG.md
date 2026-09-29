@@ -47,6 +47,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Producer priority errors** are now plain `Error`s with the same messages as `Queue.add`, instead of `GlideMQError`.
 - **`Job.retry()` only retries failed jobs** and throws on any other state, as its documentation already stated. Server function library version is `125`.
 
+### Security
+
+- **Dev dependencies**: `vitest` and `@vitest/coverage-v8` upgraded to 4.1.11 (path traversal via `@vitest/mocker` redirect mocks) and `@humanfs/node` to 0.16.8 (recursive copy followed symlinks). Test tooling only; no runtime dependency changed.
+
 ### Documentation
 
 - **Agent skills rewritten for current models**: short intent-based trigger descriptions, no trigger-phrase lists or impact-priority tables, one references table, and notes on the behavior that differs from expectations. Skill metadata versions now match the package (0.15.5).
