@@ -1,7 +1,14 @@
 import type { FlowProducerOptions, FlowJob, DAGFlow, DAGNode, Client, Serializer, BudgetOptions } from './types';
 import { JSON_SERIALIZER } from './types';
 import { Job } from './job';
-import { buildKeys, keyPrefix, MAX_JOB_DATA_SIZE, validateJobId, validateQueueName } from './utils';
+import {
+  buildKeys,
+  keyPrefix,
+  MAX_JOB_DATA_SIZE,
+  validateJobId,
+  validateJobScheduleOptions,
+  validateQueueName,
+} from './utils';
 import { createClient, ensureFunctionLibrary, ensureFunctionLibraryOnce, isClusterClient } from './connection';
 import { GlideMQError } from './errors';
 import { LIBRARY_SOURCE, addFlow, addJob, addJobArgs, completeChild, registerParent } from './functions/index';
@@ -12,6 +19,12 @@ import { Batch, ClusterBatch, type GlideClient, type GlideClusterClient } from '
 export interface JobNode {
   job: Job;
   children?: JobNode[];
+}
+
+/** Validate every node of a flow tree before any job is written. */
+function validateFlowTree(flow: FlowJob): void {
+  validateJobScheduleOptions(flow.opts);
+  for (const child of flow.children ?? []) validateFlowTree(child);
 }
 
 /**
@@ -73,6 +86,7 @@ export class FlowProducer {
         'glide-mq.flow.childCount': flow.children?.length ?? 0,
       },
       async () => {
+        validateFlowTree(flow);
         const client = await this.getClient();
         const result = await this.addFlowRecursive(client, flow);
 
@@ -141,6 +155,7 @@ export class FlowProducer {
    * Add multiple independent flows.
    */
   async addBulk(flows: FlowJob[]): Promise<JobNode[]> {
+    for (const flow of flows) validateFlowTree(flow);
     const client = await this.getClient();
     const results: JobNode[] = [];
     for (const flow of flows) {
@@ -440,6 +455,7 @@ export class FlowProducer {
       async () => {
         // Validate the DAG and get topo order (no-deps first)
         validateDAG(dag.nodes);
+        for (const node of dag.nodes) validateJobScheduleOptions(node.opts);
         const sorted = topoSort(dag.nodes);
 
         const client = await this.getClient();

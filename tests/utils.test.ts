@@ -338,6 +338,11 @@ describe('encodeScore (T3)', () => {
     expect(() => encodeScore(9999, Date.now())).toThrow('Priority must be <= 2048');
   });
 
+  it('throws for negative or fractional priority', () => {
+    expect(() => encodeScore(-1, Date.now())).toThrow('Priority must be an integer between 0 and 2048');
+    expect(() => encodeScore(1.5, Date.now())).toThrow('Priority must be an integer between 0 and 2048');
+  });
+
   it('accepts priority <= 2048', () => {
     expect(() => encodeScore(0, Date.now())).not.toThrow();
     expect(() => encodeScore(1024, Date.now())).not.toThrow();
