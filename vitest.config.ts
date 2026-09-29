@@ -37,7 +37,9 @@ export default defineConfig({
     hookTimeout: 60000,
     maxWorkers,
     fileParallelism,
-    exclude: ['node_modules/**'],
+    // Git worktrees under .claude/worktrees carry their own tests; a run from the
+    // main checkout must not pick them up.
+    exclude: ['node_modules/**', '.claude/**'],
     globalSetup: './tests/helpers/lua-coverage-hooks.ts',
     coverage: {
       provider: 'v8',
