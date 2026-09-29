@@ -10,7 +10,7 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { completeAndFetchNext, healListActive, reclaimStalled, CONSUMER_GROUP } =
+const { completeAndFetchNext, healListActive, moveToActive, reclaimStalled, CONSUMER_GROUP } =
   require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
@@ -407,5 +407,34 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
     await cleanupClient.set(k.listActive, '3');
     expect(await healListActive(cleanupClient, k)).toBe(2);
     expect(String(await cleanupClient.get(k.listActive))).toBe('1');
+  });
+  it('moveToActive rejects a stale entry for a job reclaimed and re-activated elsewhere', async () => {
+    const Q = uniqueQueue('lc-stale-activate');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      const job = await queue.add('x', {});
+      await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true }).catch(() => {});
+      const readEntry = async (consumer: string): Promise<string> => {
+        const res = await cleanupClient.xreadgroup(CONSUMER_GROUP, consumer, { [k.stream]: '>' });
+        return String(Object.keys(res[0].value)[0]);
+      };
+      const oldEntry = await readEntry('w1');
+      // w1 stalls before activating; recovery redispatches the job.
+      await reclaimStalled(cleanupClient, k, 'rescuer', 0, 5, Date.now(), CONSUMER_GROUP);
+      const newEntry = await readEntry('w2');
+      expect(newEntry).not.toBe(oldEntry);
+      const first = await moveToActive(cleanupClient, k, job.id!, Date.now(), k.stream, newEntry, CONSUMER_GROUP);
+      expect(typeof first).toBe('object');
+      const second = await moveToActive(cleanupClient, k, job.id!, Date.now(), k.stream, oldEntry, CONSUMER_GROUP);
+      expect(second).toBe('STALE');
+
+      await completeAndFetchNext(cleanupClient, k, job.id!, newEntry, 'null', Date.now(), CONSUMER_GROUP, 'w2');
+      const third = await moveToActive(cleanupClient, k, job.id!, Date.now(), k.stream, oldEntry, CONSUMER_GROUP);
+      expect(third).toBe('STALE');
+      expect(await hget(k.job(job.id!), 'state')).toBe('completed');
+    } finally {
+      await queue.close();
+    }
   });
 });

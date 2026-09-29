@@ -93,7 +93,9 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 122: moveToWaitingChildren unparks immediately when no child deps exist.
 // Version 123: glidemq_complete honors skipEvents/skipMetrics; deferActive can undo a CAF group reservation.
 // Version 124: undoGroupClaim skips active/nextSeq rewind when the job holds retainedSlot.
-// Version 125: removeJob resolves parent dependencies of a removed child and unlinks its deps set.
+// Version 125: removeJob resolves parents and clears an active job's PEL entry; drain closes ordering holes;
+//   completion paths skip removed jobs; retry re-sequences ordered jobs; listSourced marker;
+//   healListActive needs a full scan; moveToActive rejects stale claims ('STALE').
 export const LIBRARY_VERSION = '125';
 
 // Consumer group name used by workers
@@ -778,6 +780,7 @@ export async function moveToActive(
   | 'GROUP_TOKEN_LIMITED'
   | 'GROUP_ORDERED'
   | 'ERR:COST_EXCEEDS_CAPACITY'
+  | 'STALE'
   | null
 > {
   const keys: string[] = [k.job(jobId)];
@@ -808,6 +811,7 @@ export async function moveToActive(
   if (str === 'GROUP_TOKEN_LIMITED') return 'GROUP_TOKEN_LIMITED';
   if (str === 'GROUP_ORDERED') return 'GROUP_ORDERED';
   if (str === 'ERR:COST_EXCEEDS_CAPACITY') return 'ERR:COST_EXCEEDS_CAPACITY';
+  if (str === 'STALE') return 'STALE';
   // Backward compatibility: older library returns cjson string
   const arr = JSON.parse(str) as string[];
   const hash: Record<string, string> = Object.create(null);

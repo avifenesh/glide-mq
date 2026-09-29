@@ -828,6 +828,9 @@ describeEachMode('Per-key ordering', (CONNECTION) => {
 
     await cleanupClient.lpush(k.priority, [pri!.id]);
     await cleanupClient.xgroupCreate(k.stream, 'workers', '0', { mkStream: true });
+    // Claim the fixture's stream entries elsewhere so this call exercises only
+    // the priority-list path (the completed current job must not be re-read).
+    await cleanupClient.xreadgroup('workers', 'other', { [k.stream]: '>' }, { count: 3 });
     await cleanupClient.hset(k.job(current!.id), { state: 'active', processedOn: String(now) });
     await cleanupClient.hset(k.group('pri-tb'), { tbCapacity: '1', tbTokens: '1', tbRefillRate: '1' });
 

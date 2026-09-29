@@ -28,6 +28,14 @@ local function isListSourced(listSourced, lifo, priority)
   return lifo == '1' or (tonumber(priority) or 0) > 0
 end
 
+-- States from which a claimed job may start running. Anything else means the
+-- claim is stale: the job was reclaimed and re-activated elsewhere, finished,
+-- or moved to delayed/suspended/waiting-children. A missing state field is a
+-- legacy hash and stays activatable.
+local function isActivatableState(state)
+  return state == 'waiting' or state == 'prioritized' or state == 'group-waiting' or state == '' or not state
+end
+
 local function isQueuePaused(prefix)
   return redis.call('HGET', prefix .. 'meta', 'paused') == '1'
 end
@@ -1370,7 +1378,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local priJobKey = prefix .. 'job:' .. priJobId
     -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' (3 → 1)
     local priMeta = redis.call('HMGET', priJobKey, 'state', 'revoked', 'expireAt')
-    if priMeta[1] then
+    if priMeta[1] and isActivatableState(priMeta[1]) then
       if priMeta[2] ~= '1' then
         local priExpireAt = tonumber(priMeta[3])
         if not priExpireAt or priExpireAt <= 0 or timestamp <= priExpireAt then
@@ -1502,7 +1510,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local lifoJobKey = prefix .. 'job:' .. lifoJobId
     -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' (3 → 1)
     local lifoMeta = redis.call('HMGET', lifoJobKey, 'state', 'revoked', 'expireAt')
-    if lifoMeta[1] then
+    if lifoMeta[1] and isActivatableState(lifoMeta[1]) then
       if lifoMeta[2] ~= '1' then
         local lifoExpireAt = tonumber(lifoMeta[3])
         if not lifoExpireAt or lifoExpireAt <= 0 or timestamp <= lifoExpireAt then
@@ -1556,7 +1564,12 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     end
     -- Inline expiry check (avoids checkExpired's redundant HGET)
     local nextExpireAt = tonumber(nextMeta[3])
-    if nextExpireAt and nextExpireAt > 0 and timestamp > nextExpireAt then
+    if not isActivatableState(nextMeta[1]) then
+      -- Stale entry for a job that is already running or finished elsewhere.
+      redis.call('XACK', streamKey, group, nextEntryId)
+      redis.call('XDEL', streamKey, nextEntryId)
+      nextJobId = nil
+    elseif nextExpireAt and nextExpireAt > 0 and timestamp > nextExpireAt then
       local curState = nextMeta[1]
       expireJob(nextJobKey, nextJobId, prefix, timestamp, curState, nil, nil, nil)
       redis.call('XACK', streamKey, group, nextEntryId)
@@ -2596,6 +2609,14 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     elseif field == 'lastActive' then
       lastActiveValueIndex = f + 1
     end
+  end
+  -- Broadcast subscriptions share one job hash, so its state is not per claim.
+  if broadcastMode ~= '1' and not isActivatableState(curState) then
+    if streamKey ~= '' and entryId ~= '' and group ~= '' then
+      redis.call('XACK', streamKey, group, entryId)
+      redis.call('XDEL', streamKey, entryId)
+    end
+    return 'STALE'
   end
   if revoked == '1' then
     return 'REVOKED'
