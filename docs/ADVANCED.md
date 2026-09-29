@@ -702,6 +702,8 @@ await queue.add('process-large', { report: '... 15 KB of data ...' });
 // Stored size: ~300 bytes (98% savings on repetitive data)
 ```
 
+Job schedulers follow the Queue that upserts them: `upsertJobScheduler` on a gzip Queue records `compression: 'gzip'` on the entry, and every run stores its template data compressed.
+
 **Payload size limit:** job data must be ≤ 1 MB _after_ serialisation but _before_ compression. Larger payloads throw immediately:
 
 ```

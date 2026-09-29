@@ -1539,6 +1539,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           limit: schedule.limit,
           iterationCount,
           template,
+          compression: this.opts.compression === 'gzip' ? 'gzip' : undefined,
           lastRun,
           nextRun,
         };

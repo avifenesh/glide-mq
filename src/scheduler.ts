@@ -19,6 +19,7 @@ import {
 } from './functions/index';
 import {
   buildKeys,
+  compress,
   computeFollowingSchedulerNextRun,
   isValidSchedulerEvery,
   parseCrossQueueParentNotification,
@@ -503,6 +504,9 @@ export class Scheduler {
             pendingUpdateCount++;
           }
           continue;
+        }
+        if (config.compression === 'gzip') {
+          jobData = compress(jobData);
         }
 
         const opts = template.opts;
