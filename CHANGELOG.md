@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.15.6] - 2026-09-30
+
 ### Fixed
 
 - **Batch workers never charged or checked flow budgets**: batch completion and every batch failure path now charge reported usage once per job (same `usage:budgeted` marker as single-job workers), and each batch entry is diverted when its budget is already exceeded.
