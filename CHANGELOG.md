@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Bun and Deno support**: verified on Bun 1.4.2 and Deno 2.9.7 (NAPI client load, Queue/Worker/QueueEvents, gzip, worker_threads and forked sandboxes, flows, broadcast, signals). `npm run compat:bun` / `compat:deno` run the smoke against a local Valkey, CI runs both, and docs/COMPATIBILITY.md lists the required Deno permissions and the known gaps.
+
+---
+
+## [0.15.6] - 2026-09-30
+
 ---
 
 ## [0.15.6] - 2026-09-30
