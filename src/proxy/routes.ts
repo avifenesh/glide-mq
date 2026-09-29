@@ -741,6 +741,19 @@ export function createRoutes(
     return { status, message };
   }
 
+  /**
+   * An error after SSE headers went out cannot become a JSON response. Report it through
+   * onError with the queue name and end the stream so the client sees a clean close.
+   */
+  function endSseWithError(err: unknown, req: Request, res: Response): void {
+    errorHandler(err instanceof Error ? err : new Error(String(err)), param(req, 'name') ?? '');
+    try {
+      res.end();
+    } catch {
+      /* ignore */
+    }
+  }
+
   function requireConnection(feature: string) {
     if (!opts.connection) {
       throw httpError(500, `Proxy requires \`connection\` for ${feature}`);
@@ -1624,7 +1637,7 @@ export function createRoutes(
         const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
-        res.end();
+        endSseWithError(err, req, res);
       }
     }
   });
@@ -1708,7 +1721,7 @@ export function createRoutes(
         const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
-        res.end();
+        endSseWithError(err, req, res);
       }
     }
   });
@@ -2376,7 +2389,7 @@ export function createRoutes(
         const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
-        res.end();
+        endSseWithError(err, req, res);
       }
     }
   });
