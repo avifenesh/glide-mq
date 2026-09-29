@@ -11,10 +11,30 @@ import { LIBRARY_VERSION } from '../src/functions/index';
 
 vi.mock('@glidemq/speedkey', () => {
   const MockGlideClient = { createClient: vi.fn() };
-  const MockGlideClusterClient = { createClient: vi.fn() };
+  // A class so isClusterClient's instanceof check works on mock clients.
+  class MockGlideClusterClient {
+    static createClient = vi.fn();
+  }
+  /** Records typed batch calls; the mock client's exec replays them. */
+  class MockBatch {
+    commands: [string, unknown[]][] = [];
+    constructor(readonly isAtomic: boolean) {
+      return new Proxy(this, {
+        get(target, prop, receiver) {
+          if (prop in target) return Reflect.get(target, prop, receiver);
+          return (...args: unknown[]) => {
+            target.commands.push([String(prop), args]);
+            return receiver;
+          };
+        },
+      });
+    }
+  }
   return {
     GlideClient: MockGlideClient,
     GlideClusterClient: MockGlideClusterClient,
+    Batch: MockBatch,
+    ClusterBatch: MockBatch,
     TimeUnit: { Milliseconds: 'PX' },
   };
 });
@@ -22,7 +42,7 @@ vi.mock('@glidemq/speedkey', () => {
 const neverResolve = () => new Promise(() => {});
 
 function makeMockClient(overrides: Record<string, unknown> = {}) {
-  return {
+  const client: Record<string, any> = {
     fcall: vi.fn().mockImplementation((func: string) => {
       if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
       return Promise.resolve(LIBRARY_VERSION);
@@ -42,6 +62,20 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     close: vi.fn(),
     ...overrides,
   };
+  // One exec is one round trip. Each queued command runs through the client's
+  // own mock; a rejection lands in its slot like raiseOnError=false.
+  client.exec ??= vi.fn(async (batch: { commands: [string, unknown[]][] }) => {
+    const out: unknown[] = [];
+    for (const [cmd, args] of batch.commands) {
+      try {
+        out.push(await client[cmd](...args));
+      } catch (err) {
+        out.push(err);
+      }
+    }
+    return out;
+  });
+  return client;
 }
 
 function jobHash(id: string, extra: string[] = []) {
@@ -326,14 +360,15 @@ describe('heartbeat cleanup on pre-processor failures', () => {
   });
 
   it('stops heartbeats of already activated batch entries when a later activation throws', async () => {
+    // j1 is activated and gets a heartbeat; j2's ordering check then throws.
     const command = makeMockClient({
       fcall: routeFcall({
         glidemq_moveToActive: (keys) => {
           const id = jobIdFromKeys(keys);
-          if (id === 'j2') throw new Error('activation failed');
-          return jobHash(id);
+          return id === 'j2' ? jobHash(id, ['orderingKey', 'k', 'orderingSeq', '1']) : jobHash(id);
         },
       }),
+      hget: vi.fn().mockRejectedValue(new Error('ordering check failed')),
     });
     const blocking = makeMockClient({
       xreadgroup: vi
@@ -958,5 +993,280 @@ describe('close(true) aborts running processors', () => {
     await graceful;
     expect(gracefulDone).toBe(true);
     expect(command.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_fail')).toHaveLength(0);
+  });
+});
+
+describe('batch return value size guard', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function runBatchOnce(result: unknown) {
+    const command = makeMockClient({ fcall: routeFcall({}) });
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult([['1-0', 'sized']]))
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+    const done = deferred<void>();
+    const worker = new Worker(
+      'lifecycle-size-guard',
+      async () => {
+        setTimeout(() => done.resolve(), 0);
+        return [result];
+      },
+      { connection, blockTimeout: 100, batch: { size: 1 } },
+    );
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    await done.promise;
+    await vi.advanceTimersByTimeAsync(20);
+    await worker.close(true);
+    return command.fcall.mock.calls.map((c: any[]) => c[0]);
+  }
+
+  it('skips Buffer.byteLength for small results and still completes', async () => {
+    const spy = vi.spyOn(Buffer, 'byteLength');
+    const funcs = await runBatchOnce('small');
+    const measured = spy.mock.calls.some((c) => c[0] === JSON.stringify('small'));
+    spy.mockRestore();
+    expect(measured).toBe(false);
+    expect(funcs).toContain('glidemq_complete');
+  });
+
+  it('still fails a result over the byte limit', async () => {
+    // 600k two-byte chars: length passes MAX/4, bytes exceed MAX.
+    const funcs = await runBatchOnce('é'.repeat(600_000));
+    expect(funcs).toContain('glidemq_fail');
+    expect(funcs).not.toContain('glidemq_complete');
+  });
+});
+
+describe('job heartbeat round trips', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('refreshes lastActive and checks revocation in one pipeline per tick', async () => {
+    const command = makeMockClient();
+    wireClients(command, makeMockClient());
+    const worker = new Worker('lifecycle-hb-rtt', vi.fn(), { connection, blockTimeout: 100 });
+    await worker.waitUntilReady();
+
+    const ac = new AbortController();
+    (worker as any).activeAbortControllers.set('hb', ac);
+    (worker as any).startHeartbeat('hb', 2000);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(command.exec).toHaveBeenCalledTimes(1);
+    const batch = command.exec.mock.calls[0][0];
+    expect(batch.isAtomic).toBe(false);
+    expect(batch.commands.map((c: [string, unknown[]]) => c[0])).toEqual(['hset', 'hget']);
+    expect(batch.commands[0][1][0]).toMatch(/job:hb$/);
+    expect(batch.commands[1][1]).toEqual([batch.commands[0][1][0], 'revoked']);
+    expect(ac.signal.aborted).toBe(false);
+
+    command.hget.mockResolvedValue('1');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(command.exec).toHaveBeenCalledTimes(2);
+    expect(ac.signal.aborted).toBe(true);
+
+    (worker as any).stopHeartbeat('hb');
+    await worker.close(true);
+  });
+});
+
+describe('batch activation and completion round trips', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function batchRead(ids: string[]) {
+    return makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult(ids.map((id, i) => [`${i + 1}-0`, id] as [string, string])))
+        .mockImplementation(neverResolve),
+    });
+  }
+
+  function fcallsIn(batch: { commands: [string, unknown[]][] }) {
+    return batch.commands.map(([cmd, args]) => {
+      expect(cmd).toBe('fcall');
+      return [args[0], jobIdFromKeys((args[1] as string[]).slice(args[0] === 'glidemq_complete' ? 3 : 0))];
+    });
+  }
+
+  it('activates and completes a batch of 3 in one pipeline each, in entry order', async () => {
+    const command = makeMockClient({ fcall: routeFcall({}) });
+    wireClients(command, batchRead(['a', 'b', 'c']));
+    const completed: string[] = [];
+    const processor = vi.fn(async (jobs: any[]) => jobs.map((j) => `r-${j.id}`));
+    const worker = new Worker('lifecycle-batch-rtt', processor, { connection, blockTimeout: 100, batch: { size: 3 } });
+    worker.on('completed', (job: any) => completed.push(job.id));
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(processor).toHaveBeenCalledTimes(1);
+    expect(processor.mock.calls[0][0].map((j: any) => j.id)).toEqual(['a', 'b', 'c']);
+    // 2 round trips for the batch instead of 6 sequential FCALLs.
+    expect(command.exec).toHaveBeenCalledTimes(2);
+    const [activation, completion] = command.exec.mock.calls.map((c: any[]) => c[0]);
+    expect(activation.isAtomic).toBe(false);
+    expect(completion.isAtomic).toBe(false);
+    expect(fcallsIn(activation)).toEqual([
+      ['glidemq_moveToActive', 'a'],
+      ['glidemq_moveToActive', 'b'],
+      ['glidemq_moveToActive', 'c'],
+    ]);
+    expect(fcallsIn(completion)).toEqual([
+      ['glidemq_complete', 'a'],
+      ['glidemq_complete', 'b'],
+      ['glidemq_complete', 'c'],
+    ]);
+    expect(completion.commands.map((c: any) => c[1][2][2])).toEqual(['"r-a"', '"r-b"', '"r-c"']);
+    expect(completed).toEqual(['a', 'b', 'c']);
+
+    await worker.close(true);
+  });
+
+  it('runs the other entries when one pipelined activation errors', async () => {
+    const command = makeMockClient({
+      fcall: routeFcall({
+        glidemq_moveToActive: (keys) => {
+          const id = jobIdFromKeys(keys);
+          if (id === 'b') throw new Error('activation failed');
+          return jobHash(id);
+        },
+      }),
+    });
+    wireClients(command, batchRead(['a', 'b', 'c']));
+    const errors: Error[] = [];
+    const processor = vi.fn(async (jobs: any[]) => jobs.map(() => 'ok'));
+    const worker = new Worker('lifecycle-batch-partial', processor, {
+      connection,
+      blockTimeout: 100,
+      batch: { size: 3 },
+    });
+    worker.on('error', (err) => errors.push(err));
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(processor.mock.calls[0][0].map((j: any) => j.id)).toEqual(['a', 'c']);
+    expect(errors.map((e) => e.message)).toContain('activation failed');
+    expect((worker as any).heartbeatIntervals.size).toBe(0);
+
+    await worker.close(true);
+  });
+
+  it('runs nothing and leaks no heartbeat when the activation pipeline rejects', async () => {
+    const command = makeMockClient({ fcall: routeFcall({}) });
+    command.exec = vi.fn().mockRejectedValueOnce(new Error('connection lost'));
+    wireClients(command, batchRead(['a', 'b']));
+    const processor = vi.fn(async (jobs: any[]) => jobs.map(() => 'ok'));
+    const worker = new Worker('lifecycle-batch-reject', processor, {
+      connection,
+      blockTimeout: 100,
+      batch: { size: 2 },
+    });
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(processor).not.toHaveBeenCalled();
+    expect((worker as any).heartbeatIntervals.size).toBe(0);
+
+    await worker.close(true);
+  });
+
+  it('fails a revoked completion and completes the rest of the pipeline', async () => {
+    const command = makeMockClient({
+      fcall: routeFcall({
+        glidemq_complete: (_keys, args) => (args[0] === 'b' ? 'REVOKED' : 1),
+      }),
+    });
+    wireClients(command, batchRead(['a', 'b', 'c']));
+    const completed: string[] = [];
+    const processor = vi.fn(async (jobs: any[]) => jobs.map(() => 'ok'));
+    const worker = new Worker('lifecycle-batch-revoked', processor, {
+      connection,
+      blockTimeout: 100,
+      batch: { size: 3 },
+    });
+    worker.on('completed', (job: any) => completed.push(job.id));
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(completed).toEqual(['a', 'c']);
+    const fails = command.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_fail');
+    expect(fails).toHaveLength(1);
+    expect(fails[0][2][0]).toBe('b');
+
+    await worker.close(true);
+  });
+});
+
+describe('batch refill during close', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ['Worker', (opts: any, p: any) => new Worker('lifecycle-refill-close', p, opts)],
+    [
+      'BroadcastWorker',
+      (opts: any, p: any) => new BroadcastWorker('lifecycle-refill-close-b', p, { ...opts, subscription: 'sub-rc' }),
+    ],
+  ])('%s swallows a refill read torn down by close(true) and hands collected entries back', async (_name, make) => {
+    const command = makeMockClient({ fcall: routeFcall({}) });
+    const refill = deferred<any>();
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult([['1-0', 'first']]))
+        .mockImplementationOnce(() => refill.promise)
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+
+    const processor = vi.fn().mockResolvedValue(['ok']);
+    const errors: unknown[] = [];
+    const worker = make({ connection, batch: { size: 3, timeout: 5000 }, blockTimeout: 100 }, processor);
+    worker.on('error', (err: unknown) => errors.push(err));
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(blocking.xreadgroup).toHaveBeenCalledTimes(2);
+
+    const closing = worker.close(true);
+    refill.reject(new Error('client closed'));
+    await vi.advanceTimersByTimeAsync(20);
+    await closing;
+
+    expect(errors).toEqual([]);
+    expect(processor).not.toHaveBeenCalled();
+    expect(blocking.xreadgroup).toHaveBeenCalledTimes(2);
   });
 });

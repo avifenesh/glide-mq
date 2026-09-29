@@ -49,6 +49,9 @@ const JOB_USAGE_HASH_FIELDS = [
   'usage:bucketTs',
 ] as const;
 
+/** Job hash field set once a failed attempt charged its usage to the flow budget. */
+export const USAGE_BUDGETED_FIELD = 'usage:budgeted';
+
 const USAGE_MODEL_FIELD_PREFIX = 'models:';
 const USAGE_TOKEN_FIELD_PREFIX = 'tokens:';
 const USAGE_COST_FIELD_PREFIX = 'costs:';
@@ -211,6 +214,13 @@ export class Job<D = any, R = any> {
 
   /** Tokens reported via reportTokens() for TPM rate limiting. */
   tpmTokens?: number;
+
+  /**
+   * @internal `usage` was already charged to the flow budget by a failed
+   * attempt. Stored as `usage:budgeted` and cleared by reportUsage(), so a
+   * retry that reports nothing new does not charge the same usage twice.
+   */
+  usageBudgeted = false;
 
   /**
    * AbortSignal that fires when this job is revoked during processing.
@@ -387,7 +397,7 @@ export class Job<D = any, R = any> {
       const isCluster = isClusterClient(this.client);
       const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
 
-      batch.hdel(this.queueKeys.job(this.id), [...JOB_USAGE_HASH_FIELDS]);
+      batch.hdel(this.queueKeys.job(this.id), [...JOB_USAGE_HASH_FIELDS, USAGE_BUDGETED_FIELD]);
       if (hasUsage) {
         batch.hset(this.queueKeys.job(this.id), fields);
       }
@@ -411,6 +421,7 @@ export class Job<D = any, R = any> {
       if (failed) throw failed;
 
       this.usage = hasUsage ? resolved : undefined;
+      this.usageBudgeted = false;
     } finally {
       try {
         await unlock(this.client, usageLockKey, usageLockToken);
@@ -946,6 +957,7 @@ export class Job<D = any, R = any> {
         job.parentQueues = undefined;
       }
     }
+    job.usageBudgeted = hash[USAGE_BUDGETED_FIELD] === '1';
     if (hash.progress) {
       try {
         job.progress = JSON.parse(hash.progress);

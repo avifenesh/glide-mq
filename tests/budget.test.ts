@@ -355,6 +355,142 @@ describeEachMode('Budget middleware', (CONNECTION) => {
     expect(budgetExceededEmitted).toBe(true);
   });
 
+  it.each([
+    // [usage reported per attempt (null = none), attempt that succeeds (0 = none), expected tokens]
+    ['failed then retried with new usage', [100, null, 50], 3, 150],
+    ['failed then succeeded without new usage', [100, null], 2, 100],
+    ['failed on every attempt', [100, 30], 0, 130],
+  ] as const)('usage from failed attempts counts once: %s', async (_label, reports, succeedOn, expected) => {
+    queueName = uid();
+    flow = new FlowProducer({ connection: CONNECTION });
+    queue = new Queue(queueName, { connection: CONNECTION });
+
+    const node = await flow.add(
+      {
+        name: 'parent',
+        queueName,
+        data: {},
+        children: [{ name: 'child-1', queueName, data: {}, opts: { attempts: reports.length } }],
+      },
+      { budget: { maxTotalTokens: 100000 } },
+    );
+
+    let attempts = 0;
+    let finished = false;
+    worker = new Worker(
+      queueName,
+      async (job: any) => {
+        if (job.name !== 'child-1') return 'ok';
+        attempts++;
+        const report = reports[attempts - 1];
+        if (report !== null) await job.reportUsage({ tokens: { input: report } });
+        if (attempts === succeedOn) return 'ok';
+        throw new Error(`attempt ${attempts} failed`);
+      },
+      { connection: CONNECTION, promotionInterval: 100 },
+    );
+    worker.on('completed', (job: any) => {
+      if (job.name === 'child-1') finished = true;
+    });
+    worker.on('failed', (job: any) => {
+      if (job.name === 'child-1' && attempts === reports.length) finished = true;
+    });
+
+    await waitFor(() => finished, 10000);
+    await waitFor(async () => (await queue.getFlowBudget(node.job.id))!.usedTokens >= expected, 3000).catch(() => {});
+    // Give a double charge time to land before asserting the exact total.
+    await new Promise((r) => setTimeout(r, 200));
+    const budget = await queue.getFlowBudget(node.job.id);
+    expect(attempts).toBe(reports.length);
+    expect(budget!.usedTokens).toBe(expected);
+  });
+
+  it('charging a failed attempt does not recreate a job removed while active', async () => {
+    queueName = uid();
+    flow = new FlowProducer({ connection: CONNECTION });
+    queue = new Queue(queueName, { connection: CONNECTION });
+
+    const node = await flow.add(
+      {
+        name: 'parent',
+        queueName,
+        data: {},
+        children: [{ name: 'child-1', queueName, data: {}, opts: { attempts: 2 } }],
+      },
+      { budget: { maxTotalTokens: 100000 } },
+    );
+    const childId = node.children![0].job.id;
+
+    let failed = false;
+    worker = new Worker(
+      queueName,
+      async (job: any) => {
+        if (job.name !== 'child-1') return 'ok';
+        await job.reportUsage({ tokens: { input: 40 } });
+        await job.remove();
+        throw new Error('fails after removal');
+      },
+      { connection: CONNECTION, promotionInterval: 100 },
+    );
+    worker.on('failed', (job: any) => {
+      if (job.name === 'child-1') failed = true;
+    });
+    worker.on('error', () => {});
+
+    await waitFor(() => failed, 10000);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await queue.getJob(childId)).toBeNull();
+    expect((await queue.getFlowBudget(node.job.id))!.usedTokens).toBe(40);
+  });
+
+  it('usage reported in onResume after a charged failed attempt is charged', async () => {
+    queueName = uid();
+    flow = new FlowProducer({ connection: CONNECTION });
+    queue = new Queue(queueName, { connection: CONNECTION });
+
+    const node = await flow.add(
+      {
+        name: 'parent',
+        queueName,
+        data: {},
+        children: [{ name: 'child-1', queueName, data: {}, opts: { attempts: 2 } }],
+      },
+      { budget: { maxTotalTokens: 100000 } },
+    );
+    const childId = node.children![0].job.id;
+
+    let attempts = 0;
+    let done = false;
+    worker = new Worker(
+      queueName,
+      async (job: any) => {
+        if (job.name !== 'child-1') return 'ok';
+        attempts++;
+        if (attempts === 1) {
+          await job.reportUsage({ tokens: { input: 100 } });
+          throw new Error('first attempt fails');
+        }
+        await job.suspend({
+          onResume: async () => {
+            await job.reportUsage({ tokens: { input: 50 } });
+            return 'resumed';
+          },
+        });
+      },
+      { connection: CONNECTION, promotionInterval: 100 },
+    );
+    worker.on('completed', (job: any) => {
+      if (job.name === 'child-1') done = true;
+    });
+    worker.on('error', () => {});
+
+    await waitFor(async () => (await (await queue.getJob(childId))!.getState()) === 'suspended', 10000);
+    await queue.signal(childId, 'go');
+    await waitFor(() => done, 10000);
+    await new Promise((r) => setTimeout(r, 200));
+    expect((await queue.getFlowBudget(node.job.id))!.usedTokens).toBe(150);
+  });
+
   it('budget not checked for jobs without budgetKey', async () => {
     queueName = uid();
     queue = new Queue(queueName, { connection: CONNECTION });

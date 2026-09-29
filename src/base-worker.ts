@@ -1,7 +1,8 @@
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
-import { TimeUnit } from '@glidemq/speedkey';
+import { Batch, ClusterBatch, TimeUnit } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient, GlideReturnType } from '@glidemq/speedkey';
 import type {
   WorkerOptions,
   Processor,
@@ -12,7 +13,7 @@ import type {
   SignalEntry,
 } from './types';
 import { JSON_SERIALIZER } from './types';
-import { Job } from './job';
+import { Job, USAGE_BUDGETED_FIELD } from './job';
 import {
   buildKeys,
   calculateBackoff,
@@ -31,6 +32,7 @@ import {
   ensureFunctionLibrary,
   ensureFunctionLibraryOnce,
   createConsumerGroup,
+  isClusterClient,
 } from './connection';
 import {
   GlideMQError,
@@ -53,14 +55,52 @@ import {
   rateLimit as rateLimitFn,
   rateLimitGroup as rateLimitGroupFn,
   moveToActive,
+  moveToActiveCall,
+  parseMoveToActiveResult,
+  completeJobCall,
+  parseCompleteJobResult,
   moveActiveToDelayed,
   moveToWaitingChildren,
   suspendJob,
   deferActive,
   checkBudget,
   recordUsageAndCheckBudget,
+  updateJobFields,
 } from './functions/index';
 import { Scheduler } from './scheduler';
+
+/**
+ * Send the commands added by `build` as one non-atomic pipeline (1 RTT).
+ * Order is preserved; with raiseOnError=false a failed command comes back as
+ * a RequestError in its slot instead of rejecting the whole batch.
+ */
+async function execPipeline(
+  client: Client,
+  build: (batch: Batch | ClusterBatch) => void,
+): Promise<GlideReturnType[] | null> {
+  if (isClusterClient(client)) {
+    const batch = new ClusterBatch(false);
+    build(batch);
+    return (client as GlideClusterClient).exec(batch, false);
+  }
+  const batch = new Batch(false);
+  build(batch);
+  return (client as GlideClient).exec(batch, false);
+}
+
+/**
+ * A missing or short reply list must not be read as per-command results:
+ * an absent moveToActive reply would parse as "job gone" and an absent
+ * completion reply as success.
+ */
+function assertPipelineReplies(
+  results: GlideReturnType[] | null,
+  expected: number,
+): asserts results is GlideReturnType[] {
+  if (!results || results.length !== expected) {
+    throw new GlideMQError(`Pipeline returned ${results ? results.length : 'no'} replies for ${expected} commands`);
+  }
+}
 
 export type WorkerEvent =
   | 'completed'
@@ -639,18 +679,20 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     const pausedListEntries: { jobId: string; entryId: string }[] = [];
     const pausedStreamEntries: { jobId: string; entryId: string }[] = [];
     try {
-      for (const entry of collected) {
+      // One pipelined round trip activates the whole batch. The edge-case
+      // handlers below only touch their own entry; the one that changes group
+      // state (REVOKED -> failJob) is ordered after the later activations, an
+      // interleaving two workers sharing the group can already produce.
+      const moveResults = await this.moveToActiveMany(collected);
+      for (let i = 0; i < collected.length; i++) {
         if (!this.commandClient) break;
-        const moveResult = await moveToActive(
-          this.commandClient,
-          this.queueKeys,
-          entry.jobId,
-          Date.now(),
-          this.queueKeys.stream,
-          entry.entryId,
-          this.consumerGroup,
-          this.broadcastMode ? true : undefined,
-        );
+        const entry = collected[i];
+        const moveResult = moveResults[i];
+        if (moveResult instanceof Error) {
+          // Left in the PEL for stalled recovery, as a thrown activation was.
+          this.emit('error', moveResult);
+          continue;
+        }
         if (moveResult === 'PAUSED') {
           // Defer the restores until every claim has been inspected. List jobs
           // are popped from the right, so restoring them in reverse claim order
@@ -792,6 +834,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         return;
       }
 
+      const toComplete: { entry: (typeof batch)[number]; result: R; returnvalue: string }[] = [];
       for (let i = 0; i < batch.length; i++) {
         const entry = batch[i];
         const result = results[i];
@@ -810,7 +853,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           );
           continue;
         }
-        const byteLen = Buffer.byteLength(returnvalue, 'utf8');
+        // UTF-8 worst case: 4 bytes per char. Skip Buffer.byteLength for small strings.
+        const byteLen = returnvalue.length > MAX_JOB_DATA_SIZE / 4 ? Buffer.byteLength(returnvalue, 'utf8') : 0;
         if (byteLen > MAX_JOB_DATA_SIZE) {
           await this.handleJobFailure(
             entry.job,
@@ -820,42 +864,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           );
           continue;
         }
-
-        const completeResult = await completeJob(
-          this.commandClient!,
-          this.queueKeys,
-          entry.jobId,
-          entry.entryId,
-          returnvalue,
-          Date.now(),
-          this.consumerGroup,
-          entry.job.opts.removeOnComplete,
-          undefined,
-          this.broadcastMode ? true : undefined,
-          this.skipEvents,
-          this.skipMetrics,
-        );
-        if (isCompleteJobRevoked(completeResult)) {
-          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
-          continue;
-        }
-        await this.notifyCrossQueueParents(completeResult);
-
-        entry.job.returnvalue = result;
-        entry.job.finishedOn = Date.now();
-        if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
-
-        // TPM tracking for batch jobs
-        if (this.opts.tokenLimiter) {
-          const tpmTokens = Math.max(entry.job.usage?.totalTokens ?? 0, entry.job.tpmTokens ?? 0);
-          if (tpmTokens > 0) {
-            await this.incrementTpmCounter(tpmTokens);
-          }
-        }
+        toComplete.push({ entry, result, returnvalue });
       }
+      await this.completeBatchEntries(toComplete);
     } else if (batchError) {
       // Partial failure: process each result individually
       const batchResults = batchError.results;
+      const toComplete: { entry: (typeof batch)[number]; result: R; returnvalue: string }[] = [];
       for (let i = 0; i < batch.length; i++) {
         const entry = batch[i];
         const result = i < batchResults.length ? batchResults[i] : new Error('No result in BatchError');
@@ -878,7 +893,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             );
             continue;
           }
-          const byteLen = Buffer.byteLength(returnvalue, 'utf8');
+          const byteLen = returnvalue.length > MAX_JOB_DATA_SIZE / 4 ? Buffer.byteLength(returnvalue, 'utf8') : 0;
           if (byteLen > MAX_JOB_DATA_SIZE) {
             await this.handleJobFailure(
               entry.job,
@@ -888,40 +903,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             );
             continue;
           }
-
-          const completeResult = await completeJob(
-            this.commandClient!,
-            this.queueKeys,
-            entry.jobId,
-            entry.entryId,
-            returnvalue,
-            Date.now(),
-            this.consumerGroup,
-            entry.job.opts.removeOnComplete,
-            undefined,
-            this.broadcastMode ? true : undefined,
-            this.skipEvents,
-            this.skipMetrics,
-          );
-          if (isCompleteJobRevoked(completeResult)) {
-            await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
-            continue;
-          }
-          await this.notifyCrossQueueParents(completeResult);
-
-          entry.job.returnvalue = result as R;
-          entry.job.finishedOn = Date.now();
-          if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
-
-          // TPM tracking for batch jobs (partial success)
-          if (this.opts.tokenLimiter) {
-            const tpmTokens = Math.max(entry.job.usage?.totalTokens ?? 0, entry.job.tpmTokens ?? 0);
-            if (tpmTokens > 0) {
-              await this.incrementTpmCounter(tpmTokens);
-            }
-          }
+          toComplete.push({ entry, result: result as R, returnvalue });
         }
       }
+      await this.completeBatchEntries(toComplete);
     } else if (thrownError) {
       // A timeout is retryable. Revocation is terminal only when completion or
       // an explicit state check positively identifies the revoked job.
@@ -929,6 +914,131 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         if (await this.skipMovedToFailed(entry.job)) continue;
         const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : thrownError;
         await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
+      }
+    }
+  }
+
+  /**
+   * moveToActive for every entry in one pipeline, results in entry order. A
+   * command that failed on its own comes back as its Error; a transport
+   * failure rejects. A single entry keeps the plain FCALL.
+   */
+  private async moveToActiveMany(
+    entries: { jobId: string; entryId: string }[],
+  ): Promise<(Awaited<ReturnType<typeof moveToActive>> | Error)[]> {
+    const client = this.commandClient!;
+    const broadcast = this.broadcastMode ? true : undefined;
+    if (entries.length === 1) {
+      const e = entries[0];
+      return [
+        await moveToActive(
+          client,
+          this.queueKeys,
+          e.jobId,
+          Date.now(),
+          this.queueKeys.stream,
+          e.entryId,
+          this.consumerGroup,
+          broadcast,
+        ),
+      ];
+    }
+    const now = Date.now();
+    const results = await execPipeline(client, (batch) => {
+      for (const e of entries) {
+        const { keys, args } = moveToActiveCall(
+          this.queueKeys,
+          e.jobId,
+          now,
+          this.queueKeys.stream,
+          e.entryId,
+          this.consumerGroup,
+          broadcast,
+        );
+        batch.fcall('glidemq_moveToActive', keys, args);
+      }
+    });
+    assertPipelineReplies(results, entries.length);
+    return results.map((raw) => (raw instanceof Error ? raw : parseMoveToActiveResult(raw)));
+  }
+
+  /**
+   * Complete successful batch entries with one pipelined round trip, then
+   * run the per-entry follow-ups (revoked handling, parent notifications,
+   * events, TPM) in entry order.
+   */
+  private async completeBatchEntries(
+    items: { entry: { jobId: string; entryId: string; job: Job<D, R> }; result: R; returnvalue: string }[],
+  ): Promise<void> {
+    if (items.length === 0 || !this.commandClient) return;
+    const client = this.commandClient;
+    const broadcast = this.broadcastMode ? true : undefined;
+    let replies: (string[] | Error)[];
+    if (items.length === 1) {
+      const { entry, returnvalue } = items[0];
+      replies = [
+        await completeJob(
+          client,
+          this.queueKeys,
+          entry.jobId,
+          entry.entryId,
+          returnvalue,
+          Date.now(),
+          this.consumerGroup,
+          entry.job.opts.removeOnComplete,
+          undefined,
+          broadcast,
+          this.skipEvents,
+          this.skipMetrics,
+        ),
+      ];
+    } else {
+      const now = Date.now();
+      const results = await execPipeline(client, (batch) => {
+        for (const { entry, returnvalue } of items) {
+          const { keys, args } = completeJobCall(
+            this.queueKeys,
+            entry.jobId,
+            entry.entryId,
+            returnvalue,
+            now,
+            this.consumerGroup,
+            entry.job.opts.removeOnComplete,
+            undefined,
+            broadcast,
+            this.skipEvents,
+            this.skipMetrics,
+          );
+          batch.fcall('glidemq_complete', keys, args);
+        }
+      });
+      assertPipelineReplies(results, items.length);
+      replies = results.map((raw) => (raw instanceof Error ? raw : parseCompleteJobResult(raw)));
+    }
+
+    for (let i = 0; i < items.length; i++) {
+      const { entry, result } = items[i];
+      const completeResult = replies[i];
+      if (completeResult instanceof Error) {
+        // The job stays active for stalled recovery, as a thrown completion did.
+        this.emit('error', completeResult);
+        continue;
+      }
+      if (isCompleteJobRevoked(completeResult)) {
+        await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, new UnrecoverableError('revoked'));
+        continue;
+      }
+      await this.notifyCrossQueueParents(completeResult);
+
+      entry.job.returnvalue = result;
+      entry.job.finishedOn = Date.now();
+      if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
+
+      if (this.opts.tokenLimiter) {
+        const tpmTokens = Math.max(entry.job.usage?.totalTokens ?? 0, entry.job.tpmTokens ?? 0);
+        if (tpmTokens > 0) {
+          await this.incrementTpmCounter(tpmTokens);
+        }
       }
     }
   }
@@ -1547,6 +1657,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           job.failedReason = continuation.job.failedReason;
         }
         if (continuation.job.discarded) job.discarded = true;
+        // onResume reports usage on the pre-suspend instance; the budget charge reads this one.
+        job.usage = continuation.job.usage;
+        job.usageBudgeted = continuation.job.usageBudgeted;
         const resumedDelayedRequest = continuation.job.consumeMoveToDelayedRequest();
         if (resumedDelayedRequest) job.moveToDelayedRequest = resumedDelayedRequest;
         if (continuation.job.consumeMoveToWaitingChildrenRequest()) job.moveToWaitingChildrenRequest = true;
@@ -1665,6 +1778,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         // close(true) aborted it; leave it active for stalled recovery.
         if (aborted && this.forceClosing) return;
         if (await this.skipMovedToFailed(job)) return;
+        // Tokens a failed attempt spent are real spend; count them.
+        try {
+          await this.chargeUsageToBudget(job, currentJobId, true);
+        } catch (err) {
+          this.emit('error', err);
+        }
         const confirmedRevoked = aborted && (await this.isJobRevoked(currentJobId));
         await this.handleJobFailure(
           job,
@@ -1762,39 +1881,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       job.finishedOn = now;
       if (this.hasCompletedListeners) this.emit('completed', job, processResult);
 
-      if (job.budgetKey && job.usage && this.commandClient) {
-        const usageTokens = job.usage.tokens ?? {};
-        const usageCosts = job.usage.costs ?? {};
-        const rawTotal = job.usage.totalTokens ?? 0;
-        const totalCost = job.usage.totalCost ?? 0;
-
-        if (
-          rawTotal > 0 ||
-          totalCost > 0 ||
-          Object.keys(usageTokens).length > 0 ||
-          Object.keys(usageCosts).length > 0
-        ) {
-          const budgetData = await this.commandClient.hmget(job.budgetKey, ['tokenWeights', 'maxTokens', 'maxCosts']);
-          const weights = parseJsonRecord(budgetData?.[0] ? String(budgetData[0]) : '{}') ?? {};
-          const maxTokens = parseJsonRecord(budgetData?.[1] ? String(budgetData[1]) : '{}') ?? {};
-          const maxCosts = parseJsonRecord(budgetData?.[2] ? String(budgetData[2]) : '{}') ?? {};
-          const weightedTotal = computeWeightedTotal(usageTokens, weights, rawTotal);
-
-          const budgetResult = await recordUsageAndCheckBudget(
-            this.commandClient,
-            job.budgetKey,
-            usageTokens,
-            usageCosts,
-            weightedTotal,
-            totalCost,
-            maxTokens,
-            maxCosts,
-          );
-          if (budgetResult === 'exceeded') {
-            this.emit('budget-exceeded', job, currentJobId);
-          }
-        }
-      }
+      await this.chargeUsageToBudget(job, currentJobId, false);
 
       // Post-completion TPM tracking: increment counter for token rate limiting.
       // Use whichever is larger: usage.totalTokens or explicit tpmTokens.
@@ -1891,6 +1978,47 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     return false;
   }
 
+  /**
+   * Charge the usage reported for this attempt to the job's flow budget.
+   * A failed attempt marks the job hash so a retry that reports nothing new
+   * does not charge the same usage again; reportUsage() clears the mark.
+   */
+  private async chargeUsageToBudget(job: Job<D, R>, jobId: string, markCharged: boolean): Promise<void> {
+    if (!job.budgetKey || !job.usage || job.usageBudgeted || !this.commandClient) return;
+    const usageTokens = job.usage.tokens ?? {};
+    const usageCosts = job.usage.costs ?? {};
+    const rawTotal = job.usage.totalTokens ?? 0;
+    const totalCost = job.usage.totalCost ?? 0;
+    if (!(rawTotal > 0 || totalCost > 0 || Object.keys(usageTokens).length > 0 || Object.keys(usageCosts).length > 0)) {
+      return;
+    }
+    const budgetData = await this.commandClient.hmget(job.budgetKey, ['tokenWeights', 'maxTokens', 'maxCosts']);
+    const weights = parseJsonRecord(budgetData?.[0] ? String(budgetData[0]) : '{}') ?? {};
+    const maxTokens = parseJsonRecord(budgetData?.[1] ? String(budgetData[1]) : '{}') ?? {};
+    const maxCosts = parseJsonRecord(budgetData?.[2] ? String(budgetData[2]) : '{}') ?? {};
+    const weightedTotal = computeWeightedTotal(usageTokens, weights, rawTotal);
+
+    const budgetResult = await recordUsageAndCheckBudget(
+      this.commandClient,
+      job.budgetKey,
+      usageTokens,
+      usageCosts,
+      weightedTotal,
+      totalCost,
+      maxTokens,
+      maxCosts,
+    );
+    if (markCharged) {
+      // Write only if the hash still exists: a job removed while active must not come back.
+      if (await updateJobFields(this.commandClient, this.queueKeys, jobId, { [USAGE_BUDGETED_FIELD]: '1' })) {
+        job.usageBudgeted = true;
+      }
+    }
+    if (budgetResult === 'exceeded') {
+      this.emit('budget-exceeded', job, jobId);
+    }
+  }
+
   protected async isJobRevoked(jobId: string): Promise<boolean> {
     if (!this.commandClient) return false;
     try {
@@ -1911,11 +2039,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
     const timer = setInterval(() => {
-      client
-        .hset(jobKey, { lastActive: Date.now().toString() })
-        .then(async () => {
-          const revoked = await client.hget(jobKey, 'revoked');
-          if (String(revoked) === '1') this.abortJob(jobId);
+      // lastActive refresh and revocation check share one round trip.
+      execPipeline(client, (batch) => {
+        batch.hset(jobKey, { lastActive: Date.now().toString() });
+        batch.hget(jobKey, 'revoked');
+      })
+        .then((results) => {
+          if (String(results?.[1]) === '1') this.abortJob(jobId);
         })
         .catch(() => {});
     }, interval);
@@ -2295,7 +2425,20 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     await this.stopSchedulerOnClose(force);
 
     if (!force) {
-      await this.waitForActiveJobs();
+      // Closing the blocking client does not cancel an XREADGROUP BLOCK on
+      // the server: the connection keeps claiming entries into this
+      // consumer's PEL until the block expires, and nobody reads the reply.
+      // Those jobs then wait for stalled recovery and are charged a stall
+      // they never ran. Let the in-flight read return (at most blockTimeout)
+      // so its claims are handed back while the command client is open.
+      await this.settlePollLoop();
+    }
+    this.closeBlockingClient();
+
+    if (!force) {
+      // Claims handed back by the last poll can register after a snapshot.
+      // Nothing new is dispatched once closing is set, so this terminates.
+      while (this.activePromises.size > 0) await this.waitForActiveJobs();
     }
 
     if (this.sandboxClose) {
@@ -2314,10 +2457,6 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     this.heartbeatIntervals.clear();
     this.suspendContinuations.clear();
 
-    if (this.blockingClient) {
-      this.blockingClient.close();
-      this.blockingClient = null;
-    }
     void this.pollLoopPromise?.catch(() => {});
     this.pollLoopPromise = null;
 
@@ -2333,6 +2472,37 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     this.internalEvents.removeAllListeners();
     this.emit('closed');
   }
+
+  private closeBlockingClient(): void {
+    if (!this.blockingClient) return;
+    const client = this.blockingClient;
+    this.blockingClient = null;
+    try {
+      client.close();
+    } catch {
+      // Ignore close errors during shutdown
+    }
+  }
+
+  /**
+   * Wait for the poll loop to exit. The loop stops after its current read,
+   * which returns within blockTimeout. Capped so a reconnect attempt stuck on
+   * an unreachable server cannot hold close().
+   */
+  private async settlePollLoop(): Promise<void> {
+    const loop = this.pollLoopPromise;
+    if (!loop) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      loop.catch(() => {}),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, this.blockTimeout + BaseWorker.POLL_LOOP_SETTLE_GRACE_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+  }
+
+  private static readonly POLL_LOOP_SETTLE_GRACE_MS = 1000;
 
   protected async waitForActiveJobs(): Promise<void> {
     if (this.activePromises.size > 0) {

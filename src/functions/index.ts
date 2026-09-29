@@ -406,6 +406,36 @@ export async function completeJob(
   skipEvents?: boolean,
   skipMetrics?: boolean,
 ): Promise<string[]> {
+  const { keys, args } = completeJobCall(
+    k,
+    jobId,
+    entryId,
+    returnvalue,
+    timestamp,
+    group,
+    removeOnComplete,
+    parentInfo,
+    broadcastMode,
+    skipEvents,
+    skipMetrics,
+  );
+  return parseCompleteJobResult(await client.fcall('glidemq_complete', keys, args));
+}
+
+/** Keys and args of a glidemq_complete call, for direct FCALL or a pipeline. */
+export function completeJobCall(
+  k: QueueKeys,
+  jobId: string,
+  entryId: string,
+  returnvalue: string,
+  timestamp: number,
+  group: string = CONSUMER_GROUP,
+  removeOnComplete?: boolean | number | { age: number; count: number },
+  parentInfo?: { depsMember: string; parentId: string; parentKeys: QueueKeys },
+  broadcastMode?: boolean,
+  skipEvents?: boolean,
+  skipMetrics?: boolean,
+): { keys: string[]; args: string[] } {
   const { mode, count, age } = encodeRetention(removeOnComplete);
 
   const keys: string[] = [k.stream, k.completed, k.events, k.job(jobId), k.metricsCompleted];
@@ -429,8 +459,11 @@ export async function completeJob(
   }
 
   args.push(broadcastMode ? '1' : '0', skipEvents ? '1' : '0', skipMetrics ? '1' : '0');
+  return { keys, args };
+}
 
-  const raw = await client.fcall('glidemq_complete', keys, args);
+/** Parse a glidemq_complete reply. See isCompleteJobRevoked. */
+export function parseCompleteJobResult(raw: GlideReturnType): string[] {
   return String(raw) === 'REVOKED' ? [COMPLETE_REVOKED_MARKER] : parseParentNotifications(raw);
 }
 
@@ -798,6 +831,20 @@ export async function moveToActive(
   | 'STALE'
   | null
 > {
+  const { keys, args } = moveToActiveCall(k, jobId, timestamp, streamKey, entryId, group, broadcastMode);
+  return parseMoveToActiveResult(await client.fcall('glidemq_moveToActive', keys, args));
+}
+
+/** Keys and args of a glidemq_moveToActive call, for direct FCALL or a pipeline. */
+export function moveToActiveCall(
+  k: QueueKeys,
+  jobId: string,
+  timestamp: number,
+  streamKey: string = '',
+  entryId: string = '',
+  group: string = '',
+  broadcastMode?: boolean,
+): { keys: string[]; args: string[] } {
   const keys: string[] = [k.job(jobId)];
   const args: string[] = [timestamp.toString()];
   if (streamKey) {
@@ -805,8 +852,24 @@ export async function moveToActive(
     args.push(entryId, group, jobId);
     if (broadcastMode) args.push('1');
   }
-  const result = await client.fcall('glidemq_moveToActive', keys, args);
+  return { keys, args };
+}
 
+/** Parse a glidemq_moveToActive reply into a job hash or a status marker. */
+export function parseMoveToActiveResult(
+  result: GlideReturnType,
+):
+  | Record<string, string>
+  | 'REVOKED'
+  | 'PAUSED'
+  | 'EXPIRED'
+  | 'GROUP_FULL'
+  | 'GROUP_RATE_LIMITED'
+  | 'GROUP_TOKEN_LIMITED'
+  | 'GROUP_ORDERED'
+  | 'ERR:COST_EXCEEDS_CAPACITY'
+  | 'STALE'
+  | null {
   if (Array.isArray(result)) {
     if (result.length === 0) return null;
     const hash: Record<string, string> = Object.create(null);
