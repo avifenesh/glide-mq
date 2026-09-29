@@ -49,6 +49,27 @@ describe('Lua coverage instrumenter', () => {
     expect(executable).toEqual([2]);
   });
 
+  it('does not inject probes into a multi-line if condition', () => {
+    const src = [
+      '#!lua name=glidemq',
+      'if a == nil or a < 0',
+      '  or a > 10',
+      '  and b then',
+      '  return 1',
+      'end',
+      'while x',
+      '  and y do',
+      '  x = x - 1',
+      'end',
+      '',
+    ].join('\n');
+    const { lua, executable } = instrument(src);
+    expect(lua).not.toContain('__cov[3]=1;');
+    expect(lua).not.toContain('__cov[4]=1;');
+    expect(lua).not.toContain('__cov[8]=1;');
+    expect(executable).toEqual([2, 5, 7, 9]);
+  });
+
   it('stamps a distinct library version into dist when coverage is enabled', () => {
     const js = "exports.LIBRARY_VERSION = '93';\nexports.LIBRARY_SOURCE = 'x';\n";
     expect(stampCoverageVersion(js)).toContain("exports.LIBRARY_VERSION = '93-cov'");
