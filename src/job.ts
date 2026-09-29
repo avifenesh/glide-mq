@@ -1,10 +1,20 @@
 import { randomBytes } from 'crypto';
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
-import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
+import type { GlideClient, GlideClusterClient, GlideString } from '@glidemq/speedkey';
 import type { JobOptions, JobUsage, Client, Serializer, SuspendOptions, SignalEntry } from './types';
 import { JSON_SERIALIZER } from './types';
 import type { QueueKeys } from './functions/index';
-import { changeDelay, changePriority, failJob, promoteJob, removeJob, retryJob, tryLock, unlock } from './functions/index';
+import {
+  changeDelay,
+  changePriority,
+  failJob,
+  promoteJob,
+  removeJob,
+  retryJob,
+  tryLock,
+  unlock,
+  updateJobFields,
+} from './functions/index';
 import {
   GlideMQError,
   DelayedError,
@@ -316,24 +326,7 @@ export class Job<D = any, R = any> {
     if (byteLen > MAX_JOB_DATA_SIZE) {
       throw new Error(`Progress data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE})`);
     }
-    const isCluster = isClusterClient(this.client);
-    const batch = isCluster ? new ClusterBatch(false) : new Batch(false);
-
-    batch.hset(this.queueKeys.job(this.id), {
-      progress: progressStr,
-    });
-    batch.xadd(this.queueKeys.events, [
-      ['event', 'progress'],
-      ['jobId', this.id],
-      ['data', progressStr],
-    ]);
-
-    if (isCluster) {
-      await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false);
-    } else {
-      await (this.client as GlideClient).exec(batch as Batch, false);
-    }
-
+    await this.writeFields({ progress: progressStr }, { type: 'progress', data: progressStr });
     this.progress = progress;
   }
 
@@ -342,9 +335,7 @@ export class Job<D = any, R = any> {
    */
   async updateData(data: D): Promise<void> {
     const serialized = this.serializeData(data);
-    await this.client.hset(this.queueKeys.job(this.id), {
-      data: serialized,
-    });
+    await this.writeFields({ data: serialized });
     this.data = data;
   }
 
@@ -374,6 +365,9 @@ export class Job<D = any, R = any> {
     }
 
     try {
+      if ((await this.client.exists([this.queueKeys.job(this.id)])) === 0) {
+        throw new GlideMQError(`Job ${this.id} not found`);
+      }
       const previousValues = await this.client.hmget(this.queueKeys.job(this.id), [...JOB_USAGE_HASH_FIELDS]);
       const previous = parseStoredUsage(previousValues ?? []);
       const bucketTs = floorUsageBucket(Date.now());
@@ -410,11 +404,11 @@ export class Job<D = any, R = any> {
         ['data', JSON.stringify(resolved)],
       ]);
 
-      if (isCluster) {
-        await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false);
-      } else {
-        await (this.client as GlideClient).exec(batch as Batch, false);
-      }
+      const results = isCluster
+        ? await (this.client as GlideClusterClient).exec(batch as ClusterBatch, false)
+        : await (this.client as GlideClient).exec(batch as Batch, false);
+      const failed = results?.find((r) => r instanceof Error);
+      if (failed) throw failed;
 
       this.usage = hasUsage ? resolved : undefined;
     } finally {
@@ -436,7 +430,7 @@ export class Job<D = any, R = any> {
    */
   async reportTokens(count: number): Promise<void> {
     if (count < 0) throw new Error('Token count must not be negative');
-    await this.client.hset(this.queueKeys.job(this.id), { tpmTokens: count.toString() });
+    await this.writeFields({ tpmTokens: count.toString() });
     this.tpmTokens = count;
   }
 
@@ -1009,7 +1003,17 @@ export class Job<D = any, R = any> {
   async storeVector(field: string, embedding: number[] | Float32Array): Promise<void> {
     const arr = embedding instanceof Float32Array ? embedding : new Float32Array(embedding);
     const buf = Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength);
-    await this.client.hset(this.queueKeys.job(this.id), { [field]: buf });
+    await this.writeFields({ [field]: buf });
+  }
+
+  /** Write fields on this job's hash. Throws instead of recreating a removed job. */
+  private async writeFields(
+    fields: Record<string, GlideString>,
+    event?: { type: string; data: string },
+  ): Promise<void> {
+    if (!(await updateJobFields(this.client, this.queueKeys, this.id, fields, event))) {
+      throw new GlideMQError(`Job ${this.id} not found`);
+    }
   }
 
   private serializeData(data: D): string {

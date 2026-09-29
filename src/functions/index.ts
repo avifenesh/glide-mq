@@ -1,5 +1,5 @@
 import { RequestError } from '@glidemq/speedkey';
-import type { GlideReturnType } from '@glidemq/speedkey';
+import type { GlideReturnType, GlideString } from '@glidemq/speedkey';
 import type { Client } from '../types';
 import { buildKeys, parseCrossQueueParentNotification } from '../utils';
 import { librarySourceFrom, loadLibraryFile } from './load-library-source';
@@ -95,7 +95,9 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 124: undoGroupClaim skips active/nextSeq rewind when the job holds retainedSlot.
 // Version 125: removeJob resolves parents and clears an active job's PEL entry; drain closes ordering holes;
 //   completion paths skip removed jobs; retry re-sequences ordered jobs; listSourced marker;
-//   healListActive needs a full scan; moveToActive rejects stale claims ('STALE').
+//   healListActive needs a full scan; moveToActive rejects stale claims ('STALE'); glidemq_retryJob;
+//   changePriority/changeDelay handle list-held jobs; debounce resolves replaced children;
+//   glidemq_updateJobFields writes only existing job hashes.
 export const LIBRARY_VERSION = '125';
 
 // Consumer group name used by workers
@@ -1006,6 +1008,24 @@ export async function retryJobs(client: Client, k: QueueKeys, count: number, tim
     [count.toString(), timestamp.toString()],
   );
   return Number(result) || 0;
+}
+
+/**
+ * Write fields on an existing job hash, optionally emitting an event with
+ * `data`. Returns false (and writes nothing) when the job does not exist, so a
+ * removed job is never recreated as a stateless hash.
+ */
+export async function updateJobFields(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  fields: Record<string, GlideString>,
+  event?: { type: string; data: string },
+): Promise<boolean> {
+  const args: GlideString[] = [jobId, event?.type ?? '', event?.data ?? ''];
+  for (const [field, value] of Object.entries(fields)) args.push(field, value);
+  const result = await client.fcall('glidemq_updateJobFields', [k.job(jobId), k.events], args);
+  return Number(result) === 1;
 }
 
 /**

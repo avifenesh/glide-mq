@@ -560,4 +560,27 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
       await queue.close();
     }
   });
+  it('job field mutators do not recreate a removed job', async () => {
+    const Q = uniqueQueue('lc-ghost-mutators');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      const added = await queue.add('x', { v: 1 });
+      const job = (await queue.getJob(added.id!))!;
+      await job.updateProgress(10);
+      expect(await hget(k.job(job.id), 'progress')).toBe('10');
+      await job.storeVector('vec', [1, 2]);
+      expect(await cleanupClient.hstrlen(k.job(job.id), 'vec')).toBe(8);
+      await job.remove();
+      await expect(job.updateProgress(50)).rejects.toThrow(/not found/);
+      await expect(job.updateData({ v: 2 })).rejects.toThrow(/not found/);
+      await expect(job.reportTokens(5)).rejects.toThrow(/not found/);
+      await expect(job.storeVector('vec', [1, 2])).rejects.toThrow(/not found/);
+      await expect(job.reportUsage({ model: 'm', tokens: { input: 1 } })).rejects.toThrow(/not found/);
+      expect(await cleanupClient.exists([k.job(job.id)])).toBe(0);
+      expect(await queue.getJob(job.id)).toBeNull();
+    } finally {
+      await queue.close();
+    }
+  });
 });

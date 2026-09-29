@@ -4140,6 +4140,25 @@ redis.register_function('glidemq_retryJob', function(keys, args)
   return 'ok'
 end)
 
+-- Write fields on an existing job hash without recreating a removed job.
+-- KEYS: [jobKey, eventsKey]
+-- ARGS: [jobId, eventType ('' for none), eventData, field1, value1, ...]
+-- Returns 1 when written, 0 when the job does not exist.
+redis.register_function('glidemq_updateJobFields', function(keys, args)
+  local jobKey = keys[1]
+  local jobId = args[1]
+  assert(string.sub(jobKey, -(4 + #jobId)) == 'job:' .. jobId, 'unexpected key format: ' .. jobKey)
+  if redis.call('EXISTS', jobKey) == 0 then return 0 end
+  if #args >= 5 then
+    redis.call('HSET', jobKey, unpack(args, 4))
+  end
+  local eventType = args[2] or ''
+  if eventType ~= '' then
+    emitEvent(keys[2], eventType, jobId, {'data', args[3] or ''})
+  end
+  return 1
+end)
+
 redis.register_function('glidemq_healListActive', function(keys, args)
   local idKey = keys[1]
   local prefix = string.sub(idKey, 1, #idKey - 2)

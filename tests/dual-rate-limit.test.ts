@@ -40,17 +40,23 @@ const keys = buildKeys('test-queue');
 
 describe('Job.reportTokens (unit)', () => {
   let mockClient: ReturnType<typeof makeMockClient>;
+  const updateCall = (count: string) => [
+    'glidemq_updateJobFields',
+    [keys.job('1'), keys.events],
+    ['1', '', '', 'tpmTokens', count],
+  ];
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockClient = makeMockClient();
+    mockClient.fcall.mockResolvedValue(1);
   });
 
   it('stores tpmTokens in the job hash', async () => {
     const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
     await job.reportTokens(500);
 
-    expect(mockClient.hset).toHaveBeenCalledWith(keys.job('1'), { tpmTokens: '500' });
+    expect(mockClient.fcall).toHaveBeenCalledWith(...updateCall('500'));
     expect(job.tpmTokens).toBe(500);
   });
 
@@ -65,16 +71,22 @@ describe('Job.reportTokens (unit)', () => {
     await job.reportTokens(200);
 
     expect(job.tpmTokens).toBe(200);
-    expect(mockClient.hset).toHaveBeenCalledTimes(2);
-    expect(mockClient.hset).toHaveBeenLastCalledWith(keys.job('1'), { tpmTokens: '200' });
+    expect(mockClient.fcall).toHaveBeenCalledTimes(2);
+    expect(mockClient.fcall).toHaveBeenLastCalledWith(...updateCall('200'));
   });
 
   it('allows zero tokens', async () => {
     const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
     await job.reportTokens(0);
 
-    expect(mockClient.hset).toHaveBeenCalledWith(keys.job('1'), { tpmTokens: '0' });
+    expect(mockClient.fcall).toHaveBeenCalledWith(...updateCall('0'));
     expect(job.tpmTokens).toBe(0);
+  });
+
+  it('throws instead of recreating a removed job', async () => {
+    mockClient.fcall.mockResolvedValue(0);
+    const job = new Job(mockClient as any, keys, '1', 'llm-call', {}, {});
+    await expect(job.reportTokens(5)).rejects.toThrow('Job 1 not found');
   });
 });
 

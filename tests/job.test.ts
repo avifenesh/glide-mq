@@ -62,43 +62,54 @@ describe('Job', () => {
   });
 
   describe('updateProgress', () => {
-    it('should update progress with a numeric value using batch', async () => {
+    it('should update progress with a numeric value through the gated FCALL', async () => {
       const job = new Job(mockClient as any, keys, '1', 'job', {}, {});
+      mockClient.fcall.mockResolvedValueOnce(1);
 
       await job.updateProgress(50);
 
-      expect(mockBatch.hset).toHaveBeenCalledWith('glide:{test-queue}:job:1', { progress: '50' });
-      expect(mockBatch.xadd).toHaveBeenCalledWith('glide:{test-queue}:events', [
-        ['event', 'progress'],
-        ['jobId', '1'],
-        ['data', '50'],
-      ]);
-      expect(mockClient.exec).toHaveBeenCalledWith(mockBatch, false);
+      expect(mockClient.fcall).toHaveBeenCalledWith(
+        'glidemq_updateJobFields',
+        ['glide:{test-queue}:job:1', 'glide:{test-queue}:events'],
+        ['1', 'progress', '50', 'progress', '50'],
+      );
       expect(job.progress).toBe(50);
     });
 
-    it('should update progress with an object value using batch', async () => {
+    it('should update progress with an object value', async () => {
       const job = new Job(mockClient as any, keys, '2', 'job', {}, {});
       const progressObj = { step: 3, total: 10 };
+      mockClient.fcall.mockResolvedValueOnce(1);
 
       await job.updateProgress(progressObj);
 
-      expect(mockBatch.hset).toHaveBeenCalledWith('glide:{test-queue}:job:2', {
-        progress: JSON.stringify(progressObj),
-      });
-      expect(mockClient.exec).toHaveBeenCalledWith(mockBatch, false);
+      const call = mockClient.fcall.mock.calls[0];
+      expect(call[2]).toEqual(['2', 'progress', JSON.stringify(progressObj), 'progress', JSON.stringify(progressObj)]);
       expect(job.progress).toEqual(progressObj);
+    });
+
+    it('should throw and keep local progress when the job no longer exists', async () => {
+      const job = new Job(mockClient as any, keys, '3', 'job', {}, {});
+      mockClient.fcall.mockResolvedValueOnce(0);
+
+      await expect(job.updateProgress(10)).rejects.toThrow('Job 3 not found');
+      expect(job.progress).toBe(0);
     });
   });
 
   describe('updateData', () => {
     it('should update the data field in the hash and locally', async () => {
       const job = new Job(mockClient as any, keys, '1', 'job', { old: true }, {});
+      mockClient.fcall.mockResolvedValueOnce(1);
 
       const newData = { updated: true, count: 5 };
       await job.updateData(newData);
 
-      expect(mockClient.hset).toHaveBeenCalledWith('glide:{test-queue}:job:1', { data: JSON.stringify(newData) });
+      expect(mockClient.fcall).toHaveBeenCalledWith(
+        'glidemq_updateJobFields',
+        ['glide:{test-queue}:job:1', 'glide:{test-queue}:events'],
+        ['1', '', '', 'data', JSON.stringify(newData)],
+      );
       expect(job.data).toEqual(newData);
     });
   });

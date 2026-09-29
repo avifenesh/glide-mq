@@ -121,17 +121,19 @@ describe('createJobIndex schema construction', () => {
 });
 
 describe('storeVector buffer encoding', () => {
-  it('writes Float32Array buffer to job hash via hset', async () => {
+  it('writes Float32Array buffer to the job hash', async () => {
     const { Job } = require('../dist/job') as typeof import('../src/job');
     const hsetCalls: any[] = [];
     const mockClient = {
-      hset: async (key: string, fields: Record<string, any>) => {
-        hsetCalls.push({ key, fields });
+      // Field writes go through the EXISTS-gated glidemq_updateJobFields FCALL.
+      fcall: async (_fn: string, keys: string[], args: any[]) => {
+        hsetCalls.push({ key: keys[0], fields: { [args[3]]: args[4] } });
         return 1;
       },
     } as any;
     const mockKeys = {
       job: (id: string) => `glide:{test}:job:${id}`,
+      events: 'glide:{test}:events',
     } as any;
 
     const job = new Job(mockClient, mockKeys, '42', 'test-job', {}, {});
@@ -154,13 +156,14 @@ describe('storeVector buffer encoding', () => {
     const { Job } = require('../dist/job') as typeof import('../src/job');
     const hsetCalls: any[] = [];
     const mockClient = {
-      hset: async (_key: string, fields: Record<string, any>) => {
-        hsetCalls.push(fields);
+      fcall: async (_fn: string, _keys: string[], args: any[]) => {
+        hsetCalls.push({ [args[3]]: args[4] });
         return 1;
       },
     } as any;
     const mockKeys = {
       job: (id: string) => `glide:{test}:job:${id}`,
+      events: 'glide:{test}:events',
     } as any;
 
     const job = new Job(mockClient, mockKeys, '99', 'test-job', {}, {});
