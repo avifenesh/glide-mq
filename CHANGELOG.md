@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Testing mode round 2**: `delay` is honored (jobs start `delayed`, promote on time, `promote()`/`changeDelay()` follow the server rules, debounce can replace them); priority jobs sit in `prioritized` until a worker pass; `RateLimitError` parks the job for the limiter window without consuming an attempt or emitting `failed` (`TestWorkerOptions.limiter`, `worker.rateLimit(ms)`); `getJobs('waiting')` follows dispatch order; the scheduler tick ignores template `delay`/`deduplication` like production; `repeatAfterComplete` waits for completion; budget `pause` parks in `delayed`. TestJob, TestQueue and TestWorker gained the production methods they lacked (`getState`, `is*`, `waitUntilFinished`, `retry`, `remove`, `moveToFailed`, `log`, `addAndWait`, `count`, `getJobCountByTypes`, `getJobLogs`, `getSuspendedJobs`, `revoke`, `obliterate`, `pause`/`resume`, `drain`). docs/TESTING.md lists the remaining limitations.
+
 ### Added
 
 - **Bun and Deno support**: verified on Bun 1.4.2 and Deno 2.9.7 (NAPI client load, Queue/Worker/QueueEvents, gzip, worker_threads and forked sandboxes, flows, broadcast, signals). `npm run compat:bun` / `compat:deno` run the smoke against a local Valkey, CI runs both, and docs/COMPATIBILITY.md lists the required Deno permissions and the known gaps.
