@@ -42,6 +42,62 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function jobHash(id: string, extra: string[] = []) {
+  return JSON.stringify([
+    'id',
+    id,
+    'name',
+    'job',
+    'data',
+    '{}',
+    'opts',
+    '{}',
+    'timestamp',
+    '1000',
+    'attemptsMade',
+    '0',
+    'state',
+    'active',
+    ...extra,
+  ]);
+}
+
+function streamResult(entries: [string, string][]) {
+  const value: Record<string, [string, string][]> = {};
+  for (const [entryId, jobId] of entries) value[entryId] = [['jobId', jobId]];
+  return [{ key: 'stream', value }];
+}
+
+function jobIdFromKeys(keys?: string[]) {
+  return String(keys?.[0] ?? '')
+    .split(':')
+    .pop()!;
+}
+
+/** fcall router: returns the per-function override, else the library version. */
+function routeFcall(routes: Record<string, (keys: string[], args: string[]) => unknown>) {
+  return vi.fn().mockImplementation((func: string, keys: string[] = [], args: string[] = []) => {
+    if (routes[func]) return Promise.resolve().then(() => routes[func](keys, args));
+    if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
+    if (func === 'glidemq_moveToActive') return Promise.resolve(jobHash(jobIdFromKeys(keys)));
+    if (func === 'glidemq_completeAndFetchNext') {
+      return Promise.resolve(JSON.stringify({ completed: args[0], next: false }));
+    }
+    if (func === 'glidemq_complete') return Promise.resolve(1);
+    if (func === 'glidemq_fail') return Promise.resolve('retrying');
+    return Promise.resolve(LIBRARY_VERSION);
+  });
+}
+
+/** Wire createClient: first call is the command client, the rest are blocking clients. */
+function wireClients(command: ReturnType<typeof makeMockClient>, blocking: ReturnType<typeof makeMockClient>) {
+  let n = 0;
+  vi.mocked(GlideClient.createClient).mockImplementation(async () => {
+    n++;
+    return (n === 1 ? command : blocking) as any;
+  });
+}
+
 function deferred<T>() {
   let resolve!: (v: T) => void;
   let reject!: (e: unknown) => void;
@@ -219,6 +275,106 @@ describe('poll error backoff', () => {
     const reconnectStarts = createTimes.slice(2).filter((_, i) => i % 2 === 0);
     expect(reconnectStarts[0] - start).toBeGreaterThanOrEqual(900);
     expect(reconnectStarts[1] - reconnectStarts[0]).toBeGreaterThanOrEqual(1900);
+
+    await worker.close(true);
+  });
+});
+
+describe('heartbeat cleanup on pre-processor failures', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('stops the heartbeat and drops the abort controller when the rate limiter call throws', async () => {
+    const command = makeMockClient({
+      fcall: routeFcall({
+        glidemq_rateLimit: () => {
+          throw new Error('rate limiter unavailable');
+        },
+      }),
+    });
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult([['1-0', 'j1']]))
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+
+    const processor = vi.fn().mockResolvedValue('ok');
+    const worker = new Worker('lifecycle-w2', processor, {
+      connection,
+      blockTimeout: 100,
+      limiter: { max: 1, duration: 1000 },
+    });
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(processor).not.toHaveBeenCalled();
+    expect((worker as any).heartbeatIntervals.size).toBe(0);
+    expect((worker as any).activeAbortControllers.size).toBe(0);
+
+    await worker.close(true);
+  });
+
+  it('stops heartbeats of already activated batch entries when a later activation throws', async () => {
+    const command = makeMockClient({
+      fcall: routeFcall({
+        glidemq_moveToActive: (keys) => {
+          const id = jobIdFromKeys(keys);
+          if (id === 'j2') throw new Error('activation failed');
+          return jobHash(id);
+        },
+      }),
+    });
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(
+          streamResult([
+            ['1-0', 'j1'],
+            ['2-0', 'j2'],
+          ]),
+        )
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+
+    const processor = vi.fn().mockResolvedValue([]);
+    const worker = new Worker('lifecycle-w2-batch', processor, {
+      connection,
+      blockTimeout: 100,
+      batch: { size: 2 },
+    });
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(processor).not.toHaveBeenCalled();
+    expect((worker as any).heartbeatIntervals.size).toBe(0);
+
+    await worker.close(true);
+  });
+
+  it('startHeartbeat replaces an existing timer for the same job', async () => {
+    wireClients(makeMockClient(), makeMockClient());
+    const worker = new Worker('lifecycle-w2-dup', vi.fn(), { connection, blockTimeout: 100 });
+    await worker.waitUntilReady();
+
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval');
+    (worker as any).startHeartbeat('dup');
+    const first = (worker as any).heartbeatIntervals.get('dup');
+    (worker as any).startHeartbeat('dup');
+    expect(clearSpy).toHaveBeenCalledWith(first);
+    (worker as any).stopHeartbeat('dup');
+    expect((worker as any).heartbeatIntervals.size).toBe(0);
+    clearSpy.mockRestore();
 
     await worker.close(true);
   });

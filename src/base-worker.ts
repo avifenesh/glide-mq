@@ -612,42 +612,49 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     const batch: { jobId: string; entryId: string; job: Job<D, R> }[] = [];
     const pausedListEntries: { jobId: string; entryId: string }[] = [];
     const pausedStreamEntries: { jobId: string; entryId: string }[] = [];
-    for (const entry of collected) {
-      if (!this.commandClient) break;
-      const moveResult = await moveToActive(
-        this.commandClient,
-        this.queueKeys,
-        entry.jobId,
-        Date.now(),
-        this.queueKeys.stream,
-        entry.entryId,
-        this.consumerGroup,
-        this.broadcastMode ? true : undefined,
-      );
-      if (moveResult === 'PAUSED') {
-        // Defer the restores until every claim has been inspected. List jobs
-        // are popped from the right, so restoring them in reverse claim order
-        // keeps the original dispatch sequence on the next RPOP.
-        await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId, false);
-        if (entry.entryId === '') pausedListEntries.push(entry);
-        else pausedStreamEntries.push(entry);
-        continue;
-      }
-      if (await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId)) continue;
-      const hash = moveResult as Record<string, string>;
-      const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, entry.jobId, hash, this.serializer);
-      job.entryId = entry.entryId;
-      job.failContext = { group: this.consumerGroup, broadcastMode: this.broadcastMode ? true : undefined };
+    try {
+      for (const entry of collected) {
+        if (!this.commandClient) break;
+        const moveResult = await moveToActive(
+          this.commandClient,
+          this.queueKeys,
+          entry.jobId,
+          Date.now(),
+          this.queueKeys.stream,
+          entry.entryId,
+          this.consumerGroup,
+          this.broadcastMode ? true : undefined,
+        );
+        if (moveResult === 'PAUSED') {
+          // Defer the restores until every claim has been inspected. List jobs
+          // are popped from the right, so restoring them in reverse claim order
+          // keeps the original dispatch sequence on the next RPOP.
+          await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId, false);
+          if (entry.entryId === '') pausedListEntries.push(entry);
+          else pausedStreamEntries.push(entry);
+          continue;
+        }
+        if (await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId)) continue;
+        const hash = moveResult as Record<string, string>;
+        const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, entry.jobId, hash, this.serializer);
+        job.entryId = entry.entryId;
+        job.failContext = { group: this.consumerGroup, broadcastMode: this.broadcastMode ? true : undefined };
 
-      // Check ordering - if not ready, defer and skip
-      const orderingReady = await this.isOrderingTurn(job);
-      if (!orderingReady) {
-        await this.deferOutOfOrderJob(entry.jobId, entry.entryId);
-        continue;
-      }
+        // Check ordering - if not ready, defer and skip
+        const orderingReady = await this.isOrderingTurn(job);
+        if (!orderingReady) {
+          await this.deferOutOfOrderJob(entry.jobId, entry.entryId);
+          continue;
+        }
 
-      this.startHeartbeat(entry.jobId, job.opts.lockDuration);
-      batch.push({ jobId: entry.jobId, entryId: entry.entryId, job });
+        this.startHeartbeat(entry.jobId, job.opts.lockDuration);
+        batch.push({ jobId: entry.jobId, entryId: entry.entryId, job });
+      }
+    } catch (err) {
+      // Heartbeats for entries activated before the failure would otherwise
+      // run forever and keep those jobs from being reclaimed.
+      for (const entry of batch) this.stopHeartbeat(entry.jobId);
+      throw err;
     }
 
     for (const entry of pausedStreamEntries) {
@@ -1063,8 +1070,16 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     job.abortSignal = ac.signal;
     this.startHeartbeat(jobId, job.opts.lockDuration);
 
-    if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
-    if (this.opts.tokenLimiter) await this.waitForTokenLimit();
+    try {
+      if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
+      if (this.opts.tokenLimiter) await this.waitForTokenLimit();
+    } catch (err) {
+      // A failed limiter call must not leave the heartbeat refreshing
+      // lastActive, which would keep the job from ever being reclaimed.
+      this.stopHeartbeat(jobId);
+      this.activeAbortControllers.delete(jobId);
+      throw err;
+    }
 
     // Short-circuit if the job was revoked/aborted during the limiter wait.
     if (ac.signal.aborted) {
@@ -1805,6 +1820,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
   protected startHeartbeat(jobId: string, jobLockDuration?: number): void {
     if (!this.commandClient) return;
+    // Never orphan an earlier timer for the same job.
+    this.stopHeartbeat(jobId);
     // Use per-job lockDuration when specified, otherwise fall back to worker-level.
     const effectiveLock = jobLockDuration ?? this.lockDuration;
     const interval = Math.min(effectiveLock / 2, BaseWorker.REVOCATION_POLL_INTERVAL);
