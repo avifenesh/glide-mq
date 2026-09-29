@@ -268,7 +268,7 @@ const worker = new Worker(
         'fetch-url',
         { url },
         {
-          parent: { id: job.id!, queue: job.queueQualifiedName },
+          parent: { id: job.id!, queue: 'processing' }, // plain queue name of the parent
         },
       );
     }
