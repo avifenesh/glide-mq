@@ -139,11 +139,28 @@ describe('nextCronOccurrence', () => {
     expect(new Date(next).toISOString()).toBe('2024-01-08T00:00:00.000Z');
   });
 
-  it('matches specific date AND day of week', () => {
-    // 1st of month AND Monday - Apr 1 2024 is the next match
+  it('matches day of month OR day of week when both are restricted', () => {
+    // Standard cron: '0 0 1 * 1' fires on every 1st AND on every Monday
+    let t = new Date('2024-01-22T12:00:00Z').getTime();
+    const runs: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      t = nextCronOccurrence('0 0 1 * 1', t);
+      runs.push(new Date(t).toISOString().slice(0, 10));
+    }
+    // Jan 29 Mon, Feb 1 Thu, Feb 5 Mon, Feb 12 Mon
+    expect(runs).toEqual(['2024-01-29', '2024-02-01', '2024-02-05', '2024-02-12']);
+  });
+
+  it('treats * and */1 as unrestricted day fields (AND with the other field)', () => {
     const now = new Date('2024-01-01T12:00:00Z').getTime();
-    const next = nextCronOccurrence('0 0 1 * 1', now);
-    expect(new Date(next).toISOString()).toBe('2024-04-01T00:00:00.000Z');
+    // dom '*/1' is unrestricted: only Mondays match
+    expect(new Date(nextCronOccurrence('0 0 */1 * 1', now)).toISOString()).toBe('2024-01-08T00:00:00.000Z');
+    // dow '*/1' is unrestricted: only the 5th matches
+    expect(new Date(nextCronOccurrence('0 0 5 * */1', now)).toISOString()).toBe('2024-01-05T00:00:00.000Z');
+    // dom '*/2' is restricted: odd days OR Mondays
+    expect(new Date(nextCronOccurrence('0 0 */2 * 1', now)).toISOString()).toBe('2024-01-03T00:00:00.000Z');
+    // dow '0-6' is restricted (cron-parser and vixie): the 5th OR any weekday, so every day
+    expect(new Date(nextCronOccurrence('0 0 5 * 0-6', now)).toISOString()).toBe('2024-01-02T00:00:00.000Z');
   });
 
   it('throws error for impossible date (Feb 30)', () => {
@@ -248,15 +265,44 @@ describe('nextCronOccurrence with timezone', () => {
 
   // --- DST transitions ---
 
-  it('spring-forward: skips nonexistent wall-clock time', () => {
+  it('spring-forward: fixed time inside the gap fires at the first instant after it', () => {
     // In America/New_York, 2024-03-10: clocks spring forward 2:00 AM -> 3:00 AM
-    // "30 2 * * *" = 2:30 AM - does not exist on March 10
-    // Next valid occurrence is March 11 at 2:30 AM EDT = 06:30 UTC
+    // "30 2 * * *" = 2:30 AM does not exist on March 10; like vixie cron it runs at 3:00 AM EDT = 07:00 UTC
     const now = new Date('2024-03-10T06:00:00Z').getTime(); // 1:00 AM EST
     const next = nextCronOccurrence('30 2 * * *', now, 'America/New_York');
-    // March 10 2:30 AM doesn't exist, so it should fire March 11 at 2:30 AM EDT
-    // March 11 2:30 AM EDT = 06:30 UTC
-    expect(new Date(next).toISOString()).toBe('2024-03-11T06:30:00.000Z');
+    expect(new Date(next).toISOString()).toBe('2024-03-10T07:00:00.000Z');
+    // The day after is back to 2:30 AM EDT = 06:30 UTC
+    expect(new Date(nextCronOccurrence('30 2 * * *', next, 'America/New_York')).toISOString()).toBe(
+      '2024-03-11T06:30:00.000Z',
+    );
+  });
+
+  it('spring-forward: several fixed times inside the gap coalesce into one run', () => {
+    const now = new Date('2024-03-10T06:00:00Z').getTime();
+    const first = nextCronOccurrence('0,30 2 * * *', now, 'America/New_York');
+    expect(new Date(first).toISOString()).toBe('2024-03-10T07:00:00.000Z');
+    expect(new Date(nextCronOccurrence('0,30 2 * * *', first, 'America/New_York')).toISOString()).toBe(
+      '2024-03-11T06:00:00.000Z',
+    );
+  });
+
+  it('spring-forward: fixed time in a 30-minute gap (Australia/Lord_Howe)', () => {
+    // 2026-10-04 02:00 LHST (+10:30) -> 02:30 LHDT (+11); 02:15 does not exist
+    const now = new Date('2026-10-03T15:00:00Z').getTime(); // 01:30 LHST
+    const next = nextCronOccurrence('15 2 * * *', now, 'Australia/Lord_Howe');
+    expect(new Date(next).toISOString()).toBe('2026-10-03T15:30:00.000Z'); // 02:30 LHDT
+  });
+
+  it('spring-forward: wildcard pattern skips the missing times', () => {
+    const now = new Date('2024-03-10T06:30:00Z').getTime(); // 1:30 AM EST
+    expect(walkCron('*/30 * * * *', '2024-03-10T06:30:00Z', 3, 'America/New_York')).toEqual([
+      '2024-03-10T07:00:00.000Z', // 3:00 AM EDT
+      '2024-03-10T07:30:00.000Z',
+      '2024-03-10T08:00:00.000Z',
+    ]);
+    expect(nextCronOccurrence('*/30 * * * *', now, 'America/New_York')).toBe(
+      new Date('2024-03-10T07:00:00Z').getTime(),
+    );
   });
 
   it('fall-back: picks first (earlier) UTC instant for ambiguous time', () => {
@@ -268,6 +314,69 @@ describe('nextCronOccurrence with timezone', () => {
     const next = nextCronOccurrence('30 1 * * *', now, 'America/New_York');
     // 1:30 AM EDT = 05:30 UTC (the earlier of the two possible interpretations)
     expect(new Date(next).toISOString()).toBe('2024-11-03T05:30:00.000Z');
+  });
+
+  function walkCron(pattern: string, fromIso: string, count: number, tz: string): string[] {
+    let t = new Date(fromIso).getTime();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      t = nextCronOccurrence(pattern, t, tz);
+      out.push(new Date(t).toISOString());
+    }
+    return out;
+  }
+
+  it('fall-back: sub-hourly wildcard pattern fires in both instances of the repeated hour', () => {
+    // 2026-11-01 America/New_York: 01:00-01:59 happens twice (EDT 05:xx UTC, then EST 06:xx UTC)
+    expect(walkCron('*/15 * * * *', '2026-11-01T05:30:00Z', 7, 'America/New_York')).toEqual([
+      '2026-11-01T05:45:00.000Z', // 01:45 EDT
+      '2026-11-01T06:00:00.000Z', // 01:00 EST
+      '2026-11-01T06:15:00.000Z',
+      '2026-11-01T06:30:00.000Z',
+      '2026-11-01T06:45:00.000Z',
+      '2026-11-01T07:00:00.000Z', // 02:00 EST
+      '2026-11-01T07:15:00.000Z',
+    ]);
+  });
+
+  it('fall-back: hourly wildcard pattern fires every elapsed hour', () => {
+    expect(walkCron('0 * * * *', '2026-11-01T04:30:00Z', 4, 'America/New_York')).toEqual([
+      '2026-11-01T05:00:00.000Z', // 01:00 EDT
+      '2026-11-01T06:00:00.000Z', // 01:00 EST
+      '2026-11-01T07:00:00.000Z', // 02:00 EST
+      '2026-11-01T08:00:00.000Z',
+    ]);
+  });
+
+  it('fall-back: fixed-time pattern fires once, including when resumed inside the repeated hour', () => {
+    // After the 01:30 EDT run, the 01:30 EST repeat is not fired again
+    expect(walkCron('30 1 * * *', '2026-11-01T04:00:00Z', 2, 'America/New_York')).toEqual([
+      '2026-11-01T05:30:00.000Z',
+      '2026-11-02T06:30:00.000Z',
+    ]);
+    // Searching from 01:10 EST (second instance) goes to the next day
+    expect(walkCron('30 1 * * *', '2026-11-01T06:10:00Z', 1, 'America/New_York')).toEqual(['2026-11-02T06:30:00.000Z']);
+  });
+
+  it('fall-back: ambiguous fixed time resolves to the earlier instant in positive-offset zones', () => {
+    // 2026-10-25 Europe/Berlin: 02:30 CEST = 00:30 UTC, 02:30 CET = 01:30 UTC
+    expect(walkCron('30 2 * * *', '2026-10-25T00:00:00Z', 1, 'Europe/Berlin')).toEqual(['2026-10-25T00:30:00.000Z']);
+    // 2026-04-05 Australia/Sydney: 02:30 AEDT = 15:30 UTC (Apr 4), 02:30 AEST = 16:30 UTC
+    expect(walkCron('30 2 * * *', '2026-04-04T14:00:00Z', 2, 'Australia/Sydney')).toEqual([
+      '2026-04-04T15:30:00.000Z',
+      '2026-04-05T16:30:00.000Z',
+    ]);
+  });
+
+  it('fall-back: wildcard pattern in a positive-offset zone keeps a steady cadence', () => {
+    expect(walkCron('*/30 * * * *', '2026-10-24T23:00:00Z', 6, 'Europe/Berlin')).toEqual([
+      '2026-10-24T23:30:00.000Z',
+      '2026-10-25T00:00:00.000Z', // 02:00 CEST
+      '2026-10-25T00:30:00.000Z',
+      '2026-10-25T01:00:00.000Z', // 02:00 CET
+      '2026-10-25T01:30:00.000Z',
+      '2026-10-25T02:00:00.000Z',
+    ]);
   });
 
   it('midnight cron in positive-offset timezone', () => {

@@ -903,4 +903,279 @@ describeEachMode('Job schedulers', (CONNECTION) => {
       await flushQueue(cleanupClient, qName);
     }
   }, 15000);
+
+  it('re-upserting an in-flight repeatAfterComplete scheduler does not overwrite a completion that lands mid-upsert', async () => {
+    const k = buildKeys(Q);
+    const name = 'rac-inflight-race';
+    await queue.upsertJobScheduler(name, { repeatAfterComplete: 500 }, { name: 'rac-race' });
+    const inFlight = { repeatAfterComplete: 500, iterationCount: 1, nextRun: 0, template: { name: 'rac-race' } };
+    await cleanupClient.hset(k.schedulers, { [name]: JSON.stringify(inFlight) });
+    const advancedNextRun = Date.now() + 500;
+
+    // Simulate the in-flight job completing right after upsert read the entry:
+    // completion advances nextRun in Lua without the scheduler mutation lock.
+    const client = await (queue as any).getClient();
+    const originalHget = client.hget.bind(client);
+    let raced = false;
+    client.hget = async (key: string, field: string) => {
+      const value = await originalHget(key, field);
+      if (!raced && key === k.schedulers && field === name) {
+        raced = true;
+        await cleanupClient.hset(k.schedulers, {
+          [name]: JSON.stringify({ ...inFlight, nextRun: advancedNextRun }),
+        });
+      }
+      return value;
+    };
+    try {
+      await queue.upsertJobScheduler(name, { repeatAfterComplete: 500 }, { name: 'rac-race' });
+    } finally {
+      client.hget = originalHget;
+    }
+    expect(raced).toBe(true);
+    const entry = await queue.getJobScheduler(name);
+    expect(entry!.nextRun).toBe(advancedNextRun);
+    await queue.removeJobScheduler(name);
+  });
+
+  it('re-upserting a repeatAfterComplete scheduler while its job is in flight keeps the awaiting state', async () => {
+    const k = buildKeys(Q);
+    const name = 'rac-inflight-state';
+    await queue.upsertJobScheduler(name, { repeatAfterComplete: 500, limit: 10 }, { name: 'rac-inflight' });
+    const lastRun = Date.now() - 1000;
+    await cleanupClient.hset(k.schedulers, {
+      [name]: JSON.stringify({
+        repeatAfterComplete: 500,
+        limit: 10,
+        iterationCount: 3,
+        lastRun,
+        nextRun: 0,
+        template: { name: 'rac-inflight' },
+      }),
+    });
+
+    // Same schedule: nothing changes
+    await queue.upsertJobScheduler(name, { repeatAfterComplete: 500, limit: 10 }, { name: 'rac-inflight' });
+    let entry = await queue.getJobScheduler(name);
+    expect(entry!.nextRun).toBe(0);
+    expect(entry!.iterationCount).toBe(3);
+    expect(entry!.lastRun).toBe(lastRun);
+
+    // New interval: still awaiting the in-flight job, interval applies after it completes
+    await queue.upsertJobScheduler(name, { repeatAfterComplete: 2000, limit: 10 }, { name: 'rac-inflight' });
+    entry = await queue.getJobScheduler(name);
+    expect(entry!.nextRun).toBe(0);
+    expect(entry!.repeatAfterComplete).toBe(2000);
+    expect(entry!.iterationCount).toBe(3);
+    expect(entry!.lastRun).toBe(lastRun);
+
+    // Changed bounds restart the count but never fire a second chain
+    await queue.upsertJobScheduler(
+      name,
+      { repeatAfterComplete: 2000, limit: 10, endDate: Date.now() + 60_000 },
+      { name: 'rac-inflight' },
+    );
+    entry = await queue.getJobScheduler(name);
+    expect(entry!.nextRun).toBe(0);
+    expect(entry!.iterationCount).toBe(0);
+
+    // Switching to another mode schedules normally
+    await queue.upsertJobScheduler(name, { every: 1000 }, { name: 'rac-inflight' });
+    entry = await queue.getJobScheduler(name);
+    expect(entry!.nextRun).toBeGreaterThan(0);
+
+    await queue.removeJobScheduler(name);
+  });
+
+  it('repeatAfterComplete scheduler upserted from inside its processor never overlaps', async () => {
+    const qName = Q + '-rac-adaptive';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    await localQueue.upsertJobScheduler('adaptive', { repeatAfterComplete: 100 }, { name: 'adaptive-job' });
+
+    let active = 0;
+    let maxActive = 0;
+    let runs = 0;
+    const worker = new Worker(
+      qName,
+      async () => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        runs++;
+        // Adaptive interval: re-upsert while this job is running
+        await localQueue.upsertJobScheduler(
+          'adaptive',
+          { repeatAfterComplete: 100 + runs * 50 },
+          { name: 'adaptive-job' },
+        );
+        await new Promise((r) => setTimeout(r, 600));
+        active--;
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 5, blockTimeout: 200, promotionInterval: 100, stalledInterval: 60000 },
+    );
+    worker.on('error', () => {});
+
+    try {
+      const deadline = Date.now() + 8000;
+      while (runs < 3 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(runs).toBeGreaterThanOrEqual(3);
+      expect(maxActive).toBe(1);
+      const entry = await localQueue.getJobScheduler('adaptive');
+      expect(entry!.iterationCount).toBeGreaterThanOrEqual(3);
+    } finally {
+      await worker.close(true);
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    }
+  }, 20000);
+
+  it('scheduler jobs carry the template ordering key, group concurrency and cost', async () => {
+    const qName = Q + '-tmpl-ordering';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const k = buildKeys(qName);
+    await localQueue.upsertJobScheduler(
+      'ordered',
+      { every: 100, limit: 3 },
+      {
+        name: 'ordered-job',
+        opts: { ordering: { key: 'tenant-a', concurrency: 1 }, cost: 2 },
+      },
+    );
+
+    let active = 0;
+    let maxActive = 0;
+    const ids: string[] = [];
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        ids.push(job.id);
+        await new Promise((r) => setTimeout(r, 400));
+        active--;
+        return 'ok';
+      },
+      { connection: CONNECTION, concurrency: 5, blockTimeout: 200, promotionInterval: 100, stalledInterval: 60000 },
+    );
+    worker.on('error', () => {});
+
+    try {
+      const deadline = Date.now() + 8000;
+      while (ids.length < 3 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(ids.length).toBe(3);
+      // Group concurrency 1 serializes the scheduled jobs even with worker concurrency 5
+      expect(maxActive).toBe(1);
+      const fields = await cleanupClient.hmget(k.job(ids[0]), ['groupKey', 'cost']);
+      expect(fields.map((f: any) => (f == null ? null : String(f)))).toEqual(['tenant-a', '2000']);
+    } finally {
+      await worker.close(true);
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    }
+  }, 20000);
+
+  it('upsertJobScheduler validates template options like Queue.add', async () => {
+    await expect(
+      queue.upsertJobScheduler('tmpl-jobid', { every: 1000 }, { name: 'j', opts: { jobId: 'fixed' } as any }),
+    ).rejects.toThrow('Scheduler template: jobId is not supported');
+    await expect(
+      queue.upsertJobScheduler('tmpl-cost', { every: 1000 }, { name: 'j', opts: { cost: -1 } }),
+    ).rejects.toThrow('Scheduler template: cost must be a non-negative finite number');
+    await expect(
+      queue.upsertJobScheduler(
+        'tmpl-tb',
+        { every: 1000 },
+        { name: 'j', opts: { ordering: { key: 'g', tokenBucket: { capacity: 0, refillRate: 1 } } } },
+      ),
+    ).rejects.toThrow('Scheduler template: tokenBucket.capacity must be a positive finite number');
+    await expect(
+      queue.upsertJobScheduler(
+        'tmpl-over-capacity',
+        { every: 1000 },
+        { name: 'j', opts: { cost: 5, ordering: { key: 'g', tokenBucket: { capacity: 2, refillRate: 1 } } } },
+      ),
+    ).rejects.toThrow('Scheduler template: Job cost exceeds token bucket capacity');
+    await expect(
+      queue.upsertJobScheduler('tmpl-ttl', { every: 1000 }, { name: 'j', opts: { ttl: -5 } }),
+    ).rejects.toThrow('Scheduler template: ttl must be a non-negative finite number');
+    for (const name of ['tmpl-jobid', 'tmpl-cost', 'tmpl-tb', 'tmpl-over-capacity', 'tmpl-ttl']) {
+      expect(await queue.getJobScheduler(name)).toBeNull();
+    }
+  });
+
+  it('upsertJobScheduler rejects oversized, unserializable or out-of-range templates', async () => {
+    const { MAX_JOB_DATA_SIZE } = require('../dist/utils') as typeof import('../src/utils');
+    await expect(
+      queue.upsertJobScheduler('tmpl-big', { every: 1000 }, { name: 'j', data: 'x'.repeat(MAX_JOB_DATA_SIZE + 1) }),
+    ).rejects.toThrow('Scheduler template: Job data exceeds maximum size');
+    await expect(
+      queue.upsertJobScheduler('tmpl-bigint', { every: 1000 }, { name: 'j', data: { n: BigInt(1) } }),
+    ).rejects.toThrow('Scheduler template:');
+    await expect(
+      queue.upsertJobScheduler('tmpl-priority', { every: 1000 }, { name: 'j', opts: { priority: 5000 } }),
+    ).rejects.toThrow('Scheduler template: Priority must be <= 2048');
+    for (const name of ['tmpl-big', 'tmpl-bigint', 'tmpl-priority']) {
+      expect(await queue.getJobScheduler(name)).toBeNull();
+    }
+  });
+
+  it('a stored template that cannot produce a job reports an error and advances nextRun', async () => {
+    const qName = Q + '-bad-template';
+    const localQueue = new Queue(qName, { connection: CONNECTION });
+    const k = buildKeys(qName);
+    const { MAX_JOB_DATA_SIZE } = require('../dist/utils') as typeof import('../src/utils');
+    const firstNextRun = Date.now() - 100;
+    await cleanupClient.hset(k.schedulers, {
+      oversized: JSON.stringify({
+        every: 60_000,
+        iterationCount: 0,
+        nextRun: firstNextRun,
+        template: { name: 'big', data: 'x'.repeat(MAX_JOB_DATA_SIZE + 1) },
+      }),
+      badpriority: JSON.stringify({
+        every: 60_000,
+        iterationCount: 0,
+        nextRun: firstNextRun,
+        template: { name: 'prio', opts: { priority: 5000 } },
+      }),
+    });
+
+    const errors: string[] = [];
+    const processed: string[] = [];
+    const worker = new Worker(
+      qName,
+      async (job: any) => {
+        processed.push(job.name);
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 200, promotionInterval: 100, stalledInterval: 60000 },
+    );
+    worker.on('error', (err: Error) => errors.push(err.message));
+
+    try {
+      const deadline = Date.now() + 5000;
+      while (errors.filter((m) => m.includes('skipped a run')).length < 2 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      await new Promise((r) => setTimeout(r, 500));
+      const skipped = errors.filter((m) => m.includes('skipped a run'));
+      // One report per scheduler: nextRun moved a full interval ahead, so no retry on every tick
+      expect(skipped).toHaveLength(2);
+      expect(skipped.some((m) => m.includes('"oversized"') && m.includes('exceeds maximum size'))).toBe(true);
+      expect(skipped.some((m) => m.includes('"badpriority"') && m.includes('Priority must be <= 2048'))).toBe(true);
+      for (const name of ['oversized', 'badpriority']) {
+        const entry = await localQueue.getJobScheduler(name);
+        expect(entry!.nextRun).toBe(firstNextRun + 60_000);
+        expect(entry!.iterationCount).toBe(0);
+      }
+      expect(processed).toEqual([]);
+    } finally {
+      await worker.close(true);
+      await localQueue.close();
+      await flushQueue(cleanupClient, qName);
+    }
+  }, 15000);
 });

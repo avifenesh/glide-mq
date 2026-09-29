@@ -98,7 +98,8 @@ export const LIBRARY_NAME = 'glidemq';
 //   healListActive needs a full scan; moveToActive rejects stale claims ('STALE'); glidemq_retryJob;
 //   changePriority/changeDelay handle list-held jobs; debounce resolves replaced children;
 //   glidemq_updateJobFields writes only existing job hashes.
-export const LIBRARY_VERSION = '125';
+// Version 127: glidemq_casSchedulerEntry lets upsertJobScheduler write only over the entry it read.
+export const LIBRARY_VERSION = '127';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1267,6 +1268,21 @@ export async function completeChild(
     [depsMember, parentId],
   );
   return result as number;
+}
+
+/**
+ * Write a scheduler entry only if the stored value still equals `expected`
+ * ('' when the entry was absent). Returns true when written.
+ */
+export async function casSchedulerEntry(
+  client: Client,
+  queueKeys: QueueKeys,
+  name: string,
+  expected: string,
+  value: string,
+): Promise<boolean> {
+  const result = await client.fcall('glidemq_casSchedulerEntry', [queueKeys.schedulers], [name, expected, value]);
+  return Number(result) === 1;
 }
 
 /**

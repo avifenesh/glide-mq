@@ -192,6 +192,13 @@ const schedulers = await queue.getRepeatableJobs();
 await queue.removeJobScheduler('cleanup');
 ```
 
+### Cron syntax
+
+Patterns use the standard 5 fields: `minute hour day-of-month month day-of-week` (0 = Sunday). Each field accepts `*`, numbers, ranges (`1-5`), steps (`*/15`, `10-40/10`) and lists (`1,15`). Patterns run in UTC unless `tz` is set.
+
+- **Day-of-month and day-of-week**: when both fields are restricted, a day matches if either field matches. `0 0 1 * 1` fires on every 1st of the month and on every Monday. When one of them is unrestricted, only the other one decides. A field is unrestricted when it is `*` or `*/1` (day-of-month also when it covers `1-31`). An explicit `0-6` day-of-week counts as restricted. This matches cron-parser (BullMQ). Vixie cron differs only for stepped wildcards such as `*/2`, which it treats as unrestricted. Releases up to 0.15.5 required both fields to match.
+- **Daylight saving time** (with `tz`): follows vixie cron. A pattern whose minute or hour field contains `*` (`*/15 * * * *`, `0 * * * *`) is a wildcard pattern and runs on elapsed time: when clocks fall back it fires in both instances of the repeated hour. Any other pattern is fixed-time (`30 1 * * *`, `0,30 1-3 * * *`) and fires once: at the earlier instant when clocks fall back, and at the first instant after the gap when clocks spring forward (`30 2 * * *` in America/New_York runs at 03:00 EDT on the transition day; several skipped times coalesce into that one run). Wildcard patterns skip the missing times. Releases up to 0.15.5 lost part of the repeated hour and skipped fixed times inside the gap until the next day.
+
 ### Repeat-after-complete mode
 
 `repeatAfterComplete` schedules the next job only after the current one completes (or terminally fails). Unlike `every`, which fires at fixed intervals regardless of processing time, `repeatAfterComplete` ensures no overlap between successive runs.
@@ -212,6 +219,8 @@ This mode is useful for:
 - **Polling** — avoid stacking requests when the upstream is slow.
 - **Sequential pipelines** — each step must finish before the next begins.
 - **Adaptive intervals** — combine with a custom processor that adjusts `repeatAfterComplete` via `upsertJobScheduler` based on results.
+
+Upserting a `repeatAfterComplete` scheduler while its job is running (for example from inside the processor) keeps waiting for that job: the next run is scheduled when it completes, using the new interval, and `iterationCount` is kept unless `tz`, `startDate` or `endDate` changed. It never starts a second, overlapping chain. To force an immediate run, remove the scheduler and upsert it again.
 
 `repeatAfterComplete` is mutually exclusive with `pattern` and `every`. Bounded options (`startDate`, `endDate`, `limit`) work normally with this mode.
 
@@ -254,6 +263,8 @@ await queue.upsertJobScheduler(
 `getJobScheduler()` / `getRepeatableJobs()` expose the stored bounds together with `iterationCount` so you can inspect how many runs have already fired.
 
 The internal `Scheduler` class fires a promotion loop that converts due scheduler entries into real jobs, then re-registers the next occurrence.
+
+The template `opts` accept the same job options as `Queue.add` except `delay`, `deduplication`, `parent` and `jobId`, and `upsertJobScheduler` validates them the same way, so an invalid template is rejected at upsert. Ordering keys, group concurrency and rate limits, token buckets and `cost` apply to every scheduled job. `jobId` is rejected: each run gets a generated id, and a fixed id would drop every run after the first as a duplicate.
 
 ---
 
@@ -340,7 +351,7 @@ interface Serializer {
 }
 ```
 
-Both methods must be synchronous. If `serialize` throws, the job is treated as a processor failure (in Worker) or skipped (in Scheduler).
+Both methods must be synchronous. If `serialize` throws, the job is treated as a processor failure (in Worker). A scheduler template whose data cannot be serialized, or exceeds the 1 MB limit, is rejected by `upsertJobScheduler`; a stored template that still fails at run time skips that run, reports the error through the worker `error` event and moves on to the next occurrence.
 
 ### Example: MessagePack serializer
 

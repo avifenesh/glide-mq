@@ -1143,20 +1143,17 @@ describe('TestQueue scheduler runtime', () => {
     expect((queue as any).schedulerTimer).not.toBeNull();
   });
 
-  it('removes oversized testing-mode schedulers instead of leaving them perpetually due', async () => {
+  it('rejects oversized testing-mode scheduler templates at upsert, like production', async () => {
     queue = new TestQueue('sched-runtime-oversized');
     worker = new TestWorker(queue, async () => 'ok');
 
-    await queue.upsertJobScheduler(
-      'oversized',
-      { every: 20, limit: 1 },
-      { name: 'oversized-job', data: 'x'.repeat(MAX_JOB_DATA_SIZE + 1) },
-    );
-
-    const deadline = Date.now() + 500;
-    while ((await queue.getJobScheduler('oversized')) && Date.now() < deadline) {
-      await new Promise<void>((r) => setTimeout(r, 20));
-    }
+    await expect(
+      queue.upsertJobScheduler(
+        'oversized',
+        { every: 20, limit: 1 },
+        { name: 'oversized-job', data: 'x'.repeat(MAX_JOB_DATA_SIZE + 1) },
+      ),
+    ).rejects.toThrow('Scheduler template: Job data exceeds maximum size');
 
     expect(await queue.getJobScheduler('oversized')).toBeNull();
   });
@@ -1746,6 +1743,29 @@ describe('TestQueue.add validation parity (T11)', () => {
       'ttl must be a non-negative finite number',
     );
     expect(queue.jobs.size).toBe(0);
+  });
+});
+
+describe('TestQueue.upsertJobScheduler template validation parity', () => {
+  it('rejects the template options Queue.upsertJobScheduler rejects', async () => {
+    const queue = new TestQueue('tmpl-validate');
+    await expect(
+      queue.upsertJobScheduler('a', { every: 1000 }, { name: 'j', opts: { jobId: 'fixed' } as any }),
+    ).rejects.toThrow('Scheduler template: jobId is not supported');
+    await expect(
+      queue.upsertJobScheduler('b', { every: 1000 }, { name: 'j', opts: { lifo: true, ordering: { key: 'g' } } }),
+    ).rejects.toThrow('Scheduler template: lifo and ordering.key cannot be used together');
+    await expect(queue.upsertJobScheduler('c', { every: 1000 }, { name: 'j', opts: { cost: -1 } })).rejects.toThrow(
+      'Scheduler template: cost must be a non-negative finite number',
+    );
+    await expect(
+      queue.upsertJobScheduler('d', { every: 1000 }, { name: 'j', opts: { priority: 5000 } }),
+    ).rejects.toThrow('Scheduler template: Priority must be <= 2048');
+    await expect(
+      queue.upsertJobScheduler('e', { every: 1000 }, { name: 'j', data: 'a'.repeat(MAX_JOB_DATA_SIZE + 1) }),
+    ).rejects.toThrow('Scheduler template: Job data exceeds maximum size');
+    expect(await queue.getRepeatableJobs()).toEqual([]);
+    await queue.close();
   });
 });
 
