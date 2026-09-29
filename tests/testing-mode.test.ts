@@ -2487,3 +2487,121 @@ describe('TestQueue prioritized state parity', () => {
     expect(await queue.getJob(prio!.id)).toBeNull();
   });
 });
+
+describe('TestWorker rate limit parity', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it('requeues a RateLimitError job after the limiter window without counting an attempt', async () => {
+    queue = new TestQueue('rl-error');
+    const attempts: number[] = [];
+    const failed: string[] = [];
+    const retrying: [string, string][] = [];
+    worker = new TestWorker(
+      queue,
+      async (job) => {
+        attempts.push(Date.now());
+        if (attempts.length === 1) throw new TestWorker.RateLimitError();
+        return { attemptsMade: job.attemptsMade };
+      },
+      { limiter: { max: 100, duration: 60 } },
+    );
+    worker.on('failed', (job) => failed.push(job.id));
+    queue.on('retrying', (job, err: Error) => retrying.push([job.failedReason!, err.name]));
+
+    const job = await queue.add('limited', {});
+    await waitFor(async () => (await job!.getState()) === 'delayed', 2000, 2);
+    expect(await queue.getJob(job!.id)).toMatchObject({ attemptsMade: 0, failedReason: 'rate limited' });
+    expect(retrying).toEqual([['rate limited', 'RateLimitError']]);
+
+    await waitFor(() => attempts.length === 2, 2000, 5);
+    expect(attempts[1] - attempts[0]).toBeGreaterThanOrEqual(55);
+    await waitFor(async () => (await job!.getState()) === 'completed', 2000, 5);
+    expect((await queue.getJob(job!.id))!.returnvalue).toEqual({ attemptsMade: 0 });
+    expect(failed).toEqual([]);
+  });
+
+  it('honours err.delayMs, defaults to 1000ms without a limiter, and recognises the error by name', async () => {
+    queue = new TestQueue('rl-delay');
+    let calls = 0;
+    worker = new TestWorker(queue, async () => {
+      calls++;
+      if (calls === 1) {
+        const err = new Error('Rate limit exceeded') as Error & { delayMs?: number };
+        err.name = 'RateLimitError';
+        err.delayMs = 30;
+        throw err;
+      }
+      return 'ok';
+    });
+    const job = await queue.add('a', {});
+    await waitFor(() => calls === 2, 2000, 5);
+    await waitFor(async () => (await job!.getState()) === 'completed', 2000, 5);
+
+    expect(TestWorker.isRateLimitError(new TestWorker.RateLimitError())).toBe(true);
+    expect(TestWorker.isRateLimitError(new Error('x'))).toBe(false);
+    expect(new TestWorker.RateLimitError().message).toBe('Rate limit exceeded');
+  });
+
+  it('a RateLimitError pauses the worker for the delay before it dispatches other jobs', async () => {
+    queue = new TestQueue('rl-pause-others');
+    const started: [string, number][] = [];
+    let first = true;
+    worker = new TestWorker(queue, async (job) => {
+      started.push([job.name, Date.now()]);
+      if (first) {
+        first = false;
+        const err = new TestWorker.RateLimitError() as Error & { delayMs?: number };
+        err.delayMs = 60;
+        throw err;
+      }
+      return 'ok';
+    });
+    await queue.add('one', {});
+    await queue.add('two', {});
+    await waitFor(() => started.length === 3, 2000, 5);
+    expect(started.map(([n]) => n)).toEqual(['one', 'two', 'one']);
+    expect(started[1][1] - started[0][1]).toBeGreaterThanOrEqual(55);
+  });
+
+  it('limiter caps dispatches per window like glidemq_rateLimit', async () => {
+    queue = new TestQueue('rl-window');
+    const started: number[] = [];
+    worker = new TestWorker(
+      queue,
+      async () => {
+        started.push(Date.now());
+        return 'ok';
+      },
+      { concurrency: 10, limiter: { max: 2, duration: 80 } },
+    );
+    await queue.addBulk([1, 2, 3, 4].map((n) => ({ name: 'j', data: { n } })));
+    await waitFor(() => started.length === 4, 2000, 5);
+    expect(started[1] - started[0]).toBeLessThan(40);
+    expect(started[2] - started[0]).toBeGreaterThanOrEqual(75);
+    expect(started[3] - started[0]).toBeGreaterThanOrEqual(75);
+    expect(started[3] - started[2]).toBeLessThan(40);
+  });
+
+  it('rateLimit(ms) pauses dispatch for the given duration', async () => {
+    queue = new TestQueue('rl-manual');
+    const started: number[] = [];
+    worker = new TestWorker(queue, async () => {
+      started.push(Date.now());
+      return 'ok';
+    });
+    const t0 = Date.now();
+    await worker.rateLimit(60);
+    await queue.add('a', {});
+    await new Promise((r) => setTimeout(r, 20));
+    expect(started).toEqual([]);
+    await waitFor(() => started.length === 1, 2000, 5);
+    expect(started[0] - t0).toBeGreaterThanOrEqual(55);
+  });
+});

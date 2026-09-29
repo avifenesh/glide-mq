@@ -1698,6 +1698,12 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 export interface TestWorkerOptions {
   concurrency?: number;
   batch?: { size: number; timeout?: number };
+  /**
+   * Jobs-per-window rate limit, same shape as WorkerOptions.limiter. Mirrors
+   * glidemq_rateLimit: at most `max` dispatches per fixed `duration` window.
+   * Also the default pause after a processor throws RateLimitError.
+   */
+  limiter?: { max: number; duration: number };
   /** Token-per-minute rate limiting (in-memory only for testing mode). */
   tokenLimiter?: {
     maxTokens: number;
@@ -1726,9 +1732,14 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingBatch: TestJobRecord<D, R>[] = [];
   private readonly tokenLimiter: TestWorkerOptions['tokenLimiter'];
+  private readonly limiter: TestWorkerOptions['limiter'];
   private readonly backoffStrategies: TestWorkerOptions['backoffStrategies'];
   private tpmLocalCounter = 0;
   private tpmWindowStart = 0;
+  private rateLimitUntil = 0;
+  private rateWindowStart = 0;
+  private rateWindowCount = 0;
+  private rateLimitTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     queue: TestQueue<D, R>,
@@ -1781,6 +1792,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
     this.concurrency = opts?.concurrency ?? 1;
     this.tokenLimiter = opts?.tokenLimiter;
+    this.limiter = opts?.limiter;
     this.backoffStrategies = opts?.backoffStrategies;
     this.id = `test-worker-${++TestWorker.idCounter}`;
     this.startedAt = Date.now();
@@ -1840,8 +1852,48 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
   }
 
+  /**
+   * Take the next waiting job unless the worker is rate limited. Like
+   * BaseWorker.waitForRateLimit, a manual rateLimit(ms) / RateLimitError pause
+   * is honoured first, then the limiter window. When limited, the job stays
+   * at the front of the queue and a wake-up timer resumes dispatch.
+   */
   private findNextWaiting(): TestJobRecord<D, R> | undefined {
-    return this.queue.takeNextWaiting();
+    const record = this.queue.takeNextWaiting();
+    if (!record) return undefined;
+    const wait = this.acquireRateSlot();
+    if (wait <= 0) return record;
+    this.queue.waitingQueue.unshift(record);
+    this.wakeAfterRateLimit(wait);
+    return undefined;
+  }
+
+  /** Returns 0 and counts a dispatch, or the ms to wait (mirrors glidemq_rateLimit). */
+  private acquireRateSlot(): number {
+    const now = Date.now();
+    if (this.rateLimitUntil > now) return this.rateLimitUntil - now;
+    if (!this.limiter || this.limiter.max <= 0) return 0;
+    const { max, duration } = this.limiter;
+    if (now - this.rateWindowStart >= duration) {
+      this.rateWindowStart = now;
+      this.rateWindowCount = 1;
+      return 0;
+    }
+    if (this.rateWindowCount >= max) return duration - (now - this.rateWindowStart);
+    this.rateWindowCount++;
+    return 0;
+  }
+
+  private wakeAfterRateLimit(ms: number): void {
+    if (this.rateLimitTimer) return;
+    this.rateLimitTimer = setTimeout(
+      () => {
+        this.rateLimitTimer = null;
+        if (this.running && !this.queue.isPaused()) this.processAvailable();
+      },
+      Math.min(Math.max(1, ms), MAX_TIMEOUT_DELAY_MS),
+    );
+    this.rateLimitTimer.unref?.();
   }
 
   private processJob(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
@@ -1967,13 +2019,25 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
    * failedReason and emits the worker 'failed' event. A retryable failure parks
    * the job in 'delayed' for the backoff delay (queue emits 'retrying'); a
    * terminal failure moves it to 'failed', applies removeOnFail and emits the
-   * queue 'failed' event.
+   * queue 'failed' event. A RateLimitError is not a failure: the job is parked
+   * in 'delayed' for the limiter window with failedReason 'rate limited', no
+   * attempt is consumed, and the worker pauses dispatch for the same window.
    */
   private handleFailure(record: TestJobRecord<D, R>, job: TestJob<D, R>, err: Error): void {
+    const now = Date.now();
+    if (TestWorker.isRateLimitError(err)) {
+      const delayMs = (err as { delayMs?: number }).delayMs || this.limiter?.duration || 1000;
+      this.rateLimitUntil = now + delayMs;
+      record.failedReason = 'rate limited';
+      job.failedReason = 'rate limited';
+      record.processedOn = now;
+      this.queue.parkDelayed(record, delayMs);
+      this.queue.emit('retrying', job, err);
+      return;
+    }
     record.attemptsMade++;
     const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
     const maxAttempts = skipRetry ? 0 : (record.opts.attempts ?? 0);
-    const now = Date.now();
     record.failedReason = err.message;
     job.failedReason = err.message;
 
@@ -2057,7 +2121,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   }
 
   private takeWaitingRecord(): TestJobRecord<D, R> | undefined {
-    return this.queue.takeNextWaiting();
+    return this.findNextWaiting();
   }
 
   private flushBatch(): void {
@@ -2190,10 +2254,19 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     return this.activeCount;
   }
 
+  /** Pause dispatch for the given duration, like Worker.rateLimit(ms). */
+  async rateLimit(ms: number): Promise<void> {
+    this.rateLimitUntil = Date.now() + ms;
+  }
+
   /** Stop processing and detach from the queue. */
   async close(): Promise<void> {
     this.running = false;
     this.clearBatchTimer();
+    if (this.rateLimitTimer) {
+      clearTimeout(this.rateLimitTimer);
+      this.rateLimitTimer = null;
+    }
     if (this.pendingBatch.length > 0) {
       const handoff = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
       this.pendingBatch = [];
@@ -2206,4 +2279,18 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
     this.removeAllListeners();
   }
+
+  /** Same check as Worker.isRateLimitError: instance or `name === 'RateLimitError'`. */
+  static isRateLimitError(error: Error): boolean {
+    return error instanceof TestWorker.RateLimitError || error.name === 'RateLimitError';
+  }
+
+  /** Throw from a processor to requeue the job after the limiter window, like Worker.RateLimitError. */
+  static RateLimitError = class extends Error {
+    delayMs?: number;
+    constructor() {
+      super('Rate limit exceeded');
+      this.name = 'RateLimitError';
+    }
+  };
 }
