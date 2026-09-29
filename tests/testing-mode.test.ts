@@ -1718,3 +1718,62 @@ describe('TestWorker - event payloads (T2)', () => {
     await queue.close();
   }, 15000);
 });
+
+describe('TestQueue.add validation parity (T11)', () => {
+  let queue: TestQueue;
+
+  afterEach(async () => {
+    if (queue) await queue.close();
+  });
+
+  it('rejects the same invalid options as Queue.add', async () => {
+    queue = new TestQueue('validation-parity');
+    await expect(queue.add('j', {}, { priority: 2049 })).rejects.toThrow('Priority must be <= 2048');
+    await expect(queue.add('j', {}, { ttl: -1 })).rejects.toThrow('ttl must be a non-negative finite number');
+    await expect(queue.add('j', {}, { lockDuration: 10 })).rejects.toThrow('lockDuration must be a finite number');
+    await expect(queue.add('j', {}, { cost: -1 })).rejects.toThrow('cost must be a non-negative finite number');
+    await expect(queue.add('j', {}, { lifo: true, ordering: { key: 'k' } })).rejects.toThrow(
+      'lifo and ordering.key cannot be used together',
+    );
+    await expect(queue.add('j', {}, { ordering: { key: '__' } })).rejects.toThrow('reserved');
+    await expect(
+      queue.add('j', {}, { ordering: { key: 'k', tokenBucket: { capacity: 0, refillRate: 1 } } }),
+    ).rejects.toThrow('tokenBucket.capacity must be a positive finite number');
+    await expect(queue.add('j', 'x'.repeat(MAX_JOB_DATA_SIZE + 1))).rejects.toThrow('Job data exceeds maximum size');
+    await expect(queue.addBulk([{ name: 'j', data: {}, opts: { ttl: Number.NaN } }])).rejects.toThrow(
+      'ttl must be a non-negative finite number',
+    );
+    expect(queue.jobs.size).toBe(0);
+  });
+});
+
+describe('TestJob.updateData / updateProgress persistence (T11)', () => {
+  it('persists updateData and updateProgress to the stored job', async () => {
+    const queue = new TestQueue<{ v: number }>('persist-updates');
+    const worker = new TestWorker(queue, async (job) => {
+      await job.updateProgress(50);
+      await job.updateData({ v: 2 });
+      await job.updateProgress({ step: 'done' });
+      return 'ok';
+    });
+    const added = await queue.add('j', { v: 1 });
+    await waitFor(async () => (await queue.getJob(added!.id))?.returnvalue === 'ok', 2000, 5);
+
+    const stored = await queue.getJob(added!.id);
+    expect(stored!.data).toEqual({ v: 2 });
+    expect(stored!.progress).toEqual({ step: 'done' });
+
+    const outside = await queue.getJob(added!.id);
+    await outside!.updateData({ v: 3 });
+    expect((await queue.getJob(added!.id))!.data).toEqual({ v: 3 });
+    await expect(outside!.updateData({ v: 'x'.repeat(MAX_JOB_DATA_SIZE) } as any)).rejects.toThrow(
+      'Job data exceeds maximum size',
+    );
+    await expect(outside!.updateProgress({ big: 'x'.repeat(MAX_JOB_DATA_SIZE) })).rejects.toThrow(
+      'Progress data exceeds maximum size',
+    );
+
+    await worker.close();
+    await queue.close();
+  });
+});

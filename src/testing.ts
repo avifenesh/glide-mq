@@ -51,7 +51,9 @@ import {
   validateSchedulerBounds,
   validateSchedulerEvery,
   validateTimezone,
-  validateJobId,
+  validateJobDataSize,
+  validateJobOptions,
+  validateJobPriority,
 } from './utils';
 
 const MAX_TIMEOUT_DELAY_MS = 2_147_483_647;
@@ -166,6 +168,10 @@ export interface TestJobRecord<D = any, R = any> {
   usageReportedAt?: number;
   /** @internal Stored vectors for vector search testing. */
   vectors?: Map<string, number[]>;
+  /** @internal Last progress reported via updateProgress. */
+  progress?: number | object;
+  /** @internal Serializer of the owning queue, used by updateData. */
+  serializer?: Serializer;
 }
 
 /**
@@ -201,7 +207,7 @@ export class TestJob<D = any, R = any> {
     this.attemptsMade = record.attemptsMade;
     this.returnvalue = record.returnvalue;
     this.failedReason = record.failedReason;
-    this.progress = 0;
+    this.progress = record.progress ?? 0;
     this.timestamp = record.timestamp;
     this.finishedOn = record.finishedOn;
     this.processedOn = record.processedOn;
@@ -222,10 +228,23 @@ export class TestJob<D = any, R = any> {
   }
 
   async updateProgress(p: number | object): Promise<void> {
+    const progressStr = typeof p === 'number' ? p.toString() : JSON.stringify(p);
+    const byteLen = Buffer.byteLength(progressStr, 'utf8');
+    if (byteLen > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Progress data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE})`);
+    }
+    this._record.progress = typeof p === 'number' ? p : JSON.parse(progressStr);
     this.progress = p;
   }
 
   async updateData(data: D): Promise<void> {
+    const serializer = this._record.serializer ?? JSON_SERIALIZER;
+    const serialized = serializer.serialize(data);
+    const byteLen = Buffer.byteLength(serialized, 'utf8');
+    if (byteLen > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Job data exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE})`);
+    }
+    this._record.data = serializer.deserialize(serialized) as D;
     this.data = data;
   }
 
@@ -420,8 +439,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   /** Add a single job. Returns null if deduplicated or duplicate custom ID. */
   async add(name: string, data: D, opts?: JobOptions): Promise<TestJob<D, R> | null> {
+    validateJobPriority(opts?.priority ?? 0);
+    validateJobOptions(opts);
+    const serializedData = this.serializer.serialize(data);
+    validateJobDataSize(serializedData);
     const customJobId = opts?.jobId ?? '';
-    if (customJobId !== '') validateJobId(customJobId);
 
     if (opts?.deduplication && this.opts.dedup) {
       const dedupId = opts.deduplication.id;
@@ -451,7 +473,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     const now = Date.now();
     const ttl = opts?.ttl ?? 0;
     // Roundtrip data through serializer to match production behavior
-    const roundtrippedData = this.serializer.deserialize(this.serializer.serialize(data)) as D;
+    const roundtrippedData = this.serializer.deserialize(serializedData) as D;
     const record: TestJobRecord<D, R> = {
       id,
       name,
@@ -466,6 +488,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       processedOn: undefined,
       expireAt: ttl > 0 ? now + ttl : undefined,
       fallbackIndex: 0,
+      serializer: this.serializer,
     };
     this.jobs.set(id, record);
     this.waitingQueue.push(record);
