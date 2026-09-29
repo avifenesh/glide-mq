@@ -812,7 +812,7 @@ See [ADVANCED.md](./ADVANCED.md#fallback-chains) for details on how the chain ad
 
 ### Budget Middleware (Flow-level Token/Cost Caps)
 
-Enforce hard caps on total tokens and/or cost across all jobs in a flow. Pass a budget option to FlowProducer.add() with maxTotalTokens, maxTotalCost, and onExceeded (fail or pause). Per-category limits are also supported via maxTokens (e.g. `{ input: 5000 }`), tokenWeights (e.g. `{ output: 4 }`), maxCosts, and costUnit. When a job in a budgeted flow completes, the worker charges the usage it reported with reportUsage() through glidemq_recordUsageAndCheckBudget, which atomically increments counters and checks limits. Usage from failed attempts is not charged.
+Enforce hard caps on total tokens and/or cost across all jobs in a flow. Pass a budget option to FlowProducer.add() with maxTotalTokens, maxTotalCost, and onExceeded (fail or pause). Per-category limits are also supported via maxTokens (e.g. `{ input: 5000 }`), tokenWeights (e.g. `{ output: 4 }`), maxCosts, and costUnit. When an attempt of a job in a budgeted flow ends, whether it completes or fails, the worker charges the usage it reported with reportUsage() through glidemq_recordUsageAndCheckBudget, which atomically increments counters and checks limits. A retry that reports no new usage is not charged again. Batch workers do not charge budgets.
 
 Query budget state via queue.getFlowBudget(flowId). Budget state is stored in glide:{queueName}:budget:{flowId}.
 
