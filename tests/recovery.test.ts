@@ -176,11 +176,13 @@ describe('Worker connection error recovery', () => {
 
     await worker.waitUntilReady();
 
-    // First poll fails -> reconnectAndResume runs immediately and fails ->
-    // schedules setTimeout(reconnectAndResume, 2000)
+    // First poll fails -> pollLoop sleeps the 1s backoff, then reconnectAndResume
+    // fails -> schedules setTimeout(reconnectAndResume, 2000)
     await vi.advanceTimersByTimeAsync(200);
+    expect(createCount).toBe(2); // no reconnect before the first backoff
+    await vi.advanceTimersByTimeAsync(1000);
     const countAfterImmediate = createCount;
-    expect(countAfterImmediate).toBeGreaterThan(2); // init(2) + immediate reconnect(1)
+    expect(countAfterImmediate).toBeGreaterThan(2); // init(2) + first reconnect(1)
 
     // Advance 2s to fire the first backoff timer (reconnect attempt #2)
     await vi.advanceTimersByTimeAsync(2000);
@@ -194,7 +196,7 @@ describe('Worker connection error recovery', () => {
 
     // Verify exponential backoff via timestamps:
     // The gap between reconnect attempts should grow.
-    // createTimes[2] = immediate reconnect (no timer delay)
+    // createTimes[2] = first reconnect (after the 1s poll backoff)
     // createTimes[3] = after ~2s timer
     // createTimes[4] = after ~4s timer
     const gap1 = createTimes[3] - createTimes[2]; // should be ~2000

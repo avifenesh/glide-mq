@@ -15,6 +15,7 @@ export class QueueEvents extends EventEmitter {
   private initPromise: Promise<void>;
   private blockTimeout: number;
   private reconnectBackoff = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(name: string, opts: QueueEventsOptions) {
     super();
@@ -32,6 +33,11 @@ export class QueueEvents extends EventEmitter {
     this.lastId = opts.lastEventId ?? '$';
     this.blockTimeout = opts.blockTimeout ?? 5000;
     this.initPromise = this.init();
+    // Callers that never await waitUntilReady() must not crash the process
+    // with an unhandled rejection. Mirrors BaseWorker: surface it as 'error'.
+    this.initPromise.catch((err) => {
+      if (!this.closing) this.emit('error', err);
+    });
   }
 
   /**
@@ -64,7 +70,10 @@ export class QueueEvents extends EventEmitter {
         if (this.running && !this.closing) {
           this.emit('error', err);
           this.reconnectBackoff = nextReconnectDelay(this.reconnectBackoff);
-          setTimeout(() => this.reconnectAndResume(), this.reconnectBackoff);
+          this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            void this.reconnectAndResume();
+          }, this.reconnectBackoff);
         }
       });
   }
@@ -77,6 +86,9 @@ export class QueueEvents extends EventEmitter {
     },
     onError: (err: unknown) => {
       this.emit('error', err);
+    },
+    setRetryTimer: (timer: ReturnType<typeof setTimeout> | null) => {
+      this.reconnectTimer = timer;
     },
   };
 
@@ -96,8 +108,22 @@ export class QueueEvents extends EventEmitter {
           this.client = null;
         }
 
-        this.client = await createBlockingClient(this.opts.connection);
-        await ensureFunctionLibrary(this.client, undefined, this.opts.connection.clusterMode ?? false);
+        // close() can land during either await. Keep the new client local
+        // until both finish so close() never misses a client created late.
+        const client = await createBlockingClient(this.opts.connection);
+        try {
+          if (this.closing) throw new GlideMQError('QueueEvents closed during reconnect.');
+          await ensureFunctionLibrary(client, undefined, this.opts.connection.clusterMode ?? false);
+          if (this.closing) throw new GlideMQError('QueueEvents closed during reconnect.');
+        } catch (err) {
+          try {
+            client.close();
+          } catch {
+            /* ignore */
+          }
+          throw err;
+        }
+        this.client = client;
       },
       () => this.pollLoop(),
     );
@@ -141,13 +167,39 @@ export class QueueEvents extends EventEmitter {
           }
         }
 
+        // Advance before dispatch so a throwing listener cannot make the
+        // next XREAD return this entry again and stall the stream forever.
+        this.lastId = String(entryId);
+
         if (!eventType) continue;
 
-        this.emit(eventType, payload);
-
-        // Update lastId to this entry so we don't re-read it
-        this.lastId = String(entryId);
+        this.dispatch(eventType, payload);
       }
+    }
+  }
+
+  /**
+   * Emit one stream event. A listener that throws must not stop delivery of
+   * the remaining events, so its error goes to 'error' listeners. With no
+   * 'error' listener (or when the 'error' listener itself threw) it is
+   * rethrown on the next tick, the same uncaught failure a throwing
+   * EventEmitter listener produces for its caller.
+   */
+  private dispatch(eventType: string, payload: Record<string, string>): void {
+    try {
+      this.emit(eventType, payload);
+    } catch (err) {
+      if (eventType !== 'error' && this.listenerCount('error') > 0) {
+        try {
+          this.emit('error', err);
+          return;
+        } catch (listenerErr) {
+          err = listenerErr;
+        }
+      }
+      process.nextTick(() => {
+        throw err;
+      });
     }
   }
 
@@ -159,6 +211,10 @@ export class QueueEvents extends EventEmitter {
     if (this.closing) return;
     this.closing = true;
     this.running = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     // Wait for init to complete so client is available for cleanup
     try {
       await this.initPromise;

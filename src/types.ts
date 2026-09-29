@@ -121,6 +121,7 @@ export interface WorkerOptions extends QueueOptions {
   commandClient?: Client;
   concurrency?: number;
   globalConcurrency?: number;
+  /** XREADGROUP COUNT per poll. Capped at `concurrency` (`concurrency * batch.size` in batch mode); only a lower value changes behavior. */
   prefetch?: number;
   blockTimeout?: number;
   stalledInterval?: number;

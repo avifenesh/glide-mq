@@ -558,6 +558,10 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
     const queue = new Queue(qName, { connection: CONNECTION });
     const broadcast = new Broadcast(qName, { connection: CONNECTION });
     const received: any[] = [];
+    // Keep the worker from consuming while we create its exact claim/pause race.
+    // Pause before the worker starts: its init would otherwise read the meta
+    // flags first and leave an XREADGROUP in flight that claims the entry.
+    await queue.pause();
     const worker = new BroadcastWorker(
       qName,
       async (job: any) => {
@@ -567,8 +571,6 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
     );
     const k = buildKeys(qName);
 
-    // Keep the worker from consuming while we create its exact claim/pause race.
-    await queue.pause();
     await worker.waitUntilReady();
     await worker.pause(true);
     const jobId = await broadcast.publish('message', { msg: 'claimed-while-paused' });
@@ -686,6 +688,46 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
     await worker.close(true);
     await broadcast.close();
     await queue.close();
+    await flushQueue(cleanupClient, qName);
+  }, 15000);
+
+  it('RateLimitError keeps retrying past two hits in broadcast mode', async () => {
+    const qName = Q + '-rate-limit-retry';
+    const broadcast = new Broadcast(qName, { connection: CONNECTION });
+    let calls = 0;
+    const failed: string[] = [];
+    const worker = new BroadcastWorker(
+      qName,
+      async () => {
+        calls++;
+        if (calls <= 3) {
+          const err = new BroadcastWorker.RateLimitError() as Error & { delayMs?: number };
+          err.delayMs = 50;
+          throw err;
+        }
+        return 'ok';
+      },
+      {
+        connection: CONNECTION,
+        subscription: 'sub-rate-limit-retry',
+        startFrom: '0',
+        blockTimeout: 100,
+        promotionInterval: 50,
+      },
+    );
+    worker.on('error', () => {});
+    worker.on('failed', (_job: any, err: Error) => failed.push(err.message));
+    const completed = new Promise<void>((resolve) => worker.once('completed', () => resolve()));
+    await worker.waitUntilReady();
+
+    await broadcast.publish('message', { kind: 'limited' });
+    await Promise.race([completed, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))]);
+
+    expect(calls).toBe(4);
+    expect(failed).toEqual([]);
+
+    await worker.close(true);
+    await broadcast.close();
     await flushQueue(cleanupClient, qName);
   }, 15000);
 });

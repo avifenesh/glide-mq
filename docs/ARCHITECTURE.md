@@ -312,7 +312,7 @@ type WorkerEvent = 'completed' | 'failed' | 'error' | 'stalled' | 'closing' | 'c
 interface WorkerOptions {
   concurrency?: number; // per-worker, default 1
   globalConcurrency?: number; // across all workers
-  prefetch?: number; // XREADGROUP COUNT
+  prefetch?: number; // XREADGROUP COUNT, capped at concurrency (concurrency * batch.size in batch mode)
   blockTimeout?: number; // XREADGROUP BLOCK ms
   lockDuration?: number; // stall detection window
   stalledInterval?: number; // XAUTOCLAIM frequency

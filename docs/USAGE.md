@@ -266,14 +266,14 @@ await worker.pause(true); // force-stop immediately
 await worker.resume();
 
 await worker.close(); // graceful: waits for active jobs to finish
-await worker.close(true); // force-close immediately
+await worker.close(true); // force-close now: aborts job.abortSignal, running jobs are left for stalled recovery
 ```
 
 ---
 
 ## Graceful Shutdown
 
-`gracefulShutdown` registers `SIGTERM`/`SIGINT` handlers and resolves once all passed components have closed.
+`gracefulShutdown` registers `SIGTERM`/`SIGINT` handlers and resolves once all passed components have closed. A second signal while shutdown is still running removes the handlers and re-raises the signal, so a hung close cannot block exit.
 
 ```typescript
 import { Queue, Worker, QueueEvents, gracefulShutdown } from 'glide-mq';

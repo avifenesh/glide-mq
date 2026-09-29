@@ -104,6 +104,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected running = false;
   protected paused = false;
   protected closing = false;
+  protected forceClosing = false;
   protected closed = false;
   private closePromise: Promise<void> | null = null;
   protected queueKeys: ReturnType<typeof buildKeys>;
@@ -116,7 +117,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected rateLimitUntil = 0;
   protected isDrained = true;
   protected reconnectBackoff = 0;
-  protected internalEvents = new EventEmitter();
+  protected internalEvents = new EventEmitter().setMaxListeners(0);
 
   // Configurable defaults
   protected concurrency: number;
@@ -148,6 +149,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected readonly hostname = os.hostname();
 
   private static readonly REVOCATION_POLL_INTERVAL = 1000;
+  /**
+   * Cap on in-process onResume continuations. An entry is only removed when
+   * its job returns to this worker, so jobs resumed elsewhere, timed out or
+   * removed would otherwise pin their closures forever. onResume is
+   * documented as best-effort: an evicted job runs the main processor.
+   */
+  static readonly MAX_SUSPEND_CONTINUATIONS = 10000;
   protected serializer: Serializer;
   protected readonly batchMode: boolean;
   protected readonly batchSize: number;
@@ -237,7 +245,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     this.consumerId = `worker-${Date.now()}-${randomBytes(4).toString('hex')}`;
 
     this.concurrency = opts.concurrency ?? 1;
-    this.prefetch = opts.prefetch ?? (this.batchMode ? this.concurrency * this.batchSize : this.concurrency);
+    // prefetch is the XREADGROUP COUNT and can only lower the claim size.
+    // Dispatch has no separate concurrency gate, so a larger prefetch would
+    // run more jobs than `concurrency` (c>1) or leave claimed entries in the
+    // PEL with no heartbeat until stalled reclaim ran them twice (c=1).
+    const maxPrefetch = this.batchMode ? this.concurrency * this.batchSize : this.concurrency;
+    this.prefetch = Math.min(opts.prefetch ?? maxPrefetch, maxPrefetch);
     this.blockTimeout = opts.blockTimeout ?? 5000;
     this.stalledInterval = opts.stalledInterval ?? 30000;
     this.maxStalledCount = opts.maxStalledCount ?? 1;
@@ -350,7 +363,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       } catch (err) {
         if (this.running && !this.closing) {
           this.emit('error', err);
+          // Back off before the first reconnect too: a persistent non-connection
+          // error (NOPERM, WRONGTYPE) would otherwise reconnect in a tight loop.
+          // The delay only resets after a successful poll.
           this.reconnectBackoff = nextReconnectDelay(this.reconnectBackoff);
+          await this.sleepUnlessClosing(this.reconnectBackoff);
           await this.reconnectAndResume();
           return; // reconnectAndResume restarts the loop
         }
@@ -363,6 +380,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
   }
 
+  private reconnectRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
   private reconnectCtx = {
     isActive: () => this.running && !this.closing,
     getBackoff: () => this.reconnectBackoff,
@@ -372,15 +391,44 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     onError: (err: unknown) => {
       this.emit('error', err);
     },
+    setRetryTimer: (timer: ReturnType<typeof setTimeout> | null) => {
+      this.reconnectRetryTimer = timer;
+    },
   };
 
   /**
    * Attempt to reconnect clients and resume polling after a connection error.
+   * close() can land during any await below. Each resume point checks
+   * `closing` and disposes the clients this attempt created, so a late
+   * reconnect cannot leave a client, scheduler or heartbeat timer behind.
    */
   private async reconnectAndResume(): Promise<void> {
     await reconnectWithBackoff(
       this.reconnectCtx,
       async () => {
+        // Clients this attempt created and has not yet handed to a field.
+        // Once assigned, performClose owns them unless they are still there.
+        let pendingCommand: Client | null = null;
+        let pendingBlocking: Client | null = null;
+        let assignedBlocking: Client | null = null;
+        const closeQuietly = (client: Client) => {
+          try {
+            client.close();
+          } catch {
+            /* ignore */
+          }
+        };
+        const abortIfClosing = () => {
+          if (!this.closing) return;
+          if (pendingCommand) closeQuietly(pendingCommand);
+          if (pendingBlocking) closeQuietly(pendingBlocking);
+          if (assignedBlocking && this.blockingClient === assignedBlocking) {
+            this.blockingClient = null;
+            closeQuietly(assignedBlocking);
+          }
+          throw new ConnectionError('Worker closed during reconnect.');
+        };
+
         // Close stale blocking client (always owned)
         if (this.blockingClient) {
           try {
@@ -402,9 +450,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
               }
               this.commandClient = null;
             }
-            const client = await createClient(this.opts.connection!);
-            await ensureFunctionLibrary(client, undefined, this.opts.connection!.clusterMode ?? false);
-            this.commandClient = client;
+            pendingCommand = await createClient(this.opts.connection!);
+            abortIfClosing();
+            await ensureFunctionLibrary(pendingCommand, undefined, this.opts.connection!.clusterMode ?? false);
+            abortIfClosing();
+            this.commandClient = pendingCommand;
+            pendingCommand = null;
           } else if (this.commandClient) {
             // Keep the live command client so in-flight completions and
             // heartbeats continue. Closing it here freezes lastActive and
@@ -416,6 +467,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
               this.emit('error', new ConnectionError('Command client is unreachable while jobs are in flight.'));
               throw err;
             }
+            abortIfClosing();
           }
         } else {
           // Injected command client - verify liveness and re-ensure library
@@ -430,12 +482,22 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             );
             throw err;
           }
+          abortIfClosing();
         }
 
-        this.blockingClient = await createBlockingClient(this.opts.connection!);
+        pendingBlocking = await createBlockingClient(this.opts.connection!);
+        abortIfClosing();
+        this.blockingClient = assignedBlocking = pendingBlocking;
+        pendingBlocking = null;
 
         // Re-ensure consumer group
         await createConsumerGroup(this.commandClient!, this.queueKeys.stream, this.consumerGroup, this.startFrom);
+        abortIfClosing();
+
+        // Re-register before starting timers so no await separates the last
+        // closing check from the scheduler and heartbeat creation.
+        await this.registerWorker();
+        abortIfClosing();
 
         // Restart scheduler with the (possibly same) client
         if (this.scheduler) {
@@ -444,11 +506,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         this.scheduler = this.createScheduler(this.commandClient!);
         this.scheduler.start();
 
-        // Re-register worker and restart heartbeat timer after reconnect
         if (this.workerHeartbeatTimer) {
           clearInterval(this.workerHeartbeatTimer);
         }
-        await this.registerWorker();
         const hbMs = Math.max(1000, Math.floor(this.stalledInterval / 2));
         this.workerHeartbeatTimer = setInterval(() => {
           void this.registerWorker();
@@ -459,6 +519,20 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         return this.pollLoopPromise;
       },
     );
+  }
+
+  /** Sleep for `ms`, waking early when close() starts. */
+  protected sleepUnlessClosing(ms: number): Promise<void> {
+    if (this.closing || ms <= 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.internalEvents.off('closing', done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      this.internalEvents.once('closing', done);
+    });
   }
 
   protected async waitForSlot(): Promise<void> {
@@ -547,46 +621,66 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (!this.commandClient) return;
     if (collected.length === 0) return;
 
+    // Entries delivered by a read that was in flight when pause()/close()
+    // landed go back unclaimed. List jobs restore in reverse claim order so
+    // the next RPOP keeps the original sequence.
+    if (this.paused || this.closing) {
+      for (const entry of collected) {
+        if (entry.entryId !== '') await this.deferPausedActivation(entry);
+      }
+      for (let i = collected.length - 1; i >= 0; i--) {
+        if (collected[i].entryId === '') await this.deferPausedActivation(collected[i]);
+      }
+      return;
+    }
+
     // Activate jobs and build batch
     const batch: { jobId: string; entryId: string; job: Job<D, R> }[] = [];
     const pausedListEntries: { jobId: string; entryId: string }[] = [];
     const pausedStreamEntries: { jobId: string; entryId: string }[] = [];
-    for (const entry of collected) {
-      if (!this.commandClient) break;
-      const moveResult = await moveToActive(
-        this.commandClient,
-        this.queueKeys,
-        entry.jobId,
-        Date.now(),
-        this.queueKeys.stream,
-        entry.entryId,
-        this.consumerGroup,
-        this.broadcastMode ? true : undefined,
-      );
-      if (moveResult === 'PAUSED') {
-        // Defer the restores until every claim has been inspected. List jobs
-        // are popped from the right, so restoring them in reverse claim order
-        // keeps the original dispatch sequence on the next RPOP.
-        await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId, false);
-        if (entry.entryId === '') pausedListEntries.push(entry);
-        else pausedStreamEntries.push(entry);
-        continue;
-      }
-      if (await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId)) continue;
-      const hash = moveResult as Record<string, string>;
-      const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, entry.jobId, hash, this.serializer);
-      job.entryId = entry.entryId;
-      job.failContext = { group: this.consumerGroup, broadcastMode: this.broadcastMode ? true : undefined };
+    try {
+      for (const entry of collected) {
+        if (!this.commandClient) break;
+        const moveResult = await moveToActive(
+          this.commandClient,
+          this.queueKeys,
+          entry.jobId,
+          Date.now(),
+          this.queueKeys.stream,
+          entry.entryId,
+          this.consumerGroup,
+          this.broadcastMode ? true : undefined,
+        );
+        if (moveResult === 'PAUSED') {
+          // Defer the restores until every claim has been inspected. List jobs
+          // are popped from the right, so restoring them in reverse claim order
+          // keeps the original dispatch sequence on the next RPOP.
+          await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId, false);
+          if (entry.entryId === '') pausedListEntries.push(entry);
+          else pausedStreamEntries.push(entry);
+          continue;
+        }
+        if (await this.handleMoveToActiveEdgeCase(moveResult, entry.jobId, entry.entryId)) continue;
+        const hash = moveResult as Record<string, string>;
+        const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, entry.jobId, hash, this.serializer);
+        job.entryId = entry.entryId;
+        job.failContext = { group: this.consumerGroup, broadcastMode: this.broadcastMode ? true : undefined };
 
-      // Check ordering - if not ready, defer and skip
-      const orderingReady = await this.isOrderingTurn(job);
-      if (!orderingReady) {
-        await this.deferOutOfOrderJob(entry.jobId, entry.entryId);
-        continue;
-      }
+        // Check ordering - if not ready, defer and skip
+        const orderingReady = await this.isOrderingTurn(job);
+        if (!orderingReady) {
+          await this.deferOutOfOrderJob(entry.jobId, entry.entryId);
+          continue;
+        }
 
-      this.startHeartbeat(entry.jobId, job.opts.lockDuration);
-      batch.push({ jobId: entry.jobId, entryId: entry.entryId, job });
+        this.startHeartbeat(entry.jobId, job.opts.lockDuration);
+        batch.push({ jobId: entry.jobId, entryId: entry.entryId, job });
+      }
+    } catch (err) {
+      // Heartbeats for entries activated before the failure would otherwise
+      // run forever and keep those jobs from being reclaimed.
+      for (const entry of batch) this.stopHeartbeat(entry.jobId);
+      throw err;
     }
 
     for (const entry of pausedStreamEntries) {
@@ -649,39 +743,17 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     let results: R[] | undefined;
     let batchError: BatchError | undefined;
     let thrownError: Error | undefined;
+    let handBack = false;
 
+    const limited = !!(this.opts.limiter || this.globalRateLimitEnabled || this.opts.tokenLimiter);
     try {
       // Rate limit check (once per batch). Controllers must already be active
       // so revocation during this wait is visible to the batch processor.
       if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
       if (this.opts.tokenLimiter) await this.waitForTokenLimit();
-
-      // Calculate batch timeout: max timeout across all jobs in the batch
-      let maxTimeout = 0;
-      for (const entry of batch) {
-        const t = entry.job.opts.timeout;
-        if (t && t > 0 && t > maxTimeout) maxTimeout = t;
-      }
-
-      const jobs = batch.map((e) => e.job);
-      if (maxTimeout > 0) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          results = await Promise.race([
-            this.batchProcessor(jobs),
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(() => {
-                abortBatch();
-                reject(new Error('Batch timeout exceeded'));
-              }, maxTimeout);
-            }),
-          ]);
-        } finally {
-          if (timer !== undefined) clearTimeout(timer);
-        }
-      } else {
-        results = await this.batchProcessor(jobs);
-      }
+      // close() cut the limiter wait short; hand the batch back unprocessed.
+      handBack = limited && this.closing;
+      if (!handBack) results = await this.runBatchProcessor(batch, abortBatch);
     } catch (err) {
       if (err instanceof BatchError || (err instanceof Error && err.name === 'BatchError')) {
         batchError = err as BatchError;
@@ -697,6 +769,16 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
 
     if (!this.commandClient) return;
+
+    // close(true) aborted the batch; leave the jobs active for stalled recovery.
+    if (this.forceClosing && (batchError || thrownError)) return;
+
+    if (handBack) {
+      for (const entry of batch) {
+        await this.deferPausedActivation({ jobId: entry.jobId, entryId: entry.entryId, undoGroupClaim: true });
+      }
+      return;
+    }
 
     if (results) {
       // Success path: validate results is array with correct length
@@ -851,6 +933,35 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
   }
 
+  private async runBatchProcessor(
+    batch: { jobId: string; entryId: string; job: Job<D, R> }[],
+    abortBatch: () => void,
+  ): Promise<R[]> {
+    // Calculate batch timeout: max timeout across all jobs in the batch
+    let maxTimeout = 0;
+    for (const entry of batch) {
+      const t = entry.job.opts.timeout;
+      if (t && t > 0 && t > maxTimeout) maxTimeout = t;
+    }
+
+    const jobs = batch.map((e) => e.job);
+    if (maxTimeout <= 0) return this.batchProcessor!(jobs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.batchProcessor!(jobs),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            abortBatch();
+            reject(new Error('Batch timeout exceeded'));
+          }, maxTimeout);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
   // ---- Job processing helpers ----
 
   /**
@@ -996,14 +1107,31 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected async runProcessor(
     job: Job<D, R>,
     jobId: string,
-  ): Promise<{ result?: R; error?: Error; aborted: boolean }> {
+  ): Promise<{ result?: R; error?: Error; aborted: boolean; handBack?: boolean }> {
     const ac = new AbortController();
     this.activeAbortControllers.set(jobId, ac);
     job.abortSignal = ac.signal;
     this.startHeartbeat(jobId, job.opts.lockDuration);
 
-    if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
-    if (this.opts.tokenLimiter) await this.waitForTokenLimit();
+    const limited = !!(this.opts.limiter || this.globalRateLimitEnabled || this.opts.tokenLimiter);
+    try {
+      if (this.opts.limiter || this.globalRateLimitEnabled) await this.waitForRateLimit();
+      if (this.opts.tokenLimiter) await this.waitForTokenLimit();
+    } catch (err) {
+      // A failed limiter call must not leave the heartbeat refreshing
+      // lastActive, which would keep the job from ever being reclaimed.
+      this.stopHeartbeat(jobId);
+      this.activeAbortControllers.delete(jobId);
+      throw err;
+    }
+
+    // close() cut the limiter wait short. The processor has not run, so give
+    // the job back instead of running it past the limit or holding close().
+    if (limited && this.closing && !ac.signal.aborted) {
+      this.stopHeartbeat(jobId);
+      this.activeAbortControllers.delete(jobId);
+      return { aborted: false, handBack: true };
+    }
 
     // Short-circuit if the job was revoked/aborted during the limiter wait.
     if (ac.signal.aborted) {
@@ -1069,6 +1197,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
       this.rateLimitUntil = Date.now() + delayMs;
       try {
+        // glidemq_fail increments the attempt counter it compares against:
+        // the job hash in normal mode, the per-subscription hash in broadcast
+        // mode. One above the post-increment value always retries.
+        const attemptsMade = await this.getAttemptsMade(job, jobId);
         await failJob(
           this.commandClient,
           this.queueKeys,
@@ -1076,7 +1208,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           entryId,
           'rate limited',
           Date.now(),
-          job.attemptsMade + 2,
+          attemptsMade + 2,
           delayMs,
           this.consumerGroup,
           undefined,
@@ -1294,10 +1426,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected async processJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
 
-    // close() can land while XREADGROUP/list-pop is in flight. The poll loop
-    // still delivers that claim, but the while-guard below would otherwise
-    // drop it in this consumer's PEL until stall reclaim.
-    if (this.closing) {
+    // close() or pause() can land while XREADGROUP/list-pop is in flight. The
+    // poll loop still delivers that claim; hand it back instead of running it
+    // after the worker stopped taking work (or leaving it in this PEL).
+    if (this.closing || this.paused) {
       await this.deferPausedActivation({ jobId, entryId });
       return;
     }
@@ -1420,7 +1552,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         aborted = ac.signal.aborted;
       } else {
         this.suspendContinuations.delete(currentJobId);
-        ({ result: processResult, error: processError, aborted } = await this.runProcessor(job, currentJobId));
+        const run = await this.runProcessor(job, currentJobId);
+        if (run.handBack) {
+          await this.deferPausedActivation({ jobId: currentJobId, entryId: currentEntryId, undoGroupClaim: true });
+          return;
+        }
+        ({ result: processResult, error: processError, aborted } = run);
       }
 
       if (await this.skipMovedToFailed(job)) return;
@@ -1496,7 +1633,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         if (!this.commandClient) return;
         try {
           if (suspendReq?.onResume) {
-            this.suspendContinuations.set(currentJobId, { job: continuationJob, onResume: suspendReq.onResume });
+            this.setSuspendContinuation(currentJobId, { job: continuationJob, onResume: suspendReq.onResume });
           }
           const suspResult = await suspendJob(
             this.commandClient,
@@ -1513,6 +1650,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             throw new Error(`Cannot suspend job: ${suspResult.slice(6)}`);
           }
         } catch (suspErr) {
+          // The job did not suspend, so no resume will ever consume this entry.
+          this.suspendContinuations.delete(currentJobId);
           const err = suspErr instanceof Error ? suspErr : new Error(String(suspErr));
           await this.handleJobFailure(job, currentJobId, currentEntryId, err);
         }
@@ -1520,6 +1659,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
 
       if (processError || aborted) {
+        // close(true) aborted it; leave it active for stalled recovery.
+        if (aborted && this.forceClosing) return;
         if (await this.skipMovedToFailed(job)) return;
         const confirmedRevoked = aborted && (await this.isJobRevoked(currentJobId));
         await this.handleJobFailure(
@@ -1564,10 +1705,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         }
       }
       const now = Date.now();
-      // close() sets closing before waitForActiveJobs. Completing without
-      // fetch-next avoids claiming a job that this worker will not process.
+      // close() and pause() set their flag before waitForActiveJobs.
+      // Completing without fetch-next avoids claiming a job this worker will
+      // not process now; chaining under a backlog would never let pause() land.
       let fetchResult: CompleteAndFetchResult;
-      if (this.closing) {
+      if (this.closing || this.paused) {
         const notifications = await completeJob(
           this.commandClient,
           this.queueKeys,
@@ -1664,10 +1806,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         await this.updateSchedulerAfterComplete(job.schedulerName, now);
       }
 
-      // CAF raced with close(): the next job is already claimed. Defer it
-      // so another worker can take it without waiting for stall reclaim.
+      // CAF raced with close() or pause(): the next job is already claimed.
+      // Defer it so it is not run or stranded without a heartbeat.
       if (
-        this.closing &&
+        (this.closing || this.paused) &&
         typeof fetchResult.next === 'object' &&
         fetchResult.nextJobId &&
         fetchResult.nextEntryId != null
@@ -1719,6 +1861,19 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
   }
 
+  private setSuspendContinuation(
+    jobId: string,
+    continuation: { job: Job<D, R>; onResume: (signals: SignalEntry[]) => Promise<any> },
+  ): void {
+    // Re-insert so a re-suspended job counts as the newest entry.
+    this.suspendContinuations.delete(jobId);
+    this.suspendContinuations.set(jobId, continuation);
+    while (this.suspendContinuations.size > BaseWorker.MAX_SUSPEND_CONTINUATIONS) {
+      const oldest = this.suspendContinuations.keys().next().value as string;
+      this.suspendContinuations.delete(oldest);
+    }
+  }
+
   /**
    * Abort a job that is currently being processed by this worker.
    * The processor receives the abort signal via job.abortSignal and must check it cooperatively.
@@ -1744,6 +1899,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
   protected startHeartbeat(jobId: string, jobLockDuration?: number): void {
     if (!this.commandClient) return;
+    // Never orphan an earlier timer for the same job.
+    this.stopHeartbeat(jobId);
     // Use per-job lockDuration when specified, otherwise fall back to worker-level.
     const effectiveLock = jobLockDuration ?? this.lockDuration;
     const interval = Math.min(effectiveLock / 2, BaseWorker.REVOCATION_POLL_INTERVAL);
@@ -1795,6 +1952,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   /**
    * Check the server-side rate limiter and wait if the limit is exceeded.
    * Also respects any manual rate limit set via rateLimit(ms).
+   * Returns early once close() starts; callers must check `closing`.
    */
   protected async waitForRateLimit(): Promise<void> {
     if (!this.commandClient) return;
@@ -1802,7 +1960,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     // First, respect any manual rate limit
     const now = Date.now();
     if (this.rateLimitUntil > now) {
-      await new Promise<void>((resolve) => setTimeout(resolve, this.rateLimitUntil - now));
+      await this.sleepUnlessClosing(this.rateLimitUntil - now);
+      if (this.closing) return;
     }
 
     // Determine effective rate limit config.
@@ -1822,19 +1981,21 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
 
     // Server-side sliding window check
-    while (true) {
+    while (!this.closing) {
       const delayMs = await rateLimitFn(this.commandClient, this.queueKeys, max, duration, Date.now());
 
       if (delayMs <= 0) break;
 
       // Wait for the delay, then re-check
-      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      await this.sleepUnlessClosing(delayMs);
+      if (this.closing) return;
     }
   }
 
   /**
    * Check the TPM (token-per-minute) rate limit and wait if either the local or
    * per-queue counter exceeds the configured maxTokens for the current window.
+   * Returns early once close() starts; callers must check `closing`.
    */
   protected async waitForTokenLimit(): Promise<void> {
     const tl = this.opts.tokenLimiter;
@@ -1842,7 +2003,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
     const scope = tl.scope ?? 'both';
 
-    while (true) {
+    while (!this.closing) {
       const now = Date.now();
 
       // Reset local counter if the window has expired
@@ -1856,7 +2017,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         if (this.tpmLocalCounter >= tl.maxTokens) {
           const sleepMs = this.tpmWindowStart + tl.duration - now;
           if (sleepMs > 0) {
-            await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+            await this.sleepUnlessClosing(sleepMs);
+            if (this.closing) return;
             continue;
           }
         }
@@ -1872,7 +2034,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           const windowEndMs = (windowId + 1) * tl.duration;
           const sleepMs = windowEndMs - now;
           if (sleepMs > 0) {
-            await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+            await this.sleepUnlessClosing(sleepMs);
+            if (this.closing) return;
             continue;
           }
         }
@@ -2075,12 +2238,26 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    */
   async close(force?: boolean): Promise<void> {
     if (this.closed) return;
+    // Force close signals running processors through job.abortSignal, also
+    // when it escalates a graceful close that is still waiting for them.
+    if (force) this.abortActiveJobsForClose();
     if (this.closePromise) return this.closePromise;
     this.closing = true;
     this.running = false;
     this.closePromise = Promise.resolve().then(() => this.performClose(force));
+    this.internalEvents.emit('closing');
     this.emit('closing');
     return this.closePromise;
+  }
+
+  /**
+   * Abort every in-flight job for close(true). Those jobs are not failed:
+   * the worker is going away, so they stay active for stalled recovery,
+   * the same outcome as a force close whose processor ignores the signal.
+   */
+  private abortActiveJobsForClose(): void {
+    this.forceClosing = true;
+    for (const ac of this.activeAbortControllers.values()) ac.abort();
   }
 
   private async stopSchedulerOnClose(force?: boolean): Promise<void> {
@@ -2106,6 +2283,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   }
 
   private async performClose(force?: boolean): Promise<void> {
+    if (this.reconnectRetryTimer) {
+      clearTimeout(this.reconnectRetryTimer);
+      this.reconnectRetryTimer = null;
+    }
     // Wait for init to complete so clients are available for cleanup
     await this.initPromise.catch(() => {});
     await this.stopSchedulerOnClose(force);
@@ -2128,6 +2309,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       clearInterval(timer);
     }
     this.heartbeatIntervals.clear();
+    this.suspendContinuations.clear();
 
     if (this.blockingClient) {
       this.blockingClient.close();
