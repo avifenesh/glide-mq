@@ -960,3 +960,56 @@ describe('close(true) aborts running processors', () => {
     expect(command.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_fail')).toHaveLength(0);
   });
 });
+
+describe('batch return value size guard', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function runBatchOnce(result: unknown) {
+    const command = makeMockClient({ fcall: routeFcall({}) });
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult([['1-0', 'sized']]))
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+    const done = deferred<void>();
+    const worker = new Worker(
+      'lifecycle-size-guard',
+      async () => {
+        setTimeout(() => done.resolve(), 0);
+        return [result];
+      },
+      { connection, blockTimeout: 100, batch: { size: 1 } },
+    );
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    await done.promise;
+    await vi.advanceTimersByTimeAsync(20);
+    await worker.close(true);
+    return command.fcall.mock.calls.map((c: any[]) => c[0]);
+  }
+
+  it('skips Buffer.byteLength for small results and still completes', async () => {
+    const spy = vi.spyOn(Buffer, 'byteLength');
+    const funcs = await runBatchOnce('small');
+    const measured = spy.mock.calls.some((c) => c[0] === JSON.stringify('small'));
+    spy.mockRestore();
+    expect(measured).toBe(false);
+    expect(funcs).toContain('glidemq_complete');
+  });
+
+  it('still fails a result over the byte limit', async () => {
+    // 600k two-byte chars: length passes MAX/4, bytes exceed MAX.
+    const funcs = await runBatchOnce('é'.repeat(600_000));
+    expect(funcs).toContain('glidemq_fail');
+    expect(funcs).not.toContain('glidemq_complete');
+  });
+});

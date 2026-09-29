@@ -810,7 +810,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           );
           continue;
         }
-        const byteLen = Buffer.byteLength(returnvalue, 'utf8');
+        // UTF-8 worst case: 4 bytes per char. Skip Buffer.byteLength for small strings.
+        const byteLen = returnvalue.length > MAX_JOB_DATA_SIZE / 4 ? Buffer.byteLength(returnvalue, 'utf8') : 0;
         if (byteLen > MAX_JOB_DATA_SIZE) {
           await this.handleJobFailure(
             entry.job,
@@ -878,7 +879,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             );
             continue;
           }
-          const byteLen = Buffer.byteLength(returnvalue, 'utf8');
+          const byteLen = returnvalue.length > MAX_JOB_DATA_SIZE / 4 ? Buffer.byteLength(returnvalue, 'utf8') : 0;
           if (byteLen > MAX_JOB_DATA_SIZE) {
             await this.handleJobFailure(
               entry.job,
