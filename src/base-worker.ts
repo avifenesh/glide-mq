@@ -202,6 +202,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * documented as best-effort: an evicted job runs the main processor.
    */
   static readonly MAX_SUSPEND_CONTINUATIONS = 10000;
+  /**
+   * How long a job of a budget with onExceeded 'pause' waits in delayed
+   * before the worker re-checks the budget. Raise the limits with
+   * Queue.updateFlowBudget() to resume; Job.promote() re-checks sooner.
+   */
+  static readonly BUDGET_PAUSE_RECHECK_MS = 60_000;
   protected serializer: Serializer;
   protected readonly batchMode: boolean;
   protected readonly batchSize: number;
@@ -2016,14 +2022,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     const onExceeded = await this.getBudgetOnExceeded(job.budgetKey);
     this.emit('budget-exceeded', job, jobId);
     if (onExceeded === 'pause') {
-      // Move to delayed with a long backoff so it can be resumed
+      // Park in delayed; each promotion re-checks the budget until it is raised.
       try {
         await moveActiveToDelayed(
           this.commandClient,
           this.queueKeys,
           jobId,
           entryId,
-          Date.now() + 86400000,
+          Date.now() + BaseWorker.BUDGET_PAUSE_RECHECK_MS,
           undefined,
           Date.now(),
           this.consumerGroup,

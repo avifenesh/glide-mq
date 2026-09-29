@@ -509,6 +509,7 @@ The processor function signature is identical. The only change is the connection
 | -                                                            | `queue.removeGlobalRateLimit()`                                         | glide-mq only      |
 | -                                                            | `queue.getFlowUsage(parentJobId)`                                       | glide-mq only      |
 | -                                                            | `queue.getFlowBudget(flowId)`                                           | glide-mq only      |
+| -                                                            | `queue.updateFlowBudget(flowId, limits)`                                | glide-mq only      |
 | -                                                            | `queue.readStream(jobId, opts?)`                                        | glide-mq only      |
 | -                                                            | `queue.signal(jobId, name, data?)`                                      | glide-mq only      |
 | -                                                            | `queue.getSuspendInfo(jobId)`                                           | glide-mq only      |

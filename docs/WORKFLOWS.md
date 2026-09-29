@@ -418,7 +418,7 @@ FlowProducer.add() accepts an optional budget parameter that creates a shared bu
 Each child job has a budgetKey that points to the shared budget hash. The usage a job reports with reportUsage() is charged when the attempt ends, whether it completes or fails: the worker increments the budget counters via glidemq_recordUsageAndCheckBudget. A retry that reports no new usage is not charged again. Batch workers charge and check budgets the same way, per job. Before each job runs, the worker checks the budget. If limits are exceeded:
 
 - **fail**: The job that crossed the limit completes normally. Each later job fails with `Budget exceeded` when it starts (normal retry rules apply).
-- **pause**: Each later job is moved back to delayed for 24 hours when it starts, and again every time it is promoted while the budget stays exceeded.
+- **pause**: Each later job is moved back to delayed when it starts and re-checks the budget every 60 seconds (`Worker.BUDGET_PAUSE_RECHECK_MS`) until the limits are raised. Raise them with `queue.updateFlowBudget(flowId, { maxTotalCost: 2 })`: it re-evaluates `exceeded` against the usage already charged, and the paused jobs run at their next re-check, or right away after `job.promote()`.
 
 ---
 

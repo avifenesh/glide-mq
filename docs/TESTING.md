@@ -380,15 +380,16 @@ All AI-native primitives have full testing mode parity - no Valkey needed.
 
 ### TestQueue methods
 
-| Method                           | Description                                                              |
-| -------------------------------- | ------------------------------------------------------------------------ |
-| `readStream(jobId, opts?)`       | Read chunks from a streaming channel. Supports lastId, count, and block. |
-| `signal(jobId, name, data?)`     | Send a signal to a suspended job. Returns true if the job was suspended. |
-| `getSuspendInfo(jobId)`          | Get suspension state or null.                                            |
-| `getFlowUsage(parentJobId)`      | Aggregate usage across parent and children.                              |
-| `getFlowBudget(flowId)`          | Get budget state for a flow or null.                                     |
-| `createJobIndex(opts?)`          | Store index configuration in memory.                                     |
-| `vectorSearch(embedding, opts?)` | Run cosine-similarity KNN search over stored vectors.                    |
+| Method                             | Description                                                              |
+| ---------------------------------- | ------------------------------------------------------------------------ |
+| `readStream(jobId, opts?)`         | Read chunks from a streaming channel. Supports lastId, count, and block. |
+| `signal(jobId, name, data?)`       | Send a signal to a suspended job. Returns true if the job was suspended. |
+| `getSuspendInfo(jobId)`            | Get suspension state or null.                                            |
+| `getFlowUsage(parentJobId)`        | Aggregate usage across parent and children.                              |
+| `getFlowBudget(flowId)`            | Get budget state for a flow or null.                                     |
+| `updateFlowBudget(flowId, limits)` | Change budget limits and re-evaluate exceeded.                           |
+| `createJobIndex(opts?)`            | Store index configuration in memory.                                     |
+| `vectorSearch(embedding, opts?)`   | Run cosine-similarity KNN search over stored vectors.                    |
 
 ### Example: testing an AI workflow
 

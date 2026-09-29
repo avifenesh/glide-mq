@@ -114,7 +114,8 @@ export const LIBRARY_NAME = 'glidemq';
 //   glidemq_trimBroadcast trims a broadcast stream and deletes the job data of trimmed messages;
 //   promote records the newest broadcast retry entry in the job hash (bcastEntry).
 // Version 131: glidemq_fail takes an optional requeueOnly arg (RateLimitError) that schedules the retry
-//   without counting the attempt or writing failedReason.
+//   without counting the attempt or writing failedReason; glidemq_updateFlowBudget changes budget limits
+//   and re-evaluates the exceeded flag.
 export const LIBRARY_VERSION = '131';
 
 // Consumer group name used by workers
@@ -1665,6 +1666,21 @@ export async function sweepSuspended(
 /**
  * Check whether a budget has been exceeded. Returns 'ok', 'exceeded', or 'no_budget'.
  */
+/**
+ * Raise or lower the limits of a flow budget and re-evaluate its exceeded
+ * flag. A null value deletes the field. Returns 'ok', 'exceeded' or 'no_budget'.
+ */
+export async function updateFlowBudget(
+  client: Client,
+  budgetKey: string,
+  fields: Record<string, string | null>,
+): Promise<string> {
+  const args: string[] = [];
+  for (const [field, value] of Object.entries(fields)) args.push(field, value ?? '');
+  const result = await client.fcall('glidemq_updateFlowBudget', [budgetKey], args);
+  return result as string;
+}
+
 export async function checkBudget(client: Client, budgetKey: string): Promise<string> {
   const result = await client.fcall('glidemq_checkBudget', [budgetKey], []);
   return result as string;

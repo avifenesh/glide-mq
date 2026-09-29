@@ -1555,32 +1555,59 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       budget.usedCostsByCategory[cat] = (budget.usedCostsByCategory[cat] || 0) + val;
     }
 
-    if ((budget.maxTotalTokens ?? 0) > 0 && budget.usedTokens > budget.maxTotalTokens!) {
+    if (TestQueue.budgetLimitsExceeded(budget)) {
       budget.exceeded = true;
       return 'exceeded';
     }
-    if ((budget.maxTotalCost ?? 0) > 0 && budget.usedCost > budget.maxTotalCost!) {
-      budget.exceeded = true;
-      return 'exceeded';
-    }
-    if (budget.maxTokens) {
-      for (const [cat, limit] of Object.entries(budget.maxTokens)) {
-        if (limit > 0 && (budget.usedTokensByCategory[cat] ?? 0) > limit) {
-          budget.exceeded = true;
-          return 'exceeded';
-        }
-      }
-    }
-    if (budget.maxCosts) {
-      for (const [cat, limit] of Object.entries(budget.maxCosts)) {
-        if (limit > 0 && (budget.usedCostsByCategory[cat] ?? 0) > limit) {
-          budget.exceeded = true;
-          return 'exceeded';
-        }
-      }
-    }
-
     return 'ok';
+  }
+
+  private static budgetLimitsExceeded(budget: TestBudgetState): boolean {
+    if ((budget.maxTotalTokens ?? 0) > 0 && budget.usedTokens > budget.maxTotalTokens!) return true;
+    if ((budget.maxTotalCost ?? 0) > 0 && budget.usedCost > budget.maxTotalCost!) return true;
+    for (const [cat, limit] of Object.entries(budget.maxTokens ?? {})) {
+      if (limit > 0 && (budget.usedTokensByCategory[cat] ?? 0) > limit) return true;
+    }
+    for (const [cat, limit] of Object.entries(budget.maxCosts ?? {})) {
+      if (limit > 0 && (budget.usedCostsByCategory[cat] ?? 0) > limit) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Change the limits of a flow budget and re-evaluate its exceeded flag.
+   * Mirrors Queue.updateFlowBudget(); null deletes a limit.
+   */
+  async updateFlowBudget(
+    flowId: string,
+    limits: {
+      maxTotalTokens?: number | null;
+      maxTokens?: Record<string, number> | null;
+      tokenWeights?: Record<string, number> | null;
+      maxTotalCost?: number | null;
+      maxCosts?: Record<string, number> | null;
+      costUnit?: string | null;
+      onExceeded?: 'pause' | 'fail';
+    },
+  ): Promise<Awaited<ReturnType<TestQueue['getFlowBudget']>>> {
+    const budget = this.budgets.get(flowId);
+    if (!budget) return null;
+    for (const key of [
+      'maxTotalTokens',
+      'maxTokens',
+      'tokenWeights',
+      'maxTotalCost',
+      'maxCosts',
+      'costUnit',
+    ] as const) {
+      const value = limits[key];
+      if (value === undefined) continue;
+      if (value === null) delete (budget as any)[key];
+      else (budget as any)[key] = value;
+    }
+    if (limits.onExceeded !== undefined) budget.onExceeded = limits.onExceeded;
+    budget.exceeded = TestQueue.budgetLimitsExceeded(budget);
+    return this.getFlowBudget(flowId);
   }
 
   /**

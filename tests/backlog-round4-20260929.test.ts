@@ -15,6 +15,7 @@ const { BatchError } = require('../dist/errors') as typeof import('../src/errors
 const { Broadcast } = require('../dist/broadcast') as typeof import('../src/broadcast');
 const { BroadcastWorker } = require('../dist/broadcast-worker') as typeof import('../src/broadcast-worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+const { BaseWorker } = require('../dist/base-worker') as typeof import('../src/base-worker');
 
 describeEachMode('Backlog round 4 2026-09-29', (CONNECTION) => {
   let cleanupClient: any;
@@ -238,4 +239,82 @@ describeEachMode('Backlog round 4 2026-09-29', (CONNECTION) => {
       await broadcast.close();
     }
   }, 20000);
+
+  it('B3: onExceeded pause parks the job for a bounded re-check and updateFlowBudget resumes it', async () => {
+    const Q = uniqueQueue('r4-budget-pause');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const completed: string[] = [];
+    const paused: string[] = [];
+    let reported = false;
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        if (job.name !== 'parent' && !reported) {
+          reported = true;
+          await job.reportUsage({ costs: { total: 1.5 } });
+        }
+        return 'ok';
+      },
+      { connection: CONNECTION, blockTimeout: 300 },
+    );
+    worker.on('error', () => {});
+    worker.on('completed', (job: any) => completed.push(job.name));
+    worker.on('budget-exceeded', (job: any) => paused.push(job.id));
+    try {
+      const node = await flow.add(
+        {
+          name: 'parent',
+          queueName: Q,
+          data: {},
+          children: [
+            { name: 'c1', queueName: Q, data: {} },
+            { name: 'c2', queueName: Q, data: {} },
+          ],
+        },
+        { budget: { maxTotalCost: 1, onExceeded: 'pause' } },
+      );
+      const flowId = node.job.id;
+      const childIds = node.children!.map((c) => c.job.id);
+      // The child that crossed the limit completes; the other one is parked.
+      let pausedId = '';
+      await waitFor(async () => {
+        for (const id of childIds) {
+          if (String(await cleanupClient.hget(k.job(id), 'state')) === 'delayed') pausedId = id;
+        }
+        return pausedId !== '';
+      }, 15000);
+      // Parked for one re-check interval, not a day.
+      const score = Number(await cleanupClient.zscore(k.scheduled, pausedId));
+      expect(score).toBeGreaterThan(Date.now() + 1000);
+      expect(score).toBeLessThanOrEqual(Date.now() + BaseWorker.BUDGET_PAUSE_RECHECK_MS + 1000);
+
+      // A limit still below the charged usage keeps the budget exceeded.
+      let budget = await queue.updateFlowBudget(flowId, { maxTotalCost: 1.2 });
+      expect(budget).toMatchObject({ maxTotalCost: 1.2, exceeded: true, usedCost: 1.5 });
+      expect(String(await cleanupClient.hget(k.job(pausedId), 'state'))).toBe('delayed');
+
+      // Raising above the usage clears exceeded; promoting runs the job now.
+      budget = await queue.updateFlowBudget(flowId, { maxTotalCost: 100, costUnit: 'usd' });
+      expect(budget).toMatchObject({ maxTotalCost: 100, costUnit: 'usd', exceeded: false, onExceeded: 'pause' });
+      expect(await cleanupClient.hget(k.budget(flowId), 'exceeded')).toBeNull();
+      await (await queue.getJob(pausedId))!.promote();
+      await waitFor(() => completed.includes('parent'), 15000);
+      expect(completed.sort()).toEqual(['c1', 'c2', 'parent']);
+      // budget-exceeded fires for the job that crossed the limit and for the parked one.
+      expect(new Set(paused)).toEqual(new Set(childIds));
+
+      expect(await queue.updateFlowBudget('no-such-flow', { maxTotalCost: 1 })).toBeNull();
+      await expect(queue.updateFlowBudget(flowId, { maxTotalCost: -1 })).rejects.toThrow(/finite number/);
+      // null deletes a limit.
+      budget = await queue.updateFlowBudget(flowId, { maxTotalCost: null, maxTokens: { input: 10 } });
+      expect(budget!.maxTotalCost).toBeUndefined();
+      expect(budget!.maxTokens).toEqual({ input: 10 });
+    } finally {
+      await worker.close();
+      await flow.close();
+      await queue.close();
+    }
+  }, 30000);
 });

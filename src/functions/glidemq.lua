@@ -4825,6 +4825,35 @@ redis.register_function('glidemq_sweepSuspended', function(keys, args)
   return count
 end)
 
+-- True when the charged usage of a budget hash is over any of its limits:
+-- weighted total tokens, total cost, or a per-category token/cost cap.
+local function budgetLimitsExceeded(budgetKey, maxTokensJson, maxCostsJson)
+  local maxTotalTokens = tonumber(redis.call('HGET', budgetKey, 'maxTotalTokens')) or 0
+  local usedTokens = tonumber(redis.call('HGET', budgetKey, 'usedTokens')) or 0
+  if maxTotalTokens > 0 and usedTokens > maxTotalTokens then return true end
+
+  local maxTotalCost = tonumber(redis.call('HGET', budgetKey, 'maxTotalCost')) or 0
+  local usedCost = tonumber(redis.call('HGET', budgetKey, 'usedCost')) or 0
+  if maxTotalCost > 0 and usedCost > maxTotalCost then return true end
+
+  local ok3, maxTokens = pcall(cjson.decode, maxTokensJson)
+  if ok3 and type(maxTokens) == 'table' then
+    for cat, limit in pairs(maxTokens) do
+      local used = tonumber(redis.call('HGET', budgetKey, 'usedTokens:' .. cat)) or 0
+      if tonumber(limit) and tonumber(limit) > 0 and used > tonumber(limit) then return true end
+    end
+  end
+
+  local ok4, maxCosts = pcall(cjson.decode, maxCostsJson)
+  if ok4 and type(maxCosts) == 'table' then
+    for cat, limit in pairs(maxCosts) do
+      local used = tonumber(redis.call('HGET', budgetKey, 'usedCost:' .. cat)) or 0
+      if tonumber(limit) and tonumber(limit) > 0 and used > tonumber(limit) then return true end
+    end
+  end
+  return false
+end
+
 redis.register_function('glidemq_checkBudget', function(keys, args)
   local budgetKey = keys[1]
   local exists = redis.call('EXISTS', budgetKey)
@@ -4870,45 +4899,33 @@ redis.register_function('glidemq_recordUsageAndCheckBudget', function(keys, args
     end
   end
 
-  -- Check weighted total tokens cap
-  local maxTotalTokens = tonumber(redis.call('HGET', budgetKey, 'maxTotalTokens')) or 0
-  local usedTokens = tonumber(redis.call('HGET', budgetKey, 'usedTokens')) or 0
-  if maxTotalTokens > 0 and usedTokens > maxTotalTokens then
+  if budgetLimitsExceeded(budgetKey, maxTokensJson, maxCostsJson) then
     redis.call('HSET', budgetKey, 'exceeded', '1')
     return 'exceeded'
   end
+  return 'ok'
+end)
 
-  -- Check total cost cap
-  local maxTotalCost = tonumber(redis.call('HGET', budgetKey, 'maxTotalCost')) or 0
-  local usedCost = tonumber(redis.call('HGET', budgetKey, 'usedCost')) or 0
-  if maxTotalCost > 0 and usedCost > maxTotalCost then
+-- Raise or lower the limits of a flow budget and re-evaluate its exceeded
+-- flag against the usage already charged.
+-- KEYS: [budgetKey]
+-- ARGS: [field1, value1, field2, value2, ...]; an empty value deletes the field.
+-- Returns 'no_budget', 'exceeded' or 'ok'.
+redis.register_function('glidemq_updateFlowBudget', function(keys, args)
+  local budgetKey = keys[1]
+  if redis.call('EXISTS', budgetKey) == 0 then return 'no_budget' end
+  for i = 1, #args - 1, 2 do
+    if args[i + 1] == '' then
+      redis.call('HDEL', budgetKey, args[i])
+    else
+      redis.call('HSET', budgetKey, args[i], args[i + 1])
+    end
+  end
+  local limits = redis.call('HMGET', budgetKey, 'maxTokens', 'maxCosts')
+  if budgetLimitsExceeded(budgetKey, limits[1] or '{}', limits[2] or '{}') then
     redis.call('HSET', budgetKey, 'exceeded', '1')
     return 'exceeded'
   end
-
-  -- Check per-category token limits
-  local ok3, maxTokens = pcall(cjson.decode, maxTokensJson)
-  if ok3 and type(maxTokens) == 'table' then
-    for cat, limit in pairs(maxTokens) do
-      local used = tonumber(redis.call('HGET', budgetKey, 'usedTokens:' .. cat)) or 0
-      if tonumber(limit) and tonumber(limit) > 0 and used > tonumber(limit) then
-        redis.call('HSET', budgetKey, 'exceeded', '1')
-        return 'exceeded'
-      end
-    end
-  end
-
-  -- Check per-category cost limits
-  local ok4, maxCosts = pcall(cjson.decode, maxCostsJson)
-  if ok4 and type(maxCosts) == 'table' then
-    for cat, limit in pairs(maxCosts) do
-      local used = tonumber(redis.call('HGET', budgetKey, 'usedCost:' .. cat)) or 0
-      if tonumber(limit) and tonumber(limit) > 0 and used > tonumber(limit) then
-        redis.call('HSET', budgetKey, 'exceeded', '1')
-        return 'exceeded'
-      end
-    end
-  end
-
+  redis.call('HDEL', budgetKey, 'exceeded')
   return 'ok'
 end)

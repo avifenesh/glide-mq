@@ -282,6 +282,7 @@ class Queue<D = any, R = any> extends EventEmitter {
   // AI primitives
   getFlowUsage(parentJobId: string): Promise<FlowUsage>;
   getFlowBudget(flowId: string): Promise<FlowBudget | null>;
+  updateFlowBudget(flowId: string, limits: Partial<BudgetLimits>): Promise<FlowBudget | null>;
   readStream(jobId: string, opts?: ReadStreamOptions): Promise<StreamEntry[]>;
   signal(jobId: string, name: string, data?: any): Promise<boolean>;
   getSuspendInfo(jobId: string): Promise<SuspendInfo | null>;

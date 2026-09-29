@@ -55,6 +55,7 @@ import {
   computeInitialSchedulerNextRun,
   holdSchedulerModeSwitch,
   hashDataToRecord,
+  isFunctionNotFound,
   hmgetArrayToRecord,
   extractJobIdsFromStreamEntries,
   compress,
@@ -97,6 +98,7 @@ import {
   getActiveListJobIds,
   casSchedulerEntry,
   registerChildDep,
+  updateFlowBudget,
 } from './functions/index';
 import type { QueueKeys } from './functions/index';
 import { withSpan } from './telemetry';
@@ -2306,6 +2308,103 @@ export class Queue<D = any, R = any> extends EventEmitter {
       exceeded: fields.exceeded === '1',
       onExceeded: (fields.onExceeded as 'pause' | 'fail') || 'fail',
     };
+  }
+
+  /**
+   * Change the limits of a flow budget. Only the given fields change; null
+   * deletes a limit. The exceeded flag is re-evaluated against the usage
+   * already charged, so raising the limits above it resumes the flow: jobs
+   * paused by onExceeded 'pause' run at their next re-check
+   * (Worker.BUDGET_PAUSE_RECHECK_MS) or when promoted. Returns the new
+   * budget state, or null when the flow has no budget.
+   */
+  async updateFlowBudget(
+    flowId: string,
+    limits: {
+      maxTotalTokens?: number | null;
+      maxTokens?: Record<string, number> | null;
+      tokenWeights?: Record<string, number> | null;
+      maxTotalCost?: number | null;
+      maxCosts?: Record<string, number> | null;
+      costUnit?: string | null;
+      onExceeded?: 'pause' | 'fail';
+    },
+  ): Promise<Awaited<ReturnType<Queue<D, R>['getFlowBudget']>>> {
+    const fields: Record<string, string | null> = {};
+    const numeric = (name: string, value: number | null | undefined) => {
+      if (value === undefined) return;
+      if (value === null) {
+        fields[name] = null;
+        return;
+      }
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        throw new GlideMQError(`updateFlowBudget: ${name} must be a finite number >= 0`);
+      }
+      fields[name] = value.toString();
+    };
+    const record = (name: string, value: Record<string, number> | null | undefined) => {
+      if (value === undefined) return;
+      if (value === null) {
+        fields[name] = null;
+        return;
+      }
+      if (typeof value !== 'object' || Array.isArray(value)) {
+        throw new GlideMQError(`updateFlowBudget: ${name} must be a record of numbers`);
+      }
+      for (const [cat, limit] of Object.entries(value)) {
+        if (typeof limit !== 'number' || !Number.isFinite(limit) || limit < 0) {
+          throw new GlideMQError(`updateFlowBudget: ${name}.${cat} must be a finite number >= 0`);
+        }
+      }
+      fields[name] = JSON.stringify(value);
+    };
+    numeric('maxTotalTokens', limits.maxTotalTokens);
+    numeric('maxTotalCost', limits.maxTotalCost);
+    record('maxTokens', limits.maxTokens);
+    record('tokenWeights', limits.tokenWeights);
+    record('maxCosts', limits.maxCosts);
+    if (limits.costUnit !== undefined) fields.costUnit = limits.costUnit;
+    if (limits.onExceeded !== undefined) {
+      if (limits.onExceeded !== 'pause' && limits.onExceeded !== 'fail') {
+        throw new GlideMQError("updateFlowBudget: onExceeded must be 'pause' or 'fail'");
+      }
+      fields.onExceeded = limits.onExceeded;
+    }
+
+    const client = await this.getClient();
+    const budgetKey = this.keys.budget(flowId);
+    try {
+      const result = await updateFlowBudget(client, budgetKey, fields);
+      if (result === 'no_budget') return null;
+    } catch (err) {
+      if (!isFunctionNotFound(err)) throw err;
+      // Older library: write the limits, then re-evaluate the flag from the
+      // hash the way glidemq_updateFlowBudget does (not atomic with a charge).
+      if ((await client.exists([budgetKey])) === 0) return null;
+      const toSet: Record<string, string> = {};
+      const toDel: string[] = [];
+      for (const [field, value] of Object.entries(fields)) {
+        if (value === null) toDel.push(field);
+        else toSet[field] = value;
+      }
+      if (Object.keys(toSet).length > 0) await client.hset(budgetKey, toSet);
+      if (toDel.length > 0) await client.hdel(budgetKey, toDel);
+      const state = await this.getFlowBudget(flowId);
+      if (!state) return null;
+      const usedByCat = hashDataToRecord((await client.hgetall(budgetKey)) as any) ?? {};
+      const over =
+        ((state.maxTotalTokens ?? 0) > 0 && state.usedTokens > state.maxTotalTokens!) ||
+        ((state.maxTotalCost ?? 0) > 0 && state.usedCost > state.maxTotalCost!) ||
+        Object.entries(state.maxTokens ?? {}).some(
+          ([cat, limit]) => limit > 0 && parseFloat(usedByCat[`usedTokens:${cat}`] || '0') > limit,
+        ) ||
+        Object.entries(state.maxCosts ?? {}).some(
+          ([cat, limit]) => limit > 0 && parseFloat(usedByCat[`usedCost:${cat}`] || '0') > limit,
+        );
+      if (over) await client.hset(budgetKey, { exceeded: '1' });
+      else await client.hdel(budgetKey, ['exceeded']);
+    }
+    return this.getFlowBudget(flowId);
   }
 
   /**
