@@ -183,7 +183,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * claims parked during a queue-pause activation race and claims stalled
    * reclaim moved into this PEL. Drained by XCLAIM by ID in pollOnce.
    */
-  protected pausedBroadcastEntries = new Set<string>();
+  /** Broadcast entries parked in this consumer's PEL (pause or redispatch): entryId to jobId. */
+  protected pausedBroadcastEntries = new Map<string, string>();
+  /**
+   * Set when the last chain call reported NEXT_NONE with empty lists and stream
+   * (library 132); the next poll skips its pre-block list pop if still fresh.
+   */
+  protected listsEmptyAt = 0;
+  protected static readonly LISTS_EMPTY_FRESH_MS = 100;
   protected cachedRateLimitMax = 0;
   protected cachedRateLimitDuration = 0;
 
@@ -2004,6 +2011,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             next: false as const,
             parentNotifications: notifications,
             failedActivations: [],
+            listsEmpty: false,
           };
         } else {
           fetchResult = await completeAndFetchNext(
@@ -2077,6 +2085,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       // No next job - return to poll loop
       if (fetchResult.next === false) {
+        if (fetchResult.listsEmpty) this.listsEmptyAt = Date.now();
         if (!this.isDrained && this.activeCount <= 1) {
           this.isDrained = true;
           this.emit('drained');

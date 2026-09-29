@@ -376,6 +376,7 @@ const RETENTION_NONE = { mode: '0', count: 0, age: 0 } as const;
 const RETENTION_TRUE = { mode: 'true', count: 0, age: 0 } as const;
 const PARENT_NOTIFICATIONS_MARKER = '__glidemq_parent_notifications__';
 const FAILED_ACTIVATIONS_MARKER = '__glidemq_failed_activations__';
+const LISTS_EMPTY_MARKER = '__glidemq_lists_empty__';
 const COMPLETE_REVOKED_MARKER = '__glidemq_complete_revoked__';
 
 /** A job the chain call failed at activation (server-side terminal failure). */
@@ -535,6 +536,13 @@ export interface CompleteAndFetchResult {
    * dead letter queue adds their DLQ copies. Library 132+; empty before.
    */
   failedActivations: FailedActivation[];
+  /**
+   * NEXT_NONE because the priority list, the LIFO list and the stream were all
+   * empty when the call looked (library 132+). The poll loop skips its
+   * pre-block list pop. False for every other NEXT_NONE (pause, group parking,
+   * token bucket) and for older libraries.
+   */
+  listsEmpty: boolean;
 }
 
 export interface CompleteAndFetchHints {
@@ -606,7 +614,13 @@ export async function completeAndFetchNext(
   // Backward compatibility: JSON protocol (older library versions)
   const parsed = JSON.parse(String(raw));
   if (!parsed.next || parsed.next === false) {
-    return { completed: parsed.completed, next: false, parentNotifications: [], failedActivations: [] };
+    return {
+      completed: parsed.completed,
+      next: false,
+      parentNotifications: [],
+      failedActivations: [],
+      listsEmpty: false,
+    };
   }
   if (parsed.next === 'REVOKED') {
     return {
@@ -616,6 +630,7 @@ export async function completeAndFetchNext(
       nextEntryId: parsed.nextEntryId,
       parentNotifications: [],
       failedActivations: [],
+      listsEmpty: false,
     };
   }
   const parsedHash = parsed.next as string[];
@@ -630,6 +645,7 @@ export async function completeAndFetchNext(
     nextEntryId: parsed.nextEntryId,
     parentNotifications: [],
     failedActivations: [],
+    listsEmpty: false,
   };
 }
 
@@ -645,12 +661,15 @@ function parseChainReply(raw: unknown[], jobId: string, func: string): CompleteA
   let end = raw.length;
   let parentNotifications: string[] = [];
   let failedActivations: FailedActivation[] = [];
+  let listsEmpty = false;
   while (end >= 2) {
     const marker = String(raw[end - 2]);
     if (marker === PARENT_NOTIFICATIONS_MARKER) {
       parentNotifications = parseParentNotifications(raw[end - 1]);
     } else if (marker === FAILED_ACTIVATIONS_MARKER) {
       failedActivations = parseFailedActivations(raw[end - 1]);
+    } else if (marker === LISTS_EMPTY_MARKER) {
+      listsEmpty = String(raw[end - 1]) === '1';
     } else {
       break;
     }
@@ -659,10 +678,10 @@ function parseChainReply(raw: unknown[], jobId: string, func: string): CompleteA
   const tag = String(raw[0]);
   const completed = raw[1] != null ? String(raw[1]) : jobId;
   if (tag === 'NEXT_NONE') {
-    return { completed, next: false, parentNotifications, failedActivations };
+    return { completed, next: false, parentNotifications, failedActivations, listsEmpty };
   }
   if (tag === 'CURRENT_REVOKED') {
-    return { completed, next: 'CURRENT_REVOKED', parentNotifications: [], failedActivations: [] };
+    return { completed, next: 'CURRENT_REVOKED', parentNotifications: [], failedActivations: [], listsEmpty: false };
   }
   if (tag === 'NEXT_REVOKED') {
     return {
@@ -672,6 +691,7 @@ function parseChainReply(raw: unknown[], jobId: string, func: string): CompleteA
       nextEntryId: String(raw[3]),
       parentNotifications,
       failedActivations,
+      listsEmpty: false,
     };
   }
   if (tag === 'NEXT_HASH') {
@@ -686,6 +706,7 @@ function parseChainReply(raw: unknown[], jobId: string, func: string): CompleteA
       nextEntryId: String(raw[3]),
       parentNotifications,
       failedActivations,
+      listsEmpty: false,
     };
   }
   throw new Error(`Unexpected ${func} tag: ${tag}`);

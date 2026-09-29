@@ -15,6 +15,9 @@ local function noteActivationFailure(jobId, reason)
     activationFailures[#activationFailures + 1] = { id = jobId, reason = reason }
   end
 end
+-- Set by fetchNextForChain when NEXT_NONE came from empty priority and LIFO
+-- lists and an empty stream: the worker skips its pre-block list pop.
+local chainListsEmpty = false
 
 -- Guarded decrement of the per-queue list-active counter.
 -- Used at every site that tracks completion/failure/release of a list-sourced
@@ -569,6 +572,11 @@ local function finishChainReply(result, notifications)
     result[#result + 1] = cjson.encode(activationFailures)
   end
   activationFailures = nil
+  if chainListsEmpty then
+    result[#result + 1] = '__glidemq_lists_empty__'
+    result[#result + 1] = '1'
+  end
+  chainListsEmpty = false
   return appendParentNotifications(result, notifications or {})
 end
 
@@ -1414,9 +1422,11 @@ local function fetchNextForChain(prefix, streamKey, eventsKey, failedMetricsKey,
 
   -- Phase 1.0: Try priority list first (highest priority: priority > LIFO > FIFO)
   local priorityKey = prefix .. 'priority'
+  local listsEmpty = false
   for _priAttempt = 1, 3 do
     local priJobId = redis.call('RPOP', priorityKey)
     if not priJobId then
+      listsEmpty = true
       break  -- priority list is empty
     end
 
@@ -1545,9 +1555,11 @@ local function fetchNextForChain(prefix, streamKey, eventsKey, failedMetricsKey,
 
   -- Phase 1.5: Try LIFO list (before stream), retry up to 3 times
   local lifoKey = prefix .. 'lifo'
+  local lifoEmpty = false
   for _lifoAttempt = 1, 3 do
     local lifoJobId = redis.call('RPOP', lifoKey)
     if not lifoJobId then
+      lifoEmpty = true
       break  -- LIFO list is empty
     end
 
@@ -1576,11 +1588,13 @@ local function fetchNextForChain(prefix, streamKey, eventsKey, failedMetricsKey,
   for _fetchAttempt = 1, 3 do
     local nextEntries = redis.call('XREADGROUP', 'GROUP', group, consumer, 'COUNT', 1, 'STREAMS', streamKey, '>')
     if not nextEntries or #nextEntries == 0 then
+      chainListsEmpty = listsEmpty and lifoEmpty
       return {'NEXT_NONE', jobId}
     end
     local streamData = nextEntries[1]
     local entries = streamData[2]
     if not entries or #entries == 0 then
+      chainListsEmpty = listsEmpty and lifoEmpty
       return {'NEXT_NONE', jobId}
     end
     local nextEntry = entries[1]
@@ -1790,6 +1804,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     return {'CURRENT_REVOKED', jobId}
   end
   activationFailures = {}
+  chainListsEmpty = false
   local processedOn
   if hintProcessedOn ~= '' then
     processedOn = tonumber(hintProcessedOn) or timestamp
@@ -2078,6 +2093,7 @@ end)
 -- Returns {failResult, 'NEXT_NONE' | 'NEXT_REVOKED' | 'NEXT_HASH', ...} (see fetchNextForChain).
 redis.register_function('glidemq_failAndFetchNext', function(keys, args)
   activationFailures = {}
+  chainListsEmpty = false
   local failResult = failJobCore(keys, args, false)
   local jobId = args[1]
   local prefix = string.sub(keys[5], 1, #keys[5] - #('job:' .. jobId))

@@ -141,12 +141,16 @@ redis.register_function('glidemq_complete', function(keys, args) ... end)
 | glidemq_unlock                    | 1    | Release a distributed lock (compare-and-delete)                                          |
 | glidemq_renewLock                 | 1    | Renew a distributed lock TTL (compare-and-expire)                                        |
 | glidemq_complete                  | 5    | XACK stream, ZADD completed, HSET job, XADD event, check parent deps                     |
-| glidemq_completeAndFetchNext      | 5    | Complete current + fetch next in single RTT                                              |
+| glidemq_completeAndFetchNext      | 5    | Complete current + fetch next in single RTT; trailing markers list jobs failed at activation and empty lists |
 | glidemq_fail                      | 6    | XACK stream, ZADD failed or ZADD scheduled (retry), HSET job, XADD event                 |
 | glidemq_failAndFetchNext          | 6    | glidemq_fail + the fetch phases of completeAndFetchNext in single RTT (non-broadcast)    |
 | glidemq_updateFlowBudget          | 1    | HSET/HDEL budget limits, re-evaluate exceeded against charged usage                      |
 | glidemq_reclaimStalled            | 2    | XAUTOCLAIM on stream, HSET stalled count, move to failed if exceeded                     |
 | glidemq_reclaimStalledListJobs    | 2    | Stall detection for LIFO/priority list-sourced jobs via bounded SCAN                     |
+| glidemq_removeIdleConsumer        | 1    | XGROUP DELCONSUMER for the calling consumer when it holds no pending entry               |
+| glidemq_recoverBroadcastClaims    | 1    | XCLAIM parked broadcast entries the consumer still owns                                  |
+| glidemq_schedulerAwaitInflight    | 2    | Park a repeatAfterComplete entry while the old mode's job is still running               |
+| glidemq_healEarlyDeps             | 1    | Count parked early child completions registered later by a plain SADD, release parents   |
 | glidemq_pause                     | 2    | HSET meta paused=1, XADD event                                                           |
 | glidemq_resume                    | 2    | HSET meta paused=0, XADD event                                                           |
 | glidemq_dedup                     | 5-6  | Check dedup hash, skip or add based on mode (simple/throttle/debounce)                   |
