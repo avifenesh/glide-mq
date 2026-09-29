@@ -148,7 +148,7 @@ All examples live in [glidemq-examples](https://github.com/avifenesh/glidemq-exa
 ## When NOT to use glide-mq
 
 - **You need a log-based event streaming platform.** glide-mq is a job/task queue, not a partitioned event log. It does not provide Kafka-style topic partitions, consumer offset management, or event replay.
-- **You need browser support.** The Rust NAPI client requires a server-side runtime (Node.js 20+, Bun, or Deno with NAPI support).
+- **You need browser support.** The Rust NAPI client requires a server-side runtime: Node.js 20+, or Bun and Deno through their Node compatibility layers (see [Compatibility](docs/COMPATIBILITY.md)).
 - **You need exactly-once semantics.** glide-mq provides at-least-once delivery. Duplicate processing is rare but possible - design processors to be idempotent.
 - **You need to run without Valkey or Redis.** Production use requires Valkey 7.0+ or Redis 7.0+. For dev/testing, `TestQueue`/`TestWorker` run fully in-memory.
 
@@ -168,6 +168,7 @@ All examples live in [glidemq-examples](https://github.com/avifenesh/glidemq-exa
 | [Durability](docs/DURABILITY.md)       | Durability guarantees, persistence, delivery semantics      |
 | [Architecture](docs/ARCHITECTURE.md)   | Internal architecture and design reference                  |
 | [Migration](docs/MIGRATION.md)         | API mapping guide for migrating from other queues           |
+| [Compatibility](docs/COMPATIBILITY.md) | Node, Bun and Deno support, tested versions, known limits   |
 
 ## Ecosystem
 

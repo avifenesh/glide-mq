@@ -259,3 +259,42 @@ jobs:
         run: npx vitest run tests/search-index.test.ts
         env:
           SKIP_CLUSTER: '1'
+
+  compat-runtimes:
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        runtime: [bun, deno]
+      fail-fast: false
+    services:
+      valkey:
+        image: valkey/valkey:9.1.0
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - uses: oven-sh/setup-bun@v2
+        if: matrix.runtime == 'bun'
+        with:
+          bun-version: latest
+      - uses: denoland/setup-deno@v2
+        if: matrix.runtime == 'deno'
+        with:
+          deno-version: v2.x
+      - run: npm ci
+      - run: npm run build
+      - name: Runtime version
+        run: ${{ matrix.runtime }} --version
+      - name: Compat smoke (${{ matrix.runtime }})
+        run: npm run compat:${{ matrix.runtime }}
