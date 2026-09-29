@@ -33,6 +33,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Field updates recreated removed jobs**: `updateProgress`, `updateData`, `reportTokens`, vector storage and `reportUsage` on a removed job recreated a stateless ghost hash. They now write only if the job exists and throw `Job <id> not found` otherwise.
 - **List-active accounting**: jobs promoted from a priority list into the stream were treated as list-sourced (explicit `listSourced` marker now, old heuristic kept for legacy hashes), and `healListActive` no longer corrects drift from an incomplete keyspace scan.
 - **Repeat-after-complete scheduler stalled on cost overflow** in the `completeAndFetchNext` priority-list path.
+- **Re-upserting a `repeatAfterComplete` scheduler while its job ran started overlapping chains**: the awaiting-completion sentinel `nextRun=0` was treated as missing state, so the next tick fired a second job and reset `limit` counting. In-flight state is now kept and a new interval applies from that job's completion.
+- **Scheduled jobs ignored template ordering, group limits and cost**: the tick passed empty ordering and zero limits to the server function. They now apply like `Queue.add`.
+- **Bad scheduler templates failed silently forever**: an oversized or unserializable template was skipped on every tick without advancing or reporting. Upsert now validates template options, priority, size and serializability, and a stored template that still fails reports through the worker `error` event and advances `nextRun`.
+- **Cron DST handling**: timezone crons with a wildcard minute or hour now fire in both copies of the repeated fall-back hour, fixed times fire once at the earlier instant (positive-offset zones resolved to the later one), and a fixed time inside a spring-forward gap fires right after the gap instead of skipping the day. This matches vixie cron and cronie.
 - **Hung sandboxed jobs held pool slots forever**: a timed-out or revoked sandboxed job kept its worker until the processor replied, queued waiters for aborted jobs still ran later (alongside their retry), and an already-aborted job was still dispatched. Aborted waiters are now dropped, and a processor that has not settled 5 seconds after its abort has its worker thread terminated or child process SIGKILLed and replaced.
 - **Host crash on send to a dead sandbox child**: a proxy response sent after the child exited emitted an unhandled `ERR_IPC_CHANNEL_CLOSED` that killed the worker process. Sends to disconnected children are skipped and the error listener stays attached.
 - **Testing mode diverged from production**: `TestQueue`/`TestWorker` now validate job options, payload size and priority with the same helpers as `Queue.add`; persist `updateData`/`updateProgress` to the stored job; dispatch priority, then LIFO, then FIFO jobs; honor `removeOnComplete`/`removeOnFail` (`true`, count, `{ age, count }`); emit the worker `failed` event on every failed attempt, set `failedReason` and park retries in `delayed` for their backoff (`fixed`, `exponential`, jitter, `backoffStrategies`); and apply deduplication like `glidemq_dedup` (simple frees the id once the job finishes, throttle expires after `ttl`, debounce replaces a delayed job). **Behavior change**: deduplication now applies whenever a job sets `deduplication`, without `new TestQueue(name, { dedup: true })`. Pass `dedup: false` to opt out.
@@ -50,6 +54,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Security
 
 - **Dev dependencies**: `vitest` and `@vitest/coverage-v8` upgraded to 4.1.11 (path traversal via `@vitest/mocker` redirect mocks) and `@humanfs/node` to 0.16.8 (recursive copy followed symlinks). Test tooling only; no runtime dependency changed.
+### Changed
+
+- **Cron day matching uses OR when both day-of-month and day-of-week are restricted**, like standard cron and cron-parser: `0 0 1 * 1` fires on every 1st and every Monday, not only on Mondays that fall on the 1st.
+- **Scheduler templates reject `jobId`** at upsert (a fixed id deduplicated every fire). Stored legacy entries keep working.
+- **Re-upserting an in-flight `repeatAfterComplete` scheduler no longer fires immediately.** Remove and re-add the scheduler to force a run.
 
 ### Documentation
 
