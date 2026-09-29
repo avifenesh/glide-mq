@@ -65,7 +65,10 @@ export interface ConnectionOptions {
 export interface DeadLetterQueueOptions {
   /** Queue name to use as the dead letter queue. */
   name: string;
-  /** Max retries before moving to DLQ. If not set, uses the job's own attempts config. */
+  /**
+   * Not read. A job moves to the DLQ when it fails terminally, which is decided by
+   * the job's own `attempts` option.
+   */
   maxRetries?: number;
 }
 
@@ -80,7 +83,11 @@ export interface QueueOptions {
    */
   client?: Client;
   prefix?: string;
-  /** Dead letter queue configuration. Jobs that exhaust retries are moved here. */
+  /**
+   * Dead letter queue configuration. On a Worker, jobs that fail terminally are copied
+   * to this queue. On a Queue, it only records the DLQ name for `getDeadLetterJobs()`
+   * and routes nothing.
+   */
   deadLetterQueue?: DeadLetterQueueOptions;
   /** Enable transparent compression of job data. Default: 'none'. */
   compression?: 'none' | 'gzip';

@@ -529,7 +529,7 @@ The processor function signature is identical. The only change is the connection
 | `worker.on('completed', (job, result))`                                                                                       | `worker.on('completed', (job, result))`                                                                                                                   | Full    |
 | `worker.on('failed', (job, err))`                                                                                             | `worker.on('failed', (job, err))`                                                                                                                         | Full    |
 | `worker.on('error', (err))`                                                                                                   | `worker.on('error', (err))`                                                                                                                               | Full    |
-| `worker.on('stalled', (jobId))`                                                                                               | `worker.on('stalled', (jobId))`                                                                                                                           | Full    |
+| `worker.on('stalled', (jobId))`                                                                                               | `queueEvents.on('stalled', ({ jobId }))` (Workers do not emit `stalled`)                                                                                  | Changed |
 | `worker.on('closing')`                                                                                                        | `worker.on('closing')`                                                                                                                                    | Full    |
 | `worker.on('closed')`                                                                                                         | `worker.on('closed')`                                                                                                                                     | Full    |
 | `worker.on('active', (job, prev))`                                                                                            | `worker.on('active', (job, jobId))`                                                                                                                       | Changed |
@@ -1113,21 +1113,21 @@ Jobs exceeding the limit are automatically parked in a per-group wait list and r
 
 ### Dead letter queues
 
-BullMQ does not have a native DLQ - failed jobs stay in the failed state. glide-mq has first-class DLQ support configured at the queue level:
+BullMQ does not have a native DLQ - failed jobs stay in the failed state. glide-mq has built-in DLQ support configured on the Worker:
 
 ```ts
 // glide-mq only
-const queue = new Queue('tasks', {
+const worker = new Worker('tasks', processor, {
   connection,
-  deadLetterQueue: {
-    name: 'tasks-dlq', // separate queue for permanently failed jobs
-    maxRetries: 3, // override job's own attempts setting
-  },
+  deadLetterQueue: { name: 'tasks-dlq' }, // jobs that fail terminally are copied here
 });
 
 // Retrieve DLQ jobs (called on the original queue, not the DLQ):
+const queue = new Queue('tasks', { connection });
 const dlqJobs = await queue.getDeadLetterJobs();
 ```
+
+A job goes to the DLQ when its own `attempts` are exhausted. The original job stays in the failed state; the DLQ entry is a copy.
 
 If you were managing a DLQ manually in BullMQ (e.g., moving jobs in the `failed` handler), switch to the native option above.
 
