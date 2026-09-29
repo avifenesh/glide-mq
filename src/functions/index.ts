@@ -101,7 +101,10 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 127: glidemq_casSchedulerEntry lets upsertJobScheduler write only over the entry it read.
 // Version 126: cross-queue child completions that reach the parent before registration are parked
 //   (depearly) and counted by glidemq_registerChildDep; debounce replacements inherit the replaced
-//   cross-queue parent dependency (replacedIds); addJob/addFlow accept an optional trailing budgetKey.
+//   cross-queue parent dependency (replacedIds); addJob/addFlow accept an optional trailing budgetKey;
+//   CAF marks ordering done from the groupKey hint and no longer emits list-phase 'active' events;
+//   broadcast retry counters expire 24h past the retry; removeOnComplete/removeOnFail skip writes to
+//   the deleted hash; list claims are tracked in list-active-ids so list-active scans skip SCAN.
 // Version 128: version 127 (casSchedulerEntry) plus the version 126 changes above.
 export const LIBRARY_VERSION = '128';
 
