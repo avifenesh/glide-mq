@@ -35,6 +35,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Proxy `POST` routes could misread a consumed request body as a disconnect**: `trackDisconnect` counted `req` `close`, which Node emits once the JSON body is consumed while the socket is still open. It now relies on `res` `close` and a dead socket, so `jobs/wait` and other body-reading routes are not cut short.
+- **Proxy SSE failures after headers were silent**: errors on `/queues/:name/events`, `/jobs/:id/events`, `/jobs/:id/stream` and `/broadcast/:name/events` now reach `onError(err, queueName)` before the stream ends.
+- **Proxy opened a Valkey client per request** for `POST /flows` and `GET /usage/summary`; both use the shared command client.
+
+### Changed
+
+- **Proxy bounds**: `POST /queues/:name/retry` retries at most `maxPageSize` per call (default 1000) and returns `{ retried }`; `count > maxPageSize` or `count = 0` returns 400. `POST /queues/:name/jobs/wait` accepts `waitTimeout` up to the new `ProxyOptions.maxWaitTimeout` (default 60000 ms), and a client disconnect aborts the wait and frees the blocking connection. `GET /queues/:name/metrics` returns the whole per-minute hash and is not paged.
+
+### Added
+
+- **`Queue.addAndWait` accepts `signal?: AbortSignal`**: aborting rejects with a `GlideMQError` named `AbortError` and releases the blocking connection; the job stays queued.
+
+### Fixed
+
 - **`addDAG` could release a parent early**: a leaf with one dependent was wired at creation while a sibling with several dependents was wired a round trip later, so a fast leaf could release the parent before the sibling was registered. Leaf ids are reserved and every dependent's deps set is filled before any leaf becomes runnable.
 - **Scheduled jobs skipped gzip compression** on queues with `compression: 'gzip'`. The scheduler entry records the upserting queue's compression and the tick compresses like `Queue.add`.
 - **Switching a scheduler to `repeatAfterComplete` fired immediately**, overlapping a still-running job from the old mode. The first run is now held until the old mode's next run.
