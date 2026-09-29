@@ -14,6 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Flow budgets applied late**: the budget hash and each job's `budgetKey` were written after the flow's jobs were runnable. The budget is now created first and `budgetKey` is written in the same call that creates each job.
 - **Ordered group jobs completed via `completeAndFetchNext` skipped ordering bookkeeping** when only `groupKey` was stored.
 - **BroadcastWorker retry counters reset after 24h**: the per-subscription counter expired before long backoffs elapsed.
+- **Jobs claimed by a closing worker waited for stalled recovery**: closing the blocking client does not cancel an in-flight `XREADGROUP BLOCK`, so entries added during or right after `close()` landed in the closed consumer's PEL and were charged a stall they never ran. A graceful close now lets the read return (at most `blockTimeout` + 1s) and hands its claims back before closing. `close(true)` still tears down immediately.
+- **Flow budgets ignored failed attempts**: usage reported during a failed attempt was never charged to the flow budget. It now is, without double counting on retry.
 - **Reconnect after close() leaked clients and timers**: a reconnect that finished after `close()` installed new clients, a new scheduler and a heartbeat timer that kept the process alive. Reconnect now checks `closing` after every await and closes what it created (Worker and QueueEvents). The first reconnect attempt now waits out its backoff, so persistent non-connection errors no longer spin.
 - **Leaked heartbeat kept a job active forever**: if a rate-limit or token-limit call threw, the job's heartbeat interval kept refreshing `lastActive`, so stalled recovery never reclaimed it. Limiter failures and partial batch activations now stop their heartbeats.
 - **`Worker.pause()` did not stop chaining under a backlog**: completion kept fetching the next job through `completeAndFetchNext`, so `pause()` resolved only when the queue drained. Paused workers complete without fetch-next, and entries delivered by an in-flight read are handed back instead of run.
@@ -63,6 +65,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Security
 
 - **Dev dependencies**: `vitest` and `@vitest/coverage-v8` upgraded to 4.1.11 (path traversal via `@vitest/mocker` redirect mocks) and `@humanfs/node` to 0.16.8 (recursive copy followed symlinks). Test tooling only; no runtime dependency changed.
+### Performance
+
+- **Batch workers** pipeline `moveToActive` and completion calls: 2 round trips per batch instead of 2 per job. A failing command no longer stops the rest of the batch; that entry is left for stalled recovery.
+- **Heartbeats** send the `lastActive` write and the revoke check in one round trip.
 
 ### Performance
 
