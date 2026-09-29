@@ -223,18 +223,21 @@ export class BroadcastWorker<D = any, R = any> extends BaseWorker<D, R> {
         // its timeout. Refresh before every refill so a paused queue does not
         // claim another entry during that secondary read.
         await this.refreshMetaFlags();
-        if (this.queuePaused) break;
+        if (this.queuePaused || this.closing || !this.blockingClient) break;
 
         const blockMs = Math.min(remaining, this.blockTimeout);
-        const moreResult = await this.blockingClient.xreadgroup(
-          this.consumerGroup,
-          this.consumerId,
-          this.xreadStreams,
-          {
+        let moreResult: Awaited<ReturnType<Client['xreadgroup']>>;
+        try {
+          moreResult = await this.blockingClient.xreadgroup(this.consumerGroup, this.consumerId, this.xreadStreams, {
             count: this.batchSize - collected.length,
             block: blockMs,
-          },
-        );
+          });
+        } catch (err) {
+          // close(true) closed the blocking client under this read. The
+          // entries already collected go back through activateAndProcessBatch.
+          if (this.closing) break;
+          throw err;
+        }
 
         if (!moreResult) continue;
         for (const streamEntry of moreResult) {

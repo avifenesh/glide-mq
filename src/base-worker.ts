@@ -2295,7 +2295,20 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     await this.stopSchedulerOnClose(force);
 
     if (!force) {
-      await this.waitForActiveJobs();
+      // Closing the blocking client does not cancel an XREADGROUP BLOCK on
+      // the server: the connection keeps claiming entries into this
+      // consumer's PEL until the block expires, and nobody reads the reply.
+      // Those jobs then wait for stalled recovery and are charged a stall
+      // they never ran. Let the in-flight read return (at most blockTimeout)
+      // so its claims are handed back while the command client is open.
+      await this.settlePollLoop();
+    }
+    this.closeBlockingClient();
+
+    if (!force) {
+      // Claims handed back by the last poll can register after a snapshot.
+      // Nothing new is dispatched once closing is set, so this terminates.
+      while (this.activePromises.size > 0) await this.waitForActiveJobs();
     }
 
     if (this.sandboxClose) {
@@ -2314,10 +2327,6 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     this.heartbeatIntervals.clear();
     this.suspendContinuations.clear();
 
-    if (this.blockingClient) {
-      this.blockingClient.close();
-      this.blockingClient = null;
-    }
     void this.pollLoopPromise?.catch(() => {});
     this.pollLoopPromise = null;
 
@@ -2333,6 +2342,37 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     this.internalEvents.removeAllListeners();
     this.emit('closed');
   }
+
+  private closeBlockingClient(): void {
+    if (!this.blockingClient) return;
+    const client = this.blockingClient;
+    this.blockingClient = null;
+    try {
+      client.close();
+    } catch {
+      // Ignore close errors during shutdown
+    }
+  }
+
+  /**
+   * Wait for the poll loop to exit. The loop stops after its current read,
+   * which returns within blockTimeout. Capped so a reconnect attempt stuck on
+   * an unreachable server cannot hold close().
+   */
+  private async settlePollLoop(): Promise<void> {
+    const loop = this.pollLoopPromise;
+    if (!loop) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      loop.catch(() => {}),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, this.blockTimeout + BaseWorker.POLL_LOOP_SETTLE_GRACE_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+  }
+
+  private static readonly POLL_LOOP_SETTLE_GRACE_MS = 1000;
 
   protected async waitForActiveJobs(): Promise<void> {
     if (this.activePromises.size > 0) {
