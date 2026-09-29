@@ -1367,6 +1367,10 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     )
     if currentOrderingKey ~= '__' then
       markOrderingDone(jobKey, jobId, currentOrderingKey, currentOrderingSeq)
+    elseif currentGroupKey ~= '__' then
+      -- Job hashes store the ordering key as groupKey, so the worker hint
+      -- for orderingKey is absent for ordered jobs. Fall back like complete.
+      markOrderingDone(jobKey, jobId, currentGroupKey, currentOrderingSeq)
     end
     if currentGroupKey ~= '__' then
       releaseGroupSlotAndPromote(jobKey, jobId, timestamp, currentGroupKey)

@@ -10,7 +10,7 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys, keyPrefix, parseCrossQueueParentNotification } =
   require('../dist/utils') as typeof import('../src/utils');
-const { addJob, completeChild, completeJob, dedup, registerChildDep } =
+const { addJob, completeAndFetchNext, completeChild, completeJob, dedup, registerChildDep, CONSUMER_GROUP } =
   require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Lua round 2 2026-09-29', (CONNECTION) => {
@@ -228,5 +228,33 @@ describeEachMode('Lua round 2 2026-09-29', (CONNECTION) => {
     } finally {
       await flow.close();
     }
+  });
+
+  it('R2-11: completeAndFetchNext advances the ordering frontier of a group-key job', async () => {
+    const Q = uniqueQueue('r2-caf-order');
+    const k = buildKeys(Q);
+    await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true });
+    await cleanupClient.hset(k.group('g'), { maxConcurrency: '1', active: '1', nextSeq: '2' });
+    await cleanupClient.hset(k.job('o1'), { id: 'o1', name: 'o', state: 'active', groupKey: 'g', orderingSeq: '1' });
+    // The worker passes the hints it read from the job hash, which stores only groupKey.
+    await completeAndFetchNext(
+      cleanupClient,
+      k,
+      'o1',
+      '',
+      'null',
+      Date.now(),
+      CONSUMER_GROUP,
+      'c1',
+      undefined,
+      undefined,
+      {
+        orderingKey: undefined,
+        orderingSeq: 1,
+        groupKey: 'g',
+      },
+    );
+    expect(await hget(k.meta, 'orderdone:g')).toBe('1');
+    expect(await cleanupClient.exists([`${keyPrefix('glide', Q)}:orderdone:pending:g`])).toBe(0);
   });
 });
