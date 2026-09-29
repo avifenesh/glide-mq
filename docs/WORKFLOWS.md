@@ -243,7 +243,7 @@ const worker = new Worker(
 ### Example: dynamic fan-out
 
 ```typescript
-import { Queue, Worker, FlowProducer } from 'glide-mq';
+import { Queue, Worker } from 'glide-mq';
 
 const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 const queue = new Queue('processing', { connection });
@@ -262,7 +262,6 @@ const worker = new Worker(
     // First execution: inspect data and spawn children dynamically
     const { urls } = job.data;
 
-    const flow = new FlowProducer({ connection });
     for (const url of urls) {
       await queue.add(
         'fetch-url',
@@ -272,7 +271,6 @@ const worker = new Worker(
         },
       );
     }
-    await flow.close();
 
     // Pause until all children complete — throws WaitingChildrenError
     await job.moveToWaitingChildren();
