@@ -10,7 +10,7 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { completeAndFetchNext, healListActive, moveToActive, reclaimStalled, CONSUMER_GROUP } =
+const { completeAndFetchNext, healListActive, moveToActive, promote, reclaimStalled, CONSUMER_GROUP } =
   require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
@@ -485,6 +485,42 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
       await (await queue.getJob(job.id!))!.retry();
       expect(Number(await hget(k.job(job.id!), 'expireAt'))).toBeGreaterThan(Date.now());
       expect(await processedBy(Q, ['x'])).toEqual(['x']);
+    } finally {
+      await queue.close();
+    }
+  });
+  it('changePriority and changeDelay handle waiting jobs held in the priority and LIFO lists', async () => {
+    const Q = uniqueQueue('lc-change-list');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const PRIORITY_SHIFT = 2 ** 42;
+    const listHas = async (key: string, id: string) =>
+      (await cleanupClient.lrange(key, 0, -1)).map(String).includes(id);
+    try {
+      const a = await queue.add('a', {}, { priority: 1 });
+      const b = await queue.add('b', {}, { priority: 1 });
+      const c = await queue.add('c', {}, { lifo: true });
+      await promote(cleanupClient, k, Date.now());
+      expect(await listHas(k.priority, a.id!)).toBe(true);
+      expect(await hget(k.job(a.id!), 'state')).toBe('waiting');
+
+      const ja = (await queue.getJob(a.id!))!;
+      await ja.changePriority(5);
+      expect(await hget(k.job(a.id!), 'state')).toBe('prioritized');
+      expect(await listHas(k.priority, a.id!)).toBe(false);
+      expect(Number(await cleanupClient.zscore(k.scheduled, a.id!))).toBe(5 * PRIORITY_SHIFT);
+
+      const jb = (await queue.getJob(b.id!))!;
+      await jb.changePriority(0);
+      expect(await hget(k.job(b.id!), 'priority')).toBe('0');
+      expect(await listHas(k.priority, b.id!)).toBe(false);
+      expect(await cleanupClient.xlen(k.stream)).toBe(1);
+
+      const jc = (await queue.getJob(c.id!))!;
+      await jc.changeDelay(60_000);
+      expect(await hget(k.job(c.id!), 'state')).toBe('delayed');
+      expect(await listHas(k.lifo, c.id!)).toBe(false);
+      expect(await cleanupClient.zscore(k.scheduled, c.id!)).not.toBeNull();
     } finally {
       await queue.close();
     }

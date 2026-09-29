@@ -3427,6 +3427,31 @@ redis.register_function('glidemq_revoke', function(keys, args)
   return 'flagged'
 end)
 
+-- Detach a waiting job from the priority list, the LIFO list or the stream.
+-- Returns 'priority', 'lifo', 'stream', or nil when it is in none of them
+-- (a worker popped it and has not activated it yet).
+local function detachWaitingJob(prefix, streamKey, group, jobId)
+  if redis.call('LREM', prefix .. 'priority', 0, jobId) > 0 then return 'priority' end
+  if redis.call('LREM', prefix .. 'lifo', 0, jobId) > 0 then return 'lifo' end
+  local cursor = '-'
+  while true do
+    local entries = redis.call('XRANGE', streamKey, cursor, '+', 'COUNT', 1000)
+    if #entries == 0 then return nil end
+    for i = 1, #entries do
+      local entryId = entries[i][1]
+      local fields = entries[i][2]
+      for j = 1, #fields, 2 do
+        if fields[j] == 'jobId' and fields[j + 1] == jobId then
+          pcall(redis.call, 'XACK', streamKey, group, entryId)
+          redis.call('XDEL', streamKey, entryId)
+          return 'stream'
+        end
+      end
+    end
+    cursor = '(' .. entries[#entries][1]
+  end
+end
+
 redis.register_function('glidemq_changePriority', function(keys, args)
   local jobKey = keys[1]
   local streamKey = keys[2]
@@ -3444,34 +3469,24 @@ redis.register_function('glidemq_changePriority', function(keys, args)
   end
   local state = redis.call('HGET', jobKey, 'state')
   if state == 'waiting' then
+    local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     if newPriority == 0 then
-      return 'no_op'
-    end
-    local cursor = '-'
-    local found = false
-    while not found do
-      local entries = redis.call('XRANGE', streamKey, cursor, '+', 'COUNT', 1000)
-      if #entries == 0 then break end
-      for i = 1, #entries do
-        local entryId = entries[i][1]
-        local fields = entries[i][2]
-        for j = 1, #fields, 2 do
-          if fields[j] == 'jobId' and fields[j+1] == jobId then
-            pcall(redis.call, 'XACK', streamKey, group, entryId)
-            if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
-            found = true
-            break
-          end
+      -- Only a job in the priority list is ordered by priority. Move it to
+      -- where an unprioritized job waits (LIFO list or stream).
+      if redis.call('LREM', prefix .. 'priority', 0, jobId) > 0 then
+        if redis.call('HGET', jobKey, 'lifo') == '1' then
+          redis.call('RPUSH', prefix .. 'lifo', jobId)
+        else
+          xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
         end
-        if found then break end
+      elseif (tonumber(redis.call('HGET', jobKey, 'priority')) or 0) == 0 then
+        return 'no_op'
       end
-      if not found then
-        local lastId = entries[#entries][1]
-        local dashPos = lastId:find('-')
-        cursor = lastId:sub(1, dashPos) .. tostring(tonumber(lastId:sub(dashPos + 1)) + 1)
-      end
+      redis.call('HSET', jobKey, 'priority', '0')
+      emitEvent(eventsKey, 'priority-changed', jobId, {'priority', '0'})
+      return 'ok'
     end
-    if not found then
+    if not detachWaitingJob(prefix, streamKey, group, jobId) then
       return 'error:not_in_stream'
     end
     redis.call('ZADD', scheduledKey, string.format('%.0f', newPriority * PRIORITY_SHIFT), jobId)
@@ -3558,29 +3573,8 @@ redis.register_function('glidemq_changeDelay', function(keys, args)
       return 'no_op'
     end
     local priority = tonumber(redis.call('HGET', jobKey, 'priority')) or 0
-    local cursor = '-'
-    local found = false
-    while not found do
-      local entries = redis.call('XRANGE', streamKey, cursor, '+', 'COUNT', 1000)
-      if #entries == 0 then break end
-      for i = 1, #entries do
-        local entryId = entries[i][1]
-        local fields = entries[i][2]
-        for j = 1, #fields, 2 do
-          if fields[j] == 'jobId' and fields[j+1] == jobId then
-            pcall(redis.call, 'XACK', streamKey, group, entryId)
-            if entryId ~= '' then redis.call('XDEL', streamKey, entryId) end
-            found = true
-            break
-          end
-        end
-        if found then break end
-      end
-      if not found then
-        cursor = '(' .. entries[#entries][1]
-      end
-    end
-    if not found then
+    local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
+    if not detachWaitingJob(prefix, streamKey, group, jobId) then
       return 'error:not_in_stream'
     end
     local newScore = priority * PRIORITY_SHIFT + (now + newDelay)
