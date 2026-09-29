@@ -113,7 +113,9 @@ export const LIBRARY_NAME = 'glidemq';
 //   on an optional redispatch arg, replies the reclaimed entries so the worker runs them again;
 //   glidemq_trimBroadcast trims a broadcast stream and deletes the job data of trimmed messages;
 //   promote records the newest broadcast retry entry in the job hash (bcastEntry).
-export const LIBRARY_VERSION = '130';
+// Version 131: glidemq_fail takes an optional requeueOnly arg (RateLimitError) that schedules the retry
+//   without counting the attempt or writing failedReason.
+export const LIBRARY_VERSION = '131';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -643,7 +645,48 @@ export async function failJob(
   broadcastMode?: boolean,
   skipEvents?: boolean,
   skipMetrics?: boolean,
+  requeueOnly?: boolean,
 ): Promise<string> {
+  const { keys, args } = failJobCall(
+    k,
+    jobId,
+    entryId,
+    failedReason,
+    timestamp,
+    maxAttempts,
+    backoffDelay,
+    group,
+    removeOnFail,
+    broadcastMode,
+    skipEvents,
+    skipMetrics,
+    requeueOnly,
+  );
+  const result = await client.fcall('glidemq_fail', keys, args);
+  return result as string;
+}
+
+/**
+ * Build the KEYS/ARGS of a glidemq_fail call. `requeueOnly` (a RateLimitError)
+ * schedules the retry after backoffDelay without counting the attempt; an
+ * older library ignores the flag and counts it, so maxAttempts must still
+ * allow the retry.
+ */
+export function failJobCall(
+  k: QueueKeys,
+  jobId: string,
+  entryId: string,
+  failedReason: string,
+  timestamp: number,
+  maxAttempts: number,
+  backoffDelay: number,
+  group: string = CONSUMER_GROUP,
+  removeOnFail?: boolean | number | { age: number; count: number },
+  broadcastMode?: boolean,
+  skipEvents?: boolean,
+  skipMetrics?: boolean,
+  requeueOnly?: boolean,
+): { keys: string[]; args: string[] } {
   const { mode, count, age } = encodeRetention(removeOnFail);
   const args = [
     jobId,
@@ -657,17 +700,14 @@ export async function failJob(
     count.toString(),
     age.toString(),
   ];
-  if (skipEvents || skipMetrics) {
+  if (requeueOnly) {
+    args.push(broadcastMode ? '1' : '0', skipEvents ? '1' : '0', skipMetrics ? '1' : '0', '1');
+  } else if (skipEvents || skipMetrics) {
     args.push(broadcastMode ? '1' : '0', skipEvents ? '1' : '0', skipMetrics ? '1' : '0');
   } else if (broadcastMode) {
     args.push('1');
   }
-  const result = await client.fcall(
-    'glidemq_fail',
-    [k.stream, k.failed, k.scheduled, k.events, k.job(jobId), k.metricsFailed],
-    args,
-  );
-  return result as string;
+  return { keys: [k.stream, k.failed, k.scheduled, k.events, k.job(jobId), k.metricsFailed], args };
 }
 
 /**

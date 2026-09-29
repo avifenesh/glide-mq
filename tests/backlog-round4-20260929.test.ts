@@ -12,6 +12,8 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { BatchError } = require('../dist/errors') as typeof import('../src/errors');
+const { Broadcast } = require('../dist/broadcast') as typeof import('../src/broadcast');
+const { BroadcastWorker } = require('../dist/broadcast-worker') as typeof import('../src/broadcast-worker');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 describeEachMode('Backlog round 4 2026-09-29', (CONNECTION) => {
@@ -162,9 +164,10 @@ describeEachMode('Backlog round 4 2026-09-29', (CONNECTION) => {
     worker.on('failed', (job: any) => failed.push(job.id));
     try {
       const job = await queue.add('limited', {}, { attempts: 2 });
-      await waitFor(() => completed.includes(job!.id) || failed.includes(job!.id), 15000);
-      // The rate-limit requeue is not an attempt; the real failure is the only one.
-      expect(failed).toEqual([]);
+      await waitFor(() => completed.includes(job!.id), 15000);
+      // The rate-limit requeue is not an attempt: 'failed' fires once, for the
+      // real failure, and the job still completes within attempts: 2.
+      expect(failed).toEqual([job!.id]);
       expect(runs).toEqual([job!.id, job!.id, job!.id]);
       const hash = await cleanupClient.hmget(k.job(job!.id), ['attemptsMade', 'state']);
       expect(hash.map(String)).toEqual(['1', 'completed']);
@@ -200,6 +203,39 @@ describeEachMode('Backlog round 4 2026-09-29', (CONNECTION) => {
     } finally {
       await worker.close();
       await queue.close();
+    }
+  }, 20000);
+
+  it('B2: a broadcast RateLimitError requeue does not touch the per-subscription attempt counter', async () => {
+    const Q = uniqueQueue('r4-ratelimit-bcast');
+    const k = buildKeys(Q);
+    const broadcast = new Broadcast(Q, { connection: CONNECTION });
+    let runs = 0;
+    const completed: string[] = [];
+    const failed: string[] = [];
+    const worker = new BroadcastWorker(
+      Q,
+      async () => {
+        runs++;
+        if (runs === 1) throw new Worker.RateLimitError();
+        if (runs === 2) throw new Error('boom');
+        return 'ok';
+      },
+      { connection: CONNECTION, subscription: 'sub-a', blockTimeout: 300, limiter: { max: 100, duration: 200 } },
+    );
+    worker.on('error', () => {});
+    worker.on('completed', (job: any) => completed.push(job.id));
+    worker.on('failed', (job: any) => failed.push(job.id));
+    try {
+      await worker.waitUntilReady();
+      const id = await broadcast.publish('evt', {}, { attempts: 2 });
+      await waitFor(() => completed.includes(id!), 15000);
+      expect(failed).toEqual([id]);
+      expect(runs).toBe(3);
+      expect(String(await cleanupClient.hget(`${k.job(id!)}:sub:sub-a`, 'a'))).toBe('1');
+    } finally {
+      await worker.close();
+      await broadcast.close();
     }
   }, 20000);
 });

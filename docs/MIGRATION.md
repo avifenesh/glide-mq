@@ -231,7 +231,7 @@ const worker = new Worker(
     const retryAfter = await checkUpstreamRateLimit(job.data.clientId);
     if (retryAfter > 0) {
       await worker.rateLimit(retryAfter);
-      throw new Worker.RateLimitError(); // re-queues the job, never fails it (attemptsMade still increments)
+      throw new Worker.RateLimitError(); // re-queues the job after the limiter delay; not counted as an attempt
     }
     return process(job.data);
   },
@@ -518,24 +518,24 @@ The processor function signature is identical. The only change is the connection
 
 ### Worker methods and options
 
-| BullMQ                                                                                                                        | glide-mq                                                                                                                                                  | Status  |
-| ----------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| BullMQ                                                                                                                        | glide-mq                                                                                                                                                                | Status  |
+| ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `new Worker(name, processor, { connection, concurrency, limiter, stalledInterval, maxStalledCount, lockDuration, settings })` | `new Worker(name, processor, { connection, concurrency, globalConcurrency, limiter, tokenLimiter, stalledInterval, maxStalledCount, lockDuration, backoffStrategies })` | Changed |
-| `worker.pause(doNotWaitActive?)`                                                                                              | `worker.pause(force?)`                                                                                                                                    | Full    |
-| `worker.resume()`                                                                                                             | `worker.resume()`                                                                                                                                         | Full    |
-| `worker.close(force?)`                                                                                                        | `worker.close(force?)`                                                                                                                                    | Full    |
-| `worker.drain()`                                                                                                              | `worker.drain()`                                                                                                                                          | Full    |
-| `worker.rateLimit(ms)`                                                                                                        | `worker.rateLimit(ms)`                                                                                                                                    | Full    |
-| `worker.on('completed', (job, result))`                                                                                       | `worker.on('completed', (job, result))`                                                                                                                   | Full    |
-| `worker.on('failed', (job, err))`                                                                                             | `worker.on('failed', (job, err))`                                                                                                                         | Full    |
-| `worker.on('error', (err))`                                                                                                   | `worker.on('error', (err))`                                                                                                                               | Full    |
-| `worker.on('stalled', (jobId, prev))`                                                                                         | `worker.on('stalled', (jobId, prev))`                                                                                                                     | Full    |
-| `worker.on('closing')`                                                                                                        | `worker.on('closing')`                                                                                                                                    | Full    |
-| `worker.on('closed')`                                                                                                         | `worker.on('closed')`                                                                                                                                     | Full    |
-| `worker.on('active', (job, prev))`                                                                                            | `worker.on('active', (job, jobId))`                                                                                                                       | Changed |
-| `worker.on('drained')`                                                                                                        | `worker.on('drained')`                                                                                                                                    | Full    |
-| `Worker.RateLimitError`                                                                                                       | `Worker.RateLimitError` (re-queues without failing, but increments `attemptsMade`)                                                                       | Changed |
-| Sandboxed processor (file path string)                                                                                        | `new Worker('q', './processor.js', { connection, sandbox: {} })`                                                                                          | Full    |
+| `worker.pause(doNotWaitActive?)`                                                                                              | `worker.pause(force?)`                                                                                                                                                  | Full    |
+| `worker.resume()`                                                                                                             | `worker.resume()`                                                                                                                                                       | Full    |
+| `worker.close(force?)`                                                                                                        | `worker.close(force?)`                                                                                                                                                  | Full    |
+| `worker.drain()`                                                                                                              | `worker.drain()`                                                                                                                                                        | Full    |
+| `worker.rateLimit(ms)`                                                                                                        | `worker.rateLimit(ms)`                                                                                                                                                  | Full    |
+| `worker.on('completed', (job, result))`                                                                                       | `worker.on('completed', (job, result))`                                                                                                                                 | Full    |
+| `worker.on('failed', (job, err))`                                                                                             | `worker.on('failed', (job, err))`                                                                                                                                       | Full    |
+| `worker.on('error', (err))`                                                                                                   | `worker.on('error', (err))`                                                                                                                                             | Full    |
+| `worker.on('stalled', (jobId, prev))`                                                                                         | `worker.on('stalled', (jobId, prev))`                                                                                                                                   | Full    |
+| `worker.on('closing')`                                                                                                        | `worker.on('closing')`                                                                                                                                                  | Full    |
+| `worker.on('closed')`                                                                                                         | `worker.on('closed')`                                                                                                                                                   | Full    |
+| `worker.on('active', (job, prev))`                                                                                            | `worker.on('active', (job, jobId))`                                                                                                                                     | Changed |
+| `worker.on('drained')`                                                                                                        | `worker.on('drained')`                                                                                                                                                  | Full    |
+| `Worker.RateLimitError`                                                                                                       | `Worker.RateLimitError` (re-queues after the limiter delay; not counted as an attempt)                                                                                  | Full    |
+| Sandboxed processor (file path string)                                                                                        | `new Worker('q', './processor.js', { connection, sandbox: {} })`                                                                                                        | Full    |
 
 ### Job methods
 
@@ -600,24 +600,24 @@ The processor function signature is identical. The only change is the connection
 
 ### QueueEvents events
 
-| BullMQ event          | glide-mq event       | Status                                                                                  |
-| --------------------- | -------------------- | --------------------------------------------------------------------------------------- |
-| `'added'`             | `'added'`            | Full                                                                                    |
-| `'completed'`         | `'completed'`        | Full                                                                                    |
-| `'failed'`            | `'failed'`           | Changed - terminal failures only; a failed attempt that will retry emits `'retrying'`   |
-| `'stalled'`           | `'stalled'`          | Full                                                                                    |
-| `'progress'`          | `'progress'`         | Full                                                                                    |
-| `'paused'`            | `'paused'`           | Full                                                                                    |
-| `'resumed'`           | `'resumed'`          | Full                                                                                    |
-| `'removed'`           | `'removed'`          | Full                                                                                    |
-| `'retries-exhausted'` | `'failed'`           | Changed - check `job.attemptsMade >= job.opts.attempts`                                 |
-| `'waiting'`           | -                    | Gap                                                                                     |
-| `'active'`            | `'active'`           | Partial - emitted only on some activation paths; do not rely on it                      |
-| `'delayed'`           | -                    | Gap (`'retrying'` carries the backoff `delay`)                                          |
+| BullMQ event          | glide-mq event       | Status                                                                                    |
+| --------------------- | -------------------- | ----------------------------------------------------------------------------------------- |
+| `'added'`             | `'added'`            | Full                                                                                      |
+| `'completed'`         | `'completed'`        | Full                                                                                      |
+| `'failed'`            | `'failed'`           | Changed - terminal failures only; a failed attempt that will retry emits `'retrying'`     |
+| `'stalled'`           | `'stalled'`          | Full                                                                                      |
+| `'progress'`          | `'progress'`         | Full                                                                                      |
+| `'paused'`            | `'paused'`           | Full                                                                                      |
+| `'resumed'`           | `'resumed'`          | Full                                                                                      |
+| `'removed'`           | `'removed'`          | Full                                                                                      |
+| `'retries-exhausted'` | `'failed'`           | Changed - check `job.attemptsMade >= job.opts.attempts`                                   |
+| `'waiting'`           | -                    | Gap                                                                                       |
+| `'active'`            | `'active'`           | Partial - emitted only on some activation paths; do not rely on it                        |
+| `'delayed'`           | -                    | Gap (`'retrying'` carries the backoff `delay`)                                            |
 | `'drained'`           | `'drained'`          | Changed - emitted by `queue.drain()` with `jobId` = removed count, not when queue empties |
-| `'cleaned'`           | `'cleaned'`          | Changed - emitted by `queue.clean()` with `jobId` = removed count                       |
-| `'deduplicated'`      | -                    | Gap                                                                                     |
-| `'waiting-children'`  | `'waiting-children'` | Partial - emitted by `job.moveToWaitingChildren()`, not when a flow parent is created   |
+| `'cleaned'`           | `'cleaned'`          | Changed - emitted by `queue.clean()` with `jobId` = removed count                         |
+| `'deduplicated'`      | -                    | Gap                                                                                       |
+| `'waiting-children'`  | `'waiting-children'` | Partial - emitted by `job.moveToWaitingChildren()`, not when a flow parent is created     |
 
 glide-mq also emits `'retrying'`, `'retried'`, `'promoted'`, `'revoked'`, `'expired'`, `'suspended'`, `'priority-changed'`, `'delay-changed'`, `'group-rate-limited'` and `'usage'`.
 
@@ -999,7 +999,7 @@ const worker = new Worker(
   'q',
   async (job) => {
     if (shouldThrottle()) {
-      throw new Worker.RateLimitError(); // re-queues job, never fails it (attemptsMade still increments)
+      throw new Worker.RateLimitError(); // re-queues the job after the limiter delay; not counted as an attempt
     }
     return process(job);
   },

@@ -1900,6 +1900,10 @@ redis.register_function('glidemq_fail', function(keys, args)
   local broadcastMode = args[11] or '0'
   local skipEvents = args[12] or '0'
   local skipMetrics = args[13] or '0'
+  -- '1': requeue after backoffDelay without counting the attempt (a
+  -- RateLimitError). No attempt increment, no failedReason, no fallback
+  -- advance; the job always comes back.
+  local requeueOnly = args[14] == '1'
   local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
@@ -1913,16 +1917,22 @@ redis.register_function('glidemq_fail', function(keys, args)
   local attemptsMade
   if broadcastMode == '1' then
     local subKey = jobKey .. ':sub:' .. group
-    attemptsMade = redis.call('HINCRBY', subKey, 'a', 1)
+    if requeueOnly then
+      attemptsMade = tonumber(redis.call('HGET', subKey, 'a')) or 0
+    else
+      attemptsMade = redis.call('HINCRBY', subKey, 'a', 1)
+    end
     -- Keep the counter for 24h past the scheduled retry, so a backoff longer
     -- than 24h does not reset the attempts.
     redis.call('EXPIRE', subKey, 86400 + math.ceil(math.max(backoffDelay, 0) / 1000))
+  elseif requeueOnly then
+    attemptsMade = tonumber(redis.call('HGET', jobKey, 'attemptsMade')) or 0
   else
     attemptsMade = redis.call('HINCRBY', jobKey, 'attemptsMade', 1)
   end
-  if maxAttempts > 0 and attemptsMade < maxAttempts then
+  if requeueOnly or (maxAttempts > 0 and attemptsMade < maxAttempts) then
     -- Advance fallback chain if the job has fallbacks configured
-    local optsRaw = redis.call('HGET', jobKey, 'opts')
+    local optsRaw = (not requeueOnly) and redis.call('HGET', jobKey, 'opts') or nil
     if optsRaw and string.find(optsRaw, '"fallbacks"') then
       local fbIdx = tonumber(redis.call('HGET', jobKey, 'fallbackIndex') or '0') or 0
       redis.call('HSET', jobKey, 'fallbackIndex', tostring(fbIdx + 1))
@@ -1935,11 +1945,15 @@ redis.register_function('glidemq_fail', function(keys, args)
       member = jobId .. '||' .. group
     end
     redis.call('ZADD', scheduledKey, score, member)
-    redis.call('HSET', jobKey,
-      'state', 'delayed',
-      'failedReason', failedReason,
-      'processedOn', tostring(timestamp)
-    )
+    if requeueOnly then
+      redis.call('HSET', jobKey, 'state', 'delayed', 'processedOn', tostring(timestamp))
+    else
+      redis.call('HSET', jobKey,
+        'state', 'delayed',
+        'failedReason', failedReason,
+        'processedOn', tostring(timestamp)
+      )
+    end
     -- Only release group slot if not an ordering-key job (ordering jobs hold the slot through retries)
     local failOrdSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
     if failOrdSeq > 0 then
