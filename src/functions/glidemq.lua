@@ -868,6 +868,53 @@ local function removeExcessJobs(setKey, prefix, ids)
   end
 end
 
+-- Upsert the group config an ordered job carries (concurrency, sliding-window
+-- rate limit, token bucket). The current values are read in one HMGET.
+local function upsertGroupConfig(prefix, orderingKey, orderingSeq, groupConcurrency, groupRateMax, groupRateDuration,
+    tbCapacity, tbRefillRate, timestamp)
+  if groupConcurrency < 1 then groupConcurrency = 1 end
+  local groupHashKey = groupHashKey(prefix, orderingKey)
+  local cur = redis.call('HMGET', groupHashKey,
+    'maxConcurrency', 'nextSeq', 'rateMax', 'rateDuration', 'tbCapacity', 'tbRefillRate')
+  if (tonumber(cur[1]) or 0) ~= groupConcurrency then
+    redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
+  end
+  -- Initialize nextSeq for ordered promotion
+  if orderingSeq > 0 and not cur[2] then
+    redis.call('HSET', groupHashKey, 'nextSeq', '1')
+  end
+  local curRateMax = tonumber(cur[3]) or 0
+  if groupRateMax > 0 then
+    if curRateMax ~= groupRateMax then
+      redis.call('HSET', groupHashKey, 'rateMax', tostring(groupRateMax))
+    end
+    if (tonumber(cur[4]) or 0) ~= groupRateDuration then
+      redis.call('HSET', groupHashKey, 'rateDuration', tostring(groupRateDuration))
+    end
+  elseif curRateMax > 0 then
+    -- Clear stale rate limit fields if group was previously rate-limited
+    redis.call('HDEL', groupHashKey, 'rateMax', 'rateDuration', 'rateWindowStart', 'rateCount')
+  end
+  local curTbCap = tonumber(cur[5]) or 0
+  if tbCapacity > 0 then
+    if curTbCap ~= tbCapacity then
+      redis.call('HSET', groupHashKey, 'tbCapacity', tostring(tbCapacity))
+    end
+    if (tonumber(cur[6]) or 0) ~= tbRefillRate then
+      redis.call('HSET', groupHashKey, 'tbRefillRate', tostring(tbRefillRate))
+    end
+    -- Initialize tokens on first setup
+    if curTbCap == 0 then
+      redis.call('HSET', groupHashKey,
+        'tbTokens', tostring(tbCapacity),
+        'tbLastRefill', tostring(timestamp),
+        'tbRefillRemainder', '0')
+    end
+  elseif curTbCap > 0 then
+    redis.call('HDEL', groupHashKey, 'tbCapacity', 'tbRefillRate', 'tbTokens', 'tbLastRefill', 'tbRefillRemainder')
+  end
+end
+
 redis.register_function('glidemq_version', function(keys, args)
   return '__LIBRARY_VERSION__'
 end)
@@ -926,57 +973,8 @@ redis.register_function('glidemq_addJob', function(keys, args)
     orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
   end
   if useGroupConcurrency then
-    if groupConcurrency < 1 then groupConcurrency = 1 end
-    local groupHashKey = groupHashKey(prefix, orderingKey)
-    local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
-    if curMax ~= groupConcurrency then
-      redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
-    end
-    -- Initialize nextSeq for ordered promotion
-    if orderingSeq > 0 and redis.call('HEXISTS', groupHashKey, 'nextSeq') == 0 then
-      redis.call('HSET', groupHashKey, 'nextSeq', '1')
-    end
-    -- Upsert rate limit fields on group hash
-    if groupRateMax > 0 then
-      local curRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
-      if curRateMax ~= groupRateMax then
-        redis.call('HSET', groupHashKey, 'rateMax', tostring(groupRateMax))
-      end
-      local curRateDuration = tonumber(redis.call('HGET', groupHashKey, 'rateDuration')) or 0
-      if curRateDuration ~= groupRateDuration then
-        redis.call('HSET', groupHashKey, 'rateDuration', tostring(groupRateDuration))
-      end
-    else
-      -- Clear stale rate limit fields if group was previously rate-limited
-      local oldRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
-      if oldRateMax > 0 then
-        redis.call('HDEL', groupHashKey, 'rateMax', 'rateDuration', 'rateWindowStart', 'rateCount')
-      end
-    end
-    -- Upsert token bucket fields on group hash
-    if tbCapacity > 0 then
-      local curTbCap = tonumber(redis.call('HGET', groupHashKey, 'tbCapacity')) or 0
-      if curTbCap ~= tbCapacity then
-        redis.call('HSET', groupHashKey, 'tbCapacity', tostring(tbCapacity))
-      end
-      local curTbRate = tonumber(redis.call('HGET', groupHashKey, 'tbRefillRate')) or 0
-      if curTbRate ~= tbRefillRate then
-        redis.call('HSET', groupHashKey, 'tbRefillRate', tostring(tbRefillRate))
-      end
-      -- Initialize tokens on first setup
-      if curTbCap == 0 then
-        redis.call('HSET', groupHashKey,
-          'tbTokens', tostring(tbCapacity),
-          'tbLastRefill', tostring(timestamp),
-          'tbRefillRemainder', '0')
-      end
-    else
-      -- Clear stale tb fields
-      local oldTbCap = tonumber(redis.call('HGET', groupHashKey, 'tbCapacity')) or 0
-      if oldTbCap > 0 then
-        redis.call('HDEL', groupHashKey, 'tbCapacity', 'tbRefillRate', 'tbTokens', 'tbLastRefill', 'tbRefillRemainder')
-      end
-    end
+    upsertGroupConfig(prefix, orderingKey, orderingSeq, groupConcurrency, groupRateMax, groupRateDuration,
+      tbCapacity, tbRefillRate, timestamp)
   end
   local hashFields = {
     'id', jobIdStr,
@@ -2275,55 +2273,8 @@ redis.register_function('glidemq_dedup', function(keys, args)
     orderingSeq = redis.call('HINCRBY', orderingMetaKey, orderingKey, 1)
   end
   if useGroupConcurrency then
-    if groupConcurrency < 1 then groupConcurrency = 1 end
-    local groupHashKey = groupHashKey(prefix, orderingKey)
-    local curMax = tonumber(redis.call('HGET', groupHashKey, 'maxConcurrency')) or 0
-    if curMax ~= groupConcurrency then
-      redis.call('HSET', groupHashKey, 'maxConcurrency', tostring(groupConcurrency))
-    end
-    -- Initialize nextSeq for ordered promotion
-    if orderingSeq > 0 and redis.call('HEXISTS', groupHashKey, 'nextSeq') == 0 then
-      redis.call('HSET', groupHashKey, 'nextSeq', '1')
-    end
-    if groupRateMax > 0 then
-      local curRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
-      if curRateMax ~= groupRateMax then
-        redis.call('HSET', groupHashKey, 'rateMax', tostring(groupRateMax))
-      end
-      local curRateDuration = tonumber(redis.call('HGET', groupHashKey, 'rateDuration')) or 0
-      if curRateDuration ~= groupRateDuration then
-        redis.call('HSET', groupHashKey, 'rateDuration', tostring(groupRateDuration))
-      end
-    else
-      local oldRateMax = tonumber(redis.call('HGET', groupHashKey, 'rateMax')) or 0
-      if oldRateMax > 0 then
-        redis.call('HDEL', groupHashKey, 'rateMax', 'rateDuration', 'rateWindowStart', 'rateCount')
-      end
-    end
-    -- Upsert token bucket fields on group hash
-    if tbCapacity > 0 then
-      local curTbCap = tonumber(redis.call('HGET', groupHashKey, 'tbCapacity')) or 0
-      if curTbCap ~= tbCapacity then
-        redis.call('HSET', groupHashKey, 'tbCapacity', tostring(tbCapacity))
-      end
-      local curTbRate = tonumber(redis.call('HGET', groupHashKey, 'tbRefillRate')) or 0
-      if curTbRate ~= tbRefillRate then
-        redis.call('HSET', groupHashKey, 'tbRefillRate', tostring(tbRefillRate))
-      end
-      -- Initialize tokens on first setup
-      if curTbCap == 0 then
-        redis.call('HSET', groupHashKey,
-          'tbTokens', tostring(tbCapacity),
-          'tbLastRefill', tostring(timestamp),
-          'tbRefillRemainder', '0')
-      end
-    else
-      -- Clear stale tb fields
-      local oldTbCap = tonumber(redis.call('HGET', groupHashKey, 'tbCapacity')) or 0
-      if oldTbCap > 0 then
-        redis.call('HDEL', groupHashKey, 'tbCapacity', 'tbRefillRate', 'tbTokens', 'tbLastRefill', 'tbRefillRemainder')
-      end
-    end
+    upsertGroupConfig(prefix, orderingKey, orderingSeq, groupConcurrency, groupRateMax, groupRateDuration,
+      tbCapacity, tbRefillRate, timestamp)
   end
   local hashFields = {
     'id', jobIdStr,
