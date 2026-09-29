@@ -287,6 +287,10 @@ local function completeParentDependency(parentDepsKey, parentJobKey, parentStrea
   if redis.call('SISMEMBER', parentDepsKey, depsMember) == 0 then
     if redis.call('HSETNX', parentJobKey, 'depearly:' .. depsMember, '1') == 1 then
       redis.call('HINCRBY', parentJobKey, 'depsEarly', 1)
+      -- Index the parent so glidemq_healEarlyDeps can count this completion
+      -- if the member is later registered with a plain SADD (older producer)
+      -- and no further child completion arrives.
+      redis.call('SADD', string.sub(parentJobKey, 1, #parentJobKey - #('job:' .. parentId)) .. 'deps-early', parentId)
     end
     local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
     return redis.call('SCARD', parentDepsKey) - doneCount
@@ -2272,12 +2276,12 @@ end
 -- only after one complete SCAN seeded it (claims activated by an older
 -- library are not in it) and while SCARD >= list-active (an older worker
 -- that does not maintain it). Returns the IDs and whether they are complete.
-local function activeListIds(prefix, maxIter, count)
+local function activeListIds(prefix, maxIter, count, forceScan)
   local listActiveKey = prefix .. 'list-active'
   local idsKey = listActiveIdsKey(listActiveKey)
   local metaKey = prefix .. 'meta'
   local counter = tonumber(redis.call('GET', listActiveKey)) or 0
-  if redis.call('HGET', metaKey, 'listActiveIds') == '1' and redis.call('SCARD', idsKey) >= counter then
+  if not forceScan and redis.call('HGET', metaKey, 'listActiveIds') == '1' and redis.call('SCARD', idsKey) >= counter then
     local ids = {}
     local members = redis.call('SMEMBERS', idsKey)
     for i = 1, #members do
@@ -4726,6 +4730,41 @@ redis.register_function('glidemq_updateJobFields', function(keys, args)
   return 1
 end)
 
+-- Count parked early completions of parents whose child registration came
+-- through a plain SADD (producer on a library before 126) and release a
+-- parent that is complete. Bounded: at most `max` parents per call.
+-- KEYS: [idKey]  ARGS: [max]  Reply: number of parents released.
+redis.register_function('glidemq_healEarlyDeps', function(keys, args)
+  local idKey = keys[1]
+  local prefix = string.sub(idKey, 1, #idKey - 2)
+  local indexKey = prefix .. 'deps-early'
+  local max = tonumber(args[1]) or 100
+  if redis.call('EXISTS', indexKey) == 0 then return 0 end
+  local scan = redis.call('SSCAN', indexKey, '0', 'COUNT', max)
+  local parents = scan[2]
+  local released = 0
+  for i = 1, #parents do
+    local parentId = parents[i]
+    local parentJobKey = prefix .. 'job:' .. parentId
+    if redis.call('EXISTS', parentJobKey) == 0 then
+      redis.call('SREM', indexKey, parentId)
+    else
+      local depsKey = prefix .. 'deps:' .. parentId
+      if countEarlyDeps(depsKey, parentJobKey) then
+        local before = redis.call('HGET', parentJobKey, 'state')
+        releaseParentIfReady(depsKey, parentJobKey, prefix .. 'stream', prefix .. 'events', parentId)
+        if before == 'waiting-children' and redis.call('HGET', parentJobKey, 'state') == 'waiting' then
+          released = released + 1
+        end
+      end
+      if (tonumber(redis.call('HGET', parentJobKey, 'depsEarly')) or 0) <= 0 then
+        redis.call('SREM', indexKey, parentId)
+      end
+    end
+  end
+  return released
+end)
+
 redis.register_function('glidemq_healListActive', function(keys, args)
   local idKey = keys[1]
   local prefix = string.sub(idKey, 1, #idKey - 2)
@@ -4734,22 +4773,25 @@ redis.register_function('glidemq_healListActive', function(keys, args)
   if counter <= 0 then
     return 0
   end
-  local ids, complete = activeListIds(prefix, 500, 100)
+  -- Always SCAN here: list-active-ids can go stale across a library
+  -- downgrade and re-upgrade (claims made by the older library are missing,
+  -- claims it released are still members), so heal re-seeds the set from a
+  -- complete scan and only then trusts it again.
+  local ids, complete = activeListIds(prefix, 500, 100, true)
   -- A partial scan undercounts active list jobs. Correcting from it would
   -- lower list-active below the true count and let globalConcurrency
-  -- overcommit, so only a complete view may correct the counter.
+  -- overcommit, so only a complete view may correct the counter or the set.
   if not complete then return 0 end
+  local idsKey = listActiveIdsKey(listActiveKey)
+  local active = {}
+  for i = 1, #ids do active[ids[i]] = true end
+  local members = redis.call('SMEMBERS', idsKey)
+  for i = 1, #members do
+    if not active[members[i]] then redis.call('SREM', idsKey, members[i]) end
+  end
   local drift = counter - #ids
   if drift > 0 then
     redis.call('DECRBY', listActiveKey, drift)
-    -- Mirror the correction in list-active-ids: keep only the active claims.
-    local idsKey = listActiveIdsKey(listActiveKey)
-    local active = {}
-    for i = 1, #ids do active[ids[i]] = true end
-    local members = redis.call('SMEMBERS', idsKey)
-    for i = 1, #members do
-      if not active[members[i]] then redis.call('SREM', idsKey, members[i]) end
-    end
   end
   return drift
 end)

@@ -1777,6 +1777,22 @@ export async function healListActive(client: Client, keys: QueueKeys): Promise<n
 }
 
 /**
+ * Count parked early child completions for parents whose registration came
+ * through a plain SADD (producer on a library before 126) and release the
+ * parents that are complete (glidemq_healEarlyDeps, library 132). Bounded to
+ * `max` parents per call. Returns the number released; 0 on an older library.
+ */
+export async function healEarlyDeps(client: Client, keys: QueueKeys, max = 100): Promise<number> {
+  try {
+    const result = await client.fcall('glidemq_healEarlyDeps', [keys.id], [max.toString()]);
+    return Number(result) || 0;
+  } catch (err) {
+    if (!isFunctionNotFound(err)) throw err;
+    return 0;
+  }
+}
+
+/**
  * Return active list-sourced jobIds (priority or LIFO) via bounded SCAN.
  * Pagination follows the same convention as Queue.getJobs: inclusive 0-indexed
  * bounds; end < 0 means unbounded.

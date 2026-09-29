@@ -16,6 +16,7 @@ import {
   renewLock,
   unlock,
   completeChild,
+  healEarlyDeps,
   healListActive,
   schedulerAwaitInflight,
   sweepSuspended,
@@ -182,6 +183,7 @@ export class Scheduler {
       this.promoteDelayed()
         .then(() => this.promoteRateLimitedGroups())
         .then(() => this.flushCrossQueueParentNotifies())
+        .then(() => this.healEarlyDependencies())
         .then(() => this.runSchedulers())
         .then(() => {
           this.onPromotionTick?.();
@@ -340,6 +342,19 @@ export class Scheduler {
       } catch (err) {
         this.reportError(err);
       }
+    }
+  }
+
+  /**
+   * Release parents whose last child completion was parked before an older
+   * producer registered the child with a plain SADD (no later completion
+   * counts it). Bounded per call; a no-op when no parent is indexed.
+   */
+  private async healEarlyDependencies(): Promise<void> {
+    try {
+      await healEarlyDeps(this.client, this.queueKeys);
+    } catch (err) {
+      this.reportError(err);
     }
   }
 
