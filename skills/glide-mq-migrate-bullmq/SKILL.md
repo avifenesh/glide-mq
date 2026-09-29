@@ -7,7 +7,7 @@ description: >-
 license: Apache-2.0
 metadata:
   author: glide-mq
-  version: "0.15.5"
+  version: "0.15.6"
   tags: glide-mq, bullmq, migration, queue, valkey, redis
   sources: docs/MIGRATION.md
 ---

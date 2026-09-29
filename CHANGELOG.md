@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.15.6] - 2026-09-30
+
 ### Fixed
 
 - **`addDAG` could release a parent early**: a leaf with one dependent was wired at creation while a sibling with several dependents was wired a round trip later, so a fast leaf could release the parent before the sibling was registered. Leaf ids are reserved and every dependent's deps set is filled before any leaf becomes runnable.
