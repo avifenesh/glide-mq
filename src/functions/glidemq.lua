@@ -1396,6 +1396,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
                     'state', 'failed',
                     'failedReason', 'cost exceeds token bucket capacity',
                     'finishedOn', tostring(timestamp))
+                  advanceRepeatAfterComplete(priJobKey, prefix, tonumber(timestamp))
                   if skipEvents ~= '1' then emitEvent(eventsKey, 'failed', priJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
                   if skipMetrics ~= '1' then recordMetrics(prefix .. 'metrics:failed', tonumber(timestamp), tonumber(timestamp) - priProcessedOn) end
                   if priOrdSeq > 0 then

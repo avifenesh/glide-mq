@@ -10,6 +10,7 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
+const { completeAndFetchNext, CONSUMER_GROUP } = require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
   let cleanupClient: any;
@@ -189,5 +190,37 @@ describeEachMode('Lua correctness 2026-09-29', (CONNECTION) => {
     } finally {
       await queue.close();
     }
+  });
+  it('CAF priority-list cost overflow advances a repeat-after-complete scheduler', async () => {
+    const Q = uniqueQueue('lc-caf-pri-cost');
+    const k = buildKeys(Q);
+    await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true });
+    await cleanupClient.hset(k.schedulers, {
+      rac: JSON.stringify({ repeatAfterComplete: 1000, nextRun: 0, template: { name: 'rac' } }),
+    });
+    await cleanupClient.hset(k.job('pri'), {
+      id: 'pri',
+      name: 'rac',
+      state: 'waiting',
+      priority: '1',
+      groupKey: 'g',
+      cost: '5000',
+      schedulerName: 'rac',
+    });
+    await cleanupClient.hset(k.group('g'), {
+      maxConcurrency: '0',
+      active: '0',
+      tbCapacity: '1000',
+      tbRefillRate: '1000',
+      tbTokens: '1000',
+      tbLastRefill: String(Date.now()),
+    });
+    await cleanupClient.lpush(k.priority, ['pri']);
+    await cleanupClient.hset(k.job('cur'), { id: 'cur', name: 'cur', state: 'active' });
+    const now = Date.now();
+    await completeAndFetchNext(cleanupClient, k, 'cur', '', 'null', now, CONSUMER_GROUP, 'c1');
+    expect(await hget(k.job('pri'), 'state')).toBe('failed');
+    const config = JSON.parse((await hget(k.schedulers, 'rac'))!);
+    expect(config.nextRun).toBe(now + 1000);
   });
 });
