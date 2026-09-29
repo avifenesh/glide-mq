@@ -327,3 +327,115 @@ describe('HTTP proxy hardening - queue cache connections', () => {
     }
   });
 });
+
+describe('HTTP proxy hardening - error responses', () => {
+  const { Queue: DistQueue } = require('../dist/queue') as typeof import('../src/queue');
+  const { Job: DistJob } = require('../dist/job') as typeof import('../src/job');
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+  const logged: Array<{ err: Error; queueName: string }> = [];
+  const queueName = `proxy-hard-${RUN_ID}-errors`;
+  const restores: Array<() => void> = [];
+
+  function patch<T extends object>(target: T, key: keyof T, impl: unknown): void {
+    const original = target[key];
+    (target as any)[key] = impl;
+    restores.push(() => {
+      (target as any)[key] = original;
+    });
+  }
+
+  function restoreAll(): void {
+    for (const restore of restores.splice(0).reverse()) restore();
+  }
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    const proxy = createProxyServer({
+      connection: CONNECTION,
+      onError: (err, name) => {
+        logged.push({ err, queueName: name });
+      },
+    });
+    proxyClose = proxy.close;
+    ({ baseUrl, server } = await listen(proxy.app));
+  });
+
+  afterEach(() => {
+    restoreAll();
+    logged.length = 0;
+  });
+
+  afterAll(async () => {
+    server.closeAllConnections?.();
+    await proxyClose();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  }, 30000);
+
+  async function post(path: string, body: unknown): Promise<Response> {
+    return fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('POST /jobs/wait hides internal error details and logs them through onError', async () => {
+    patch(DistQueue.prototype, 'addAndWait', async () => {
+      throw new Error('connection lost to 10.0.0.7:6379');
+    });
+    const res = await post(`/queues/${queueName}/jobs/wait`, { name: 'w', data: {} });
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toBe('Internal server error');
+    expect(logged).toHaveLength(1);
+    expect(logged[0].err.message).toBe('connection lost to 10.0.0.7:6379');
+    expect(logged[0].queueName).toBe(queueName);
+  });
+
+  it('POST /jobs/wait maps validation errors to 400 instead of 500', async () => {
+    patch(DistQueue.prototype, 'addAndWait', async () => {
+      throw new Error('ordering.key must be a non-empty string');
+    });
+    const res = await post(`/queues/${queueName}/jobs/wait`, { name: 'w', data: {} });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('ordering.key must be a non-empty string');
+    expect(logged).toHaveLength(0);
+  });
+
+  it('job priority/delay/promote return 500 for transport errors and 400 for known rejections', async () => {
+    const addRes = await post(`/queues/${queueName}/jobs`, { name: 'mut', data: {}, opts: { delay: 60000 } });
+    expect(addRes.status).toBe(201);
+    const { id } = await addRes.json();
+
+    const transport = async () => {
+      throw new Error('socket hang up 10.0.0.7:6379');
+    };
+    patch(DistJob.prototype, 'changePriority', transport);
+    patch(DistJob.prototype, 'changeDelay', transport);
+    patch(DistJob.prototype, 'promote', transport);
+
+    const cases: Array<[string, unknown]> = [
+      ['priority', { priority: 1 }],
+      ['delay', { delay: 10 }],
+      ['promote', {}],
+    ];
+    for (const [path, body] of cases) {
+      const res = await post(`/queues/${queueName}/jobs/${id}/${path}`, body);
+      expect(res.status).toBe(500);
+      expect((await res.json()).error).toBe('Internal server error');
+    }
+    expect(logged).toHaveLength(3);
+
+    restoreAll();
+    patch(DistJob.prototype, 'promote', async () => {
+      throw new Error('Cannot promote: job is not delayed');
+    });
+    const rejected = await post(`/queues/${queueName}/jobs/${id}/promote`, {});
+    expect(rejected.status).toBe(400);
+    expect((await rejected.json()).error).toBe('Cannot promote: job is not delayed');
+  });
+});

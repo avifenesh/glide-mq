@@ -70,9 +70,11 @@ function queryValue(req: Request, key: string): string | undefined {
   return value != null ? String(value) : undefined;
 }
 
+/** Error with an HTTP status whose message is written by the proxy and safe to return to clients. */
 function httpError(status: number, message: string): Error {
   const err = new Error(message);
   (err as any).status = status;
+  (err as any).expose = true;
   return err;
 }
 
@@ -113,22 +115,43 @@ function isValidationError(err: unknown): boolean {
 }
 
 /**
+ * Map a client-facing failure of a job mutation (a known "Cannot ..." rejection or a validation
+ * error) to 400. Anything else, such as a transport error, is returned unchanged.
+ */
+function asClientError(err: unknown, knownPrefix: string): unknown {
+  if (err instanceof Error && (err.message.startsWith(knownPrefix) || isValidationError(err))) {
+    return httpError(400, err.message);
+  }
+  return err;
+}
+
+function genericServerMessage(status: number): string {
+  if (status === 503) return 'Service unavailable';
+  if (status === 504) return 'Gateway timeout';
+  return 'Internal server error';
+}
+
+/**
  * Resolve the HTTP status code and message for a caught error.
  * Returns the .status property if set, falls back to 400/500 heuristic.
+ * 5xx responses carry a generic message unless the proxy itself wrote it (httpError).
  */
-function errorResponse(err: unknown): { status: number; message: string } {
+function errorResponse(err: unknown): { status: number; message: string; internal: boolean } {
   if (err && typeof err === 'object') {
     const status = (err as any).status;
     if (typeof status === 'number' && status >= 400) {
+      if (status >= 500 && (err as any).expose !== true) {
+        return { status, message: genericServerMessage(status), internal: true };
+      }
       const message = err instanceof Error ? err.message : 'Request error';
-      return { status, message };
+      return { status, message, internal: false };
     }
   }
   if (isValidationError(err)) {
     const message = err instanceof Error ? err.message : 'Bad request';
-    return { status: 400, message };
+    return { status: 400, message, internal: false };
   }
-  return { status: 500, message: 'Internal server error' };
+  return { status: 500, message: 'Internal server error', internal: true };
 }
 
 function parseInteger(raw: string, label: string, opts?: { allowNegativeOne?: boolean; min?: number }): number {
@@ -701,6 +724,15 @@ export function createRoutes(
   let sharedClientOwned = false;
   let sharedClientInit: Promise<Client> | null = null;
 
+  /** errorResponse() plus logging of internal errors through onError, since clients get a generic message. */
+  function resolveError(err: unknown, req: Request): { status: number; message: string } {
+    const { status, message, internal } = errorResponse(err);
+    if (internal) {
+      errorHandler(err instanceof Error ? err : new Error(String(err)), param(req, 'name') ?? '');
+    }
+    return { status, message };
+  }
+
   function requireConnection(feature: string) {
     if (!opts.connection) {
       throw httpError(500, `Proxy requires \`connection\` for ${feature}`);
@@ -1151,7 +1183,7 @@ export function createRoutes(
       };
       res.status(201).json(response);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1189,7 +1221,7 @@ export function createRoutes(
       const anyCreated = results.some((job) => job !== null);
       res.status(anyCreated ? 201 : 200).json({ jobs: responseJobs });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1208,7 +1240,7 @@ export function createRoutes(
         jobs: jobs.map((job) => serializeJob(job, state)),
       });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1231,20 +1263,19 @@ export function createRoutes(
       const result = await queue.addAndWait(body.name, body.data ?? null, body.opts as any);
       res.status(200).json({ result });
     } catch (err) {
-      if (err instanceof Error) {
+      let mapped = err;
+      if (err instanceof Error && (err as any).status == null) {
         if (err.message.includes('did not finish within')) {
-          (err as any).status = 504;
+          mapped = httpError(504, err.message);
         } else if (
           err.message.includes('cannot wait on a deduplicated') ||
           err.message.includes('removeOnComplete/removeOnFail') ||
           err.message.includes('waitTimeout')
         ) {
-          (err as any).status = 400;
-        } else if ((err as any).status == null) {
-          (err as any).status = 500;
+          mapped = httpError(400, err.message);
         }
       }
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(mapped, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1262,7 +1293,7 @@ export function createRoutes(
 
       res.status(200).json(serializeJob(job, await job.getState()));
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1278,7 +1309,7 @@ export function createRoutes(
         jobs: jobs.map((job) => serializeDeadLetterJob(job)),
       });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1304,7 +1335,7 @@ export function createRoutes(
 
       res.status(200).json({ jobs: replayedJobs, replayed: replayedJobs.length });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1319,7 +1350,7 @@ export function createRoutes(
       }
       res.status(200).json(serializeDeadLetterJob(job));
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1334,7 +1365,7 @@ export function createRoutes(
       }
       res.status(200).json({ name: replayed.name, newJobId: replayed.id });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1349,7 +1380,7 @@ export function createRoutes(
       }
       res.status(200).json({ removed: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1371,12 +1402,12 @@ export function createRoutes(
       try {
         await job.changePriority(body.priority);
       } catch (err) {
-        throw withStatus(err, 400, 'Cannot change priority');
+        throw asClientError(err, 'Cannot change priority');
       }
 
       res.status(200).json({ priority: body.priority, updated: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1398,12 +1429,12 @@ export function createRoutes(
       try {
         await job.changeDelay(body.delay);
       } catch (err) {
-        throw withStatus(err, 400, 'Cannot change delay');
+        throw asClientError(err, 'Cannot change delay');
       }
 
       res.status(200).json({ delay: body.delay, updated: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1421,12 +1452,12 @@ export function createRoutes(
       try {
         await job.promote();
       } catch (err) {
-        throw withStatus(err, 400, 'Cannot promote job');
+        throw asClientError(err, 'Cannot promote');
       }
 
       res.status(200).json({ promoted: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1465,7 +1496,7 @@ export function createRoutes(
       res.end();
     } catch (err) {
       if (!res.headersSent) {
-        const { status, message } = errorResponse(err);
+        const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
         res.end();
@@ -1572,7 +1603,7 @@ export function createRoutes(
     } catch (err) {
       closeConnection?.();
       if (!res.headersSent) {
-        const { status, message } = errorResponse(err);
+        const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
         res.end();
@@ -1656,7 +1687,7 @@ export function createRoutes(
     } catch (err) {
       closeConnection?.();
       if (!res.headersSent) {
-        const { status, message } = errorResponse(err);
+        const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
         res.end();
@@ -1671,7 +1702,7 @@ export function createRoutes(
       await queue.pause();
       res.status(200).json({ paused: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1683,7 +1714,7 @@ export function createRoutes(
       await queue.resume();
       res.status(200).json({ paused: false });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1695,7 +1726,7 @@ export function createRoutes(
       const counts = await queue.getJobCounts();
       res.status(200).json(counts);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1715,7 +1746,7 @@ export function createRoutes(
       );
       res.status(200).json(metrics);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1727,7 +1758,7 @@ export function createRoutes(
       const workers: WorkerInfo[] = await queue.getWorkers();
       res.status(200).json({ workers });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1748,7 +1779,7 @@ export function createRoutes(
       );
       res.status(200).json({ jobs: serialized.filter((job) => job.suspend != null) });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1762,7 +1793,7 @@ export function createRoutes(
       await queue.drain(delayed);
       res.status(200).json({ delayed, drained: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1777,7 +1808,7 @@ export function createRoutes(
       const retried = await queue.retryJobs(count !== undefined ? { count } : undefined);
       res.status(200).json({ retried });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1800,7 +1831,7 @@ export function createRoutes(
       const removed = await queue.clean(ageSeconds * 1000, limit, state);
       res.status(200).json({ removed });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1812,7 +1843,7 @@ export function createRoutes(
       const schedulers = await queue.getRepeatableJobs();
       res.status(200).json({ schedulers });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1828,7 +1859,7 @@ export function createRoutes(
       }
       res.status(200).json({ entry, name });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1844,7 +1875,7 @@ export function createRoutes(
       await queue.upsertJobScheduler(param(req, 'id'), body.schedule, body.template);
       res.status(200).json({ upserted: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1861,7 +1892,7 @@ export function createRoutes(
       await queue.removeJobScheduler(name);
       res.status(200).json({ removed: true });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1878,7 +1909,7 @@ export function createRoutes(
       const usage = await queue.getFlowUsage(parentId);
       res.status(200).json(usage);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1893,7 +1924,7 @@ export function createRoutes(
       }
       res.status(200).json(budget);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -1994,7 +2025,7 @@ export function createRoutes(
         await producer.close().catch(() => undefined);
       }
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2017,7 +2048,7 @@ export function createRoutes(
         usage: snapshot.usage,
       });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2040,7 +2071,7 @@ export function createRoutes(
         usage: snapshot.usage,
       });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2085,7 +2116,7 @@ export function createRoutes(
       await deleteFlowRecord(flowId);
       res.status(200).json({ flagged, flowId, jobs, revoked, skipped });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2139,7 +2170,7 @@ export function createRoutes(
 
       res.status(200).json(summary);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2156,7 +2187,7 @@ export function createRoutes(
 
       res.status(200).json(info);
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2176,7 +2207,7 @@ export function createRoutes(
       const resumed = await queue.signal(jobId, body.name, body.data);
       res.status(200).json({ resumed });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2193,7 +2224,7 @@ export function createRoutes(
 
       res.status(200).json({ status });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2205,7 +2236,7 @@ export function createRoutes(
       const rateLimit = await queue.getGlobalRateLimit();
       res.status(200).json({ rateLimit });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2230,7 +2261,7 @@ export function createRoutes(
       await queue.setGlobalRateLimit({ duration: body.duration, max: body.max });
       res.status(200).json({ rateLimit: { duration: body.duration, max: body.max } });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2242,7 +2273,7 @@ export function createRoutes(
       await queue.removeGlobalRateLimit();
       res.status(200).json({ removed: true, rateLimit: null });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2266,7 +2297,7 @@ export function createRoutes(
       }
       res.status(201).json({ id, subject: body.subject });
     } catch (err) {
-      const { status, message } = errorResponse(err);
+      const { status, message } = resolveError(err, req);
       res.status(status).json({ error: message });
     }
   });
@@ -2316,7 +2347,7 @@ export function createRoutes(
     } catch (err) {
       cleanup?.();
       if (!res.headersSent) {
-        const { status, message } = errorResponse(err);
+        const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
         res.end();

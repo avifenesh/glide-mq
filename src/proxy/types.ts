@@ -34,7 +34,10 @@ export interface ProxyOptions {
    * returns at most this many items. Default: 1000.
    */
   maxPageSize?: number;
-  /** Callback for queue-level errors. Defaults to console.error if not provided. */
+  /**
+   * Callback for queue-level errors and for internal request errors. 5xx responses return a
+   * generic message; the underlying error is passed here. Defaults to console.error if not provided.
+   */
   onError?: (err: Error, queueName: string) => void;
 }
 
