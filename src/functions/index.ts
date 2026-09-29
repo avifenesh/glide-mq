@@ -868,6 +868,7 @@ export function parseMoveToActiveResult(
   | 'GROUP_TOKEN_LIMITED'
   | 'GROUP_ORDERED'
   | 'ERR:COST_EXCEEDS_CAPACITY'
+  | 'STALE'
   | null {
   if (Array.isArray(result)) {
     if (result.length === 0) return null;
