@@ -317,4 +317,89 @@ describeEachMode('Backlog round 4 2026-09-29', (CONNECTION) => {
       await queue.close();
     }
   }, 30000);
+
+  it('B4: a mixed success/failure stream is processed on the chain with one FCALL per failure', async () => {
+    const Q = uniqueQueue('r4-faf');
+    const DLQ = uniqueQueue('r4-faf-dlq');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const dlq = new Queue(DLQ, { connection: CONNECTION });
+    const completed: string[] = [];
+    const failed: [string, string][] = [];
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        if (job.data.mode === 'fail') throw new Error(`boom ${job.data.i}`);
+        if (job.data.mode === 'flaky' && job.attemptsMade === 0) throw new Error('flaky');
+        return `ok ${job.data.i}`;
+      },
+      { connection: CONNECTION, blockTimeout: 300, deadLetterQueue: { name: DLQ } },
+    );
+    worker.on('error', () => {});
+    worker.on('completed', (job: any) => completed.push(job.id));
+    worker.on('failed', (job: any, err: Error) => failed.push([job.id, err.message]));
+    try {
+      await worker.waitUntilReady();
+      const calls: Record<string, number> = {};
+      const client = (worker as any).commandClient;
+      const realFcall = client.fcall.bind(client);
+      client.fcall = (func: string, ...rest: any[]) => {
+        calls[func] = (calls[func] ?? 0) + 1;
+        return realFcall(func, ...rest);
+      };
+
+      const jobs: { id: string; mode: string }[] = [];
+      for (let i = 0; i < 24; i++) {
+        const mode = i % 3 === 0 ? 'fail' : i % 3 === 1 ? 'flaky' : 'ok';
+        const opts = mode === 'flaky' ? { attempts: 2 } : { attempts: 1 };
+        const job = await queue.add('j', { i, mode }, opts);
+        jobs.push({ id: job!.id, mode });
+      }
+      const terminalFails = jobs.filter((j) => j.mode === 'fail').map((j) => j.id);
+      await waitFor(() => completed.length === 16 && failed.length === 16, 20000);
+
+      expect(completed.sort()).toEqual(
+        jobs
+          .filter((j) => j.mode !== 'fail')
+          .map((j) => j.id)
+          .sort(),
+      );
+      // Each terminal failure and each flaky first attempt emits 'failed'.
+      expect(failed.filter(([, m]) => m === 'flaky')).toHaveLength(8);
+      expect(
+        failed
+          .filter(([, m]) => m.startsWith('boom'))
+          .map(([id]) => id)
+          .sort(),
+      ).toEqual([...terminalFails].sort());
+      for (const j of jobs) {
+        const [state, attemptsMade, failedReason] = (
+          await cleanupClient.hmget(k.job(j.id), ['state', 'attemptsMade', 'failedReason'])
+        ).map((v: any) => (v === null ? null : String(v)));
+        if (j.mode === 'fail')
+          expect([state, attemptsMade, failedReason]).toEqual(['failed', '1', expect.stringMatching(/^boom/)]);
+        else if (j.mode === 'flaky') expect([state, attemptsMade, failedReason]).toEqual(['completed', '1', 'flaky']);
+        else expect([state, attemptsMade]).toEqual(['completed', '0']);
+      }
+      const counts = await queue.getJobCounts();
+      expect(counts.completed).toBe(16);
+      expect(counts.failed).toBe(8);
+      expect(counts.active).toBe(0);
+      expect(counts.waiting).toBe(0);
+      // Terminal failures reached the DLQ through the chained path.
+      const dlqJobs = await dlq.getJobs('waiting');
+      expect(dlqJobs.map((j: any) => j.data.originalJobId).sort()).toEqual([...terminalFails].sort());
+      expect(dlqJobs.map((j: any) => j.data.data.i).sort((a: number, b: number) => a - b)).toEqual(
+        jobs.filter((j) => j.mode === 'fail').map((_, idx) => idx * 3),
+      );
+      // Every failure went through failAndFetchNext; plain glidemq_fail was never needed.
+      expect(calls.glidemq_failAndFetchNext).toBe(16);
+      expect(calls.glidemq_fail ?? 0).toBe(0);
+    } finally {
+      await worker.close();
+      await queue.close();
+      await flushQueue(cleanupClient, DLQ).catch(() => {});
+      await dlq.close();
+    }
+  }, 30000);
 });

@@ -20,6 +20,7 @@ import {
   computeFollowingSchedulerNextRun,
   computeWeightedTotal,
   hashDataToRecord,
+  isFunctionNotFound,
   nextReconnectDelay,
   parseCrossQueueParentNotification,
   parseJsonRecord,
@@ -49,6 +50,7 @@ import {
   completeJob,
   isCompleteJobRevoked,
   completeAndFetchNext,
+  failAndFetchNext,
   type CompleteAndFetchResult,
   completeChild,
   failJob,
@@ -156,6 +158,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected scheduler: Scheduler | null = null;
   protected initPromise: Promise<void>;
   protected rateLimitUntil = 0;
+  /** Set once glidemq_failAndFetchNext is missing from the loaded library (rolling upgrade). */
+  private failAndFetchNextUnavailable = false;
   protected isDrained = true;
   protected reconnectBackoff = 0;
   protected internalEvents = new EventEmitter().setMaxListeners(0);
@@ -1379,19 +1383,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       return false;
     }
 
-    const configuredAttempts = job.opts.attempts ?? 0;
-    // .name fallback handles cross-realm errors or sandbox IPC where instanceof may fail
-    const skipRetry = job.discarded || error instanceof UnrecoverableError || error.name === 'UnrecoverableError';
-    const maxAttempts = skipRetry ? 0 : configuredAttempts;
-    let backoffDelay = 0;
-    if (maxAttempts > 0 && job.opts.backoff) {
-      const attemptsMade = await this.getAttemptsMade(job, jobId);
-      const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
-      backoffDelay = strategyFn
-        ? strategyFn(attemptsMade + 1, error)
-        : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, attemptsMade + 1, job.opts.backoff.jitter);
-    }
-
+    const { maxAttempts, backoffDelay } = await this.planFailure(job, jobId, error);
     const failResult = await failJob(
       this.commandClient,
       this.queueKeys,
@@ -1407,7 +1399,35 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.skipEvents,
       this.skipMetrics,
     );
+    return this.finishFailure(job, error, failResult);
+  }
 
+  /** Attempts cap and backoff for this failure, as glidemq_fail expects them. */
+  private async planFailure(
+    job: Job<D, R>,
+    jobId: string,
+    error: Error,
+  ): Promise<{ maxAttempts: number; backoffDelay: number }> {
+    const configuredAttempts = job.opts.attempts ?? 0;
+    // .name fallback handles cross-realm errors or sandbox IPC where instanceof may fail
+    const skipRetry = job.discarded || error instanceof UnrecoverableError || error.name === 'UnrecoverableError';
+    const maxAttempts = skipRetry ? 0 : configuredAttempts;
+    let backoffDelay = 0;
+    if (maxAttempts > 0 && job.opts.backoff) {
+      const attemptsMade = await this.getAttemptsMade(job, jobId);
+      const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
+      backoffDelay = strategyFn
+        ? strategyFn(attemptsMade + 1, error)
+        : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, attemptsMade + 1, job.opts.backoff.jitter);
+    }
+    return { maxAttempts, backoffDelay };
+  }
+
+  /**
+   * After glidemq_fail ran: DLQ copy on a terminal failure, 'failed' event,
+   * repeatAfterComplete scheduling. Returns true when the failure was terminal.
+   */
+  private async finishFailure(job: Job<D, R>, error: Error, failResult: string): Promise<boolean> {
     if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
       await this.moveToDLQ(job, error);
     }
@@ -1420,6 +1440,80 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
 
     return failResult === 'failed';
+  }
+
+  /**
+   * Fail a processed job and, on the plain (non-broadcast, running) path,
+   * fetch the next job in the same FCALL so the chain survives a failure.
+   * Returns the fetch result to chain on, or null when the failure went
+   * through handleJobFailure (rate limit, broadcast, close/pause, old library).
+   */
+  private async failAndChain(
+    job: Job<D, R>,
+    jobId: string,
+    entryId: string,
+    error: Error,
+  ): Promise<CompleteAndFetchResult | null> {
+    // Tokens a failed attempt spent are real spend; count them.
+    try {
+      await this.chargeUsageToBudget(job, jobId, true);
+    } catch (err) {
+      this.emit('error', err);
+    }
+    const client = this.commandClient;
+    if (
+      !client ||
+      this.broadcastMode ||
+      this.closing ||
+      this.paused ||
+      this.failAndFetchNextUnavailable ||
+      BaseWorker.isRateLimitError(error)
+    ) {
+      await this.handleJobFailure(job, jobId, entryId, error);
+      return null;
+    }
+    const { maxAttempts, backoffDelay } = await this.planFailure(job, jobId, error);
+    let result;
+    try {
+      result = await failAndFetchNext(
+        client,
+        this.queueKeys,
+        jobId,
+        entryId,
+        error.message,
+        Date.now(),
+        maxAttempts,
+        backoffDelay,
+        this.consumerGroup,
+        this.consumerId,
+        job.opts.removeOnFail,
+        this.skipEvents,
+        this.skipMetrics,
+      );
+    } catch (err) {
+      if (!isFunctionNotFound(err)) throw err;
+      // Older library without glidemq_failAndFetchNext: the call did nothing.
+      this.failAndFetchNextUnavailable = true;
+      const failResult = await failJob(
+        client,
+        this.queueKeys,
+        jobId,
+        entryId,
+        error.message,
+        Date.now(),
+        maxAttempts,
+        backoffDelay,
+        this.consumerGroup,
+        job.opts.removeOnFail,
+        undefined,
+        this.skipEvents,
+        this.skipMetrics,
+      );
+      await this.finishFailure(job, error, failResult);
+      return null;
+    }
+    await this.finishFailure(job, error, result.failResult);
+    return result;
   }
 
   /**
@@ -1599,7 +1693,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   /**
    * Process a job through its full lifecycle: activate, run processor, complete, fetch next.
    * Used for both c=1 (inline, blocking poll loop) and c>1 (dispatched via dispatchJob).
-   * Chains into the next job via completeAndFetchNext to reuse the same dispatch slot.
+   * Chains into the next job via completeAndFetchNext (or failAndFetchNext
+   * after a failure) to reuse the same dispatch slot.
    */
   protected async processJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
@@ -1810,120 +1905,121 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         return;
       }
 
+      let fetchResult: CompleteAndFetchResult;
       if (processError || aborted) {
         // close(true) aborted it; leave it active for stalled recovery.
         if (aborted && this.forceClosing) return;
         if (await this.skipMovedToFailed(job)) return;
         const confirmedRevoked = aborted && (await this.isJobRevoked(currentJobId));
-        await this.failProcessedJob(
+        const chained = await this.failAndChain(
           job,
           currentJobId,
           currentEntryId,
           confirmedRevoked ? new UnrecoverableError('revoked') : (processError ?? new Error('Job aborted')),
         );
-        return;
-      }
+        if (!chained) return;
+        fetchResult = chained;
+      } else {
+        if (await this.skipMovedToFailed(job)) return;
 
-      if (await this.skipMovedToFailed(job)) return;
+        if (!this.commandClient) return;
 
-      if (!this.commandClient) return;
-
-      let returnvalue: string;
-      try {
-        returnvalue = processResult !== undefined ? this.serializer.serialize(processResult) : 'null';
-      } catch (serializeErr) {
-        const err = serializeErr instanceof Error ? serializeErr : new Error(String(serializeErr));
-        await this.handleJobFailure(
-          job,
-          currentJobId,
-          currentEntryId,
-          new Error(`Serializer failed on return value: ${err.message}`),
-        );
-        return;
-      }
-      // UTF-8 worst case: 4 bytes per char. Skip Buffer.byteLength for small strings.
-      if (returnvalue.length > MAX_JOB_DATA_SIZE / 4) {
-        const byteLen = Buffer.byteLength(returnvalue, 'utf8');
-        if (byteLen > MAX_JOB_DATA_SIZE) {
+        let returnvalue: string;
+        try {
+          returnvalue = processResult !== undefined ? this.serializer.serialize(processResult) : 'null';
+        } catch (serializeErr) {
+          const err = serializeErr instanceof Error ? serializeErr : new Error(String(serializeErr));
           await this.handleJobFailure(
             job,
             currentJobId,
             currentEntryId,
-            new Error(
-              `Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller return values or store large data externally.`,
-            ),
+            new Error(`Serializer failed on return value: ${err.message}`),
           );
           return;
         }
-      }
-      const now = Date.now();
-      // close() and pause() set their flag before waitForActiveJobs.
-      // Completing without fetch-next avoids claiming a job this worker will
-      // not process now; chaining under a backlog would never let pause() land.
-      let fetchResult: CompleteAndFetchResult;
-      if (this.closing || this.paused) {
-        const notifications = await completeJob(
-          this.commandClient,
-          this.queueKeys,
-          currentJobId,
-          currentEntryId,
-          returnvalue,
-          now,
-          this.consumerGroup,
-          job.opts.removeOnComplete,
-          undefined,
-          this.broadcastMode ? true : undefined,
-          this.skipEvents,
-          this.skipMetrics,
-        );
-        if (isCompleteJobRevoked(notifications)) {
-          await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
-          return;
+        // UTF-8 worst case: 4 bytes per char. Skip Buffer.byteLength for small strings.
+        if (returnvalue.length > MAX_JOB_DATA_SIZE / 4) {
+          const byteLen = Buffer.byteLength(returnvalue, 'utf8');
+          if (byteLen > MAX_JOB_DATA_SIZE) {
+            await this.handleJobFailure(
+              job,
+              currentJobId,
+              currentEntryId,
+              new Error(
+                `Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller return values or store large data externally.`,
+              ),
+            );
+            return;
+          }
         }
-        fetchResult = { completed: currentJobId, next: false as const, parentNotifications: notifications };
-      } else {
-        fetchResult = await completeAndFetchNext(
-          this.commandClient,
-          this.queueKeys,
-          currentJobId,
-          currentEntryId,
-          returnvalue,
-          now,
-          this.consumerGroup,
-          this.consumerId,
-          job.opts.removeOnComplete,
-          undefined,
-          completionHints,
-          this.broadcastMode ? true : undefined,
-          job.processedOn,
-          !!job.parentIds,
-          this.skipEvents,
-          this.skipMetrics,
-        );
+        const now = Date.now();
+        // close() and pause() set their flag before waitForActiveJobs.
+        // Completing without fetch-next avoids claiming a job this worker will
+        // not process now; chaining under a backlog would never let pause() land.
+        if (this.closing || this.paused) {
+          const notifications = await completeJob(
+            this.commandClient,
+            this.queueKeys,
+            currentJobId,
+            currentEntryId,
+            returnvalue,
+            now,
+            this.consumerGroup,
+            job.opts.removeOnComplete,
+            undefined,
+            this.broadcastMode ? true : undefined,
+            this.skipEvents,
+            this.skipMetrics,
+          );
+          if (isCompleteJobRevoked(notifications)) {
+            await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
+            return;
+          }
+          fetchResult = { completed: currentJobId, next: false as const, parentNotifications: notifications };
+        } else {
+          fetchResult = await completeAndFetchNext(
+            this.commandClient,
+            this.queueKeys,
+            currentJobId,
+            currentEntryId,
+            returnvalue,
+            now,
+            this.consumerGroup,
+            this.consumerId,
+            job.opts.removeOnComplete,
+            undefined,
+            completionHints,
+            this.broadcastMode ? true : undefined,
+            job.processedOn,
+            !!job.parentIds,
+            this.skipEvents,
+            this.skipMetrics,
+          );
 
-        if (fetchResult.next === 'CURRENT_REVOKED') {
-          await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
-          return;
+          if (fetchResult.next === 'CURRENT_REVOKED') {
+            await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
+            return;
+          }
         }
-      }
-      await this.notifyCrossQueueParents(fetchResult.parentNotifications);
-      job.returnvalue = processResult;
-      job.finishedOn = now;
-      if (this.hasCompletedListeners) this.emit('completed', job, processResult);
+        await this.notifyCrossQueueParents(fetchResult.parentNotifications);
+        job.returnvalue = processResult;
+        job.finishedOn = now;
+        if (this.hasCompletedListeners) this.emit('completed', job, processResult);
 
-      await this.chargeUsageToBudget(job, currentJobId, false);
+        await this.chargeUsageToBudget(job, currentJobId, false);
 
-      // Post-completion TPM tracking: increment counter for token rate limiting.
-      // Use whichever is larger: usage.totalTokens or explicit tpmTokens.
-      if (this.opts.tokenLimiter) {
-        const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
-        if (tpmTokens > 0) {
-          await this.incrementTpmCounter(tpmTokens);
+        // Post-completion TPM tracking: increment counter for token rate limiting.
+        // Use whichever is larger: usage.totalTokens or explicit tpmTokens.
+        if (this.opts.tokenLimiter) {
+          const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
+          if (tpmTokens > 0) {
+            await this.incrementTpmCounter(tpmTokens);
+          }
         }
-      }
 
-      if (job.schedulerName) {
-        await this.updateSchedulerAfterComplete(job.schedulerName, now);
+        if (job.schedulerName) {
+          await this.updateSchedulerAfterComplete(job.schedulerName, now);
+        }
       }
 
       // CAF raced with close() or pause(): the next job is already claimed.
