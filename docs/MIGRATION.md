@@ -883,6 +883,8 @@ await queue.upsertJobScheduler(
 );
 ```
 
+**Cron syntax is narrower than BullMQ's cron-parser.** glide-mq takes exactly 5 fields (no seconds field), numeric values only (no `MON` or `JAN` names), day-of-week `0-6` (`7` for Sunday is rejected), and no `L`, `W`, `#` or `?`. Unsupported patterns throw at upsert. Day matching and DST follow standard cron: when both day-of-month and day-of-week are restricted, either one matching fires the job, as in cron-parser. See [Cron syntax](ADVANCED.md#cron-syntax).
+
 You can then layer on glide-mq-only scheduler bounds when needed:
 
 ```ts

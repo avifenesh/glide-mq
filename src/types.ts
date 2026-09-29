@@ -483,7 +483,7 @@ export interface QueueEventsOptions {
 
 /** Options for defining a job schedule (cron, interval, or repeat-after-complete). */
 export interface ScheduleOpts {
-  /** Cron pattern (5 fields: minute hour dayOfMonth month dayOfWeek) */
+  /** Cron pattern (5 fields: minute hour dayOfMonth month dayOfWeek, dayOfWeek 0-6; no seconds field) */
   pattern?: string;
   /** Repeat interval in milliseconds */
   every?: number;

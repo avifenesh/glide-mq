@@ -806,7 +806,10 @@ function cronWallMatches(cron: CronPattern, p: TzParts): boolean {
 
 /**
  * Compute the next occurrence of a cron pattern after `afterMs` (epoch ms).
- * Supports standard 5-field cron: minute hour dayOfMonth month dayOfWeek.
+ * Supports standard 5-field cron: minute hour dayOfMonth month dayOfWeek, with
+ * `*`, numbers, ranges, steps and lists. No seconds field, no names, and
+ * dayOfWeek is 0-6 (7 is rejected). When both day fields are restricted, a day
+ * matching either one matches.
  * When `tz` is provided, the cron expression is evaluated in that IANA timezone.
  * Returns epoch ms of the next matching time (always in UTC).
  */
