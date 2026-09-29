@@ -57,6 +57,11 @@ export interface SchedulerOptions {
    * consumer's PEL. The worker must run them again; nobody else will.
    */
   onRedispatch?: (entries: { jobId: string; entryId: string }[]) => void;
+  /**
+   * Stalled reclaim deletes consumers of the group that hold no pending entry
+   * and have been idle longer than this (ms). 0 disables it.
+   */
+  idleConsumerMs?: number;
 }
 
 /**
@@ -81,6 +86,7 @@ export class Scheduler {
   private onError?: (err: Error) => void;
   private onStalled?: (jobId: string) => void;
   private onRedispatch?: (entries: { jobId: string; entryId: string }[]) => void;
+  private idleConsumerMs: number;
   private serializer: Serializer;
   private promotionTimer: ReturnType<typeof setInterval> | null = null;
   private promotionWakeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -108,6 +114,7 @@ export class Scheduler {
     this.onError = opts.onError;
     this.onStalled = opts.onStalled;
     this.onRedispatch = opts.onRedispatch;
+    this.idleConsumerMs = opts.idleConsumerMs ?? 0;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
   }
 
@@ -389,6 +396,7 @@ export class Scheduler {
         this.consumerGroup,
         this.broadcastMode,
         this.lockDuration,
+        this.idleConsumerMs,
       );
     }
     const result = await reclaimStalledWithIds(
@@ -402,6 +410,7 @@ export class Scheduler {
       this.broadcastMode,
       this.lockDuration,
       redispatch,
+      this.idleConsumerMs,
     );
     this.reportStalled(result.stalledIds);
     if (result.redispatch.length > 0) {

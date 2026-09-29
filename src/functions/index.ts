@@ -897,22 +897,43 @@ export async function reclaimStalled(
   group: string = CONSUMER_GROUP,
   broadcastMode?: boolean,
   workerLockDuration: number = 0,
+  idleConsumerMs: number = 0,
 ): Promise<number> {
-  const result = await client.fcall(
-    'glidemq_reclaimStalled',
-    [k.stream, k.events],
-    [
-      group,
-      consumer,
-      minIdleMs.toString(),
-      maxStalledCount.toString(),
-      timestamp.toString(),
-      k.failed,
-      broadcastMode ? '1' : '0',
-      workerLockDuration.toString(),
-    ],
-  );
+  const args = [
+    group,
+    consumer,
+    minIdleMs.toString(),
+    maxStalledCount.toString(),
+    timestamp.toString(),
+    k.failed,
+    broadcastMode ? '1' : '0',
+    workerLockDuration.toString(),
+  ];
+  // Appended optional args (returnIds, redispatch, idleConsumerMs); older
+  // libraries ignore them.
+  if (idleConsumerMs > 0) args.push('0', '0', Math.trunc(idleConsumerMs).toString());
+  const result = await client.fcall('glidemq_reclaimStalled', [k.stream, k.events], args);
   return result as number;
+}
+
+/**
+ * Delete this consumer from the group when it holds no pending entry, in one
+ * step with the check (glidemq_removeIdleConsumer, library 132). Returns
+ * whether it was deleted; false on an older library.
+ */
+export async function removeIdleConsumer(
+  client: Client,
+  k: QueueKeys,
+  group: string,
+  consumer: string,
+): Promise<boolean> {
+  try {
+    const result = await client.fcall('glidemq_removeIdleConsumer', [k.stream], [group, consumer]);
+    return Number(result) === 1;
+  } catch (err) {
+    if (!isFunctionNotFound(err)) throw err;
+    return false;
+  }
 }
 
 /** Reply of a stalled reclaim that asked for the IDs of the jobs it returned to waiting. */
@@ -965,6 +986,7 @@ export async function reclaimStalledWithIds(
   broadcastMode?: boolean,
   workerLockDuration: number = 0,
   redispatch?: boolean,
+  idleConsumerMs: number = 0,
 ): Promise<ReclaimStalledResult> {
   const args = [
     group,
@@ -976,8 +998,9 @@ export async function reclaimStalledWithIds(
     broadcastMode ? '1' : '0',
     workerLockDuration.toString(),
     '1',
+    broadcastMode && redispatch ? '1' : '0',
   ];
-  if (broadcastMode && redispatch) args.push('1');
+  if (idleConsumerMs > 0) args.push(Math.trunc(idleConsumerMs).toString());
   const result = await client.fcall('glidemq_reclaimStalled', [k.stream, k.events], args);
   return parseReclaimStalledResult(result);
 }

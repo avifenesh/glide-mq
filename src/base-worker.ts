@@ -68,6 +68,7 @@ import {
   moveToWaitingChildren,
   suspendJob,
   deferActive,
+  removeIdleConsumer,
   checkBudget,
   recordUsageAndCheckBudget,
   updateJobFields,
@@ -411,9 +412,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       },
       onRedispatch: this.broadcastMode
         ? (entries) => {
-            for (const entry of entries) this.pausedBroadcastEntries.add(entry.entryId);
+            for (const entry of entries) this.pausedBroadcastEntries.set(entry.entryId, entry.jobId);
           }
         : undefined,
+      // Item 4: dead consumers with no pending entry are removed by stalled
+      // reclaim once idle well past any blocking read of a live worker.
+      idleConsumerMs: Math.max(10 * this.stalledInterval, 3 * this.blockTimeout, 60_000),
       onError: (err) => {
         if (!this.closing) {
           this.emit('error', err);
@@ -2674,6 +2678,16 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       // Claims handed back by the last poll can register after a snapshot.
       // Nothing new is dispatched once closing is set, so this terminates.
       while (this.activePromises.size > 0) await this.waitForActiveJobs();
+    }
+    await this.handBackParkedBroadcastEntries(true);
+    if (!force && this.commandClient) {
+      // A consumer with no pending entry has nothing left to recover; drop it
+      // from the group so dead consumers do not accumulate.
+      try {
+        await removeIdleConsumer(this.commandClient, this.queueKeys, this.consumerGroup, this.consumerId);
+      } catch {
+        // Stalled reclaim removes idle consumers later.
+      }
     }
 
     if (this.sandboxClose) {

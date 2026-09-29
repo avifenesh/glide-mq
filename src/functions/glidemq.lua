@@ -905,6 +905,34 @@ advanceRepeatAfterComplete = function(jobKey, prefix, timestamp)
   redis.call('HSET', schedulersKey, schedulerName, updated)
 end
 
+-- Delete consumers of a group that hold no pending entry and have been idle
+-- longer than idleMs, skipping the caller. Bounded to MAX_CONSUMER_DELETES per
+-- call; XINFO CONSUMERS itself lists every consumer of the group.
+local MAX_CONSUMER_DELETES = 20
+local function deleteIdleConsumers(streamKey, group, keep, idleMs)
+  local ok, consumers = pcall(redis.call, 'XINFO', 'CONSUMERS', streamKey, group)
+  if not ok or type(consumers) ~= 'table' then return 0 end
+  local deleted = 0
+  for i = 1, #consumers do
+    local info = consumers[i]
+    local name, pending, idle = nil, 0, 0
+    if type(info) == 'table' then
+      for f = 1, #info, 2 do
+        if info[f] == 'name' then name = info[f + 1]
+        elseif info[f] == 'pending' then pending = tonumber(info[f + 1]) or 0
+        elseif info[f] == 'idle' then idle = tonumber(info[f + 1]) or 0
+        end
+      end
+    end
+    if name and name ~= keep and pending == 0 and idle > idleMs then
+      redis.call('XGROUP', 'DELCONSUMER', streamKey, group, name)
+      deleted = deleted + 1
+      if deleted >= MAX_CONSUMER_DELETES then break end
+    end
+  end
+  return deleted
+end
+
 -- Apply stall logic to a job: increment stalledCount, fail if over max, else emit stalled event.
 -- Returns true if the job was moved to failed, false if only stalled.
 -- subKey: broadcast mode counts stalls per subscription in job:<id>:sub:<group>
@@ -2143,9 +2171,14 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   -- {count, {stalledId...}, {jobId, entryId, ...}}. Older callers omit it and
   -- keep the entry parked in the reclaiming consumer's PEL.
   local redispatch = broadcastMode == '1' and args[10] == '1'
+  -- Optional (library 132): consumers of this group with no pending entries
+  -- that have been idle longer than this many ms are deleted (at most
+  -- MAX_CONSUMER_DELETES per call), so dead workers do not accumulate.
+  local idleConsumerMs = tonumber(args[11]) or 0
   local stalledIds = {}
   local redispatched = {}
   local function reply(count)
+    if idleConsumerMs > 0 then deleteIdleConsumers(streamKey, group, consumer, idleConsumerMs) end
     if redispatch then return {count, stalledIds, redispatched} end
     if not returnIds then return count end
     local out = {count}
@@ -2241,6 +2274,21 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
     end
   end
   return reply(count)
+end)
+
+-- Remove this consumer from its group when it holds no pending entry. Checked
+-- and deleted in one step: XGROUP DELCONSUMER would drop pending entries.
+-- KEYS: [streamKey]  ARGS: [group, consumer]  Reply: 1 deleted, 0 kept.
+redis.register_function('glidemq_removeIdleConsumer', function(keys, args)
+  local streamKey = keys[1]
+  local group = args[1]
+  local consumer = args[2]
+  local ok, pending = pcall(redis.call, 'XPENDING', streamKey, group, '-', '+', 1, consumer)
+  if not ok then return 0 end
+  if pending and #pending > 0 then return 0 end
+  local okDel, deleted = pcall(redis.call, 'XGROUP', 'DELCONSUMER', streamKey, group, consumer)
+  if not okDel then return 0 end
+  return 1
 end)
 
 local function isActiveListClaim(jobKey)
