@@ -52,8 +52,12 @@ describe('Job.reportUsage (unit)', () => {
       sadd: vi.fn(),
       xadd: vi.fn(),
     };
-    (Batch as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockBatch);
-    (ClusterBatch as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockBatch);
+    (Batch as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
+      return mockBatch;
+    });
+    (ClusterBatch as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
+      return mockBatch;
+    });
   });
 
   it('persists usage to job hash via HSET', async () => {
