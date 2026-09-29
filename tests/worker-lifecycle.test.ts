@@ -38,6 +38,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     set: vi.fn().mockResolvedValue('OK'),
     del: vi.fn().mockResolvedValue(1),
     ping: vi.fn().mockResolvedValue('PONG'),
+    smembers: vi.fn().mockResolvedValue(new Set()),
     close: vi.fn(),
     ...overrides,
   };
@@ -568,5 +569,32 @@ describe('batch fetch count', () => {
     expect(blocking.xreadgroup.mock.calls[0][3]).toEqual({ count: 4, block: 100 });
 
     await worker.close(true);
+  });
+});
+
+describe('QueueEvents init failure', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('routes a connection failure to error listeners instead of an unhandled rejection', async () => {
+    vi.mocked(GlideClient.createClient).mockRejectedValue(new Error('ECONNREFUSED'));
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const qe = new QueueEvents('lifecycle-w6', { connection });
+      const errors: Error[] = [];
+      qe.on('error', (err: Error) => errors.push(err));
+      // Never awaits waitUntilReady().
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0].message).toContain('ECONNREFUSED');
+      expect(unhandled).toEqual([]);
+      await qe.close();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 });

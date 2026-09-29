@@ -33,6 +33,11 @@ export class QueueEvents extends EventEmitter {
     this.lastId = opts.lastEventId ?? '$';
     this.blockTimeout = opts.blockTimeout ?? 5000;
     this.initPromise = this.init();
+    // Callers that never await waitUntilReady() must not crash the process
+    // with an unhandled rejection. Mirrors BaseWorker: surface it as 'error'.
+    this.initPromise.catch((err) => {
+      if (!this.closing) this.emit('error', err);
+    });
   }
 
   /**
