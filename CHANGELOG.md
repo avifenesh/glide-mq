@@ -14,6 +14,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Scheduled jobs skipped gzip compression** on queues with `compression: 'gzip'`. The scheduler entry records the upserting queue's compression and the tick compresses like `Queue.add`.
 - **Switching a scheduler to `repeatAfterComplete` fired immediately**, overlapping a still-running job from the old mode. The first run is now held until the old mode's next run.
 - **`TestJob.moveToDelayed()` was missing** in testing mode.
+- **Broadcast subscriptions lost stalled messages**: a stalled message was claimed into the reclaiming worker's PEL and never run again, then failed on the next cycle. Stalled reclaim now re-dispatches the claimed entries for that subscription, and stall counts are kept per subscription instead of on the shared job hash.
+- **Broadcast `maxMessages` trimming leaked storage**: trimmed messages left their job hash, per-subscription hashes and completed/failed members behind. `publish` now trims through `glidemq_trimBroadcast`, which deletes them once no subscription still holds the message. `maxMessages` remains a hard cap and can drop messages a slow subscriber has not read.
+- **Broadcast priority/LIFO messages were never delivered**: `publish` now rejects `priority` and `lifo` (the proxy returns 400).
 - **`obliterate()` wiped running priority/LIFO jobs**: without `force` it counted only stream pending entries. Active list claims now block it too.
 - **Worker `stalled` event was never emitted**: workers now emit `('stalled', jobId, 'active')` for jobs their stalled check returned to waiting. The reclaim functions return the IDs on an optional argument; older libraries keep the count reply.
 - **`events: false` / `metrics: false` did not apply to failures**: `glidemq_fail` now honors both, skipping `retrying`/`failed` events and failure metrics.
@@ -63,9 +66,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - **Scheduler templates reject `delay`, `deduplication` and `parent`** at upsert (the scheduler never applied them). Stored entries keep firing.
-- **Server function library version is `128`.** Workers and producers reload it on connect.
 - **Server-side priority validation**: `addJob`, `dedup` and `addFlow` reject a priority that is not an integer 0-2048 with an error, as a defense behind the client checks.
-- **Server function library version is `129`.** Workers and producers reload it on connect.
+- **Server function library version is `130`.** Workers and producers reload it on connect.
 - **`completeAndFetchNext` no longer emits `active` events** from its priority and LIFO paths, matching the stream path and `moveToActive`. Workers still emit their local `active` event.
 - **Proxy request bounds (`maxPageSize`, default 1000)**: `GET /jobs`, `/dlq` and `/suspended` without `end` (or `end=-1`) return at most `maxPageSize` items from `start`, and larger explicit spans return 400. `dlq/replay-all` replays at most `maxPageSize` per call, and `clean` rejects a `limit` above it. `POST /flows` rejects flows with more than 1000 nodes.
 - **`prefetch` is capped at `concurrency`** (`concurrency * batch.size` in batch mode). Prefetch above concurrency ran more processors than `concurrency` allowed, or left entries without heartbeats to be reclaimed and run twice.

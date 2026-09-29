@@ -59,12 +59,10 @@ describeEachMode('Stalled reclaim cursor', (CONNECTION) => {
     scheduler.start();
 
     try {
-      await waitFor(
-        async () => (await cleanupClient.hget(keys.job(jobIds[jobCount - 1]), 'stalledCount')) === '1',
-        5000,
-        25,
-      );
-      expect(Number(await cleanupClient.hget(keys.job(jobIds[0]), 'stalledCount'))).toBe(1);
+      // Broadcast mode counts stalls per subscription.
+      const subKey = (jobId: string) => `${keys.job(jobId)}:sub:${group}`;
+      await waitFor(async () => (await cleanupClient.hget(subKey(jobIds[jobCount - 1]), 's')) === '1', 5000, 25);
+      expect(Number(await cleanupClient.hget(subKey(jobIds[0]), 's'))).toBe(1);
     } finally {
       scheduler.stop();
       await scheduler.waitForIdle();

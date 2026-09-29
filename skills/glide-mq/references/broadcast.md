@@ -11,7 +11,7 @@ import { Broadcast, BroadcastWorker } from 'glide-mq';
 
 const broadcast = new Broadcast('events', {
   connection: ConnectionOptions,
-  maxMessages?: number,  // retain at most N messages in the stream
+  maxMessages?: number,  // hard cap on stream length; drops unread messages too
 });
 ```
 
@@ -54,20 +54,20 @@ await worker.close();
 
 Patterns use `.` as token separator:
 
-| Token | Meaning |
-|-------|---------|
-| `*` | Matches exactly one token |
-| `>` | Matches one or more tokens (must be last token) |
-| literal | Matches exactly |
+| Token   | Meaning                                         |
+| ------- | ----------------------------------------------- |
+| `*`     | Matches exactly one token                       |
+| `>`     | Matches one or more tokens (must be last token) |
+| literal | Matches exactly                                 |
 
 ### Pattern Examples
 
-| Pattern | Matches | Does NOT match |
-|---------|---------|----------------|
-| `orders.created` | `orders.created` | `orders.updated`, `orders.created.us` |
-| `orders.*` | `orders.created`, `orders.updated` | `orders.created.us` |
-| `orders.>` | `orders.created`, `orders.created.us`, `orders.a.b.c` | `inventory.created` |
-| `*.created` | `orders.created`, `inventory.created` | `orders.updated` |
+| Pattern          | Matches                                               | Does NOT match                        |
+| ---------------- | ----------------------------------------------------- | ------------------------------------- |
+| `orders.created` | `orders.created`                                      | `orders.updated`, `orders.created.us` |
+| `orders.*`       | `orders.created`, `orders.updated`                    | `orders.created.us`                   |
+| `orders.>`       | `orders.created`, `orders.created.us`, `orders.a.b.c` | `inventory.created`                   |
+| `*.created`      | `orders.created`, `inventory.created`                 | `orders.updated`                      |
 
 ### Usage
 
@@ -98,34 +98,34 @@ const worker = new BroadcastWorker('events', processor, {
 ```typescript
 import { matchSubject, compileSubjectMatcher } from 'glide-mq';
 
-matchSubject('orders.*', 'orders.created');  // true
-matchSubject('orders.*', 'orders.a.b');      // false
+matchSubject('orders.*', 'orders.created'); // true
+matchSubject('orders.*', 'orders.a.b'); // false
 
 const matcher = compileSubjectMatcher(['orders.*', 'shipping.>']);
-matcher('orders.created');    // true
-matcher('shipping.us.west');  // true
-matcher('inventory.low');     // false
+matcher('orders.created'); // true
+matcher('shipping.us.west'); // true
+matcher('inventory.low'); // false
 ```
 
 ## Queue vs Broadcast
 
-| | Queue | Broadcast |
-|---|---|---|
-| Delivery | Point-to-point (one consumer) | Fan-out (all subscribers) |
-| Use case | Task processing | Event distribution |
-| API | `queue.add(name, data, opts)` | `broadcast.publish(subject, data, opts?)` |
-| Consumer | `Worker` | `BroadcastWorker` |
-| Retry | Per job | Per subscriber, per message |
-| Trimming | Auto (completion/removal) | `maxMessages` option |
+|          | Queue                         | Broadcast                                 |
+| -------- | ----------------------------- | ----------------------------------------- |
+| Delivery | Point-to-point (one consumer) | Fan-out (all subscribers)                 |
+| Use case | Task processing               | Event distribution                        |
+| API      | `queue.add(name, data, opts)` | `broadcast.publish(subject, data, opts?)` |
+| Consumer | `Worker`                      | `BroadcastWorker`                         |
+| Retry    | Per job                       | Per subscriber, per message               |
+| Trimming | Auto (completion/removal)     | `maxMessages` option                      |
 
 ## HTTP Proxy
 
 Cross-language producers and consumers can use the proxy instead of `Broadcast` / `BroadcastWorker` directly:
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/broadcast/:name` | Publish `{ subject, data?, opts? }` |
-| GET | `/broadcast/:name/events` | SSE fan-out stream. Requires `subscription`; optional `subjects=a.*,b.>` |
+| Method | Path                      | Description                                                              |
+| ------ | ------------------------- | ------------------------------------------------------------------------ |
+| POST   | `/broadcast/:name`        | Publish `{ subject, data?, opts? }`                                      |
+| GET    | `/broadcast/:name/events` | SSE fan-out stream. Requires `subscription`; optional `subjects=a.*,b.>` |
 
 SSE payloads arrive as `event: message` with JSON `{ id, subject, data, timestamp }`.
 

@@ -173,6 +173,26 @@ await emailWorker.close();
 
 Both `Broadcast` and `BroadcastWorker` support graceful shutdown via `close()`. The worker drains in-progress jobs before disconnecting.
 
+## Crash and stall recovery
+
+A message a subscription's worker claimed but did not finish stays in that subscription's pending entries list: the worker was killed, force-closed with `close(true)`, or received the message while it was closing. Another `BroadcastWorker` on the same subscription reclaims it once the claim has been idle for `stalledInterval` and the message's `lastActive` is older than `lockDuration`, then runs it again. Other subscriptions are not affected.
+
+- Stalls are counted per subscription, in `job:<id>:sub:<subscription>` (24h TTL). After more than `maxStalledCount` stalls in one subscription, the message fails, like a terminal processor failure in that subscription (the message hash, shared by all subscriptions, is marked failed).
+- Recovery needs a running `BroadcastWorker` on that subscription. A restarted process gets a new consumer ID, so its own old claims are recovered the same way.
+- `lastActive` is shared by all subscriptions. While another subscription is still processing the same message, stall detection waits until that heartbeat stops.
+- A reclaimed message that the reclaiming worker has not started when it closes or pauses stays in its pending list and is reclaimed again, which counts one more stall.
+
+## Retention
+
+`removeOnComplete` and `removeOnFail` do not apply to broadcast messages: one message hash is shared by all subscriptions. Without `maxMessages`, every published message keeps its stream entry, job hash and completed/failed set member.
+
+`maxMessages` is a hard cap, applied on each publish:
+
+- The oldest entries are trimmed even when a subscription has not read them yet. That subscription never sees them, and no event is emitted. Size `maxMessages` for the lag of your slowest subscriber.
+- For each trimmed message, the publish also deletes its job hash, per-subscription hashes (`job:<id>:sub:<subscription>`), log and completed/failed set member.
+- A trimmed message that a subscription still has claimed, has scheduled for a retry, or has a newer retry entry for keeps its data until that settles. So does a message parked outside the stream (delayed, suspended, group-waiting, waiting-children). Claims held this way are re-checked by later publishes, so their data waits for the next publish.
+- One publish trims at most 1000 entries. Lowering `maxMessages` on a large stream converges over several publishes.
+
 ## HTTP proxy
 
 The proxy exposes broadcast publish and SSE fan-out over HTTP:

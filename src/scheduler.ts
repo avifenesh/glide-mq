@@ -50,6 +50,11 @@ export interface SchedulerOptions {
   broadcastMode?: boolean;
   /** Called for each job this scheduler's reclaim found stalled and returned to waiting. */
   onStalled?: (jobId: string) => void;
+  /**
+   * Broadcast mode: receives the entries stalled reclaim moved into this
+   * consumer's PEL. The worker must run them again; nobody else will.
+   */
+  onRedispatch?: (entries: { jobId: string; entryId: string }[]) => void;
 }
 
 /**
@@ -73,6 +78,7 @@ export class Scheduler {
   private onPromotionTick?: () => void;
   private onError?: (err: Error) => void;
   private onStalled?: (jobId: string) => void;
+  private onRedispatch?: (entries: { jobId: string; entryId: string }[]) => void;
   private serializer: Serializer;
   private promotionTimer: ReturnType<typeof setInterval> | null = null;
   private promotionWakeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -99,6 +105,7 @@ export class Scheduler {
     this.onPromotionTick = opts.onPromotionTick;
     this.onError = opts.onError;
     this.onStalled = opts.onStalled;
+    this.onRedispatch = opts.onRedispatch;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
   }
 
@@ -354,7 +361,8 @@ export class Scheduler {
    * Calls FCALL glidemq_reclaimStalled via XAUTOCLAIM semantics in Lua.
    */
   async reclaimStalledJobs(): Promise<number> {
-    if (!this.onStalled) {
+    const redispatch = this.broadcastMode && !!this.onRedispatch;
+    if (!this.onStalled && !redispatch) {
       return reclaimStalled(
         this.client,
         this.queueKeys,
@@ -367,7 +375,7 @@ export class Scheduler {
         this.lockDuration,
       );
     }
-    const { count, stalledIds } = await reclaimStalledWithIds(
+    const result = await reclaimStalledWithIds(
       this.client,
       this.queueKeys,
       this.consumerId,
@@ -377,9 +385,17 @@ export class Scheduler {
       this.consumerGroup,
       this.broadcastMode,
       this.lockDuration,
+      redispatch,
     );
-    this.reportStalled(stalledIds);
-    return count;
+    this.reportStalled(result.stalledIds);
+    if (result.redispatch.length > 0) {
+      try {
+        this.onRedispatch?.(result.redispatch);
+      } catch (err) {
+        this.reportError(err);
+      }
+    }
+    return result.count;
   }
 
   private reportStalled(jobIds: string[]): void {

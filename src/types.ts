@@ -171,7 +171,11 @@ export interface WorkerOptions extends QueueOptions {
 
 /** Configuration options for a Broadcast (pub/sub) queue. */
 export interface BroadcastOptions extends QueueOptions {
-  /** Max messages to retain in stream (must be a positive integer). Trimmed exactly (hard limit) on each publish. Opt-in; no trimming by default. */
+  /**
+   * Max messages to retain in stream (must be a positive integer). Trimmed exactly (hard limit) on each publish,
+   * including messages a subscription has not read yet. Trimmed messages' job data is deleted once no subscription
+   * holds them. Opt-in; no trimming by default.
+   */
   maxMessages?: number;
 }
 

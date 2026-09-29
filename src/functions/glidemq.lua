@@ -858,8 +858,18 @@ end
 
 -- Apply stall logic to a job: increment stalledCount, fail if over max, else emit stalled event.
 -- Returns true if the job was moved to failed, false if only stalled.
-local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp)
-  local stalledCount = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
+-- subKey: broadcast mode counts stalls per subscription in job:<id>:sub:<group>
+-- field 's', so a stall in one subscription does not count against another.
+local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp, subKey)
+  local stalledCount
+  if subKey then
+    stalledCount = redis.call('HINCRBY', subKey, 's', 1)
+    -- Same retention as the per-subscription retry counter; never shorten a
+    -- longer TTL a scheduled retry set.
+    if redis.call('PTTL', subKey) < 86400000 then redis.call('PEXPIRE', subKey, 86400000) end
+  else
+    stalledCount = redis.call('HINCRBY', jobKey, 'stalledCount', 1)
+  end
   if stalledCount > maxStalledCount then
     local metricsKey = prefix .. 'metrics:failed'
     local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
@@ -1137,7 +1147,10 @@ redis.register_function('glidemq_promote', function(keys, args)
         else
           local jobName = redis.call('HGET', jobKey, 'name')
           if retryGroup then
-            redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name', jobName or '', 'retryGroup', retryGroup)
+            local retryEntryId = redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name', jobName or '', 'retryGroup', retryGroup)
+            -- Newest stream entry of this broadcast message; glidemq_trimBroadcast
+            -- keeps the hash until that entry is trimmed too.
+            redis.call('HSET', jobKey, 'bcastEntry', retryEntryId)
           else
             xaddJob(streamKey, jobId, jobName)
           end
@@ -2015,8 +2028,15 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   -- 'stalled' for the jobs this call returned to waiting. Older callers omit
   -- it and keep the integer reply.
   local returnIds = args[9] == '1'
+  -- Optional, broadcast mode: '1' means the calling worker re-dispatches the
+  -- entries this call reclaimed into its own PEL. The reply becomes
+  -- {count, {stalledId...}, {jobId, entryId, ...}}. Older callers omit it and
+  -- keep the entry parked in the reclaiming consumer's PEL.
+  local redispatch = broadcastMode == '1' and args[10] == '1'
   local stalledIds = {}
+  local redispatched = {}
   local function reply(count)
+    if redispatch then return {count, stalledIds, redispatched} end
     if not returnIds then return count end
     local out = {count}
     for i = 1, #stalledIds do out[#out + 1] = stalledIds[i] end
@@ -2075,16 +2095,23 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       if lastActive and (timestamp - lastActive) < effectiveIdle then
         count = count + 1
       else
-      local failed = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp)
+      local subKey = nil
+      if broadcastMode == '1' then subKey = jobKey .. ':sub:' .. group end
+      local failed = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp, subKey)
       if not failed then stalledIds[#stalledIds + 1] = jobId end
       if failed then
         if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
         if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
       elseif broadcastMode == '1' then
         -- Broadcast mode keeps the original entry visible to all subscribers,
-        -- so we can't redispatch via XADD. Leave state active for the next
-        -- reclaim cycle; if it stalls again, applyStalledLogic will fail it.
+        -- so it cannot be redispatched via XADD. XAUTOCLAIM moved the claim
+        -- into this consumer's PEL: a redispatching caller runs it again by
+        -- entry ID. Otherwise it stays there for the next reclaim cycle.
         redis.call('HSET', jobKey, 'state', 'active')
+        if redispatch then
+          redispatched[#redispatched + 1] = jobId
+          redispatched[#redispatched + 1] = entryId
+        end
       else
         -- Under maxStalledCount threshold: redispatch the job to the stream
         -- so a healthy worker picks it up. The original PEL entry now belongs
@@ -3478,6 +3505,136 @@ redis.register_function('glidemq_registerParent', function(keys, args)
     return 'already_completed'
   end
   return 'ok'
+end)
+
+-- Names of the consumer groups of a stream (none if the stream is missing).
+local function streamGroupNames(streamKey)
+  local names = {}
+  local ok, groups = pcall(redis.call, 'XINFO', 'GROUPS', streamKey)
+  if not ok or type(groups) ~= 'table' then return names end
+  for gi = 1, #groups do
+    local info = groups[gi]
+    if type(info) == 'table' then
+      for f = 1, #info, 2 do
+        if info[f] == 'name' then
+          names[#names + 1] = info[f + 1]
+          break
+        end
+      end
+    end
+  end
+  return names
+end
+
+local function entryPendingInAnyGroup(streamKey, groups, entryId)
+  for i = 1, #groups do
+    if #redis.call('XPENDING', streamKey, groups[i], entryId, entryId, 1) > 0 then return true end
+  end
+  return false
+end
+
+-- States parked outside the stream (groupq, suspended set, parent deps,
+-- scheduled set): the message still comes back, so trimming keeps it.
+local TRIM_KEEP_STATES = {
+  ['delayed'] = true, ['group-waiting'] = true, ['suspended'] = true, ['waiting-children'] = true,
+}
+
+-- Delete a broadcast message whose stream entries are all trimmed, once no
+-- claim (bcastHeld), scheduled retry or newer retry entry still needs it.
+local function deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, jobId)
+  local jobKey = prefix .. 'job:' .. jobId
+  local vals = redis.call('HMGET', jobKey, 'state', 'bcastHeld', 'bcastEntry')
+  if not vals[1] or TRIM_KEEP_STATES[vals[1]] then return end
+  if (tonumber(vals[2]) or 0) > 0 then return end
+  if vals[3] and #redis.call('XRANGE', streamKey, vals[3], vals[3]) > 0 then return end
+  local scheduledKey = keys[4]
+  if redis.call('ZSCORE', scheduledKey, jobId) then return end
+  local subKeys = {}
+  for i = 1, #groups do
+    if redis.call('ZSCORE', scheduledKey, jobId .. '||' .. groups[i]) then return end
+    subKeys[#subKeys + 1] = jobKey .. ':sub:' .. groups[i]
+  end
+  redis.call('ZREM', keys[2], jobId)
+  redis.call('ZREM', keys[3], jobId)
+  redis.call('UNLINK', jobKey, prefix .. 'log:' .. jobId)
+  for i = 1, #subKeys, 1000 do
+    redis.call('UNLINK', unpack(subKeys, i, math.min(i + 999, #subKeys)))
+  end
+end
+
+-- Trim a broadcast stream to maxLen entries (a hard cap: entries a
+-- subscription has not read yet are dropped too) and delete the job hashes,
+-- per-subscription hashes and completed/failed members of the trimmed
+-- messages. A trimmed entry still pending in some subscription keeps its
+-- message until that claim settles; later calls re-check those claims.
+-- KEYS: [streamKey, completedKey, failedKey, scheduledKey]
+-- ARGS: [maxLen, timestamp]
+-- Returns the number of trimmed entries.
+redis.register_function('glidemq_trimBroadcast', function(keys, args)
+  local streamKey = keys[1]
+  local maxLen = tonumber(args[1]) or 0
+  local timestamp = tonumber(args[2]) or 0
+  local prefix = string.sub(streamKey, 1, #streamKey - 6)
+  local heldKey = prefix .. 'bcast-held'
+  local excess = redis.call('XLEN', streamKey) - maxLen
+  local held = redis.call('ZRANGE', heldKey, 0, 99)
+  if excess <= 0 and #held == 0 then return 0 end
+  local groups = streamGroupNames(streamKey)
+  local trimmed = 0
+  local candidates = {}
+  if excess > 0 then
+    -- Bounded per call; each publish trims again, so a backlog converges.
+    local batch = math.min(excess, 1000)
+    local entries = redis.call('XRANGE', streamKey, '-', '+', 'COUNT', batch + 1)
+    local last = math.min(batch, #entries)
+    if #entries > batch then
+      redis.call('XTRIM', streamKey, 'MINID', entries[batch + 1][1])
+    else
+      redis.call('XTRIM', streamKey, 'MAXLEN', maxLen)
+    end
+    trimmed = last
+    for i = 1, last do
+      local entryId = entries[i][1]
+      local fields = entries[i][2]
+      local jobId = nil
+      for j = 1, #fields, 2 do
+        if fields[j] == 'jobId' then
+          jobId = fields[j + 1]
+          break
+        end
+      end
+      if jobId and redis.call('EXISTS', prefix .. 'job:' .. jobId) == 1 then
+        if entryPendingInAnyGroup(streamKey, groups, entryId) then
+          redis.call('HINCRBY', prefix .. 'job:' .. jobId, 'bcastHeld', 1)
+          redis.call('ZADD', heldKey, timestamp, entryId .. '|' .. jobId)
+        else
+          candidates[#candidates + 1] = jobId
+        end
+      end
+    end
+  end
+  -- Re-check claims held by earlier trims. A claim that is still pending
+  -- moves to the back so a stuck one does not block the rest.
+  for i = 1, #held do
+    local member = held[i]
+    local sep = string.find(member, '|', 1, true)
+    local entryId = string.sub(member, 1, sep - 1)
+    local jobId = string.sub(member, sep + 1)
+    if entryPendingInAnyGroup(streamKey, groups, entryId) then
+      redis.call('ZADD', heldKey, timestamp, member)
+    else
+      redis.call('ZREM', heldKey, member)
+      local jobKey = prefix .. 'job:' .. jobId
+      if redis.call('EXISTS', jobKey) == 1 then
+        if redis.call('HINCRBY', jobKey, 'bcastHeld', -1) <= 0 then redis.call('HDEL', jobKey, 'bcastHeld') end
+        candidates[#candidates + 1] = jobId
+      end
+    end
+  end
+  for i = 1, #candidates do
+    deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, candidates[i])
+  end
+  return trimmed
 end)
 
 redis.register_function('glidemq_removeJob', function(keys, args)
