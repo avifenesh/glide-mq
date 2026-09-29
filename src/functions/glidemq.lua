@@ -2354,9 +2354,12 @@ redis.register_function('glidemq_dedup', function(keys, args)
      parentQueue ~= extractQueueTag(string.sub(prefix, 1, #prefix - 1)) and
      replacedEdges.parentQueue == parentQueue and replacedEdges.parentId == parentId then
     local inherited = decodeReplacedIds(replacedEdges.replacedIds) or {}
-    inherited[#inherited + 1] = replacedJobId
-    hashFields[#hashFields + 1] = 'replacedIds'
-    hashFields[#hashFields + 1] = cjson.encode(inherited)
+    -- A same-id replacement already owns the replaced deps member.
+    if replacedJobId ~= jobIdStr then inherited[#inherited + 1] = replacedJobId end
+    if #inherited > 0 then
+      hashFields[#hashFields + 1] = 'replacedIds'
+      hashFields[#hashFields + 1] = cjson.encode(inherited)
+    end
     replacedEdges.parentId = nil
     replacedEdges.replacedIds = nil
   end
