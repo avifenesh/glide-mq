@@ -616,12 +616,12 @@ export class FlowProducer {
             if (autoIdLeaves.length > 0) {
               const idBatch = isCluster ? new ClusterBatch(false) : new Batch(false);
               for (const n of autoIdLeaves) idBatch.incr(buildKeys(n.queueName, prefix).id);
-              const rawIds = isCluster
-                ? await (client as GlideClusterClient).exec(idBatch as ClusterBatch, true)
-                : await (client as GlideClient).exec(idBatch as Batch, true);
-              if (!Array.isArray(rawIds) || rawIds.length !== autoIdLeaves.length) {
-                throw new GlideMQError('addDAG id reservation returned unexpected result length');
-              }
+              // raiseOnError without WATCH: exec returns one reply per INCR.
+              const rawIds = (
+                isCluster
+                  ? await (client as GlideClusterClient).exec(idBatch as ClusterBatch, true)
+                  : await (client as GlideClient).exec(idBatch as Batch, true)
+              )!;
               autoIdLeaves.forEach((n, i) => presetIds.set(n.name, String(rawIds[i])));
             }
             const depsBatch = isCluster ? new ClusterBatch(false) : new Batch(false);
