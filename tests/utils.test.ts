@@ -405,6 +405,110 @@ describe('nextCronOccurrence with timezone', () => {
   });
 });
 
+describe('nextCronOccurrence extended syntax', () => {
+  function walk(pattern: string, fromIso: string, count: number, tz?: string): string[] {
+    let t = new Date(fromIso).getTime();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      t = nextCronOccurrence(pattern, t, tz);
+      out.push(new Date(t).toISOString());
+    }
+    return out;
+  }
+
+  describe('names', () => {
+    it('accepts weekday names, case-insensitive, in ranges', () => {
+      expect(walk('0 9 * * MON-FRI', '2024-01-13T00:00:00Z', 1)).toEqual(['2024-01-15T09:00:00.000Z']);
+      expect(walk('0 9 * * mon-fri', '2024-01-13T00:00:00Z', 1)).toEqual(['2024-01-15T09:00:00.000Z']);
+      expect(walk('0 0 * * Sun', '2024-01-15T00:00:00Z', 1)).toEqual(['2024-01-21T00:00:00.000Z']);
+    });
+
+    it('accepts weekday names in lists', () => {
+      expect(walk('0 0 * * SUN,SAT', '2024-01-15T00:00:00Z', 2)).toEqual([
+        '2024-01-20T00:00:00.000Z',
+        '2024-01-21T00:00:00.000Z',
+      ]);
+    });
+
+    it('accepts month names in values, ranges and steps', () => {
+      expect(walk('0 0 1 DEC *', '2024-01-01T00:00:00Z', 1)).toEqual(['2024-12-01T00:00:00.000Z']);
+      expect(walk('0 9 1 JAN-MAR/2 *', '2024-02-10T00:00:00Z', 2)).toEqual([
+        '2024-03-01T09:00:00.000Z',
+        '2025-01-01T09:00:00.000Z',
+      ]);
+      expect(walk('0 0 1 jan,jul *', '2024-02-10T00:00:00Z', 1)).toEqual(['2024-07-01T00:00:00.000Z']);
+    });
+
+    it('rejects unknown names and names in the wrong field', () => {
+      const now = Date.now();
+      expect(() => nextCronOccurrence('0 0 * * FOO', now)).toThrow('Invalid cron token: FOO');
+      expect(() => nextCronOccurrence('0 0 * MON *', now)).toThrow('Invalid cron token: MON');
+      expect(() => nextCronOccurrence('0 JAN * * *', now)).toThrow('Invalid cron token: JAN');
+    });
+  });
+
+  describe('day-of-week 7', () => {
+    it('treats 7 as Sunday', () => {
+      expect(walk('0 0 * * 7', '2024-01-15T00:00:00Z', 1)).toEqual(['2024-01-21T00:00:00.000Z']);
+      expect(walk('0 0 * * 5-7', '2024-01-15T00:00:00Z', 4)).toEqual([
+        '2024-01-19T00:00:00.000Z',
+        '2024-01-20T00:00:00.000Z',
+        '2024-01-21T00:00:00.000Z',
+        '2024-01-26T00:00:00.000Z',
+      ]);
+      expect(walk('0 0 * * 1-7/3', '2024-01-15T00:00:00Z', 3)).toEqual([
+        '2024-01-18T00:00:00.000Z',
+        '2024-01-21T00:00:00.000Z',
+        '2024-01-22T00:00:00.000Z',
+      ]);
+    });
+
+    it('still rejects 8', () => {
+      expect(() => nextCronOccurrence('0 0 * * 8', Date.now())).toThrow('Cron value out of bounds: 8');
+      expect(() => nextCronOccurrence('0 0 * * 5-8', Date.now())).toThrow('Cron range out of bounds: 5-8');
+    });
+  });
+
+  describe('? in day fields', () => {
+    it('is an unrestricted day field', () => {
+      expect(walk('0 0 ? * 1', '2024-01-13T00:00:00Z', 1)).toEqual(['2024-01-15T00:00:00.000Z']);
+      expect(walk('0 0 15 * ?', '2024-01-13T00:00:00Z', 2)).toEqual([
+        '2024-01-15T00:00:00.000Z',
+        '2024-02-15T00:00:00.000Z',
+      ]);
+      expect(walk('0 0 ? * ?', '2024-01-13T00:00:00Z', 1)).toEqual(['2024-01-14T00:00:00.000Z']);
+    });
+
+    it('is rejected outside the day fields', () => {
+      expect(() => nextCronOccurrence('? 0 * * *', Date.now())).toThrow('Invalid cron token: ?');
+      expect(() => nextCronOccurrence('0 ? * * *', Date.now())).toThrow('Invalid cron token: ?');
+      expect(() => nextCronOccurrence('0 0 * ? *', Date.now())).toThrow('Invalid cron token: ?');
+    });
+  });
+
+  describe('start/step', () => {
+    it('reads N/step as N-max/step', () => {
+      expect(walk('5/15 * * * *', '2024-01-01T12:00:00Z', 5)).toEqual([
+        '2024-01-01T12:05:00.000Z',
+        '2024-01-01T12:20:00.000Z',
+        '2024-01-01T12:35:00.000Z',
+        '2024-01-01T12:50:00.000Z',
+        '2024-01-01T13:05:00.000Z',
+      ]);
+      expect(walk('0 9 5/10 * *', '2024-01-13T00:00:00Z', 2)).toEqual([
+        '2024-01-15T09:00:00.000Z',
+        '2024-01-25T09:00:00.000Z',
+      ]);
+    });
+
+    it('rejects malformed steps', () => {
+      expect(() => nextCronOccurrence('5/ * * * *', Date.now())).toThrow('Invalid cron token: 5/');
+      expect(() => nextCronOccurrence('*/5/2 * * * *', Date.now())).toThrow('Invalid cron token: */5/2');
+      expect(() => nextCronOccurrence('1-5-9 * * * *', Date.now())).toThrow('Invalid cron token: 1-5-9');
+    });
+  });
+});
+
 describe('hmgetArrayToRecord', () => {
   it('converts an array of values to a Record keyed by field names', () => {
     const fields = ['a', 'b', 'c'];

@@ -515,70 +515,123 @@ export async function reconnectWithBackoff(
   }
 }
 
-// ---- Simple 5-field cron parser ----
-// Format: minute hour dayOfMonth month dayOfWeek
-// Supports: *, specific numbers, ranges (1-5), steps (*/5), lists (1,3,5)
+// ---- Cron parser ----
+// Format: [second] minute hour dayOfMonth month dayOfWeek (5 or 6 fields)
+// Supports: *, ?, numbers, names (JAN-DEC, SUN-SAT), ranges (1-5), steps (*/5, 5/15, 1-30/10), lists (1,3,5)
 
 interface CronField {
   set: Set<number>;
   sorted: number[];
 }
 
-function parseCronField(field: string, min: number, max: number): CronField {
+interface CronFieldSpec {
+  min: number;
+  max: number;
+  /** Case-insensitive names accepted in place of numbers. */
+  names?: Record<string, number>;
+  /** '?' is accepted as a synonym for '*'. */
+  allowQuestion?: boolean;
+}
+
+const MONTH_NAMES: Record<string, number> = {
+  JAN: 1,
+  FEB: 2,
+  MAR: 3,
+  APR: 4,
+  MAY: 5,
+  JUN: 6,
+  JUL: 7,
+  AUG: 8,
+  SEP: 9,
+  OCT: 10,
+  NOV: 11,
+  DEC: 12,
+};
+
+const DOW_NAMES: Record<string, number> = { SUN: 0, MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6 };
+
+const CRON_MINUTE: CronFieldSpec = { min: 0, max: 59 };
+const CRON_HOUR: CronFieldSpec = { min: 0, max: 23 };
+const CRON_DOM: CronFieldSpec = { min: 1, max: 31, allowQuestion: true };
+const CRON_MONTH: CronFieldSpec = { min: 1, max: 12, names: MONTH_NAMES };
+// 7 is accepted as a second Sunday and folded onto 0 after parsing.
+const CRON_DOW: CronFieldSpec = { min: 0, max: 7, names: DOW_NAMES, allowQuestion: true };
+
+/** Parse one value of a field: a number or a name. Returns undefined for anything else. */
+function parseCronValue(token: string, spec: CronFieldSpec): number | undefined {
+  if (/^\d+$/.test(token)) return parseInt(token, 10);
+  return spec.names?.[token.toUpperCase()];
+}
+
+function parseCronField(field: string, spec: CronFieldSpec): CronField {
   const values: Set<number> = new Set();
+  const { min, max } = spec;
+
+  const addRange = (from: number, to: number, step: number) => {
+    if (from < min || to > max) {
+      throw new Error(`Cron range out of bounds: ${from}-${to}`);
+    }
+    if (from > to) {
+      throw new Error(`Cron range reversed: ${from}-${to}`);
+    }
+    for (let i = from; i <= to; i += step) values.add(i);
+  };
 
   for (const part of field.split(',')) {
     const trimmed = part.trim();
 
-    if (trimmed === '*') {
-      for (let i = min; i <= max; i++) values.add(i);
+    if (trimmed === '*' || (spec.allowQuestion && trimmed === '?')) {
+      addRange(min, max, 1);
       continue;
     }
 
-    const stepMatch = trimmed.match(/^(\*|(\d+)-(\d+))\/(\d+)$/);
-    if (stepMatch) {
-      const step = parseInt(stepMatch[4], 10);
+    // Split once on '/', then once on '-'. More separators are malformed.
+    const slash = trimmed.split('/');
+    if (slash.length > 2 || slash.some((s) => s.length === 0)) {
+      throw new Error(`Invalid cron token: ${trimmed}`);
+    }
+    const [rangeText, stepText] = slash;
+    let step = 1;
+    if (stepText !== undefined) {
+      if (!/^\d+$/.test(stepText)) {
+        throw new Error(`Invalid cron token: ${trimmed}`);
+      }
+      step = parseInt(stepText, 10);
       if (step <= 0) {
         throw new Error(`Invalid cron step: ${step}`);
       }
-      let start = min;
-      let end = max;
-      if (stepMatch[2] !== undefined) {
-        start = parseInt(stepMatch[2], 10);
-        end = parseInt(stepMatch[3], 10);
-      }
-      if (start < min || end > max) {
-        throw new Error(`Cron range out of bounds: ${start}-${end}`);
-      }
-      if (start > end) {
-        throw new Error(`Cron range reversed: ${start}-${end}`);
-      }
-      for (let i = start; i <= end; i += step) values.add(i);
+    }
+
+    if (rangeText === '*') {
+      addRange(min, max, step);
       continue;
     }
 
-    const rangeMatch = trimmed.match(/^(\d+)-(\d+)$/);
-    if (rangeMatch) {
-      const from = parseInt(rangeMatch[1], 10);
-      const to = parseInt(rangeMatch[2], 10);
-      if (from < min || to > max) {
-        throw new Error(`Cron range out of bounds: ${from}-${to}`);
-      }
-      if (from > to) {
-        throw new Error(`Cron range reversed: ${from}-${to}`);
-      }
-      for (let i = from; i <= to; i++) values.add(i);
-      continue;
-    }
-
-    if (!/^\d+$/.test(trimmed)) {
+    const dash = rangeText.split('-');
+    if (dash.length > 2 || dash.some((s) => s.length === 0)) {
       throw new Error(`Invalid cron token: ${trimmed}`);
     }
-    const num = parseInt(trimmed, 10);
-    if (num < min || num > max) {
-      throw new Error(`Cron value out of bounds: ${num}`);
+    const from = parseCronValue(dash[0], spec);
+    if (from === undefined) {
+      throw new Error(`Invalid cron token: ${trimmed}`);
     }
-    values.add(num);
+    if (dash.length === 2) {
+      const to = parseCronValue(dash[1], spec);
+      if (to === undefined) {
+        throw new Error(`Invalid cron token: ${trimmed}`);
+      }
+      addRange(from, to, step);
+      continue;
+    }
+    if (stepText !== undefined) {
+      // 'N/step' runs from N to the end of the field, as in cron-parser and Quartz.
+      addRange(from, max, step);
+      continue;
+    }
+    if (from < min || from > max) {
+      throw new Error(`Cron value out of bounds: ${from}`);
+    }
+    values.add(from);
   }
 
   const sorted = [...values].sort((a, b) => a - b);
@@ -591,9 +644,9 @@ interface CronPattern {
   dom: CronField;
   month: CronField;
   dow: CronField;
-  /** Day-of-month field covers every day 1-31 ('*', '*\/1', '1-31'). */
+  /** Day-of-month field covers every day 1-31 ('*', '?', '*\/1', '1-31'). */
   domUnrestricted: boolean;
-  /** Day-of-week field is '*' or '*\/1'. An explicit '0-6' counts as restricted, as in cron-parser and vixie cron. */
+  /** Day-of-week field is '*', '?' or '*\/1'. An explicit '0-6' counts as restricted, as in cron-parser and vixie cron. */
   dowUnrestricted: boolean;
 }
 
@@ -602,16 +655,20 @@ function parseCronPattern(pattern: string): CronPattern {
   if (fields.length !== 5) {
     throw new Error(`Invalid cron pattern: expected 5 fields, got ${fields.length}`);
   }
-  const dom = parseCronField(fields[2], 1, 31);
-  const dow = parseCronField(fields[4], 0, 6); // 0=Sunday
+  const dom = parseCronField(fields[2], CRON_DOM);
+  const dow = parseCronField(fields[4], CRON_DOW);
+  if (dow.set.delete(7)) {
+    dow.set.add(0);
+    dow.sorted = [...dow.set].sort((a, b) => a - b);
+  }
   return {
-    minute: parseCronField(fields[0], 0, 59),
-    hour: parseCronField(fields[1], 0, 23),
+    minute: parseCronField(fields[0], CRON_MINUTE),
+    hour: parseCronField(fields[1], CRON_HOUR),
     dom,
-    month: parseCronField(fields[3], 1, 12),
+    month: parseCronField(fields[3], CRON_MONTH),
     dow,
     domUnrestricted: dom.set.size === 31,
-    dowUnrestricted: dow.set.size === 7 && fields[4].includes('*'),
+    dowUnrestricted: dow.set.size === 7 && /[*?]/.test(fields[4]),
   };
 }
 
