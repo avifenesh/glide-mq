@@ -1223,3 +1223,50 @@ describe('batch activation and completion round trips', () => {
     await worker.close(true);
   });
 });
+
+describe('batch refill during close', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    ['Worker', (opts: any, p: any) => new Worker('lifecycle-refill-close', p, opts)],
+    [
+      'BroadcastWorker',
+      (opts: any, p: any) => new BroadcastWorker('lifecycle-refill-close-b', p, { ...opts, subscription: 'sub-rc' }),
+    ],
+  ])('%s swallows a refill read torn down by close(true) and hands collected entries back', async (_name, make) => {
+    const command = makeMockClient({ fcall: routeFcall({}) });
+    const refill = deferred<any>();
+    const blocking = makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult([['1-0', 'first']]))
+        .mockImplementationOnce(() => refill.promise)
+        .mockImplementation(neverResolve),
+    });
+    wireClients(command, blocking);
+
+    const processor = vi.fn().mockResolvedValue(['ok']);
+    const errors: unknown[] = [];
+    const worker = make({ connection, batch: { size: 3, timeout: 5000 }, blockTimeout: 100 }, processor);
+    worker.on('error', (err: unknown) => errors.push(err));
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(blocking.xreadgroup).toHaveBeenCalledTimes(2);
+
+    const closing = worker.close(true);
+    refill.reject(new Error('client closed'));
+    await vi.advanceTimersByTimeAsync(20);
+    await closing;
+
+    expect(errors).toEqual([]);
+    expect(processor).not.toHaveBeenCalled();
+    expect(blocking.xreadgroup).toHaveBeenCalledTimes(2);
+  });
+});
