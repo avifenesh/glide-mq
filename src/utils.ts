@@ -518,6 +518,7 @@ export async function reconnectWithBackoff(
 // ---- Cron parser ----
 // Format: [second] minute hour dayOfMonth month dayOfWeek (5 or 6 fields, seconds default to 0)
 // Supports: *, ?, numbers, names (JAN-DEC, SUN-SAT), ranges (1-5), steps (*/5, 5/15, 1-30/10), lists (1,3,5)
+// Day modifiers: L and LW and <n>W in day-of-month, <d>L and <d>#<n> in day-of-week
 
 interface CronField {
   set: Set<number>;
@@ -564,7 +565,11 @@ function parseCronValue(token: string, spec: CronFieldSpec): number | undefined 
   return spec.names?.[token.toUpperCase()];
 }
 
-function parseCronField(field: string, spec: CronFieldSpec): CronField {
+/**
+ * Parse one cron field into its set of values. `special` consumes tokens the
+ * generic grammar does not cover (L, W, #) and returns true when it did.
+ */
+function parseCronField(field: string, spec: CronFieldSpec, special?: (token: string) => boolean): CronField {
   const values: Set<number> = new Set();
   const { min, max } = spec;
 
@@ -585,6 +590,7 @@ function parseCronField(field: string, spec: CronFieldSpec): CronField {
       addRange(min, max, 1);
       continue;
     }
+    if (special?.(trimmed)) continue;
 
     // Split once on '/', then once on '-'. More separators are malformed.
     const slash = trimmed.split('/');
@@ -639,7 +645,64 @@ function parseCronField(field: string, spec: CronFieldSpec): CronField {
   return { set: values, sorted };
 }
 
-interface CronPattern {
+/** Quartz-style day modifiers. Each one adds days to its field's match. */
+interface CronDayModifiers {
+  /** 'L' in day-of-month: the last day of the month. */
+  domLast: boolean;
+  /** 'LW' in day-of-month: the last weekday (Mon-Fri) of the month. */
+  domLastWeekday: boolean;
+  /** '<n>W' in day-of-month: the weekday nearest to day n, inside the same month. */
+  domNearestWeekday: number[];
+  /** '<d>L' in day-of-week: the last such weekday of the month. */
+  dowLast: Set<number>;
+  /** '<d>#<n>' in day-of-week: the nth such weekday of the month, n in 1-5. */
+  dowNth: Array<[dow: number, nth: number]>;
+}
+
+function checkCronBound(value: number, min: number, max: number): number {
+  if (value < min || value > max) {
+    throw new Error(`Cron value out of bounds: ${value}`);
+  }
+  return value;
+}
+
+function parseDomModifier(mods: CronDayModifiers, token: string): boolean {
+  const upper = token.toUpperCase();
+  if (upper === 'L') {
+    mods.domLast = true;
+    return true;
+  }
+  if (upper === 'LW') {
+    mods.domLastWeekday = true;
+    return true;
+  }
+  const nearest = upper.match(/^(\d+)W$/);
+  if (nearest) {
+    mods.domNearestWeekday.push(checkCronBound(parseInt(nearest[1], 10), CRON_DOM.min, CRON_DOM.max));
+    return true;
+  }
+  return false;
+}
+
+function parseDowModifier(mods: CronDayModifiers, token: string): boolean {
+  const last = token.match(/^(.+)L$/i);
+  if (last) {
+    const dow = parseCronValue(last[1], CRON_DOW);
+    if (dow === undefined) return false;
+    mods.dowLast.add(checkCronBound(dow, CRON_DOW.min, CRON_DOW.max) % 7);
+    return true;
+  }
+  const nth = token.match(/^(.+)#(\d+)$/);
+  if (nth) {
+    const dow = parseCronValue(nth[1], CRON_DOW);
+    if (dow === undefined) return false;
+    mods.dowNth.push([checkCronBound(dow, CRON_DOW.min, CRON_DOW.max) % 7, checkCronBound(parseInt(nth[2], 10), 1, 5)]);
+    return true;
+  }
+  return false;
+}
+
+interface CronPattern extends CronDayModifiers {
   second: CronField;
   minute: CronField;
   hour: CronField;
@@ -663,13 +726,21 @@ function parseCronPattern(pattern: string): CronPattern {
   }
   const hasSeconds = fields.length === 6;
   const [secondText, minuteText, hourText, domText, monthText, dowText] = hasSeconds ? fields : ['0', ...fields];
-  const dom = parseCronField(domText, CRON_DOM);
-  const dow = parseCronField(dowText, CRON_DOW);
+  const mods: CronDayModifiers = {
+    domLast: false,
+    domLastWeekday: false,
+    domNearestWeekday: [],
+    dowLast: new Set(),
+    dowNth: [],
+  };
+  const dom = parseCronField(domText, CRON_DOM, (token) => parseDomModifier(mods, token));
+  const dow = parseCronField(dowText, CRON_DOW, (token) => parseDowModifier(mods, token));
   if (dow.set.delete(7)) {
     dow.set.add(0);
     dow.sorted = [...dow.set].sort((a, b) => a - b);
   }
   return {
+    ...mods,
     second: parseCronField(secondText, CRON_SECOND),
     minute: parseCronField(minuteText, CRON_MINUTE),
     hour: parseCronField(hourText, CRON_HOUR),
@@ -683,14 +754,41 @@ function parseCronPattern(pattern: string): CronPattern {
   };
 }
 
+function daysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+/** Quartz 'W': the weekday (Mon-Fri) nearest to day n without leaving the month. */
+function nearestWeekday(n: number, dowOfN: number, monthLength: number): number {
+  if (dowOfN >= 1 && dowOfN <= 5) return n;
+  if (dowOfN === 6) return n > 1 ? n - 1 : n + 2;
+  return n < monthLength ? n + 1 : n - 2;
+}
+
+function cronDomMatches(cron: CronPattern, day: number, dayOfWeek: number, monthLength: number): boolean {
+  if (cron.dom.set.has(day)) return true;
+  if (cron.domLast && day === monthLength) return true;
+  // Day of week of another day n in the same month.
+  const dowOf = (n: number) => (((dayOfWeek + n - day) % 7) + 7) % 7;
+  if (cron.domLastWeekday && day === nearestWeekday(monthLength, dowOf(monthLength), monthLength)) return true;
+  return cron.domNearestWeekday.some((n) => n <= monthLength && nearestWeekday(n, dowOf(n), monthLength) === day);
+}
+
+function cronDowMatches(cron: CronPattern, day: number, dayOfWeek: number, monthLength: number): boolean {
+  if (cron.dow.set.has(dayOfWeek)) return true;
+  if (cron.dowLast.has(dayOfWeek) && day + 7 > monthLength) return true;
+  const nth = Math.ceil(day / 7);
+  return cron.dowNth.some(([d, n]) => d === dayOfWeek && n === nth);
+}
+
 /**
  * Standard cron day rule: when both day-of-month and day-of-week are restricted,
  * a day matches if EITHER field matches. Otherwise both must match (the
  * unrestricted one always does).
  */
-function cronDayMatches(cron: CronPattern, day: number, dayOfWeek: number): boolean {
-  const domMatch = cron.dom.set.has(day);
-  const dowMatch = cron.dow.set.has(dayOfWeek);
+function cronDayMatches(cron: CronPattern, day: number, dayOfWeek: number, monthLength: number): boolean {
+  const domMatch = cronDomMatches(cron, day, dayOfWeek, monthLength);
+  const dowMatch = cronDowMatches(cron, day, dayOfWeek, monthLength);
   if (!cron.domUnrestricted && !cron.dowUnrestricted) return domMatch || dowMatch;
   return domMatch && dowMatch;
 }
@@ -891,7 +989,7 @@ function tzGapEnd(w: Wall, tz: string): number {
 function cronWallMatches(cron: CronPattern, p: TzParts): boolean {
   return (
     cron.month.set.has(p.month) &&
-    cronDayMatches(cron, p.day, p.dayOfWeek) &&
+    cronDayMatches(cron, p.day, p.dayOfWeek, daysInMonth(p.year, p.month)) &&
     cron.hour.set.has(p.hour) &&
     cron.minute.set.has(p.minute) &&
     cron.second.set.has(p.second)
@@ -1044,8 +1142,8 @@ function searchCronWall(
     }
 
     // 2. Day check - UTC dates give month length and day of week
-    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    if (day > daysInMonth) {
+    const monthLength = daysInMonth(year, month);
+    if (day > monthLength) {
       month++;
       if (month > 12) {
         month = 1;
@@ -1056,7 +1154,7 @@ function searchCronWall(
       continue;
     }
     const dow = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
-    if (!cronDayMatches(cron, day, dow)) {
+    if (!cronDayMatches(cron, day, dow, monthLength)) {
       day++;
       hour = minute = second = 0;
       continue;

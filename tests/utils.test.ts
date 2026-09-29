@@ -522,9 +522,7 @@ describe('nextCronOccurrence extended syntax', () => {
     });
 
     it('honors seconds with a timezone', () => {
-      expect(walk('30 0 9 * * *', '2024-01-15T00:00:00Z', 1, 'America/New_York')).toEqual([
-        '2024-01-15T14:00:30.000Z',
-      ]);
+      expect(walk('30 0 9 * * *', '2024-01-15T00:00:00Z', 1, 'America/New_York')).toEqual(['2024-01-15T14:00:30.000Z']);
     });
 
     it('fall-back: fixed minute and hour with stepped seconds fires only in the first instance', () => {
@@ -550,6 +548,106 @@ describe('nextCronOccurrence extended syntax', () => {
         '2024-03-10T07:00:00.000Z',
         '2024-03-11T06:30:15.000Z',
       ]);
+    });
+  });
+
+  describe('L, W and # day modifiers', () => {
+    it('L in day-of-month is the last day of the month', () => {
+      expect(walk('0 0 L * *', '2024-01-15T00:00:00Z', 3)).toEqual([
+        '2024-01-31T00:00:00.000Z',
+        '2024-02-29T00:00:00.000Z',
+        '2024-03-31T00:00:00.000Z',
+      ]);
+      expect(walk('0 0 1,L * *', '2024-01-15T00:00:00Z', 2)).toEqual([
+        '2024-01-31T00:00:00.000Z',
+        '2024-02-01T00:00:00.000Z',
+      ]);
+    });
+
+    it('<dow>L in day-of-week is the last such weekday of the month', () => {
+      expect(walk('0 0 * * 5L', '2024-01-15T00:00:00Z', 2)).toEqual([
+        '2024-01-26T00:00:00.000Z',
+        '2024-02-23T00:00:00.000Z',
+      ]);
+      expect(walk('0 0 * * FRIL', '2024-01-15T00:00:00Z', 1)).toEqual(['2024-01-26T00:00:00.000Z']);
+      expect(walk('0 0 * * 7L', '2024-01-15T00:00:00Z', 1)).toEqual(['2024-01-28T00:00:00.000Z']);
+    });
+
+    it('<dow>#<n> is the nth such weekday of the month', () => {
+      expect(walk('0 0 * * 2#1', '2024-01-15T00:00:00Z', 2)).toEqual([
+        '2024-02-06T00:00:00.000Z',
+        '2024-03-05T00:00:00.000Z',
+      ]);
+      expect(walk('0 0 * * 1#5', '2024-01-15T00:00:00Z', 2)).toEqual([
+        '2024-01-29T00:00:00.000Z',
+        '2024-04-29T00:00:00.000Z',
+      ]);
+      expect(walk('0 0 * * MON#2', '2024-01-01T00:00:00Z', 1)).toEqual(['2024-01-08T00:00:00.000Z']);
+    });
+
+    it('<day>W is the nearest weekday inside the same month', () => {
+      expect(walk('0 0 15W * *', '2024-01-13T00:00:00Z', 2)).toEqual([
+        '2024-01-15T00:00:00.000Z', // Monday
+        '2024-02-15T00:00:00.000Z', // Thursday
+      ]);
+      expect(walk('0 0 15W * *', '2024-06-01T00:00:00Z', 1)).toEqual(['2024-06-14T00:00:00.000Z']); // Sat -> Fri
+      expect(walk('0 0 15W * *', '2024-09-01T00:00:00Z', 1)).toEqual(['2024-09-16T00:00:00.000Z']); // Sun -> Mon
+      expect(walk('0 0 1W * *', '2024-05-20T00:00:00Z', 1)).toEqual(['2024-06-03T00:00:00.000Z']); // Sat 1st -> Mon 3rd
+      expect(walk('0 0 31W * *', '2024-03-01T00:00:00Z', 2)).toEqual([
+        '2024-03-29T00:00:00.000Z', // Sun 31st -> Fri 29th; April has no 31st
+        '2024-05-31T00:00:00.000Z',
+      ]);
+    });
+
+    it('LW is the last weekday of the month', () => {
+      expect(walk('0 0 LW * *', '2024-02-01T00:00:00Z', 3)).toEqual([
+        '2024-02-29T00:00:00.000Z', // Thursday
+        '2024-03-29T00:00:00.000Z', // 31st is a Sunday
+        '2024-04-30T00:00:00.000Z', // Tuesday
+      ]);
+    });
+
+    it('keeps the OR rule when both day fields are restricted', () => {
+      expect(walk('0 0 L * 1', '2024-01-25T00:00:00Z', 3)).toEqual([
+        '2024-01-29T00:00:00.000Z',
+        '2024-01-31T00:00:00.000Z',
+        '2024-02-05T00:00:00.000Z',
+      ]);
+      expect(walk('0 0 * * 1#2,5L', '2024-01-01T00:00:00Z', 4)).toEqual([
+        '2024-01-08T00:00:00.000Z',
+        '2024-01-26T00:00:00.000Z',
+        '2024-02-12T00:00:00.000Z',
+        '2024-02-23T00:00:00.000Z',
+      ]);
+    });
+
+    it('works with names, seconds and a timezone together', () => {
+      expect(walk('30 0 9 LW * *', '2024-02-01T00:00:00Z', 1, 'America/New_York')).toEqual([
+        '2024-02-29T14:00:30.000Z',
+      ]);
+      expect(walk('0 9 * * FRI#2', '2024-02-01T00:00:00Z', 1, 'Europe/Berlin')).toEqual(['2024-02-09T08:00:00.000Z']);
+    });
+
+    it('rejects malformed modifiers', () => {
+      const now = Date.now();
+      expect(() => nextCronOccurrence('0 0 * * L', now)).toThrow('Invalid cron token: L');
+      expect(() => nextCronOccurrence('0 0 * * 1#6', now)).toThrow('Cron value out of bounds: 6');
+      expect(() => nextCronOccurrence('0 0 * * 1#0', now)).toThrow('Cron value out of bounds: 0');
+      expect(() => nextCronOccurrence('0 0 * * 8L', now)).toThrow('Cron value out of bounds: 8');
+      expect(() => nextCronOccurrence('0 0 32W * *', now)).toThrow('Cron value out of bounds: 32');
+      expect(() => nextCronOccurrence('0 0 W * *', now)).toThrow('Invalid cron token: W');
+      expect(() => nextCronOccurrence('0 0 L-1 * *', now)).toThrow('Invalid cron token: L-1');
+      expect(() => nextCronOccurrence('0 0 1-15W * *', now)).toThrow('Invalid cron token: 1-15W');
+      expect(() => nextCronOccurrence('0 0 * * 1-3#2', now)).toThrow('Invalid cron token: 1-3#2');
+      expect(() => nextCronOccurrence('0 0 * L *', now)).toThrow('Invalid cron token: L');
+      expect(() => nextCronOccurrence('0 L * * *', now)).toThrow('Invalid cron token: L');
+    });
+
+    it('gives up with a clear error when the pattern can never match inside the horizon', () => {
+      // The 5th Monday of February needs a leap year whose February starts on a Monday (2016, 2044).
+      expect(() => nextCronOccurrence('0 0 * 2 1#5', new Date('2024-01-01T00:00:00Z').getTime())).toThrow(
+        'No cron match found within 10 years for pattern: 0 0 * 2 1#5',
+      );
     });
   });
 
