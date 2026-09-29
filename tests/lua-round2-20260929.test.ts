@@ -11,8 +11,21 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys, keyPrefix, parseCrossQueueParentNotification } =
   require('../dist/utils') as typeof import('../src/utils');
-const { addJob, completeAndFetchNext, completeChild, completeJob, dedup, failJob, registerChildDep, CONSUMER_GROUP } =
-  require('../dist/functions') as typeof import('../src/functions');
+const {
+  addJob,
+  completeAndFetchNext,
+  completeChild,
+  completeJob,
+  dedup,
+  failJob,
+  getActiveListJobIds,
+  healListActive,
+  moveToActive,
+  popLists,
+  reclaimStalledListJobs,
+  registerChildDep,
+  CONSUMER_GROUP,
+} = require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Lua round 2 2026-09-29', (CONNECTION) => {
   let cleanupClient: any;
@@ -358,5 +371,68 @@ describeEachMode('Lua round 2 2026-09-29', (CONNECTION) => {
     expect(await hget(k.group('g'), 'active')).toBe('0');
     expect(await hget(k.meta, 'orderdone:g')).toBe('1');
     expect(await eventTypes(Q)).toContain('failed');
+  });
+
+  async function members(key: string): Promise<string[]> {
+    return [...(await cleanupClient.smembers(key))].map(String).sort();
+  }
+
+  it('P3: list claims are tracked in list-active-ids from reservation to release', async () => {
+    const Q = uniqueQueue('r2-la-ids');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      const a = await queue.add('a', {}, { lifo: true });
+      const b = await queue.add('b', {}, { lifo: true });
+      const popped = await popLists(cleanupClient, k, 2);
+      expect(popped.sort()).toEqual([a!.id, b!.id].sort());
+      expect(await members(k.listActiveIds)).toEqual([a!.id, b!.id].sort());
+      await moveToActive(cleanupClient, k, a!.id, Date.now());
+      await moveToActive(cleanupClient, k, b!.id, Date.now());
+      // CAF completes a list claim and activates the next priority claim.
+      await cleanupClient.hset(k.job('pri'), { id: 'pri', name: 'pri', state: 'waiting', priority: '1' });
+      await cleanupClient.lpush(k.priority, ['pri']);
+      const r = await completeAndFetchNext(cleanupClient, k, a!.id, '', 'null', Date.now(), CONSUMER_GROUP, 'c1');
+      expect(r.nextJobId).toBe('pri');
+      expect(await members(k.listActiveIds)).toEqual([b!.id, 'pri'].sort());
+      expect(await failJob(cleanupClient, k, b!.id, '', 'boom', Date.now(), 0, 0)).toBe('failed');
+      expect(await members(k.listActiveIds)).toEqual(['pri']);
+      expect(String(await cleanupClient.get(k.listActive))).toBe('1');
+    } finally {
+      await queue.close();
+    }
+  });
+
+  it('P3: scans read list-active-ids once seeded and fall back to SCAN when it is short', async () => {
+    const Q = uniqueQueue('r2-la-scan');
+    const k = buildKeys(Q);
+    const active = { name: 'x', state: 'active', listSourced: '1', lastActive: '1' };
+    // A claim activated by an older library: counted, not in the set.
+    await cleanupClient.hset(k.job('old'), { id: 'old', ...active });
+    await cleanupClient.set(k.listActive, '1');
+    expect(await getActiveListJobIds(cleanupClient, k, 0, -1)).toEqual(['old']);
+    // The complete scan seeded the set.
+    expect(await members(k.listActiveIds)).toEqual(['old']);
+
+    // Once seeded, an untracked claim is not found while SCARD covers the counter...
+    await cleanupClient.hset(k.job('rogue'), { id: 'rogue', ...active });
+    expect(await getActiveListJobIds(cleanupClient, k, 0, -1)).toEqual(['old']);
+    // ...and the scan runs again when the counter exceeds the set.
+    await cleanupClient.set(k.listActive, '2');
+    expect((await getActiveListJobIds(cleanupClient, k, 0, -1)).sort()).toEqual(['old', 'rogue']);
+    expect(await members(k.listActiveIds)).toEqual(['old', 'rogue']);
+
+    // Heal corrects drift from the set and drops released members.
+    await cleanupClient.hset(k.job('rogue'), { state: 'completed' });
+    await cleanupClient.set(k.listActive, '3');
+    expect(await healListActive(cleanupClient, k)).toBe(2);
+    expect(String(await cleanupClient.get(k.listActive))).toBe('1');
+    expect(await members(k.listActiveIds)).toEqual(['old']);
+
+    // Stalled reclaim finds the tracked claim and releases it.
+    expect(await reclaimStalledListJobs(cleanupClient, k, 1000, 5, Date.now())).toBe(1);
+    expect(await hget(k.job('old'), 'state')).toBe('waiting');
+    expect(await members(k.listActiveIds)).toEqual([]);
+    expect(String(await cleanupClient.get(k.listActive))).toBe('0');
   });
 });

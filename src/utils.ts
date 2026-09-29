@@ -293,6 +293,7 @@ export function buildKeys(queueName: string, prefix = DEFAULT_PREFIX) {
     lifo: `${p}:lifo`,
     priority: `${p}:priority`,
     listActive: `${p}:list-active`,
+    listActiveIds: `${p}:list-active-ids`,
     metricsFailed: `${p}:metrics:failed`,
     group: (key: string) => `${p}:group:${key}`,
     groupq: (key: string) => `${p}:groupq:${key}`,

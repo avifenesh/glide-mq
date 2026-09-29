@@ -12,10 +12,24 @@ local advanceRepeatAfterComplete
 -- recover from a negative counter (its early-out at <= 0 is intentional - it
 -- only repairs positive drift from worker crashes), so a duplicate decrement
 -- would latch the counter negative forever.
-local function decrListActive(listActiveKey)
+-- list-active-ids is a same-slot SET of the job IDs counted in list-active
+-- (reserved or active list claims). It lets the list-active scans read the
+-- claims instead of SCANning the keyspace. Every counter increment adds the
+-- job and every decrement removes it.
+local function listActiveIdsKey(listActiveKey)
+  return listActiveKey .. '-ids'
+end
+
+local function decrListActive(listActiveKey, jobId)
   if not listActiveKey or listActiveKey == '' then return end
+  if jobId then redis.call('SREM', listActiveIdsKey(listActiveKey), jobId) end
   local la = tonumber(redis.call('GET', listActiveKey)) or 0
   if la > 0 then redis.call('DECR', listActiveKey) end
+end
+
+local function incrListActive(listActiveKey, jobIds)
+  redis.call('INCRBY', listActiveKey, #jobIds)
+  redis.call('SADD', listActiveIdsKey(listActiveKey), unpack(jobIds))
 end
 
 -- Whether an active job was claimed from the priority/LIFO lists (no PEL
@@ -1214,7 +1228,12 @@ redis.register_function('glidemq_complete', function(keys, args)
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   -- The job was removed while active: removeJob already released its slot,
   -- list reservation and parents. Do not recreate the hash.
-  if not cur[2] then return '' end
+  if not cur[2] then
+    if entryId == '' then
+      redis.call('SREM', string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active-ids', jobId)
+    end
+    return ''
+  end
   -- removeOnComplete:true deletes the hash below; nothing in this script reads
   -- the completed state, returnvalue or finishedOn, so skip those writes.
   local removeNow = removeMode == 'true' and broadcastMode ~= '1'
@@ -1313,7 +1332,7 @@ redis.register_function('glidemq_complete', function(keys, args)
       end
     end
   end
-  if entryId == '' then decrListActive(prefix .. 'list-active') end
+  if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
   return #parentNotifications > 0 and cjson.encode(parentNotifications) or ''
 end)
 
@@ -1360,6 +1379,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local parentNotifications = {}
   -- A job removed while active was already released by removeJob. Skip the
   -- completion so the hash and group/list accounting are not touched again.
+  if not cur[2] and entryId == '' then redis.call('SREM', prefix .. 'list-active-ids', jobId) end
   if cur[2] then
     -- removeOnComplete:true deletes the hash below; nothing in this script
     -- reads the completed state, returnvalue or finishedOn.
@@ -1389,7 +1409,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     local parentNotificationSet = {}
     enqueueTreeParentNotifies(prefix, jobId, storedParentQueue, storedParentId,
       cur[6], parentNotifications, parentNotificationSet)
-    if entryId == '' then decrListActive(prefix .. 'list-active') end
+    if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
 
     -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
     if broadcastMode ~= '1' then
@@ -1600,7 +1620,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
                   redis.call('ZREM', priWaitListKey, priJobId)
                 end
                 local priJobFields = redis.call('HGETALL', priJobKey)
-                redis.call('INCR', prefix .. 'list-active')
+                incrListActive(prefix .. 'list-active', {priJobId})
                 return appendParentNotifications({'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}, parentNotifications)
               end
             end
@@ -1608,7 +1628,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
             -- Non-group job: activate directly
             redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
             local priJobFields = redis.call('HGETALL', priJobKey)
-            redis.call('INCR', prefix .. 'list-active')
+            incrListActive(prefix .. 'list-active', {priJobId})
             return appendParentNotifications({'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}, parentNotifications)
           end
         else
@@ -1635,7 +1655,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
         if not lifoExpireAt or lifoExpireAt <= 0 or timestamp <= lifoExpireAt then
           redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
           local lifoJobFields = redis.call('HGETALL', lifoJobKey)
-          redis.call('INCR', prefix .. 'list-active')
+          incrListActive(prefix .. 'list-active', {lifoJobId})
           return appendParentNotifications({'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}, parentNotifications)
         else
           expireJob(lifoJobKey, lifoJobId, prefix, timestamp, lifoMeta[1], nil, nil, nil)
@@ -1855,7 +1875,12 @@ redis.register_function('glidemq_fail', function(keys, args)
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   -- Removed while active: do not recreate the hash or schedule a retry.
-  if redis.call('EXISTS', jobKey) == 0 then return 'removed' end
+  if redis.call('EXISTS', jobKey) == 0 then
+    if entryId == '' then
+      redis.call('SREM', string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active-ids', jobId)
+    end
+    return 'removed'
+  end
   local attemptsMade
   if broadcastMode == '1' then
     local subKey = jobKey .. ':sub:' .. group
@@ -1898,7 +1923,7 @@ redis.register_function('glidemq_fail', function(keys, args)
       'attemptsMade', tostring(attemptsMade),
       'delay', tostring(backoffDelay)
     })
-    if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
+    if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active', jobId) end
     return 'retrying'
   else
     -- removeOnFail:true deletes the hash below; nothing in this script reads
@@ -1943,7 +1968,7 @@ redis.register_function('glidemq_fail', function(keys, args)
         end
       end
     end
-    if entryId == '' then decrListActive(prefix .. 'list-active') end
+    if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
     return 'failed'
   end
 end)
@@ -2051,11 +2076,66 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   return count
 end)
 
+local function isActiveListClaim(jobKey)
+  local vals = redis.call('HMGET', jobKey, 'state', 'listSourced', 'lifo', 'priority')
+  return vals[1] == 'active' and isListSourced(vals[2], vals[3], vals[4])
+end
+
+-- Bounded SCAN for active list-sourced jobs. All prefix:job:* keys share the
+-- queue hash tag, so SCAN sees the whole set on the local node. Returns the
+-- job IDs and whether the scan completed.
+local function scanActiveListIds(prefix, maxIter, count)
+  local pattern = prefix .. 'job:*'
+  local cursor = '0'
+  local iter = 0
+  local ids = {}
+  repeat
+    iter = iter + 1
+    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', count)
+    cursor = sr[1]
+    local scanned = sr[2]
+    for i = 1, #scanned do
+      local jk = scanned[i]
+      if isActiveListClaim(jk) then
+        ids[#ids + 1] = string.sub(jk, #prefix + 5)
+      end
+    end
+  until cursor == '0' or iter >= maxIter
+  return ids, cursor == '0'
+end
+
+-- Active list-sourced job IDs, read from list-active-ids when it covers every
+-- claim counted in list-active, else from a bounded SCAN. A set is trusted
+-- only after one complete SCAN seeded it (claims activated by an older
+-- library are not in it) and while SCARD >= list-active (an older worker
+-- that does not maintain it). Returns the IDs and whether they are complete.
+local function activeListIds(prefix, maxIter, count)
+  local listActiveKey = prefix .. 'list-active'
+  local idsKey = listActiveIdsKey(listActiveKey)
+  local metaKey = prefix .. 'meta'
+  local counter = tonumber(redis.call('GET', listActiveKey)) or 0
+  if redis.call('HGET', metaKey, 'listActiveIds') == '1' and redis.call('SCARD', idsKey) >= counter then
+    local ids = {}
+    local members = redis.call('SMEMBERS', idsKey)
+    for i = 1, #members do
+      if isActiveListClaim(prefix .. 'job:' .. members[i]) then ids[#ids + 1] = members[i] end
+    end
+    return ids, true
+  end
+  local ids, complete = scanActiveListIds(prefix, maxIter, count)
+  if complete then
+    for i = 1, #ids, 1000 do
+      redis.call('SADD', idsKey, unpack(ids, i, math.min(i + 999, #ids)))
+    end
+    redis.call('HSET', metaKey, 'listActiveIds', '1')
+  end
+  return ids, complete
+end
+
 -- Reclaim stalled list-sourced jobs (LIFO/priority) that are invisible to XAUTOCLAIM.
--- Uses bounded SCAN to find active list jobs with stale lastActive, then applies stall logic.
--- Each call starts at cursor 0 and stops after maxIter SCAN steps, so on a very
--- large keyspace jobs past that bound are not reclaimed by this call. It only
--- acts on jobs it saw, so a partial scan never corrupts state.
+-- Finds active list jobs with stale lastActive (see activeListIds), then applies
+-- stall logic. A bounded SCAN may not see jobs past its bound on a very large
+-- keyspace; it only acts on jobs it saw, so a partial scan never corrupts state.
 -- KEYS: [streamKey, eventsKey]
 -- ARGS: [minIdleMs, maxStalledCount, timestamp, failedKey]
 redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
@@ -2070,81 +2150,68 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
   local workerLockDuration = tonumber(args[5]) or 0
   local prefix = string.sub(streamKey, 1, #streamKey - 6)
   -- Paused list claims retain their list-active reservation until resume.
-  -- Skip the bounded SCAN entirely so the reclaimer cannot redispatch or fail
+  -- Skip the scan entirely so the reclaimer cannot redispatch or fail
   -- a claim that was deliberately parked by a pause-race activation.
   if isQueuePaused(prefix) then return 0 end
   local listActiveKey = prefix .. 'list-active'
   local currentActive = tonumber(redis.call('GET', listActiveKey)) or 0
   if currentActive <= 0 then return 0 end
-  local pattern = prefix .. 'job:*'
-  local cursor = '0'
-  local maxIter = 1000
-  local iter = 0
+  local ids = activeListIds(prefix, 1000, 500)
   local count = 0
-  repeat
-    iter = iter + 1
-    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 500)
-    cursor = sr[1]
-    local scannedKeys = sr[2]
-    for i = 1, #scannedKeys do
-      local jk = scannedKeys[i]
-      local state = redis.call('HGET', jk, 'state')
-      if state == 'active' then
-        local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority', 'opts', 'listSourced')
-        local lastActive = tonumber(vals[1])
-        local listClaim = isListSourced(vals[5], vals[2], vals[3])
-        local jobLockDuration = extractLockDurationFromOpts(vals[4])
-        local effectiveIdle
-        if jobLockDuration > 0 then
-          effectiveIdle = jobLockDuration
-        elseif workerLockDuration > 0 then
-          effectiveIdle = workerLockDuration
+  for i = 1, #ids do
+    local jobId = ids[i]
+    local jk = prefix .. 'job:' .. jobId
+    local vals = redis.call('HMGET', jk, 'lastActive', 'lifo', 'priority', 'opts')
+    local lastActive = tonumber(vals[1])
+    local jobLockDuration = extractLockDurationFromOpts(vals[4])
+    local effectiveIdle
+    if jobLockDuration > 0 then
+      effectiveIdle = jobLockDuration
+    elseif workerLockDuration > 0 then
+      effectiveIdle = workerLockDuration
+    else
+      effectiveIdle = minIdleMs
+    end
+    if lastActive and (timestamp - lastActive) >= effectiveIdle then
+      -- Claim this stalled check by refreshing lastActive. This preserves
+      -- XAUTOCLAIM-like de-duplication semantics across worker schedulers
+      -- so the same stale list job is counted at most once per interval.
+      redis.call('HSET', jk, 'lastActive', tostring(timestamp))
+      local shouldDecr = false
+      if checkExpired(jk, jobId, prefix, timestamp) then
+        shouldDecr = true
+      else
+        if applyStalledLogic(jk, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp) then
+          shouldDecr = true
         else
-          effectiveIdle = minIdleMs
-        end
-        if listClaim and lastActive and (timestamp - lastActive) >= effectiveIdle then
-          -- Claim this stalled check by refreshing lastActive. This preserves
-          -- XAUTOCLAIM-like de-duplication semantics across worker schedulers
-          -- so the same stale list job is counted at most once per interval.
-          redis.call('HSET', jk, 'lastActive', tostring(timestamp))
-          local jobId = string.sub(jk, #prefix + 5)
-          local shouldDecr = false
-          if checkExpired(jk, jobId, prefix, timestamp) then
-            shouldDecr = true
+          -- Under threshold: re-queue the job onto its source list so a
+          -- healthy worker picks it up. LIFO -> RPUSH lifo, priority ->
+          -- LPUSH priority (RPOP returns highest priority first). Decrement
+          -- the list-active counter because the job is no longer active.
+          local isLifo = vals[2] == '1'
+          local pri = tonumber(vals[3]) or 0
+          redis.call('HSET', jk, 'state', 'waiting')
+          redis.call('HDEL', jk, 'processedOn', 'lastActive')
+          if isLifo then
+            redis.call('RPUSH', prefix .. 'lifo', jobId)
+          elseif pri > 0 then
+            redis.call('LPUSH', prefix .. 'priority', jobId)
           else
-            if applyStalledLogic(jk, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp) then
-              shouldDecr = true
-            else
-              -- Under threshold: re-queue the job onto its source list so a
-              -- healthy worker picks it up. LIFO -> RPUSH lifo, priority ->
-              -- LPUSH priority (RPOP returns highest priority first). Decrement
-              -- the list-active counter because the job is no longer active.
-              local isLifo = vals[2] == '1'
-              local pri = tonumber(vals[3]) or 0
-              redis.call('HSET', jk, 'state', 'waiting')
-              redis.call('HDEL', jk, 'processedOn', 'lastActive')
-              if isLifo then
-                redis.call('RPUSH', prefix .. 'lifo', jobId)
-              elseif pri > 0 then
-                redis.call('LPUSH', prefix .. 'priority', jobId)
-              else
-                -- Stream-sourced fallback (shouldn't normally hit this branch
-                -- because XAUTOCLAIM handles stream entries, but redispatch
-                -- safely if someone misclassifies).
-                redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name',
-                  redis.call('HGET', jk, 'name') or '')
-              end
-              shouldDecr = true
-            end
+            -- Stream-sourced fallback (shouldn't normally hit this branch
+            -- because XAUTOCLAIM handles stream entries, but redispatch
+            -- safely if someone misclassifies).
+            redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name',
+              redis.call('HGET', jk, 'name') or '')
           end
-          if shouldDecr then
-            decrListActive(listActiveKey)
-          end
-          count = count + 1
+          shouldDecr = true
         end
       end
+      if shouldDecr then
+        decrListActive(listActiveKey, jobId)
+      end
+      count = count + 1
     end
-  until cursor == '0' or iter >= maxIter
+  end
   return count
 end)
 
@@ -2678,12 +2745,12 @@ redis.register_function('glidemq_rpopAndReserve', function(keys, args)
     results[#results + 1] = jobId
   end
   if #results > 0 then
-    redis.call('INCRBY', listActiveKey, #results)
+    incrListActive(listActiveKey, results)
   end
   return results
 end)
 
-redis.register_function('glidemq_moveToActive', function(keys, args)
+local function moveToActiveClaim(keys, args)
   local jobKey = keys[1]
   local streamKey = keys[2] or ''
   local timestamp = args[1]
@@ -2908,6 +2975,30 @@ redis.register_function('glidemq_moveToActive', function(keys, args)
     fields[#fields + 1] = timestampStr
   end
   return fields
+end
+
+-- Results after which the worker releases a list reservation itself (typed
+-- DECRBY on list-active), so the claim leaves list-active-ids here.
+local RELEASED_LIST_CLAIM = {
+  [''] = true, STALE = true, EXPIRED = true, GROUP_ORDERED = true, GROUP_FULL = true,
+  GROUP_RATE_LIMITED = true, GROUP_TOKEN_LIMITED = true, ['ERR:COST_EXCEEDS_CAPACITY'] = true,
+}
+
+redis.register_function('glidemq_moveToActive', function(keys, args)
+  local result = moveToActiveClaim(keys, args)
+  local jobId = args[4] or ''
+  -- List claims carry no entryId. Activation also tracks claims popped by the
+  -- legacy non-reserving glidemq_popLists.
+  if (args[2] or '') == '' and jobId ~= '' then
+    local jobKey = keys[1]
+    local idsKey = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active-ids'
+    if type(result) == 'table' then
+      redis.call('SADD', idsKey, jobId)
+    elseif RELEASED_LIST_CLAIM[result] then
+      redis.call('SREM', idsKey, jobId)
+    end
+  end
+  return result
 end)
 
 redis.register_function('glidemq_deferActive', function(keys, args)
@@ -2928,7 +3019,10 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
   -- List-sourced jobs (entryId='') were counted in list-active; DECR to stay balanced.
-  if entryId == '' then decrListActive(listActiveKey) end
+  if entryId == '' then
+    decrListActive(listActiveKey, jobId)
+    redis.call('SREM', string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active-ids', jobId)
+  end
   if exists == 0 then
     return 0
   end
@@ -3372,7 +3466,7 @@ redis.register_function('glidemq_removeJob', function(keys, args)
     local src = redis.call('HMGET', jobKey, 'listSourced', 'lifo', 'priority')
     activeListClaim = isListSourced(src[1], src[2], src[3])
     if activeListClaim then
-      decrListActive(prefix .. 'list-active')
+      decrListActive(prefix .. 'list-active', jobId)
     end
   end
   redis.call('ZREM', scheduledKey, jobId)
@@ -3793,7 +3887,7 @@ redis.register_function('glidemq_moveActiveToDelayed', function(keys, args)
   else
     redis.call('HSET', jobKey, 'state', 'delayed', 'delay', tostring(delay))
   end
-  if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
+  if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active', jobId) end
   -- Only release group slot if this is NOT an ordering-key step-job.
   -- Ordering-key jobs hold the slot until full completion to preserve per-key order.
   local jobOrdSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
@@ -3848,11 +3942,11 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
     redis.call('HSET', jobKey, 'state', 'waiting')
     xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
     emitEvent(eventsKey, 'active', jobId, nil)
-    if entryId == '' then decrListActive(prefix .. 'list-active') end
+    if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
     return 'completed'
   end
 
-  if entryId == '' then decrListActive(prefix .. 'list-active') end
+  if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
   emitEvent(eventsKey, 'waiting-children', jobId, nil)
   return 'ok'
 end)
@@ -3885,7 +3979,7 @@ redis.register_function('glidemq_rateLimitGroup', function(keys, args)
 
   if entryId ~= '' then pcall(redis.call, 'XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
-  if entryId == '' then decrListActive(prefix .. 'list-active') end
+  if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
 
   local orderingSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
   local keepSlot = (currentJob == 'requeue' and orderingSeq > 0)
@@ -4273,43 +4367,30 @@ redis.register_function('glidemq_healListActive', function(keys, args)
   if counter <= 0 then
     return 0
   end
-  local pattern = prefix .. 'job:*'
-  local cursor = '0'
-  local actual = 0
-  local maxIter = 500
-  local iter = 0
-  repeat
-    iter = iter + 1
-    local scanResult = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 100)
-    cursor = scanResult[1]
-    local scannedKeys = scanResult[2]
-    for i = 1, #scannedKeys do
-      local jk = scannedKeys[i]
-      local state = redis.call('HGET', jk, 'state')
-      if state == 'active' then
-        local src = redis.call('HMGET', jk, 'listSourced', 'lifo', 'priority')
-        if isListSourced(src[1], src[2], src[3]) then
-          actual = actual + 1
-        end
-      end
-    end
-  until cursor == '0' or iter >= maxIter
+  local ids, complete = activeListIds(prefix, 500, 100)
   -- A partial scan undercounts active list jobs. Correcting from it would
   -- lower list-active below the true count and let globalConcurrency
-  -- overcommit, so only a completed scan may correct the counter.
-  if cursor ~= '0' then return 0 end
-  local drift = counter - actual
+  -- overcommit, so only a complete view may correct the counter.
+  if not complete then return 0 end
+  local drift = counter - #ids
   if drift > 0 then
     redis.call('DECRBY', listActiveKey, drift)
+    -- Mirror the correction in list-active-ids: keep only the active claims.
+    local idsKey = listActiveIdsKey(listActiveKey)
+    local active = {}
+    for i = 1, #ids do active[ids[i]] = true end
+    local members = redis.call('SMEMBERS', idsKey)
+    for i = 1, #members do
+      if not active[members[i]] then redis.call('SREM', idsKey, members[i]) end
+    end
   end
   return drift
 end)
 
--- List active list-sourced jobIds (state='active' AND isListSourced) via bounded SCAN.
--- Stream-backed active jobs are in the consumer group PEL (XPENDING) and listed separately.
--- All prefix:job:* keys share the {queueName} hash tag, so SCAN runs on a single
--- cluster slot and observes the full set on its local node. The scan is capped
--- at maxIter steps; past that bound on a very large keyspace the result is partial.
+-- List active list-sourced jobIds (state='active' AND isListSourced), see
+-- activeListIds. Stream-backed active jobs are in the consumer group PEL
+-- (XPENDING) and listed separately. A bounded SCAN on a very large keyspace
+-- may return a partial result.
 -- KEYS: [idKey]
 -- ARGS: [start, end] (inclusive 0-indexed bounds; end < 0 means unbounded)
 -- Returns: array of jobId strings.
@@ -4319,27 +4400,7 @@ redis.register_function('glidemq_getActiveListJobIds', function(keys, args)
   local startIdx = tonumber(args[1]) or 0
   local endIdx = tonumber(args[2])
   if endIdx == nil then endIdx = -1 end
-  local pattern = prefix .. 'job:*'
-  local cursor = '0'
-  local maxIter = 1000
-  local iter = 0
-  local ids = {}
-  repeat
-    iter = iter + 1
-    local sr = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 500)
-    cursor = sr[1]
-    local scanned = sr[2]
-    for i = 1, #scanned do
-      local jk = scanned[i]
-      local state = redis.call('HGET', jk, 'state')
-      if state == 'active' then
-        local vals = redis.call('HMGET', jk, 'listSourced', 'lifo', 'priority')
-        if isListSourced(vals[1], vals[2], vals[3]) then
-          ids[#ids + 1] = string.sub(jk, #prefix + 5)
-        end
-      end
-    end
-  until cursor == '0' or iter >= maxIter
+  local ids = activeListIds(prefix, 1000, 500)
   if endIdx >= 0 then
     local lastIdx = endIdx + 1
     if lastIdx > #ids then lastIdx = #ids end
@@ -4414,7 +4475,7 @@ redis.register_function('glidemq_popListsReserve', function(keys, args)
     end
   end
   if #results > 0 and listActiveKey and listActiveKey ~= '' then
-    redis.call('INCRBY', listActiveKey, #results)
+    incrListActive(listActiveKey, results)
   end
   return results
 end)
@@ -4462,7 +4523,7 @@ redis.register_function('glidemq_suspend', function(keys, args)
 
   if entryId == '' then
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
-    decrListActive(prefix .. 'list-active')
+    decrListActive(prefix .. 'list-active', jobId)
   end
 
   emitEvent(eventsKey, 'suspended', jobId, nil)
