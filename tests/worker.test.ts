@@ -1169,4 +1169,34 @@ describe('Scheduler', () => {
       [CONSUMER_GROUP, 'long-lock', '5000', '1', now.toString(), queueKeys.failed, '0', '60000'],
     );
   });
+
+  it('reclaimStalledJobs with onStalled asks for IDs and reports them', async () => {
+    const now = 1700000000000;
+    vi.setSystemTime(now);
+    mockClient.fcall = vi.fn().mockResolvedValue([3, 'a', 'b']);
+    const stalled: string[] = [];
+    const scheduler = new Scheduler(mockClient as any, queueKeys, {
+      stalledInterval: 5000,
+      lockDuration: 5000,
+      consumerId: 'c',
+      onStalled: (id) => stalled.push(id),
+    });
+
+    expect(await scheduler.reclaimStalledJobs()).toBe(3);
+    expect(stalled).toEqual(['a', 'b']);
+    expect(mockClient.fcall).toHaveBeenCalledWith(
+      'glidemq_reclaimStalled',
+      [queueKeys.stream, queueKeys.events],
+      [CONSUMER_GROUP, 'c', '5000', '1', now.toString(), queueKeys.failed, '0', '5000', '1'],
+    );
+  });
+
+  it('reclaimStalledJobs with onStalled accepts the integer reply of an older library', async () => {
+    mockClient.fcall = vi.fn().mockResolvedValue(2);
+    const stalled: string[] = [];
+    const scheduler = new Scheduler(mockClient as any, queueKeys, { onStalled: (id) => stalled.push(id) });
+
+    expect(await scheduler.reclaimStalledJobs()).toBe(2);
+    expect(stalled).toEqual([]);
+  });
 });

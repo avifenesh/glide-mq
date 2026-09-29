@@ -1711,30 +1711,30 @@ export class Queue<D = any, R = any> extends EventEmitter {
 
   /**
    * Remove all data associated with this queue from the server.
-   * If force=false (default), fails if the stream has pending (active) entries.
-   * Active priority/LIFO jobs have no pending entry and are not counted.
+   * If force=false (default), fails if there are active jobs (stream PEL
+   * entries or active priority/LIFO list claims).
    * If force=true, deletes everything regardless of active jobs.
    */
   async obliterate(opts?: { force?: boolean }): Promise<void> {
     const client = await this.getClient();
     const force = opts?.force ?? false;
 
-    // Check for active jobs if not forcing
+    // Check for active jobs if not forcing: stream PEL entries plus list-active
+    // claims (priority/LIFO jobs carry no PEL entry), as in getJobCounts.
     if (!force) {
+      let streamActive = 0;
       try {
         const pendingInfo = await client.xpending(this.keys.stream, CONSUMER_GROUP);
-        const activeCount = Number(pendingInfo[0]) || 0;
-        if (activeCount > 0) {
-          throw new Error(
-            `Cannot obliterate queue "${this.name}": ${activeCount} active jobs. Use { force: true } to override.`,
-          );
-        }
-      } catch (err) {
-        // If the error is our own active-jobs check, re-throw
-        if (err instanceof Error && err.message.includes('Cannot obliterate')) {
-          throw err;
-        }
-        // Consumer group doesn't exist yet means no active jobs - continue
+        streamActive = Number(pendingInfo[0]) || 0;
+      } catch {
+        // Consumer group doesn't exist yet means no stream-active jobs
+      }
+      const listActive = Number(await client.get(this.keys.listActive)) || 0;
+      const activeCount = streamActive + listActive;
+      if (activeCount > 0) {
+        throw new Error(
+          `Cannot obliterate queue "${this.name}": ${activeCount} active jobs. Use { force: true } to override.`,
+        );
       }
     }
 

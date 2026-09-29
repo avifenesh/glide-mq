@@ -106,7 +106,10 @@ export const LIBRARY_NAME = 'glidemq';
 //   broadcast retry counters expire 24h past the retry; removeOnComplete/removeOnFail skip writes to
 //   the deleted hash; list claims are tracked in list-active-ids so list-active scans skip SCAN.
 // Version 128: version 127 (casSchedulerEntry) plus the version 126 changes above.
-export const LIBRARY_VERSION = '128';
+// Version 129: reclaimStalled/reclaimStalledListJobs reply stalled IDs on an optional returnIds arg;
+//   glidemq_fail honors optional skipEvents/skipMetrics args; addJob/dedup/addFlow reject a priority
+//   outside 0..2048 integers with an error reply, and changePriority returns error:invalid_priority for it.
+export const LIBRARY_VERSION = '129';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -634,24 +637,31 @@ export async function failJob(
   group: string = CONSUMER_GROUP,
   removeOnFail?: boolean | number | { age: number; count: number },
   broadcastMode?: boolean,
+  skipEvents?: boolean,
+  skipMetrics?: boolean,
 ): Promise<string> {
   const { mode, count, age } = encodeRetention(removeOnFail);
+  const args = [
+    jobId,
+    entryId,
+    failedReason,
+    timestamp.toString(),
+    maxAttempts.toString(),
+    backoffDelay.toString(),
+    group,
+    mode,
+    count.toString(),
+    age.toString(),
+  ];
+  if (skipEvents || skipMetrics) {
+    args.push(broadcastMode ? '1' : '0', skipEvents ? '1' : '0', skipMetrics ? '1' : '0');
+  } else if (broadcastMode) {
+    args.push('1');
+  }
   const result = await client.fcall(
     'glidemq_fail',
     [k.stream, k.failed, k.scheduled, k.events, k.job(jobId), k.metricsFailed],
-    [
-      jobId,
-      entryId,
-      failedReason,
-      timestamp.toString(),
-      maxAttempts.toString(),
-      backoffDelay.toString(),
-      group,
-      mode,
-      count.toString(),
-      age.toString(),
-      ...(broadcastMode ? ['1'] : []),
-    ],
+    args,
   );
   return result as string;
 }
@@ -688,6 +698,58 @@ export async function reclaimStalled(
   return result as number;
 }
 
+/** Reply of a stalled reclaim that asked for the IDs of the jobs it returned to waiting. */
+export interface ReclaimStalledResult {
+  /** Jobs handled by this call (the integer reply of the count-only form). */
+  count: number;
+  /** Jobs that stalled and went back to waiting. Empty when the library predates the IDs reply. */
+  stalledIds: string[];
+}
+
+/**
+ * Parse a reclaim reply: {count, stalledId...} from a library that honors the
+ * returnIds arg, or the plain integer count from an older one.
+ */
+export function parseReclaimStalledResult(raw: GlideReturnType): ReclaimStalledResult {
+  if (Array.isArray(raw)) {
+    return { count: Number(raw[0]) || 0, stalledIds: raw.slice(1).map((v) => String(v)) };
+  }
+  return { count: Number(raw) || 0, stalledIds: [] };
+}
+
+/**
+ * reclaimStalled that also returns the IDs of the jobs that stalled and went
+ * back to waiting (the ones that got a 'stalled' event).
+ */
+export async function reclaimStalledWithIds(
+  client: Client,
+  k: QueueKeys,
+  consumer: string,
+  minIdleMs: number,
+  maxStalledCount: number,
+  timestamp: number,
+  group: string = CONSUMER_GROUP,
+  broadcastMode?: boolean,
+  workerLockDuration: number = 0,
+): Promise<ReclaimStalledResult> {
+  const result = await client.fcall(
+    'glidemq_reclaimStalled',
+    [k.stream, k.events],
+    [
+      group,
+      consumer,
+      minIdleMs.toString(),
+      maxStalledCount.toString(),
+      timestamp.toString(),
+      k.failed,
+      broadcastMode ? '1' : '0',
+      workerLockDuration.toString(),
+      '1',
+    ],
+  );
+  return parseReclaimStalledResult(result);
+}
+
 /**
  * Reclaim stalled list-sourced jobs (LIFO/priority) that are invisible to XAUTOCLAIM.
  * Uses bounded SCAN to find active list jobs with stale lastActive, then applies stall logic.
@@ -706,6 +768,30 @@ export async function reclaimStalledListJobs(
     [minIdleMs.toString(), maxStalledCount.toString(), timestamp.toString(), k.failed, workerLockDuration.toString()],
   );
   return result as number;
+}
+
+/** reclaimStalledListJobs that also returns the IDs of the jobs that went back to waiting. */
+export async function reclaimStalledListJobsWithIds(
+  client: Client,
+  k: QueueKeys,
+  minIdleMs: number,
+  maxStalledCount: number,
+  timestamp: number,
+  workerLockDuration: number = 0,
+): Promise<ReclaimStalledResult> {
+  const result = await client.fcall(
+    'glidemq_reclaimStalledListJobs',
+    [k.stream, k.events],
+    [
+      minIdleMs.toString(),
+      maxStalledCount.toString(),
+      timestamp.toString(),
+      k.failed,
+      workerLockDuration.toString(),
+      '1',
+    ],
+  );
+  return parseReclaimStalledResult(result);
 }
 
 /**

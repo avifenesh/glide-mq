@@ -64,14 +64,27 @@ function isSkippable(trimmed) {
   );
 }
 
+const CONTINUATION_HEAD = /^(?:or|and|not)\b|^(?:\.\.|==|~=|<=|>=|[<>+*\/%^-])/;
+
 function isContinuation(trimmed) {
   if (!trimmed) return false;
   const c = trimmed[0];
-  return c === "'" || c === '"' || c === ')' || c === '}' || c === ']';
+  return c === "'" || c === '"' || c === ')' || c === '}' || c === ']' || CONTINUATION_HEAD.test(trimmed);
 }
 
 const FUNCTION_TAIL = /\bfunction\s*\([^)]*\)\s*$/;
 const INCOMPLETE_TAIL = /(?:\bor|\band|,|\(|\{)\s*$/;
+// An if/elseif/while condition stays open until its `then` or `do`.
+const OPEN_CONDITION = /^(?:if|elseif|while)\b/;
+const CONDITION_CLOSED = /\b(?:then|do)\b/;
+
+function isIncomplete(trimmed, wasIncomplete) {
+  if (INCOMPLETE_TAIL.test(trimmed)) return true;
+  if (OPEN_CONDITION.test(trimmed)) return !CONDITION_CLOSED.test(trimmed);
+  // A continuation of an open condition keeps it open until then/do.
+  if (wasIncomplete && isContinuation(trimmed)) return !CONDITION_CLOSED.test(trimmed);
+  return false;
+}
 
 function instrument(source) {
   const lines = source.split('\n');
@@ -100,7 +113,7 @@ function instrument(source) {
     const skip = startDepth !== 0 || incomplete || isSkippable(trimmed) || isContinuation(trimmed);
     depth += netDepth(line);
     if (FUNCTION_TAIL.test(trimmed)) depth = 0;
-    if (!isSkippable(trimmed)) incomplete = INCOMPLETE_TAIL.test(trimmed);
+    if (!isSkippable(trimmed)) incomplete = isIncomplete(trimmed, incomplete);
     if (skip) {
       out.push(line);
       continue;

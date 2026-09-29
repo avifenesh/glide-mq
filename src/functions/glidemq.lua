@@ -50,6 +50,19 @@ local function isActivatableState(state)
   return state == 'waiting' or state == 'prioritized' or state == 'group-waiting' or state == '' or not state
 end
 
+-- Priority is encoded in the high bits of scheduled scores, so it must be an
+-- integer in [0, MAX_PRIORITY]. Clients validate first; this rejects a bad
+-- value from any other caller before it corrupts ZSet ordering.
+local MAX_PRIORITY = 2048
+
+local function checkPriority(raw)
+  if raw == nil or raw == '' then return end
+  local p = tonumber(raw)
+  if not p or p ~= p or p < 0 or p > MAX_PRIORITY or p ~= math.floor(p) then
+    error({err = 'ERR invalid priority ' .. tostring(raw) .. ': must be an integer between 0 and ' .. MAX_PRIORITY})
+  end
+end
+
 local function isQueuePaused(prefix)
   return redis.call('HGET', prefix .. 'meta', 'paused') == '1'
 end
@@ -961,6 +974,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local schedulerName = args[20] or ''
   local skipEvents = args[21] or '0'
   local budgetKey = args[22] or ''
+  checkPriority(args[6])
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local effectiveCost = (jobCost > 0) and jobCost or 1000
   if orderingKey ~= '' and tbCapacity > 0 and effectiveCost > tbCapacity then
@@ -1871,6 +1885,8 @@ redis.register_function('glidemq_fail', function(keys, args)
   local removeCount = tonumber(args[9]) or 0
   local removeAge = tonumber(args[10]) or 0
   local broadcastMode = args[11] or '0'
+  local skipEvents = args[12] or '0'
+  local skipMetrics = args[13] or '0'
   local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
   if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
   if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
@@ -1918,11 +1934,13 @@ redis.register_function('glidemq_fail', function(keys, args)
     else
       releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
     end
-    emitEvent(eventsKey, 'retrying', jobId, {
-      'failedReason', failedReason,
-      'attemptsMade', tostring(attemptsMade),
-      'delay', tostring(backoffDelay)
-    })
+    if skipEvents ~= '1' then
+      emitEvent(eventsKey, 'retrying', jobId, {
+        'failedReason', failedReason,
+        'attemptsMade', tostring(attemptsMade),
+        'delay', tostring(backoffDelay)
+      })
+    end
     if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active', jobId) end
     return 'retrying'
   else
@@ -1940,8 +1958,8 @@ redis.register_function('glidemq_fail', function(keys, args)
     end
     markOrderingDone(jobKey, jobId)
     releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
-    emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
-    recordMetrics(metricsKey, timestamp, timestamp - processedOn)
+    if skipEvents ~= '1' then emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason}) end
+    if skipMetrics ~= '1' then recordMetrics(metricsKey, timestamp, timestamp - processedOn) end
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     -- In broadcast mode, skip job hash deletion: the job must persist for all subscriptions
     if broadcastMode ~= '1' then
@@ -1981,7 +1999,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   -- XAUTOCLAIM them while paused; doing so would make stale claims look like
   -- stalled work and can fail them before resume. This guard is intentionally
   -- before the bounded XAUTOCLAIM scan so paused recovery has no side effects.
-  if isQueuePaused(prefix) then return 0 end
+  if isQueuePaused(prefix) then return args[9] == '1' and {0} or 0 end
   local group = args[1]
   local consumer = args[2]
   local minIdleMs = tonumber(args[3])
@@ -1993,6 +2011,17 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   -- job has no opts.lockDuration of its own. Falls back to minIdleMs (the
   -- stalledInterval cadence) when neither is set, matching old behavior. (#213)
   local workerLockDuration = tonumber(args[8]) or 0
+  -- Optional: '1' replies {count, stalledId...} so the worker can emit
+  -- 'stalled' for the jobs this call returned to waiting. Older callers omit
+  -- it and keep the integer reply.
+  local returnIds = args[9] == '1'
+  local stalledIds = {}
+  local function reply(count)
+    if not returnIds then return count end
+    local out = {count}
+    for i = 1, #stalledIds do out[#out + 1] = stalledIds[i] end
+    return out
+  end
   local prefix = string.sub(streamKey, 1, #streamKey - 6)
   local metaKey = prefix .. 'meta'
   local cursorField = 'stalledCursor:' .. group
@@ -2005,7 +2034,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   redis.call('HSET', metaKey, cursorField, nextCursor)
   local entries = result[2]
   if not entries or #entries == 0 then
-    return 0
+    return reply(0)
   end
   local count = 0
   for i = 1, #entries do
@@ -2047,6 +2076,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
         count = count + 1
       else
       local failed = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp)
+      if not failed then stalledIds[#stalledIds + 1] = jobId end
       if failed then
         if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
         if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
@@ -2073,7 +2103,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       end
     end
   end
-  return count
+  return reply(count)
 end)
 
 local function isActiveListClaim(jobKey)
@@ -2137,14 +2167,23 @@ end
 -- stall logic. A bounded SCAN may not see jobs past its bound on a very large
 -- keyspace; it only acts on jobs it saw, so a partial scan never corrupts state.
 -- KEYS: [streamKey, eventsKey]
--- ARGS: [minIdleMs, maxStalledCount, timestamp, failedKey]
+-- ARGS: [minIdleMs, maxStalledCount, timestamp, failedKey, workerLockDuration?, returnIds?]
+-- returnIds '1' replies {count, stalledId...} instead of the integer count.
 redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
   local streamKey = keys[1]
   local eventsKey = keys[2]
   local minIdleMs = tonumber(args[1])
   local maxStalledCount = tonumber(args[2]) or 1
   local timestamp = tonumber(args[3])
-  if not minIdleMs or not timestamp then return 0 end
+  local returnIds = args[6] == '1'
+  local stalledIds = {}
+  local function reply(count)
+    if not returnIds then return count end
+    local out = {count}
+    for i = 1, #stalledIds do out[#out + 1] = stalledIds[i] end
+    return out
+  end
+  if not minIdleMs or not timestamp then return reply(0) end
   local failedKey = args[4]
   -- Worker-level lockDuration; per-entry threshold when opts.lockDuration unset. (#213)
   local workerLockDuration = tonumber(args[5]) or 0
@@ -2152,10 +2191,10 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
   -- Paused list claims retain their list-active reservation until resume.
   -- Skip the scan entirely so the reclaimer cannot redispatch or fail
   -- a claim that was deliberately parked by a pause-race activation.
-  if isQueuePaused(prefix) then return 0 end
+  if isQueuePaused(prefix) then return reply(0) end
   local listActiveKey = prefix .. 'list-active'
   local currentActive = tonumber(redis.call('GET', listActiveKey)) or 0
-  if currentActive <= 0 then return 0 end
+  if currentActive <= 0 then return reply(0) end
   local ids = activeListIds(prefix, 1000, 500)
   local count = 0
   for i = 1, #ids do
@@ -2188,6 +2227,7 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
           -- healthy worker picks it up. LIFO -> RPUSH lifo, priority ->
           -- LPUSH priority (RPOP returns highest priority first). Decrement
           -- the list-active counter because the job is no longer active.
+          stalledIds[#stalledIds + 1] = jobId
           local isLifo = vals[2] == '1'
           local pri = tonumber(vals[3]) or 0
           redis.call('HSET', jk, 'state', 'waiting')
@@ -2212,7 +2252,7 @@ redis.register_function('glidemq_reclaimStalledListJobs', function(keys, args)
       count = count + 1
     end
   end
-  return count
+  return reply(count)
 end)
 
 redis.register_function('glidemq_pause', function(keys, args)
@@ -2260,6 +2300,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local customJobId = args[20] or ''
   local parentQueue = args[22] or ''
   local skipEvents = args[23] or '0'
+  checkPriority(args[9])
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local effectiveCost = (jobCost > 0) and jobCost or 1000
   if orderingKey ~= '' and tbCapacity > 0 and effectiveCost > tbCapacity then
@@ -3101,9 +3142,11 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   if parentUseGroup and parentTbCapacity > 0 and parentEffectiveCost > parentTbCapacity then
     return cjson.encode({'ERR:COST_EXCEEDS_CAPACITY'})
   end
+  checkPriority(args[6])
   -- Validate every child before allocating IDs or mutating ordering/group state.
   for i = 1, numChildren do
     local base = 9 + (i - 1) * 9
+    checkPriority(args[base + 5])
     local preChildOpts = args[base + 3]
     local preChildOrderingKey = extractOrderingKeyFromOpts(preChildOpts)
     local preChildTbCap, _ = extractTokenBucketFromOpts(preChildOpts)
@@ -3679,7 +3722,8 @@ redis.register_function('glidemq_changePriority', function(keys, args)
   local eventsKey = keys[4]
   local jobId = args[1]
   local newPriority = tonumber(args[2])
-  if newPriority == nil or newPriority < 0 then
+  if newPriority == nil or newPriority ~= newPriority or newPriority < 0 or newPriority > MAX_PRIORITY
+    or newPriority ~= math.floor(newPriority) then
     return 'error:invalid_priority'
   end
   local group = args[3]

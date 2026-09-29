@@ -142,11 +142,11 @@ await queue.drain(); // remove waiting jobs only
 await queue.drain(true); // also remove delayed/scheduled jobs
 
 // Remove ALL queue data from Valkey
-await queue.obliterate(); // fails if stream jobs are active (see note below)
+await queue.obliterate(); // fails if there are active jobs (stream or priority/LIFO)
 await queue.obliterate({ force: true }); // unconditional wipe
 ```
 
-The active-job check counts the stream's pending entries only. Active priority and LIFO jobs have no pending entry, so `obliterate()` without `force` does not see them and wipes the queue while they run.
+The active-job check counts both the stream's pending entries and active priority/LIFO claims.
 
 ### Cleaning old jobs
 
@@ -240,6 +240,10 @@ worker.on('error', (err) => {
   console.error('Worker error', err);
 });
 
+worker.on('stalled', (jobId, prev) => {
+  console.warn(`Job ${jobId} stalled (was ${prev}) and was re-queued`);
+});
+
 worker.on('drained', () => {
   console.log('Queue is empty — no more jobs waiting');
 });
@@ -251,11 +255,12 @@ worker.on('drained', () => {
 | `completed` | `(job, result)` | Fired when a job finishes successfully          |
 | `failed`    | `(job, err)`    | Fired when a job throws or times out            |
 | `error`     | `(err)`         | Internal worker error (connection issues, etc.) |
+| `stalled`   | `(jobId, prev)` | Job exceeded lock duration and was re-queued    |
 | `drained`   | `()`            | Queue transitioned from non-empty to empty      |
 | `closing`   | `()`            | Worker is beginning to close                    |
 | `closed`    | `()`            | Worker has fully closed                         |
 
-Workers do not emit `stalled`. Stalled recovery writes a `stalled` event to the events stream; listen with `QueueEvents` (`events.on('stalled', ({ jobId }) => ...)`, see below).
+A worker emits `stalled` for each job its own stalled check returned to waiting (`prev` is `'active'`). A job past `maxStalledCount` is failed instead and gets no `stalled`. Every stalled recovery also writes a `stalled` event to the events stream, so `QueueEvents` (`events.on('stalled', ({ jobId }) => ...)`) sees stalls found by any worker.
 
 ### Pausing / closing a worker
 
@@ -433,11 +438,11 @@ const queue = new Queue('tasks', { connection, events: false });
 // Producer - same option
 const producer = new Producer('tasks', { connection, events: false });
 
-// Worker - skip XADD 'completed' (and list-pop 'active') events on process
+// Worker - skip XADD 'completed'/'failed'/'retrying' events on process
 const worker = new Worker('tasks', handler, { connection, events: false });
 ```
 
-A worker with `events: false` still writes `failed` and `retrying` events, and stalled recovery still writes `stalled`. This only affects the Valkey events stream. TS-side `EventEmitter` events (`worker.on('completed', ...)`) are unaffected.
+With `metrics: false` a worker also skips the completed and failed metrics. Stalled recovery and delayed-job promotion still write their events (`stalled`, `promoted`). This only affects the Valkey events stream. TS-side `EventEmitter` events (`worker.on('completed', ...)`) are unaffected.
 
 ### `QueueEvents` — stream-based lifecycle events
 

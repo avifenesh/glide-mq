@@ -19,6 +19,7 @@ import {
   calculateBackoff,
   computeFollowingSchedulerNextRun,
   computeWeightedTotal,
+  hashDataToRecord,
   nextReconnectDelay,
   parseCrossQueueParentNotification,
   parseJsonRecord,
@@ -381,6 +382,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       consumerGroup: this.consumerGroup,
       broadcastMode: this.broadcastMode,
       onPromotionTick: () => this.refreshMetaFlags(),
+      onStalled: (jobId) => {
+        this.emit('stalled', jobId, 'active');
+      },
       onError: (err) => {
         if (!this.closing) {
           this.emit('error', err);
@@ -1097,6 +1101,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   ): Promise<boolean> {
     if (!this.commandClient) return true;
     if (moveResult === null) {
+      // The job hash is gone (removed before activation). A list claim has no
+      // stream entry to settle, but its list-active reservation is still held:
+      // removeJob releases list claims only once they are active.
+      if (entryId === '') {
+        await this.releaseListActiveSlot();
+        return true;
+      }
       try {
         await completeJob(
           this.commandClient,
@@ -1131,6 +1142,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           this.consumerGroup,
           undefined,
           this.broadcastMode ? true : undefined,
+          this.skipEvents,
+          this.skipMetrics,
         );
       } catch (err) {
         this.emit('error', err);
@@ -1153,6 +1166,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         await this.releaseListActiveSlot();
       }
       return true;
+    }
+    if (moveResult === 'ERR:COST_EXCEEDS_CAPACITY' && this.opts.deadLetterQueue) {
+      // moveToActive failed the job terminally; give it the DLQ copy that
+      // worker-side terminal failures get.
+      await this.moveFailedJobToDLQ(jobId);
     }
     if (
       moveResult === 'GROUP_FULL' ||
@@ -1326,6 +1344,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           this.consumerGroup,
           undefined,
           this.broadcastMode ? true : undefined,
+          this.skipEvents,
+          this.skipMetrics,
         );
       } catch (e) {
         this.emit('error', e);
@@ -1358,6 +1378,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.consumerGroup,
       job.opts.removeOnFail,
       this.broadcastMode ? true : undefined,
+      this.skipEvents,
+      this.skipMetrics,
     );
 
     if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
@@ -1482,15 +1504,32 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
   }
 
-  /** Deliver notifications recorded atomically by the completion FCALL. */
+  /**
+   * Deliver notifications recorded atomically by the completion FCALL.
+   * The xq-pending entry is removed only when the parent took the completion
+   * (remaining count >= 0) or no longer exists (-1), as in the scheduler
+   * retry. A failed delivery stays pending for that retry and is reported
+   * without interrupting the completion path.
+   */
   protected async notifyCrossQueueParents(notifications: string[]): Promise<void> {
     if (!this.commandClient) return;
     for (const member of notifications) {
       const notification = parseCrossQueueParentNotification(member);
       if (!notification) continue;
       const [parentQueue, parentId, depsMember] = notification;
-      await completeChild(this.commandClient, buildKeys(parentQueue, this.opts.prefix), parentId, depsMember);
-      await this.commandClient.srem(this.queueKeys.xqPending, [member]);
+      try {
+        const remaining = await completeChild(
+          this.commandClient,
+          buildKeys(parentQueue, this.opts.prefix),
+          parentId,
+          depsMember,
+        );
+        if (Number.isInteger(remaining) && remaining >= -1) {
+          await this.commandClient.srem(this.queueKeys.xqPending, [member]);
+        }
+      } catch (err) {
+        if (!this.closing) this.emit('error', err instanceof Error ? err : new Error(String(err)));
+      }
     }
   }
 
@@ -1936,6 +1975,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
               this.consumerGroup,
               undefined,
               this.broadcastMode ? true : undefined,
+              this.skipEvents,
+              this.skipMetrics,
             );
           } catch (err) {
             this.emit('error', err);
@@ -2057,6 +2098,19 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (timer) {
       clearInterval(timer);
       this.heartbeatIntervals.delete(jobId);
+    }
+  }
+
+  /** DLQ copy of a job the server already failed, read back from its hash. */
+  private async moveFailedJobToDLQ(jobId: string): Promise<void> {
+    if (!this.commandClient) return;
+    try {
+      const hash = hashDataToRecord(await this.commandClient.hgetall(this.queueKeys.job(jobId)));
+      if (!hash) return;
+      const job = Job.fromHash<D, R>(this.commandClient, this.queueKeys, jobId, hash, this.serializer);
+      await this.moveToDLQ(job, new Error(job.failedReason ?? 'failed'));
+    } catch (err) {
+      this.emit('error', err);
     }
   }
 
