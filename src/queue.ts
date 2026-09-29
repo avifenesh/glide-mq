@@ -942,6 +942,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
       if (this.closing) {
         throw new GlideMQError('Queue is closing');
       }
+      if (signal?.aborted) {
+        throw addAndWaitAbortError();
+      }
       // Ownership of blockingClient transfers to waitForJobResult, which
       // handles cleanup (including reconnection) in its own finally block.
       // The await ensures that if waitForJobResult rejects, the error
@@ -1155,6 +1158,11 @@ export class Queue<D = any, R = any> extends EventEmitter {
     signal?.addEventListener('abort', onAbort, { once: true });
 
     try {
+      // An abort that landed before the listener was attached never fires it; check once here
+      // so the blocking read is not started at all.
+      if (signal?.aborted) {
+        throw addAndWaitAbortError();
+      }
       while (Date.now() < deadline) {
         let result;
         try {

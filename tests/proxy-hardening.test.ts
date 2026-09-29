@@ -860,4 +860,45 @@ describe('HTTP proxy hardening - jobs/wait bounds', () => {
     req.destroy();
     await waitFor(() => blockingClients[0].closed, 3000);
   });
+
+  it('releases the blocking client when the disconnect lands while add() is still running', async () => {
+    const { Queue: DistQueue } = require('../dist/queue') as typeof import('../src/queue');
+    const originalAdd = DistQueue.prototype.add;
+    let releaseAdd!: () => void;
+    const addGate = new Promise<void>((resolve) => {
+      releaseAdd = resolve;
+    });
+    let addReached!: () => void;
+    const reachedAdd = new Promise<void>((resolve) => {
+      addReached = resolve;
+    });
+    DistQueue.prototype.add = async function (this: any, ...args: any[]) {
+      addReached();
+      await addGate;
+      return originalAdd.apply(this, args as any);
+    } as any;
+
+    try {
+      const body = JSON.stringify({ name: 'abort-during-add', data: {}, opts: { waitTimeout: 15000 } });
+      const url = new URL(`${baseUrl}/queues/${queueName}/jobs/wait`);
+      const req = http.request({
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      });
+      req.on('error', () => undefined);
+      req.end(body);
+
+      await reachedAdd;
+      expect(blockingClients).toHaveLength(1);
+      req.destroy();
+      await sleep(100);
+      releaseAdd();
+      await waitFor(() => blockingClients[0].closed, 3000);
+    } finally {
+      DistQueue.prototype.add = originalAdd;
+    }
+  });
 });
