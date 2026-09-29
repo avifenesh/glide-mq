@@ -337,6 +337,7 @@ Where `2^42 = 4398046511104`.
 - Priority 1 uses score `4398046511104 + timestamp_ms`.
 - Within the same priority, FIFO by timestamp.
 - Non-delayed priority jobs use score `priority * 2^42 + 0` (timestamp = 0) so they promote immediately.
+- Priority must be an integer from 0 to 2048. `glidemq_addJob`, `glidemq_dedup` and `glidemq_addFlow` (parent or any child) reply with an `invalid priority` error for any other value and write nothing.
 
 ---
 

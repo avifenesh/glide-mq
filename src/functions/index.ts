@@ -107,7 +107,8 @@ export const LIBRARY_NAME = 'glidemq';
 //   the deleted hash; list claims are tracked in list-active-ids so list-active scans skip SCAN.
 // Version 128: version 127 (casSchedulerEntry) plus the version 126 changes above.
 // Version 129: reclaimStalled/reclaimStalledListJobs reply stalled IDs on an optional returnIds arg;
-//   glidemq_fail honors optional skipEvents/skipMetrics args.
+//   glidemq_fail honors optional skipEvents/skipMetrics args; addJob/dedup/addFlow reject a priority
+//   outside 0..2048 integers with an error reply, and changePriority returns error:invalid_priority for it.
 export const LIBRARY_VERSION = '129';
 
 // Consumer group name used by workers

@@ -9,8 +9,8 @@ import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './he
 const { InfBoundary } = require('@glidemq/speedkey') as typeof import('@glidemq/speedkey');
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
-const { failJob, moveToActive, popLists, reclaimStalled, CONSUMER_GROUP } =
+const { buildKeys, keyPrefix } = require('../dist/utils') as typeof import('../src/utils');
+const { addFlow, addJob, dedup, failJob, moveToActive, popLists, reclaimStalled, CONSUMER_GROUP } =
   require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Follow-ups 2026-09-29', (CONNECTION) => {
@@ -201,5 +201,65 @@ describeEachMode('Follow-ups 2026-09-29', (CONNECTION) => {
       await dlq.close();
       await queue.close();
     }
+  });
+
+  async function addWithPriority(Q: string, priority: string): Promise<unknown> {
+    return cleanupClient.fcall(
+      'glidemq_addJob',
+      [buildKeys(Q).id, buildKeys(Q).stream, buildKeys(Q).scheduled, buildKeys(Q).events],
+      ['p', '{}', '{}', Date.now().toString(), '0', priority, '', '0', '', '0', '0', '0', '0', '0', '0', '0', '', '0'],
+    );
+  }
+
+  it('F6: glidemq_addJob rejects a non-integer or out-of-range priority', async () => {
+    const Q = uniqueQueue('fu-pri-add');
+    const k = buildKeys(Q);
+    for (const bad of ['-1', '2049', '1.5', 'abc']) {
+      await expect(addWithPriority(Q, bad)).rejects.toThrow(/invalid priority/);
+    }
+    expect(await cleanupClient.exists([k.id, k.scheduled, k.stream])).toBe(0);
+    const id = await addJob(cleanupClient, k, 'p', '{}', '{}', Date.now(), 0, 2048, '', 0);
+    expect(await cleanupClient.hget(k.job(String(id)), 'priority')).toBe('2048');
+    for (const bad of ['1.5', '2049']) {
+      const reply = await cleanupClient.fcall(
+        'glidemq_changePriority',
+        [k.job(String(id)), k.stream, k.scheduled, k.events],
+        [String(id), bad, CONSUMER_GROUP],
+      );
+      expect(String(reply)).toBe('error:invalid_priority');
+    }
+  });
+
+  it('F6: glidemq_dedup rejects an invalid priority', async () => {
+    const Q = uniqueQueue('fu-pri-dedup');
+    const k = buildKeys(Q);
+    await expect(dedup(cleanupClient, k, 'd', 0, 'simple', 'p', '{}', '{}', Date.now(), 0, 3.5, '', 0)).rejects.toThrow(
+      /invalid priority/,
+    );
+    expect(await cleanupClient.exists([k.dedup, k.id])).toBe(0);
+  });
+
+  it('F6: glidemq_addFlow rejects an invalid parent or child priority before writing', async () => {
+    const Q = uniqueQueue('fu-pri-flow');
+    const k = buildKeys(Q);
+    const child = (priority: number) => ({
+      name: 'c',
+      data: '{}',
+      opts: '{}',
+      delay: 0,
+      priority,
+      maxAttempts: 0,
+      keys: k,
+      queuePrefix: keyPrefix('glide', Q),
+      parentQueueName: Q,
+      customId: '',
+    });
+    await expect(addFlow(cleanupClient, k, 'p', '{}', '{}', Date.now(), 0, -2, 0, [child(0)])).rejects.toThrow(
+      /invalid priority/,
+    );
+    await expect(addFlow(cleanupClient, k, 'p', '{}', '{}', Date.now(), 0, 0, 0, [child(5000)])).rejects.toThrow(
+      /invalid priority/,
+    );
+    expect(await cleanupClient.exists([k.id, k.stream, k.scheduled])).toBe(0);
   });
 });

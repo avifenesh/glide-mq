@@ -50,6 +50,19 @@ local function isActivatableState(state)
   return state == 'waiting' or state == 'prioritized' or state == 'group-waiting' or state == '' or not state
 end
 
+-- Priority is encoded in the high bits of scheduled scores, so it must be an
+-- integer in [0, MAX_PRIORITY]. Clients validate first; this rejects a bad
+-- value from any other caller before it corrupts ZSet ordering.
+local MAX_PRIORITY = 2048
+
+local function checkPriority(raw)
+  if raw == nil or raw == '' then return end
+  local p = tonumber(raw)
+  if not p or p ~= p or p < 0 or p > MAX_PRIORITY or p ~= math.floor(p) then
+    error({err = 'ERR invalid priority ' .. tostring(raw) .. ': must be an integer between 0 and ' .. MAX_PRIORITY})
+  end
+end
+
 local function isQueuePaused(prefix)
   return redis.call('HGET', prefix .. 'meta', 'paused') == '1'
 end
@@ -961,6 +974,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   local schedulerName = args[20] or ''
   local skipEvents = args[21] or '0'
   local budgetKey = args[22] or ''
+  checkPriority(args[6])
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local effectiveCost = (jobCost > 0) and jobCost or 1000
   if orderingKey ~= '' and tbCapacity > 0 and effectiveCost > tbCapacity then
@@ -2286,6 +2300,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   local customJobId = args[20] or ''
   local parentQueue = args[22] or ''
   local skipEvents = args[23] or '0'
+  checkPriority(args[9])
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local effectiveCost = (jobCost > 0) and jobCost or 1000
   if orderingKey ~= '' and tbCapacity > 0 and effectiveCost > tbCapacity then
@@ -3127,9 +3142,11 @@ redis.register_function('glidemq_addFlow', function(keys, args)
   if parentUseGroup and parentTbCapacity > 0 and parentEffectiveCost > parentTbCapacity then
     return cjson.encode({'ERR:COST_EXCEEDS_CAPACITY'})
   end
+  checkPriority(args[6])
   -- Validate every child before allocating IDs or mutating ordering/group state.
   for i = 1, numChildren do
     local base = 9 + (i - 1) * 9
+    checkPriority(args[base + 5])
     local preChildOpts = args[base + 3]
     local preChildOrderingKey = extractOrderingKeyFromOpts(preChildOpts)
     local preChildTbCap, _ = extractTokenBucketFromOpts(preChildOpts)
@@ -3705,7 +3722,8 @@ redis.register_function('glidemq_changePriority', function(keys, args)
   local eventsKey = keys[4]
   local jobId = args[1]
   local newPriority = tonumber(args[2])
-  if newPriority == nil or newPriority < 0 then
+  if newPriority == nil or newPriority ~= newPriority or newPriority < 0 or newPriority > MAX_PRIORITY
+    or newPriority ~= math.floor(newPriority) then
     return 'error:invalid_priority'
   end
   local group = args[3]
