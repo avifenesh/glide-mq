@@ -13,7 +13,7 @@ import type {
   SignalEntry,
 } from './types';
 import { JSON_SERIALIZER } from './types';
-import { Job } from './job';
+import { Job, USAGE_BUDGETED_FIELD } from './job';
 import {
   buildKeys,
   calculateBackoff,
@@ -1687,6 +1687,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         // close(true) aborted it; leave it active for stalled recovery.
         if (aborted && this.forceClosing) return;
         if (await this.skipMovedToFailed(job)) return;
+        // Tokens a failed attempt spent are real spend; count them.
+        try {
+          await this.chargeUsageToBudget(job, currentJobId, true);
+        } catch (err) {
+          this.emit('error', err);
+        }
         const confirmedRevoked = aborted && (await this.isJobRevoked(currentJobId));
         await this.handleJobFailure(
           job,
@@ -1784,39 +1790,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       job.finishedOn = now;
       if (this.hasCompletedListeners) this.emit('completed', job, processResult);
 
-      if (job.budgetKey && job.usage && this.commandClient) {
-        const usageTokens = job.usage.tokens ?? {};
-        const usageCosts = job.usage.costs ?? {};
-        const rawTotal = job.usage.totalTokens ?? 0;
-        const totalCost = job.usage.totalCost ?? 0;
-
-        if (
-          rawTotal > 0 ||
-          totalCost > 0 ||
-          Object.keys(usageTokens).length > 0 ||
-          Object.keys(usageCosts).length > 0
-        ) {
-          const budgetData = await this.commandClient.hmget(job.budgetKey, ['tokenWeights', 'maxTokens', 'maxCosts']);
-          const weights = parseJsonRecord(budgetData?.[0] ? String(budgetData[0]) : '{}') ?? {};
-          const maxTokens = parseJsonRecord(budgetData?.[1] ? String(budgetData[1]) : '{}') ?? {};
-          const maxCosts = parseJsonRecord(budgetData?.[2] ? String(budgetData[2]) : '{}') ?? {};
-          const weightedTotal = computeWeightedTotal(usageTokens, weights, rawTotal);
-
-          const budgetResult = await recordUsageAndCheckBudget(
-            this.commandClient,
-            job.budgetKey,
-            usageTokens,
-            usageCosts,
-            weightedTotal,
-            totalCost,
-            maxTokens,
-            maxCosts,
-          );
-          if (budgetResult === 'exceeded') {
-            this.emit('budget-exceeded', job, currentJobId);
-          }
-        }
-      }
+      await this.chargeUsageToBudget(job, currentJobId, false);
 
       // Post-completion TPM tracking: increment counter for token rate limiting.
       // Use whichever is larger: usage.totalTokens or explicit tpmTokens.
@@ -1911,6 +1885,45 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Charge the usage reported for this attempt to the job's flow budget.
+   * A failed attempt marks the job hash so a retry that reports nothing new
+   * does not charge the same usage again; reportUsage() clears the mark.
+   */
+  private async chargeUsageToBudget(job: Job<D, R>, jobId: string, markCharged: boolean): Promise<void> {
+    if (!job.budgetKey || !job.usage || job.usageBudgeted || !this.commandClient) return;
+    const usageTokens = job.usage.tokens ?? {};
+    const usageCosts = job.usage.costs ?? {};
+    const rawTotal = job.usage.totalTokens ?? 0;
+    const totalCost = job.usage.totalCost ?? 0;
+    if (!(rawTotal > 0 || totalCost > 0 || Object.keys(usageTokens).length > 0 || Object.keys(usageCosts).length > 0)) {
+      return;
+    }
+    const budgetData = await this.commandClient.hmget(job.budgetKey, ['tokenWeights', 'maxTokens', 'maxCosts']);
+    const weights = parseJsonRecord(budgetData?.[0] ? String(budgetData[0]) : '{}') ?? {};
+    const maxTokens = parseJsonRecord(budgetData?.[1] ? String(budgetData[1]) : '{}') ?? {};
+    const maxCosts = parseJsonRecord(budgetData?.[2] ? String(budgetData[2]) : '{}') ?? {};
+    const weightedTotal = computeWeightedTotal(usageTokens, weights, rawTotal);
+
+    const budgetResult = await recordUsageAndCheckBudget(
+      this.commandClient,
+      job.budgetKey,
+      usageTokens,
+      usageCosts,
+      weightedTotal,
+      totalCost,
+      maxTokens,
+      maxCosts,
+    );
+    if (markCharged) {
+      await this.commandClient.hset(this.queueKeys.job(jobId), { [USAGE_BUDGETED_FIELD]: '1' });
+      job.usageBudgeted = true;
+    }
+    if (budgetResult === 'exceeded') {
+      this.emit('budget-exceeded', job, jobId);
+    }
   }
 
   protected async isJobRevoked(jobId: string): Promise<boolean> {
