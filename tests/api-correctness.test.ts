@@ -3,9 +3,10 @@
  * Runs against both standalone (:6379) and cluster (:7000).
  */
 import { it, expect, beforeAll, afterAll } from 'vitest';
-import { describeEachMode, createCleanupClient, flushQueue } from './helpers/fixture';
+import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
+const { Worker } = require('../dist/worker') as typeof import('../src/worker');
 const { Producer } = require('../dist/producer') as typeof import('../src/producer');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys, keyPrefix } = require('../dist/utils') as typeof import('../src/utils');
@@ -148,4 +149,78 @@ describeEachMode('Job option number validation', (CONNECTION) => {
       await queue.close();
     }
   });
+});
+
+describeEachMode('FlowProducer.add with leaf children in other queues', (CONNECTION) => {
+  const PQ = 'test-apicorr-xflow-p-' + Date.now();
+  const CQ = 'test-apicorr-xflow-c-' + Date.now();
+  let cleanupClient: any;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+  });
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, PQ);
+    await flushQueue(cleanupClient, CQ);
+    cleanupClient.close();
+  });
+
+  it('creates the flow and completes the parent after every child', async () => {
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const processed: string[] = [];
+    const workerOpts = { connection: CONNECTION, blockTimeout: 200, stalledInterval: 60000 };
+    const childWorker = new Worker(
+      CQ,
+      async (job: any) => {
+        processed.push(job.name);
+        return job.data.v;
+      },
+      workerOpts,
+    );
+    const parentWorker = new Worker(
+      PQ,
+      async (job: any) => {
+        processed.push(job.name);
+        return job.data.v ?? 'parent';
+      },
+      workerOpts,
+    );
+    childWorker.on('error', () => {});
+    parentWorker.on('error', () => {});
+    try {
+      const node = await flow.add({
+        name: 'parent',
+        queueName: PQ,
+        data: {},
+        children: [
+          { name: 'same-queue', queueName: PQ, data: { v: 'a' } },
+          { name: 'other-1', queueName: CQ, data: { v: 'b' } },
+          { name: 'other-2', queueName: CQ, data: { v: 'c' } },
+        ],
+      });
+      expect(node.children!.map((c) => c.job.name)).toEqual(['same-queue', 'other-1', 'other-2']);
+      for (const child of node.children!) {
+        expect(child.job.parentId).toBe(node.job.id);
+        expect(child.job.parentQueue).toBe(PQ);
+      }
+      const deps = [...(await cleanupClient.smembers(buildKeys(PQ).deps(node.job.id)))].map(String).sort();
+      expect(deps).toEqual(
+        [
+          `${keyPrefix('glide', PQ)}:${node.children![0].job.id}`,
+          `${keyPrefix('glide', CQ)}:${node.children![1].job.id}`,
+          `${keyPrefix('glide', CQ)}:${node.children![2].job.id}`,
+        ].sort(),
+      );
+
+      const parentKey = buildKeys(PQ).job(node.job.id);
+      await waitFor(async () => String(await cleanupClient.hget(parentKey, 'state')) === 'completed', 15000);
+      expect(processed.filter((n) => n === 'parent')).toHaveLength(1);
+      expect(processed.indexOf('parent')).toBe(processed.length - 1);
+    } finally {
+      await childWorker.close(true);
+      await parentWorker.close(true);
+      await flow.close();
+    }
+  }, 30000);
 });

@@ -70,7 +70,9 @@ export class FlowProducer {
   /**
    * Add a flow (parent with children) atomically.
    * Children can have their own children (recursive flows), which are flattened
-   * into multiple addFlow calls (one per level with children).
+   * into multiple addFlow calls (one per level with children). In cluster mode,
+   * leaf children in a different queue than their parent are created first and
+   * then wired to the parent, since their keys live on another slot.
    *
    * When `flowOpts.budget` is provided, a budget hash is created in Valkey and
    * a `budgetKey` field is written to the parent and all child job hashes.
@@ -253,10 +255,14 @@ export class FlowProducer {
     }
 
     // Recursively process children that themselves have children (bottom-up).
+    // In cluster mode a leaf child in another queue lives on another slot and
+    // cannot share the parent's addFlow FCALL, so it is pre-created the same
+    // way and wired to the parent below.
+    const isCluster = isClusterClient(client);
     const childNodeMap: Map<number, JobNode> = new Map();
     for (let i = 0; i < flow.children.length; i++) {
       const child = flow.children[i];
-      if (child.children && child.children.length > 0) {
+      if ((child.children && child.children.length > 0) || (isCluster && child.queueName !== parentQueueName)) {
         childNodeMap.set(i, await this.addFlowRecursive(client, child));
       }
     }
