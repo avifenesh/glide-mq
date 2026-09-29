@@ -150,6 +150,20 @@ describeEachMode('Queue.addBulk cross-queue parents', (CONNECTION) => {
       await queue.close();
     }
   });
+
+  it('FlowProducer rejects invalid queue names anywhere in the tree before writing', async () => {
+    const flow = new FlowProducer({ connection: CONNECTION });
+    try {
+      await expect(
+        flow.add({ name: 'p', queueName: Q, data: {}, children: [{ name: 'c', queueName: 'bad{tag}', data: {} }] }),
+      ).rejects.toThrow('Queue name must not contain curly braces or colons');
+      await expect(flow.addBulk([{ name: 'p', queueName: 'bad:q', data: {} }])).rejects.toThrow(
+        'Queue name must not contain curly braces or colons',
+      );
+    } finally {
+      await flow.close();
+    }
+  });
 });
 
 describeEachMode('Job option number validation', (CONNECTION) => {

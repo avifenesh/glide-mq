@@ -23,6 +23,7 @@ export interface JobNode {
 
 /** Validate every node of a flow tree before any job is written. */
 function validateFlowTree(flow: FlowJob): void {
+  validateQueueName(flow.queueName);
   validateJobScheduleOptions(flow.opts);
   for (const child of flow.children ?? []) validateFlowTree(child);
 }
