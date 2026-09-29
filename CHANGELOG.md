@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Hung sandboxed jobs held pool slots forever**: a timed-out or revoked sandboxed job kept its worker until the processor replied, queued waiters for aborted jobs still ran later (alongside their retry), and an already-aborted job was still dispatched. Aborted waiters are now dropped, and a processor that has not settled 5 seconds after its abort has its worker thread terminated or child process SIGKILLed and replaced.
+- **Host crash on send to a dead sandbox child**: a proxy response sent after the child exited emitted an unhandled `ERR_IPC_CHANNEL_CLOSED` that killed the worker process. Sends to disconnected children are skipped and the error listener stays attached.
+
 ### Documentation
 
 - **Agent skills rewritten for current models**: short intent-based trigger descriptions, no trigger-phrase lists or impact-priority tables, one references table, and notes on the behavior that differs from expectations. Skill metadata versions now match the package (0.15.5).
