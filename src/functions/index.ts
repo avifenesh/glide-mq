@@ -1,6 +1,7 @@
 import { RequestError } from '@glidemq/speedkey';
-import type { GlideReturnType } from '@glidemq/speedkey';
+import type { GlideReturnType, GlideString } from '@glidemq/speedkey';
 import type { Client } from '../types';
+import { buildKeys, parseCrossQueueParentNotification } from '../utils';
 import { librarySourceFrom, loadLibraryFile } from './load-library-source';
 
 export const LIBRARY_NAME = 'glidemq';
@@ -92,7 +93,12 @@ export const LIBRARY_NAME = 'glidemq';
 // Version 122: moveToWaitingChildren unparks immediately when no child deps exist.
 // Version 123: glidemq_complete honors skipEvents/skipMetrics; deferActive can undo a CAF group reservation.
 // Version 124: undoGroupClaim skips active/nextSeq rewind when the job holds retainedSlot.
-export const LIBRARY_VERSION = '124';
+// Version 125: removeJob resolves parents and clears an active job's PEL entry; drain closes ordering holes;
+//   completion paths skip removed jobs; retry re-sequences ordered jobs; listSourced marker;
+//   healListActive needs a full scan; moveToActive rejects stale claims ('STALE'); glidemq_retryJob;
+//   changePriority/changeDelay handle list-held jobs; debounce resolves replaced children;
+//   glidemq_updateJobFields writes only existing job hashes.
+export const LIBRARY_VERSION = '125';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -776,6 +782,7 @@ export async function moveToActive(
   | 'GROUP_TOKEN_LIMITED'
   | 'GROUP_ORDERED'
   | 'ERR:COST_EXCEEDS_CAPACITY'
+  | 'STALE'
   | null
 > {
   const keys: string[] = [k.job(jobId)];
@@ -806,6 +813,7 @@ export async function moveToActive(
   if (str === 'GROUP_TOKEN_LIMITED') return 'GROUP_TOKEN_LIMITED';
   if (str === 'GROUP_ORDERED') return 'GROUP_ORDERED';
   if (str === 'ERR:COST_EXCEEDS_CAPACITY') return 'ERR:COST_EXCEEDS_CAPACITY';
+  if (str === 'STALE') return 'STALE';
   // Backward compatibility: older library returns cjson string
   const arr = JSON.parse(str) as string[];
   const hash: Record<string, string> = Object.create(null);
@@ -914,6 +922,8 @@ export async function deferActive(
 
 /**
  * Remove a job from all data structures (hash, stream, scheduled, completed, failed).
+ * A removed child resolves its parents. Cross-queue parents are notified here;
+ * a failed delivery stays in xq-pending for the scheduler to retry.
  * Returns 1 if removed, 0 if not found.
  */
 export async function removeJob(client: Client, k: QueueKeys, jobId: string): Promise<number> {
@@ -922,7 +932,22 @@ export async function removeJob(client: Client, k: QueueKeys, jobId: string): Pr
     [k.job(jobId), k.stream, k.scheduled, k.completed, k.failed, k.events, k.log(jobId)],
     [jobId],
   );
-  return result as number;
+  if (typeof result !== 'string') return Number(result) || 0;
+  const suffix = `:{${k.name}}:id`;
+  if (!k.id.endsWith(suffix)) return 1;
+  const prefix = k.id.slice(0, -suffix.length);
+  for (const member of parseParentNotifications(result)) {
+    const notification = parseCrossQueueParentNotification(member);
+    if (!notification) continue;
+    const [parentQueue, parentId, depsMember] = notification;
+    try {
+      await completeChild(client, buildKeys(parentQueue, prefix), parentId, depsMember);
+      await client.srem(k.xqPending, [member]);
+    } catch {
+      // The scheduler retries members left in xq-pending.
+    }
+  }
+  return 1;
 }
 
 /**
@@ -983,6 +1008,38 @@ export async function retryJobs(client: Client, k: QueueKeys, count: number, tim
     [count.toString(), timestamp.toString()],
   );
   return Number(result) || 0;
+}
+
+/**
+ * Write fields on an existing job hash, optionally emitting an event with
+ * `data`. Returns false (and writes nothing) when the job does not exist, so a
+ * removed job is never recreated as a stateless hash.
+ */
+export async function updateJobFields(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  fields: Record<string, GlideString>,
+  event?: { type: string; data: string },
+): Promise<boolean> {
+  const args: GlideString[] = [jobId, event?.type ?? '', event?.data ?? ''];
+  for (const [field, value] of Object.entries(fields)) args.push(field, value);
+  const result = await client.fcall('glidemq_updateJobFields', [k.job(jobId), k.events], args);
+  return Number(result) === 1;
+}
+
+/**
+ * Retry one failed job: move it to the scheduled ZSet (promoted on the next
+ * cycle), reset attempts and re-arm its TTL. Ordered jobs get a fresh sequence.
+ * Returns 'ok', 'error:not_found' or 'error:not_failed'.
+ */
+export async function retryJob(client: Client, k: QueueKeys, jobId: string, timestamp: number): Promise<string> {
+  const result = await client.fcall(
+    'glidemq_retryJob',
+    [k.job(jobId), k.failed, k.scheduled],
+    [jobId, timestamp.toString()],
+  );
+  return String(result);
 }
 
 /**

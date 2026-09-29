@@ -979,6 +979,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       | 'GROUP_TOKEN_LIMITED'
       | 'GROUP_ORDERED'
       | 'ERR:COST_EXCEEDS_CAPACITY'
+      | 'STALE'
       | null,
     jobId: string,
     entryId: string,
@@ -1048,9 +1049,11 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       moveResult === 'GROUP_RATE_LIMITED' ||
       moveResult === 'GROUP_TOKEN_LIMITED' ||
       moveResult === 'GROUP_ORDERED' ||
-      moveResult === 'ERR:COST_EXCEEDS_CAPACITY'
+      moveResult === 'ERR:COST_EXCEEDS_CAPACITY' ||
+      moveResult === 'STALE'
     ) {
-      // Job was parked/rejected before entering processor execution.
+      // Job was parked/rejected before entering processor execution. STALE:
+      // the claim is outdated because the job runs or finished elsewhere.
       // For list-backed jobs (entryId=''), release the reserved list-active slot.
       if (entryId === '') {
         await this.releaseListActiveSlot();
