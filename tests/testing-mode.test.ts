@@ -2367,3 +2367,123 @@ describe('TestQueue delayed jobs parity', () => {
     expect(order).toEqual(['prio-delayed', 'fifo', 'fifo-2']);
   });
 });
+
+describe('TestQueue prioritized state parity', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it('keeps a priority job in prioritized until a worker promotes it', async () => {
+    queue = new TestQueue('prio-state');
+    const job = await queue.add('p', {}, { priority: 2 });
+    expect(await job!.getState()).toBe('prioritized');
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 1 });
+    expect((await queue.getJobs('delayed')).map((j) => j.id)).toEqual([job!.id]);
+    expect(await queue.getJobs('waiting')).toEqual([]);
+    expect((await queue.searchJobs({ state: 'prioritized' })).map((j) => j.id)).toEqual([job!.id]);
+
+    const promoted: string[] = [];
+    queue.on('promoted', (id: string) => promoted.push(id));
+    worker = new TestWorker(queue, async () => 'ok');
+    await waitFor(async () => (await job!.getState()) === 'completed', 2000, 5);
+    expect(promoted).toEqual([job!.id]);
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 0, completed: 1 });
+  });
+
+  it('a worker promotes prioritized jobs to waiting while the queue is paused', async () => {
+    queue = new TestQueue('prio-paused');
+    const done: string[] = [];
+    worker = new TestWorker(queue, async (job) => {
+      done.push(job.id);
+      return 'ok';
+    });
+    await queue.pause();
+    const job = await queue.add('p', {}, { priority: 1 });
+    // The attached worker's promotion pass runs on the next microtask, before the add() caller resumes.
+    await waitFor(async () => (await job!.getState()) === 'waiting', 2000, 2);
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 1, delayed: 0 });
+    expect(done).toEqual([]);
+    await queue.resume();
+    await waitFor(() => done.length === 1, 2000, 5);
+  });
+
+  it('changePriority follows glidemq_changePriority state rules', async () => {
+    queue = new TestQueue('prio-change');
+    const changed: [string, number][] = [];
+    queue.on('priority-changed', (id: string, priority: number) => changed.push([id, priority]));
+    const waiting = await queue.add('w', {});
+    const prio = await queue.add('p', {}, { priority: 3 });
+    const delayed = await queue.add('d', {}, { delay: 60_000 });
+
+    await waiting!.changePriority(0);
+    expect(await waiting!.getState()).toBe('waiting');
+    await waiting!.changePriority(2);
+    expect(await waiting!.getState()).toBe('prioritized');
+    expect(waiting!.opts.priority).toBe(2);
+
+    await prio!.changePriority(1);
+    expect(await prio!.getState()).toBe('prioritized');
+    expect(prio!.opts.priority).toBe(1);
+    await prio!.changePriority(0);
+    expect(await prio!.getState()).toBe('waiting');
+    expect(prio!.opts.priority).toBe(0);
+
+    await delayed!.changePriority(4);
+    expect(await delayed!.getState()).toBe('delayed');
+    expect(delayed!.opts.priority).toBe(4);
+    expect((await queue.getJobs('delayed')).map((j) => j.id)).toEqual([waiting!.id, delayed!.id]);
+
+    expect(changed).toEqual([
+      [waiting!.id, 2],
+      [prio!.id, 1],
+      [prio!.id, 0],
+      [delayed!.id, 4],
+    ]);
+
+    await expect(prio!.changePriority(2049)).rejects.toThrow('Cannot change priority: invalid_priority');
+    await expect(prio!.changePriority(1.5)).rejects.toThrow('Cannot change priority: invalid_priority');
+
+    worker = new TestWorker(queue, async () => 'ok');
+    await waitFor(async () => (await prio!.getState()) === 'completed', 2000, 5);
+    await expect(prio!.changePriority(1)).rejects.toThrow('Cannot change priority: invalid_state');
+    await delayed!.remove();
+    await expect(delayed!.changePriority(1)).rejects.toThrow('Cannot change priority: not_found');
+  });
+
+  it('changeDelay moves between prioritized and delayed like production', async () => {
+    queue = new TestQueue('prio-delay');
+    const job = await queue.add('p', {}, { priority: 3 });
+    await job!.changeDelay(0);
+    expect(await job!.getState()).toBe('prioritized');
+    await job!.changeDelay(60_000);
+    expect(await job!.getState()).toBe('delayed');
+    await job!.changeDelay(0);
+    expect(await job!.getState()).toBe('prioritized');
+    expect((await queue.getJobCounts()).delayed).toBe(1);
+  });
+
+  it('debounce dedup replaces a prioritized job that has not been promoted', async () => {
+    queue = new TestQueue('prio-debounce');
+    const opts = { deduplication: { id: 'd', mode: 'debounce' as const }, priority: 1 };
+    const first = await queue.add('t', { v: 1 }, opts);
+    const second = await queue.add('t', { v: 2 }, opts);
+    expect(second).not.toBeNull();
+    expect(await queue.getJob(first!.id)).toBeNull();
+  });
+
+  it('drain() keeps prioritized jobs and drain(true) removes them', async () => {
+    queue = new TestQueue('prio-drain');
+    await queue.add('w', {});
+    const prio = await queue.add('p', {}, { priority: 1 });
+    await queue.drain();
+    expect(await prio!.getState()).toBe('prioritized');
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 1 });
+    await queue.drain(true);
+    expect(await queue.getJob(prio!.id)).toBeNull();
+  });
+});

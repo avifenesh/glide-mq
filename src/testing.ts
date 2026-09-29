@@ -40,6 +40,7 @@ import { JSON_SERIALIZER } from './types';
 import { GlideMQError, UnrecoverableError, BatchError, SuspendError, DelayedError } from './errors';
 import {
   MAX_JOB_DATA_SIZE,
+  MAX_JOB_PRIORITY,
   calculateBackoff,
   computeFollowingSchedulerNextRun,
   computeInitialSchedulerNextRun,
@@ -142,7 +143,7 @@ export interface TestJobRecord<D = any, R = any> {
   name: string;
   data: D;
   opts: JobOptions;
-  state: 'waiting' | 'active' | 'completed' | 'failed' | 'delayed' | 'suspended';
+  state: 'waiting' | 'prioritized' | 'active' | 'completed' | 'failed' | 'delayed' | 'suspended';
   attemptsMade: number;
   returnvalue: R | undefined;
   failedReason: string | undefined;
@@ -260,11 +261,31 @@ export class TestJob<D = any, R = any> {
 
   discarded = false;
 
+  /**
+   * Mirror glidemq_changePriority: a waiting job given a priority moves to
+   * prioritized, a prioritized job given 0 returns to waiting, a delayed job
+   * keeps its place with the new priority, other states throw.
+   */
   async changePriority(newPriority: number): Promise<void> {
     if (newPriority < 0) {
       throw new Error('Priority must be >= 0');
     }
+    if (!Number.isInteger(newPriority) || newPriority > MAX_JOB_PRIORITY) {
+      throw new Error('Cannot change priority: invalid_priority');
+    }
+    const queue = this.owningQueue();
+    const record = queue.jobs.get(this.id);
+    if (!record) throw new Error('Cannot change priority: not_found');
+    if (record.state === 'waiting') {
+      if (newPriority === 0 && (record.opts.priority ?? 0) === 0) return;
+      if (newPriority > 0) record.state = 'prioritized';
+    } else if (record.state === 'prioritized') {
+      if (newPriority === 0) record.state = 'waiting';
+    } else if (record.state !== 'delayed') {
+      throw new Error('Cannot change priority: invalid_state');
+    }
     this.opts.priority = newPriority;
+    queue.emit('priority-changed', this.id, newPriority);
   }
 
   /**
@@ -280,11 +301,12 @@ export class TestJob<D = any, R = any> {
     if (!record) throw new Error('Cannot change delay: not_found');
     if (record.state === 'delayed') {
       if (newDelay === 0) {
-        queue.releaseDelayed(record);
+        // The job stays parked as prioritized when it has a priority, like the ZADD XX path.
+        queue.releaseDelayed(record, (record.opts.priority ?? 0) > 0);
       } else {
         queue.parkDelayed(record, newDelay);
       }
-    } else if (record.state === 'waiting') {
+    } else if (record.state === 'waiting' || record.state === 'prioritized') {
       if (newDelay === 0) return;
       queue.parkDelayed(record, newDelay);
     } else {
@@ -300,7 +322,7 @@ export class TestJob<D = any, R = any> {
     const record = queue.jobs.get(this.id);
     if (!record) throw new Error('Cannot promote: not_found');
     if (record.state !== 'delayed') throw new Error('Cannot promote: not_delayed');
-    queue.releaseDelayed(record);
+    queue.releaseDelayed(record, false);
     this.opts.delay = 0;
   }
 
@@ -417,6 +439,14 @@ export interface SearchJobsOptions {
   state?: TestJobRecord['state'];
   /** When true, excludes `data` and `returnvalue` fields from returned jobs. */
   excludeData?: boolean;
+}
+
+/**
+ * Match a record state against a queried state. 'delayed' reads the scheduled
+ * ZSet in production, which also holds prioritized jobs.
+ */
+function matchesQueueState(state: TestJobRecord['state'], queried: TestJobRecord['state']): boolean {
+  return state === queried || (queried === 'delayed' && state === 'prioritized');
 }
 
 /** Check if all key-value pairs in filter exist in data (shallow match). */
@@ -551,6 +581,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
     const ttl = opts?.ttl ?? 0;
     const delay = opts?.delay ?? 0;
+    const priority = opts?.priority ?? 0;
     // Roundtrip data through serializer to match production behavior
     const roundtrippedData = this.serializer.deserialize(serializedData) as D;
     const record: TestJobRecord<D, R> = {
@@ -574,6 +605,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     if (delay > 0) {
       // glidemq_addJob parks the job in the scheduled ZSet until timestamp + delay.
       this.parkDelayed(record, delay);
+    } else if (priority > 0) {
+      this.enqueuePrioritized(record);
     } else {
       this.enqueueWaiting(record);
     }
@@ -597,16 +630,47 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
   }
 
+  /**
+   * @internal A priority job without delay waits in the scheduled ZSet as
+   * 'prioritized' until a worker's promotion pass moves it to 'waiting'. Wake
+   * the workers even when paused: production promotes on the scheduler tick.
+   */
+  enqueuePrioritized(record: TestJobRecord<D, R>): void {
+    record.state = 'prioritized';
+    this.waitingQueue.push(record);
+    queueMicrotask(() => {
+      for (const w of this.workers) {
+        w.onJobAdded();
+      }
+    });
+  }
+
+  /** @internal Move every prioritized record to waiting, like glidemq_promote on a worker tick. */
+  promotePrioritized(): void {
+    for (const record of this.waitingQueue) {
+      if (record.state !== 'prioritized' || this.jobs.get(record.id) !== record) continue;
+      record.state = 'waiting';
+      this.emit('promoted', record.id);
+    }
+  }
+
   /** @internal Park a record in 'delayed' for delayMs and schedule its promotion. */
   parkDelayed(record: TestJobRecord<D, R>, delayMs: number): void {
     record.state = 'delayed';
     this.schedulePromotion(record, delayMs);
   }
 
-  /** @internal Release a delayed record now (Job.promote, changeDelay(0)). */
-  releaseDelayed(record: TestJobRecord<D, R>): void {
+  /**
+   * @internal Release a delayed record now. Job.promote() sends it to waiting;
+   * changeDelay(0) keeps a priority job parked as prioritized.
+   */
+  releaseDelayed(record: TestJobRecord<D, R>, toPrioritized: boolean): void {
     this.clearPromotion(record.id);
     record.delayedUntil = undefined;
+    if (toPrioritized) {
+      this.enqueuePrioritized(record);
+      return;
+    }
     this.enqueueWaiting(record);
     this.emit('promoted', record.id);
   }
@@ -638,7 +702,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
     const record = this.jobs.get(existing.jobId);
     if (!record || record.state === 'completed' || record.state === 'failed') return false;
-    if (mode === 'debounce' && record.state === 'delayed') {
+    if (mode === 'debounce' && (record.state === 'delayed' || record.state === 'prioritized')) {
       this.removeJob(record.id);
       return false;
     }
@@ -674,7 +738,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     end = -1,
     opts?: GetJobsOptions,
   ): Promise<TestJob<D, R>[]> {
-    const records = [...this.jobs.values()].filter((r) => r.state === type);
+    // The scheduled ZSet backs getJobs('delayed') and holds prioritized jobs too.
+    const records = [...this.jobs.values()].filter((r) => matchesQueueState(r.state, type));
     if (type === 'delayed') {
       // Scheduled ZSet order: score = priority * PRIORITY_SHIFT + due time, ties by id.
       records.sort(
@@ -702,7 +767,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       const s = record.state;
       if (s === 'waiting') counts.waiting++;
       else if (s === 'active') counts.active++;
-      else if (s === 'delayed') counts.delayed++;
+      else if (s === 'delayed' || s === 'prioritized') counts.delayed++;
       else if (s === 'completed') counts.completed++;
       else if (s === 'failed') counts.failed++;
       // 'suspended' is not tracked in JobCounts
@@ -782,7 +847,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     const results: TestJob<D, R>[] = [];
     for (const record of this.jobs.values()) {
       if (opts.name !== undefined && record.name !== opts.name) continue;
-      if (opts.state !== undefined && record.state !== opts.state) continue;
+      if (opts.state !== undefined && !matchesQueueState(record.state, opts.state)) continue;
       if (opts.data !== undefined && !matchesData(record.data as Record<string, unknown>, opts.data)) continue;
       const job = new TestJob<D, R>(record);
       if (opts.excludeData) {
@@ -818,7 +883,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   async drain(delayed?: boolean): Promise<void> {
     const toRemove: string[] = [];
     for (const [id, record] of this.jobs) {
-      if (record.state === 'waiting' || (delayed && record.state === 'delayed')) {
+      if (record.state === 'waiting' || (delayed && (record.state === 'delayed' || record.state === 'prioritized'))) {
         toRemove.push(id);
       }
     }
@@ -1380,6 +1445,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
    * priority is dispatched from the LIFO list, like production promotion.
    */
   takeNextWaiting(): TestJobRecord<D, R> | undefined {
+    this.promotePrioritized();
     const q = this.waitingQueue;
     let write = 0;
     for (let read = 0; read < q.length; read++) {
@@ -1746,7 +1812,9 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   }
 
   private processAvailable(): void {
-    if (!this.running || this.queue.isPaused()) return;
+    if (!this.running) return;
+    this.queue.promotePrioritized();
+    if (this.queue.isPaused()) return;
 
     if (this.batchMode) {
       this.processAvailableBatch();
