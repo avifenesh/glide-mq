@@ -70,9 +70,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Batch workers** pipeline `moveToActive` and completion calls: 2 round trips per batch instead of 2 per job. A failing command no longer stops the rest of the batch; that entry is left for stalled recovery.
 - **Heartbeats** send the `lastActive` write and the revoke check in one round trip.
-
-### Performance
-
 - **List-active scans** (heal, list stall reclaim, active list job lookup) read a same-slot `list-active-ids` set instead of scanning the keyspace, falling back to SCAN when the set is incomplete (legacy workers).
 - **Fewer hash reads** in `complete`, `completeAndFetchNext`, `moveToActive`, `addJob` and `dedup`, and `removeOnComplete`/`removeOnFail: true` skip terminal writes to a hash deleted in the same call.
 
