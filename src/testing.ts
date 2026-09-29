@@ -176,6 +176,12 @@ export interface TestJobRecord<D = any, R = any> {
   progress?: number | object;
   /** @internal Serializer of the owning queue, used by updateData. */
   serializer?: Serializer;
+  /** @internal Owning queue, used by state-changing TestJob methods. */
+  queue?: TestQueue<D, R>;
+  /** @internal Epoch ms at which a delayed job is due (the time part of the scheduled score). */
+  delayedUntil?: number;
+  /** @internal Log lines appended by job.log(). */
+  logs?: string[];
 }
 
 /**
@@ -261,15 +267,58 @@ export class TestJob<D = any, R = any> {
     this.opts.priority = newPriority;
   }
 
+  /**
+   * Mirror glidemq_changeDelay: a delayed job is rescheduled (or released when
+   * the delay becomes 0), a waiting job is parked in delayed, other states throw.
+   */
   async changeDelay(newDelay: number): Promise<void> {
     if (newDelay < 0) {
       throw new Error('Delay must be >= 0');
     }
+    const queue = this.owningQueue();
+    const record = queue.jobs.get(this.id);
+    if (!record) throw new Error('Cannot change delay: not_found');
+    if (record.state === 'delayed') {
+      if (newDelay === 0) {
+        queue.releaseDelayed(record);
+      } else {
+        queue.parkDelayed(record, newDelay);
+      }
+    } else if (record.state === 'waiting') {
+      if (newDelay === 0) return;
+      queue.parkDelayed(record, newDelay);
+    } else {
+      throw new Error('Cannot change delay: invalid_state');
+    }
     this.opts.delay = newDelay;
+    queue.emit('delay-changed', this.id, newDelay);
   }
 
+  /** Mirror glidemq_promoteJob: only a delayed job can be promoted. */
   async promote(): Promise<void> {
+    const queue = this.owningQueue();
+    const record = queue.jobs.get(this.id);
+    if (!record) throw new Error('Cannot promote: not_found');
+    if (record.state !== 'delayed') throw new Error('Cannot promote: not_delayed');
+    queue.releaseDelayed(record);
     this.opts.delay = 0;
+  }
+
+  /** Read the current state, 'unknown' once the job has been removed (like Job.getState). */
+  async getState(): Promise<string> {
+    const record = this._record.queue?.jobs.get(this.id);
+    return record ? record.state : 'unknown';
+  }
+
+  /** Remove this job from the queue, like Job.remove(). */
+  async remove(): Promise<void> {
+    this.owningQueue().removeJob(this.id);
+  }
+
+  private owningQueue(): TestQueue<D, R> {
+    const queue = this._record.queue;
+    if (!queue) throw new Error('TestJob is not attached to a TestQueue');
+    return queue;
   }
 
   discard(): void {
@@ -458,7 +507,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private schedulerRunning = false;
   private nextSchedulerWakeAt: number | null = null;
   private suspendedTimeoutTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-  private retryTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private promotionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
   constructor(name: string, opts?: TestQueueOptions) {
     super();
@@ -501,6 +550,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       this.dedupEntries.set(dedup.id, { jobId: id, timestamp: now });
     }
     const ttl = opts?.ttl ?? 0;
+    const delay = opts?.delay ?? 0;
     // Roundtrip data through serializer to match production behavior
     const roundtrippedData = this.serializer.deserialize(serializedData) as D;
     const record: TestJobRecord<D, R> = {
@@ -518,13 +568,25 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       expireAt: ttl > 0 ? now + ttl : undefined,
       fallbackIndex: 0,
       serializer: this.serializer,
+      queue: this,
     };
     this.jobs.set(id, record);
-    this.waitingQueue.push(record);
+    if (delay > 0) {
+      // glidemq_addJob parks the job in the scheduled ZSet until timestamp + delay.
+      this.parkDelayed(record, delay);
+    } else {
+      this.enqueueWaiting(record);
+    }
 
     const job = new TestJob<D, R>(record);
     this.emit('added', job);
+    return job;
+  }
 
+  /** @internal Put a record in 'waiting' and wake the workers, like an XADD / list push. */
+  enqueueWaiting(record: TestJobRecord<D, R>): void {
+    record.state = 'waiting';
+    this.waitingQueue.push(record);
     // Notify attached workers (microtask so the add() caller gets the job first)
     if (!this.paused) {
       queueMicrotask(() => {
@@ -533,8 +595,31 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
         }
       });
     }
+  }
 
-    return job;
+  /** @internal Park a record in 'delayed' for delayMs and schedule its promotion. */
+  parkDelayed(record: TestJobRecord<D, R>, delayMs: number): void {
+    record.state = 'delayed';
+    this.schedulePromotion(record, delayMs);
+  }
+
+  /** @internal Release a delayed record now (Job.promote, changeDelay(0)). */
+  releaseDelayed(record: TestJobRecord<D, R>): void {
+    this.clearPromotion(record.id);
+    record.delayedUntil = undefined;
+    this.enqueueWaiting(record);
+    this.emit('promoted', record.id);
+  }
+
+  /** @internal Delete a job and its timers, like glidemq_removeJob. Returns false when absent. */
+  removeJob(id: string): boolean {
+    const record = this.jobs.get(id);
+    if (!record) return false;
+    this.clearPromotion(id);
+    this.clearSuspendedTimeout(id);
+    this.jobs.delete(id);
+    this.emit('removed', id);
+    return true;
   }
 
   /**
@@ -554,8 +639,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     const record = this.jobs.get(existing.jobId);
     if (!record || record.state === 'completed' || record.state === 'failed') return false;
     if (mode === 'debounce' && record.state === 'delayed') {
-      this.jobs.delete(record.id);
-      this.emit('removed', record.id);
+      this.removeJob(record.id);
       return false;
     }
     return mode === 'simple' || mode === 'debounce';
@@ -590,19 +674,25 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     end = -1,
     opts?: GetJobsOptions,
   ): Promise<TestJob<D, R>[]> {
-    const matching: TestJob<D, R>[] = [];
-    for (const record of this.jobs.values()) {
-      if (record.state === type) {
-        const job = new TestJob<D, R>(record);
-        if (opts?.excludeData) {
-          job.data = undefined as unknown as D;
-          job.returnvalue = undefined;
-        }
-        matching.push(job);
-      }
+    const records = [...this.jobs.values()].filter((r) => r.state === type);
+    if (type === 'delayed') {
+      // Scheduled ZSet order: score = priority * PRIORITY_SHIFT + due time, ties by id.
+      records.sort(
+        (a, b) =>
+          (a.opts.priority ?? 0) - (b.opts.priority ?? 0) ||
+          (a.delayedUntil ?? 0) - (b.delayedUntil ?? 0) ||
+          (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      );
     }
     const sliceEnd = end >= 0 ? end + 1 : undefined;
-    return matching.slice(start, sliceEnd);
+    return records.slice(start, sliceEnd).map((record) => {
+      const job = new TestJob<D, R>(record);
+      if (opts?.excludeData) {
+        job.data = undefined as unknown as D;
+        job.returnvalue = undefined;
+      }
+      return job;
+    });
   }
 
   /** Get counts by state. */
@@ -733,6 +823,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       }
     }
     for (const id of toRemove) {
+      this.clearPromotion(id);
       this.jobs.delete(id);
     }
     // Clear waitingQueue - stale entries will be skipped by findNextWaiting,
@@ -1241,34 +1332,42 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   }
 
   /**
-   * @internal Promote a job parked in 'delayed' by a retry or moveToDelayed back
-   * to 'waiting' once its delay elapses (the in-memory equivalent of glidemq_promote).
+   * @internal Promote a job parked in 'delayed' (delay option, retry backoff or
+   * moveToDelayed) back to 'waiting' once its delay elapses: the in-memory
+   * equivalent of glidemq_promote.
    */
-  scheduleRetry(record: TestJobRecord<D, R>, delayMs: number): void {
-    const existing = this.retryTimers.get(record.id);
-    if (existing) clearTimeout(existing);
-    const timer = setTimeout(
-      () => {
-        this.retryTimers.delete(record.id);
-        if (this.jobs.get(record.id) !== record || record.state !== 'delayed') return;
-        record.state = 'waiting';
-        this.waitingQueue.push(record);
-        if (!this.paused) {
-          for (const w of this.workers) w.onJobAdded();
-        }
-      },
-      Math.min(Math.max(0, delayMs), MAX_TIMEOUT_DELAY_MS),
-    );
+  schedulePromotion(record: TestJobRecord<D, R>, delayMs: number): void {
+    this.clearPromotion(record.id);
+    const wait = Math.min(Math.max(0, delayMs), MAX_TIMEOUT_DELAY_MS);
+    record.delayedUntil = Date.now() + wait;
+    const timer = setTimeout(() => {
+      this.promotionTimers.delete(record.id);
+      if (this.jobs.get(record.id) !== record || record.state !== 'delayed') return;
+      record.delayedUntil = undefined;
+      record.state = 'waiting';
+      this.waitingQueue.push(record);
+      this.emit('promoted', record.id);
+      if (!this.paused) {
+        for (const w of this.workers) w.onJobAdded();
+      }
+    }, wait);
     timer.unref?.();
-    this.retryTimers.set(record.id, timer);
+    this.promotionTimers.set(record.id, timer);
+  }
+
+  private clearPromotion(jobId: string): void {
+    const timer = this.promotionTimers.get(jobId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.promotionTimers.delete(jobId);
   }
 
   /** Close the queue, clear timers, and detach all workers. */
   async close(): Promise<void> {
     this.clearSchedulerTimer();
     this.clearAllSuspendedTimeouts();
-    for (const timer of this.retryTimers.values()) clearTimeout(timer);
-    this.retryTimers.clear();
+    for (const timer of this.promotionTimers.values()) clearTimeout(timer);
+    this.promotionTimers.clear();
     this.removeAllListeners();
     this.workers.clear();
     TestQueue.registry.delete(this.name);
@@ -1780,9 +1879,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         }
         // moveToDelayed: park without counting an attempt, promote at the timestamp.
         if (err instanceof DelayedError) {
-          const delay = Math.max(0, err.delayedUntil - Date.now());
-          record.state = 'delayed';
-          this.queue.scheduleRetry(record, delay);
+          this.queue.parkDelayed(record, Math.max(0, err.delayedUntil - Date.now()));
           return;
         }
 
@@ -1824,11 +1921,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       if (record.opts.fallbacks && record.opts.fallbacks.length > 0) {
         record.fallbackIndex++;
       }
-      record.state = 'delayed';
       record.processedOn = now;
+      this.queue.parkDelayed(record, backoffDelay);
       this.emit('failed', job, err);
       this.queue.emit('retrying', job, err);
-      this.queue.scheduleRetry(record, backoffDelay);
       return;
     }
 
