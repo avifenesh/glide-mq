@@ -18,7 +18,7 @@ Those structures survive restarts only if Valkey is configured to persist them.
 - `appendfsync always` minimizes the persistence window further, but costs throughput and latency.
 - RDB-only snapshots are usually not enough for queues unless you can tolerate losing all writes since the last snapshot.
 - glide-mq provides **at-least-once** delivery semantics, not exactly-once.
-- If a worker crashes after claiming a job but before acking it, the job is not silently lost; another worker can reclaim it from the pending entries list.
+- If a worker crashes after claiming a job but before acking it, the job is not silently lost; another worker can reclaim it from the pending entries list. Priority and LIFO jobs have no pending entry and are found by a bounded keyspace scan instead.
 
 ## What Persists
 
@@ -108,6 +108,8 @@ If a worker crashes mid-processing:
 4. the reclaim path increments `stalledCount` and:
    - **redispatches** the job back to the queue so a healthy worker can pick it up again, when `stalledCount <= maxStalledCount` (default `1`)
    - **fails** the job (state = `failed`, reason = `job stalled more than maxStalledCount`) once `stalledCount` exceeds the limit, instead of leaving it in limbo
+
+Priority and LIFO jobs are popped from lists and have no pending entry, so `XAUTOCLAIM` cannot see them. `glidemq_reclaimStalledListJobs` finds them with a bounded `SCAN` over job hashes (at most 1000 SCAN steps per call). Each call starts from cursor 0, so on a very large keyspace a stalled list job past that bound can stay unrecovered. Neither reclaim path runs while the queue is paused.
 
 This means a single crash gets a retry; chronic crashing produces a clean terminal failure. AI-style workloads that take minutes-to-hours per job benefit from the retry: a transient worker death does not cost the whole run, and processors that store progress via `job.moveToDelayed(timestamp, nextStep)` resume from the most recent checkpoint.
 

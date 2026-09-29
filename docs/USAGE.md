@@ -836,7 +836,7 @@ Jobs report token consumption via job.reportTokens(count) or automatically via j
 
 Override the worker-level lockDuration for individual jobs via opts.lockDuration. Useful for mixed workloads where some jobs are fast and others are long-running. The per-job lockDuration is read by glidemq_reclaimStalled and glidemq_reclaimStalledListJobs to set the stall threshold per job.
 
-The stall threshold resolution chain is: per-job `opts.lockDuration` (if set) > worker-level `lockDuration` > `stalledInterval`. Use a short `stalledInterval` only to make the scheduler check more often - it is not the threshold. To get fast stall recovery, set `lockDuration` to the small value, not `stalledInterval`.
+The stall threshold resolution chain is: per-job `opts.lockDuration` (if set) > worker-level `lockDuration` > `stalledInterval`. The scheduler also checks only every `stalledInterval`, and stream entries are claimed only after they have been idle for `stalledInterval`. So a stalled job is recovered no sooner than `max(stalledInterval, threshold)` after its last heartbeat. To get fast stall recovery, lower both `stalledInterval` and `lockDuration`.
 
 ### Vector Search (createJobIndex / storeVector / vectorSearch)
 
