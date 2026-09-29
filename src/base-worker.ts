@@ -1158,6 +1158,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
       this.rateLimitUntil = Date.now() + delayMs;
       try {
+        // glidemq_fail increments the attempt counter it compares against:
+        // the job hash in normal mode, the per-subscription hash in broadcast
+        // mode. One above the post-increment value always retries.
+        const attemptsMade = await this.getAttemptsMade(job, jobId);
         await failJob(
           this.commandClient,
           this.queueKeys,
@@ -1165,7 +1169,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           entryId,
           'rate limited',
           Date.now(),
-          job.attemptsMade + 2,
+          attemptsMade + 2,
           delayMs,
           this.consumerGroup,
           undefined,
