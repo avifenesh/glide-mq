@@ -1852,7 +1852,9 @@ redis.register_function('glidemq_fail', function(keys, args)
   if broadcastMode == '1' then
     local subKey = jobKey .. ':sub:' .. group
     attemptsMade = redis.call('HINCRBY', subKey, 'a', 1)
-    redis.call('EXPIRE', subKey, 86400)
+    -- Keep the counter for 24h past the scheduled retry, so a backoff longer
+    -- than 24h does not reset the attempts.
+    redis.call('EXPIRE', subKey, 86400 + math.ceil(math.max(backoffDelay, 0) / 1000))
   else
     attemptsMade = redis.call('HINCRBY', jobKey, 'attemptsMade', 1)
   end

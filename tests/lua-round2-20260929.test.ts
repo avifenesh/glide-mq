@@ -11,7 +11,7 @@ const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { buildKeys, keyPrefix, parseCrossQueueParentNotification } =
   require('../dist/utils') as typeof import('../src/utils');
-const { addJob, completeAndFetchNext, completeChild, completeJob, dedup, registerChildDep, CONSUMER_GROUP } =
+const { addJob, completeAndFetchNext, completeChild, completeJob, dedup, failJob, registerChildDep, CONSUMER_GROUP } =
   require('../dist/functions') as typeof import('../src/functions');
 
 describeEachMode('Lua round 2 2026-09-29', (CONNECTION) => {
@@ -296,5 +296,16 @@ describeEachMode('Lua round 2 2026-09-29', (CONNECTION) => {
     } finally {
       await queue.close();
     }
+  });
+
+  it('R2-13: a broadcast retry counter outlives a backoff longer than 24h', async () => {
+    const Q = uniqueQueue('r2-sub-ttl');
+    const k = buildKeys(Q);
+    await cleanupClient.hset(k.job('b1'), { id: 'b1', name: 'b', state: 'active' });
+    const twoDaysMs = 2 * 86_400_000;
+    const r = await failJob(cleanupClient, k, 'b1', '', 'boom', Date.now(), 3, twoDaysMs, 'subA', undefined, true);
+    expect(r).toBe('retrying');
+    const ttl = Number(await cleanupClient.ttl(`${k.job('b1')}:sub:subA`));
+    expect(ttl).toBeGreaterThan(twoDaysMs / 1000);
   });
 });
