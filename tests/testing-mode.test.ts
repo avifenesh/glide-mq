@@ -2487,6 +2487,29 @@ describe('TestQueue prioritized state parity', () => {
     await queue.drain(true);
     expect(await queue.getJob(prio!.id)).toBeNull();
   });
+
+  it('a prioritized job kept by drain() is still promoted and run by a worker attached later', async () => {
+    queue = new TestQueue('prio-drain-then-run');
+    await queue.add('w', {});
+    const prio = await queue.add('p', {}, { priority: 1 });
+    await queue.drain();
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 1 });
+
+    const done: string[] = [];
+    worker = new TestWorker(queue, async (job) => {
+      done.push(job.name);
+      return 'ok';
+    });
+    // Worker.drain() only returns once nothing is waiting, prioritized or delayed.
+    await Promise.race([
+      worker.drain(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('worker.drain() hung')), 2000)),
+    ]);
+    worker = undefined;
+    expect(done).toEqual(['p']);
+    expect(await prio!.getState()).toBe('completed');
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 0, completed: 1 });
+  });
 });
 
 describe('TestWorker rate limit parity', () => {

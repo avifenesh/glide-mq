@@ -1173,9 +1173,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       this.clearPromotion(id);
       this.jobs.delete(id);
     }
-    // Clear waitingQueue - stale entries will be skipped by findNextWaiting,
-    // but draining waiting jobs means the queue should be empty.
-    this.waitingQueue.length = 0;
+    // Waiting entries are gone. Prioritized jobs survive a drain without the
+    // delayed flag (they sit in the scheduled ZSet in production) and must stay
+    // reachable for the next worker promotion pass.
+    const survivors = this.waitingQueue.filter((r) => r.state === 'prioritized' && this.jobs.get(r.id) === r);
+    this.waitingQueue.splice(0, this.waitingQueue.length, ...survivors);
     if (toRemove.length > 0) {
       this.emit('drained', toRemove.length);
     }
