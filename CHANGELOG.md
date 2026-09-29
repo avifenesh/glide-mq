@@ -23,6 +23,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Batch workers never charged or checked flow budgets**: batch completion and every batch failure path now charge reported usage once per job (same `usage:budgeted` marker as single-job workers), and each batch entry is diverted when its budget is already exceeded.
+- **`RateLimitError` consumed an attempt**: the requeue incremented `attemptsMade` (or the broadcast per-subscription counter) and wrote `failedReason`. `glidemq_fail` takes an optional `requeueOnly` argument; the job is scheduled after the limiter delay with its counters untouched.
+- **Budget `onExceeded: 'pause'` re-delayed jobs by 24 hours with no way out**: paused jobs re-check every 60 seconds, `job.promote()` re-checks at once, and the new `Queue.updateFlowBudget(flowId, limits)` raises, lowers or removes limits and clears `exceeded` when they are no longer breached (`TestQueue.updateFlowBudget` mirrors it).
+
+### Changed
+
+- **Server function library version is `131`.** Workers and producers reload it on connect.
+- **Broadcast `trimmed` event**: `Broadcast` emits `('trimmed', { trimmed, unread })` after a publish that trims, where `unread` counts messages dropped before some subscription had read them.
+
+### Performance
+
+- **Failed jobs keep the fetch chain alive**: `glidemq_failAndFetchNext` fails the current job and fetches the next one in one call (1 round trip instead of about 4). Rate-limit requeues, batch and broadcast workers keep the previous path. On a library that lacks the function the worker falls back to `glidemq_fail` once per process.
+
+### Fixed
+
 - **`addDAG` could release a parent early**: a leaf with one dependent was wired at creation while a sibling with several dependents was wired a round trip later, so a fast leaf could release the parent before the sibling was registered. Leaf ids are reserved and every dependent's deps set is filled before any leaf becomes runnable.
 - **Scheduled jobs skipped gzip compression** on queues with `compression: 'gzip'`. The scheduler entry records the upserting queue's compression and the tick compresses like `Queue.add`.
 - **Switching a scheduler to `repeatAfterComplete` fired immediately**, overlapping a still-running job from the old mode. The first run is now held until the old mode's next run.
