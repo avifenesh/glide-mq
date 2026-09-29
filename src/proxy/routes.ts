@@ -322,7 +322,8 @@ function trackDisconnect(req: Request, res: Response): DisconnectTracker {
     if (req.socket?.destroyed || res.destroyed) markClosed();
   });
   res.once('close', markClosed);
-  if (req.destroyed || res.destroyed || req.socket?.destroyed) markClosed();
+  // Same rule for the initial state: a consumed body leaves req.destroyed true on a live socket.
+  if (res.destroyed || req.socket?.destroyed) markClosed();
   return {
     get closed() {
       return closed;

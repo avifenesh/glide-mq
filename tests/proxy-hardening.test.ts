@@ -902,3 +902,45 @@ describe('HTTP proxy hardening - jobs/wait bounds', () => {
     }
   });
 });
+
+describe('HTTP proxy hardening - mounted behind a parent body parser', () => {
+  const express = require('express') as typeof import('express');
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+  const queueName = `proxy-hard-${RUN_ID}-parent-app`;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    const proxy = createProxyServer({ connection: CONNECTION });
+    proxyClose = proxy.close;
+    const parent = express();
+    parent.use(express.json());
+    parent.use(async (_req, _res, next) => {
+      await sleep(20);
+      next();
+    });
+    parent.use(proxy.app);
+    ({ baseUrl, server } = await listen(parent));
+  });
+
+  afterAll(async () => {
+    server.closeAllConnections?.();
+    await proxyClose();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  }, 30000);
+
+  it('jobs/wait still answers when the request body was consumed before the handler ran', async () => {
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs/wait`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'no-worker', data: {}, opts: { waitTimeout: 300 } }),
+      signal: AbortSignal.timeout(5000),
+    });
+    expect(res.status).toBe(504);
+    expect((await res.json()).error).toMatch(/did not finish within 300ms/);
+  });
+});
