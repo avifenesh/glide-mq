@@ -360,14 +360,15 @@ describe('heartbeat cleanup on pre-processor failures', () => {
   });
 
   it('stops heartbeats of already activated batch entries when a later activation throws', async () => {
+    // j1 is activated and gets a heartbeat; j2's ordering check then throws.
     const command = makeMockClient({
       fcall: routeFcall({
         glidemq_moveToActive: (keys) => {
           const id = jobIdFromKeys(keys);
-          if (id === 'j2') throw new Error('activation failed');
-          return jobHash(id);
+          return id === 'j2' ? jobHash(id, ['orderingKey', 'k', 'orderingSeq', '1']) : jobHash(id);
         },
       }),
+      hget: vi.fn().mockRejectedValue(new Error('ordering check failed')),
     });
     const blocking = makeMockClient({
       xreadgroup: vi
@@ -1083,6 +1084,142 @@ describe('job heartbeat round trips', () => {
     expect(ac.signal.aborted).toBe(true);
 
     (worker as any).stopHeartbeat('hb');
+    await worker.close(true);
+  });
+});
+
+describe('batch activation and completion round trips', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function batchRead(ids: string[]) {
+    return makeMockClient({
+      xreadgroup: vi
+        .fn()
+        .mockResolvedValueOnce(streamResult(ids.map((id, i) => [`${i + 1}-0`, id] as [string, string])))
+        .mockImplementation(neverResolve),
+    });
+  }
+
+  function fcallsIn(batch: { commands: [string, unknown[]][] }) {
+    return batch.commands.map(([cmd, args]) => {
+      expect(cmd).toBe('fcall');
+      return [args[0], jobIdFromKeys((args[1] as string[]).slice(args[0] === 'glidemq_complete' ? 3 : 0))];
+    });
+  }
+
+  it('activates and completes a batch of 3 in one pipeline each, in entry order', async () => {
+    const command = makeMockClient({ fcall: routeFcall({}) });
+    wireClients(command, batchRead(['a', 'b', 'c']));
+    const completed: string[] = [];
+    const processor = vi.fn(async (jobs: any[]) => jobs.map((j) => `r-${j.id}`));
+    const worker = new Worker('lifecycle-batch-rtt', processor, { connection, blockTimeout: 100, batch: { size: 3 } });
+    worker.on('completed', (job: any) => completed.push(job.id));
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(processor).toHaveBeenCalledTimes(1);
+    expect(processor.mock.calls[0][0].map((j: any) => j.id)).toEqual(['a', 'b', 'c']);
+    // 2 round trips for the batch instead of 6 sequential FCALLs.
+    expect(command.exec).toHaveBeenCalledTimes(2);
+    const [activation, completion] = command.exec.mock.calls.map((c: any[]) => c[0]);
+    expect(activation.isAtomic).toBe(false);
+    expect(completion.isAtomic).toBe(false);
+    expect(fcallsIn(activation)).toEqual([
+      ['glidemq_moveToActive', 'a'],
+      ['glidemq_moveToActive', 'b'],
+      ['glidemq_moveToActive', 'c'],
+    ]);
+    expect(fcallsIn(completion)).toEqual([
+      ['glidemq_complete', 'a'],
+      ['glidemq_complete', 'b'],
+      ['glidemq_complete', 'c'],
+    ]);
+    expect(completion.commands.map((c: any) => c[1][2][2])).toEqual(['"r-a"', '"r-b"', '"r-c"']);
+    expect(completed).toEqual(['a', 'b', 'c']);
+
+    await worker.close(true);
+  });
+
+  it('runs the other entries when one pipelined activation errors', async () => {
+    const command = makeMockClient({
+      fcall: routeFcall({
+        glidemq_moveToActive: (keys) => {
+          const id = jobIdFromKeys(keys);
+          if (id === 'b') throw new Error('activation failed');
+          return jobHash(id);
+        },
+      }),
+    });
+    wireClients(command, batchRead(['a', 'b', 'c']));
+    const errors: Error[] = [];
+    const processor = vi.fn(async (jobs: any[]) => jobs.map(() => 'ok'));
+    const worker = new Worker('lifecycle-batch-partial', processor, {
+      connection,
+      blockTimeout: 100,
+      batch: { size: 3 },
+    });
+    worker.on('error', (err) => errors.push(err));
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(processor.mock.calls[0][0].map((j: any) => j.id)).toEqual(['a', 'c']);
+    expect(errors.map((e) => e.message)).toContain('activation failed');
+    expect((worker as any).heartbeatIntervals.size).toBe(0);
+
+    await worker.close(true);
+  });
+
+  it('runs nothing and leaks no heartbeat when the activation pipeline rejects', async () => {
+    const command = makeMockClient({ fcall: routeFcall({}) });
+    command.exec = vi.fn().mockRejectedValueOnce(new Error('connection lost'));
+    wireClients(command, batchRead(['a', 'b']));
+    const processor = vi.fn(async (jobs: any[]) => jobs.map(() => 'ok'));
+    const worker = new Worker('lifecycle-batch-reject', processor, {
+      connection,
+      blockTimeout: 100,
+      batch: { size: 2 },
+    });
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(processor).not.toHaveBeenCalled();
+    expect((worker as any).heartbeatIntervals.size).toBe(0);
+
+    await worker.close(true);
+  });
+
+  it('fails a revoked completion and completes the rest of the pipeline', async () => {
+    const command = makeMockClient({
+      fcall: routeFcall({
+        glidemq_complete: (_keys, args) => (args[0] === 'b' ? 'REVOKED' : 1),
+      }),
+    });
+    wireClients(command, batchRead(['a', 'b', 'c']));
+    const completed: string[] = [];
+    const processor = vi.fn(async (jobs: any[]) => jobs.map(() => 'ok'));
+    const worker = new Worker('lifecycle-batch-revoked', processor, {
+      connection,
+      blockTimeout: 100,
+      batch: { size: 3 },
+    });
+    worker.on('completed', (job: any) => completed.push(job.id));
+    worker.on('error', () => {});
+    await worker.waitUntilReady();
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(completed).toEqual(['a', 'c']);
+    const fails = command.fcall.mock.calls.filter((c: any[]) => c[0] === 'glidemq_fail');
+    expect(fails).toHaveLength(1);
+    expect(fails[0][2][0]).toBe('b');
+
     await worker.close(true);
   });
 });
