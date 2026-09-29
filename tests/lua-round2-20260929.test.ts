@@ -343,5 +343,20 @@ describeEachMode('Lua round 2 2026-09-29', (CONNECTION) => {
     expect(Number(await cleanupClient.zcard(k.completed))).toBe(0);
     expect(await hget(k.group('g'), 'active')).toBe('0');
     expect(await hget(k.meta, 'orderdone:g')).toBe('2');
+    const events = await eventTypes(Q);
+    expect(events.filter((e) => e === 'completed')).toHaveLength(2);
+  });
+
+  it('P5: fail with removeOnFail frees the group slot, emits failed and leaves nothing behind', async () => {
+    const Q = uniqueQueue('r2-rm-fail');
+    const k = buildKeys(Q);
+    await cleanupClient.hset(k.group('g'), { maxConcurrency: '1', active: '1', nextSeq: '2' });
+    await cleanupClient.hset(k.job('f'), { id: 'f', name: 'f', state: 'active', groupKey: 'g', orderingSeq: '1' });
+    expect(await failJob(cleanupClient, k, 'f', '', 'boom', Date.now(), 0, 0, CONSUMER_GROUP, true)).toBe('failed');
+    expect(await cleanupClient.exists([k.job('f')])).toBe(0);
+    expect(Number(await cleanupClient.zcard(k.failed))).toBe(0);
+    expect(await hget(k.group('g'), 'active')).toBe('0');
+    expect(await hget(k.meta, 'orderdone:g')).toBe('1');
+    expect(await eventTypes(Q)).toContain('failed');
   });
 });

@@ -1217,12 +1217,17 @@ redis.register_function('glidemq_complete', function(keys, args)
   -- The job was removed while active: removeJob already released its slot,
   -- list reservation and parents. Do not recreate the hash.
   if not cur[2] then return '' end
-  redis.call('ZADD', completedKey, timestamp, jobId)
-  redis.call('HSET', jobKey,
-    'state', 'completed',
-    'returnvalue', returnvalue,
-    'finishedOn', tostring(timestamp)
-  )
+  -- removeOnComplete:true deletes the hash below; nothing in this script reads
+  -- the completed state, returnvalue or finishedOn, so skip those writes.
+  local removeNow = removeMode == 'true' and broadcastMode ~= '1'
+  if not removeNow then
+    redis.call('ZADD', completedKey, timestamp, jobId)
+    redis.call('HSET', jobKey,
+      'state', 'completed',
+      'returnvalue', returnvalue,
+      'finishedOn', tostring(timestamp)
+    )
+  end
   markOrderingDone(jobKey, jobId)
   releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
   if skipEvents ~= '1' then emitEvent(eventsKey, 'completed', jobId, {'returnvalue', returnvalue}) end
@@ -1235,8 +1240,7 @@ redis.register_function('glidemq_complete', function(keys, args)
   enqueueTreeParentNotifies(prefix, jobId, storedParentQueue, storedParentId,
     cur[6], parentNotifications, parentNotificationSet)
   if broadcastMode ~= '1' then
-    if removeMode == 'true' then
-      redis.call('ZREM', completedKey, jobId)
+    if removeNow then
       redis.call('UNLINK', jobKey)
     elseif removeMode == 'count' and removeCount > 0 then
       local total = redis.call('ZCARD', completedKey)
@@ -1359,12 +1363,17 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   -- A job removed while active was already released by removeJob. Skip the
   -- completion so the hash and group/list accounting are not touched again.
   if cur[2] then
-    redis.call('ZADD', completedKey, timestamp, jobId)
-    redis.call('HSET', jobKey,
-      'state', 'completed',
-      'returnvalue', returnvalue,
-      'finishedOn', tostring(timestamp)
-    )
+    -- removeOnComplete:true deletes the hash below; nothing in this script
+    -- reads the completed state, returnvalue or finishedOn.
+    local removeNow = removeMode == 'true' and broadcastMode ~= '1'
+    if not removeNow then
+      redis.call('ZADD', completedKey, timestamp, jobId)
+      redis.call('HSET', jobKey,
+        'state', 'completed',
+        'returnvalue', returnvalue,
+        'finishedOn', tostring(timestamp)
+      )
+    end
     if currentOrderingKey ~= '__' then
       markOrderingDone(jobKey, jobId, currentOrderingKey, currentOrderingSeq)
     elseif currentGroupKey ~= '__' then
@@ -1386,8 +1395,7 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
 
     -- Retention cleanup (skip in broadcast mode - job hash must persist for all subscriptions)
     if broadcastMode ~= '1' then
-      if removeMode == 'true' then
-        redis.call('ZREM', completedKey, jobId)
+      if removeNow then
         redis.call('UNLINK', jobKey)
       elseif removeMode == 'count' and removeCount > 0 then
         local total = redis.call('ZCARD', completedKey)
@@ -1895,13 +1903,18 @@ redis.register_function('glidemq_fail', function(keys, args)
     if entryId == '' then decrListActive(string.sub(jobKey, 1, #jobKey - #('job:' .. jobId)) .. 'list-active') end
     return 'retrying'
   else
-    redis.call('ZADD', failedKey, timestamp, jobId)
-    redis.call('HSET', jobKey,
-      'state', 'failed',
-      'failedReason', failedReason,
-      'finishedOn', tostring(timestamp),
-      'processedOn', tostring(timestamp)
-    )
+    -- removeOnFail:true deletes the hash below; nothing in this script reads
+    -- the failed state, reason or timestamps, so skip those writes.
+    local removeNow = removeMode == 'true' and broadcastMode ~= '1'
+    if not removeNow then
+      redis.call('ZADD', failedKey, timestamp, jobId)
+      redis.call('HSET', jobKey,
+        'state', 'failed',
+        'failedReason', failedReason,
+        'finishedOn', tostring(timestamp),
+        'processedOn', tostring(timestamp)
+      )
+    end
     markOrderingDone(jobKey, jobId)
     releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
     emitEvent(eventsKey, 'failed', jobId, {'failedReason', failedReason})
@@ -1909,8 +1922,7 @@ redis.register_function('glidemq_fail', function(keys, args)
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     -- In broadcast mode, skip job hash deletion: the job must persist for all subscriptions
     if broadcastMode ~= '1' then
-      if removeMode == 'true' then
-        redis.call('ZREM', failedKey, jobId)
+      if removeNow then
         redis.call('UNLINK', jobKey)
       elseif removeMode == 'count' and removeCount > 0 then
         local total = redis.call('ZCARD', failedKey)
