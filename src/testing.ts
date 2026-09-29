@@ -371,7 +371,10 @@ function cosineSimilarity(a: number[], b: number[]): number {
 // ---- TestQueue ----
 
 export interface TestQueueOptions {
-  /** Enable deduplication in 'simple' mode. */
+  /**
+   * Deduplication is always applied when a job sets `deduplication`, like the real Queue.
+   * Set to `false` to ignore `deduplication` options. `true` is accepted for backward compatibility.
+   */
   dedup?: boolean;
   /** Custom serializer for job data and return values. When provided, values are roundtripped through serialize/deserialize to match production behavior. */
   serializer?: Serializer;
@@ -408,7 +411,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private static registry: Map<string, TestQueue<any, any>> = new Map();
   readonly name: string;
   /** @internal */ readonly jobs: Map<string, TestJobRecord<D, R>> = new Map();
-  /** @internal */ readonly dedupSet: Set<string> = new Set();
+  /** @internal dedup id -> job id and add timestamp, like the glidemq dedup hash. */
+  readonly dedupEntries: Map<string, { jobId: string; timestamp: number }> = new Map();
   /** @internal */ readonly waitingQueue: TestJobRecord<D, R>[] = [];
   /** @internal */ readonly budgets: Map<string, TestBudgetState> = new Map();
   private idCounter = 0;
@@ -447,11 +451,10 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     validateJobDataSize(serializedData);
     const customJobId = opts?.jobId ?? '';
 
-    if (opts?.deduplication && this.opts.dedup) {
-      const dedupId = opts.deduplication.id;
-      if (this.dedupSet.has(dedupId)) {
-        return null;
-      }
+    const dedup = this.opts.dedup !== false ? opts?.deduplication : undefined;
+    const now = Date.now();
+    if (dedup && this.isDeduplicated(dedup, now)) {
+      return null;
     }
 
     let id: string;
@@ -469,10 +472,9 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       }
     }
     // Record dedup key only after all checks pass (custom ID, etc.)
-    if (opts?.deduplication && this.opts.dedup) {
-      this.dedupSet.add(opts.deduplication.id);
+    if (dedup) {
+      this.dedupEntries.set(dedup.id, { jobId: id, timestamp: now });
     }
-    const now = Date.now();
     const ttl = opts?.ttl ?? 0;
     // Roundtrip data through serializer to match production behavior
     const roundtrippedData = this.serializer.deserialize(serializedData) as D;
@@ -508,6 +510,30 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
 
     return job;
+  }
+
+  /**
+   * Mirror glidemq_dedup. simple: skip while the tracked job exists and is not
+   * completed/failed. throttle: skip while inside `ttl` ms of the tracked add
+   * (never with ttl 0). debounce: replace a delayed tracked job, skip while it
+   * is waiting/active, accept once it finished or is gone.
+   */
+  private isDeduplicated(dedup: NonNullable<JobOptions['deduplication']>, now: number): boolean {
+    const existing = this.dedupEntries.get(dedup.id);
+    if (!existing) return false;
+    const mode = dedup.mode ?? 'simple';
+    if (mode === 'throttle') {
+      const ttl = dedup.ttl ?? 0;
+      return ttl > 0 && now - existing.timestamp < ttl;
+    }
+    const record = this.jobs.get(existing.jobId);
+    if (!record || record.state === 'completed' || record.state === 'failed') return false;
+    if (mode === 'debounce' && record.state === 'delayed') {
+      this.jobs.delete(record.id);
+      this.emit('removed', record.id);
+      return false;
+    }
+    return mode === 'simple' || mode === 'debounce';
   }
 
   /** Add multiple jobs. */

@@ -1164,6 +1164,8 @@ describe('TestQueue scheduler runtime', () => {
   it('consumes testing-mode scheduler iterations even when the templated add is deduplicated', async () => {
     queue = new TestQueue('sched-runtime-dedup', { dedup: true });
     worker = new TestWorker(queue, async () => 'ok');
+    // Keep the seed job waiting: simple dedup releases the id once the job completes.
+    await queue.pause();
 
     await queue.add('seed', { ok: true }, { deduplication: { id: 'dup-key', mode: 'simple' } });
     await queue.upsertJobScheduler(
@@ -1973,5 +1975,85 @@ describe('TestWorker retry parity (T8)', () => {
 
     await worker.close();
     await queue.close();
+  });
+});
+
+describe('TestQueue deduplication parity (T10)', () => {
+  let queue: TestQueue;
+
+  afterEach(async () => {
+    if (queue) await queue.close();
+  });
+
+  it('dedups without the dedup flag, like Queue.add', async () => {
+    queue = new TestQueue('dedup-default');
+    const a = await queue.add('t', {}, { deduplication: { id: 'd' } });
+    const b = await queue.add('t', {}, { deduplication: { id: 'd' } });
+    expect(a).not.toBeNull();
+    expect(b).toBeNull();
+  });
+
+  it('dedup: false keeps the legacy opt-out', async () => {
+    queue = new TestQueue('dedup-off', { dedup: false });
+    expect(await queue.add('t', {}, { deduplication: { id: 'd' } })).not.toBeNull();
+    expect(await queue.add('t', {}, { deduplication: { id: 'd' } })).not.toBeNull();
+  });
+
+  it('simple mode releases the id once the job completes, fails, or is removed', async () => {
+    queue = new TestQueue('dedup-simple');
+    let done = 0;
+    const worker = new TestWorker(queue, async (job) => {
+      if (job.data.fail) throw new Error('boom');
+      return 'ok';
+    });
+    worker.on('completed', () => done++);
+    worker.on('failed', () => done++);
+
+    expect(await queue.add('t', {}, { deduplication: { id: 'd', mode: 'simple' } })).not.toBeNull();
+    await waitFor(() => done === 1, 2000, 2);
+    expect(await queue.add('t', { fail: true }, { deduplication: { id: 'd', mode: 'simple' } })).not.toBeNull();
+    await waitFor(() => done === 2, 2000, 2);
+    const third = await queue.add('t', {}, { deduplication: { id: 'd', mode: 'simple' }, removeOnComplete: true });
+    expect(third).not.toBeNull();
+    await waitFor(() => done === 3, 2000, 2);
+    expect(await queue.getJob(third!.id)).toBeNull();
+    expect(await queue.add('t', {}, { deduplication: { id: 'd', mode: 'simple' } })).not.toBeNull();
+
+    await worker.close();
+  });
+
+  it('throttle mode skips inside ttl and accepts after it, regardless of job state', async () => {
+    queue = new TestQueue('dedup-throttle');
+    const opts = { deduplication: { id: 'd', mode: 'throttle' as const, ttl: 50 } };
+    expect(await queue.add('t', { v: 1 }, opts)).not.toBeNull();
+    expect(await queue.add('t', { v: 2 }, opts)).toBeNull();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(await queue.add('t', { v: 3 }, opts)).not.toBeNull();
+
+    const noTtl = { deduplication: { id: 'n', mode: 'throttle' as const } };
+    expect(await queue.add('t', {}, noTtl)).not.toBeNull();
+    expect(await queue.add('t', {}, noTtl)).not.toBeNull();
+  });
+
+  it('debounce mode skips while waiting and replaces a delayed job', async () => {
+    queue = new TestQueue('dedup-debounce');
+    const opts = { deduplication: { id: 'd', mode: 'debounce' as const } };
+    const first = await queue.add('t', { v: 1 }, opts);
+    expect(await queue.add('t', { v: 2 }, opts)).toBeNull();
+
+    const removed: string[] = [];
+    queue.on('removed', (id: string) => removed.push(id));
+    queue.jobs.get(first!.id)!.state = 'delayed';
+    const replacement = await queue.add('t', { v: 3 }, opts);
+    expect(replacement).not.toBeNull();
+    expect(await queue.getJob(first!.id)).toBeNull();
+    expect(removed).toEqual([first!.id]);
+  });
+
+  it('a duplicate custom jobId does not claim the dedup id', async () => {
+    queue = new TestQueue('dedup-custom-id');
+    await queue.add('t', {}, { jobId: 'x' });
+    expect(await queue.add('t', {}, { jobId: 'x', deduplication: { id: 'd' } })).toBeNull();
+    expect(await queue.add('t', {}, { deduplication: { id: 'd' } })).not.toBeNull();
   });
 });

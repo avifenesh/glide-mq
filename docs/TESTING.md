@@ -260,50 +260,34 @@ expect(failed[0]?.failedReason).toMatch('bad input');
 
 ## Deduplication Testing
 
-`TestQueue` honours all three deduplication modes — `simple`, `throttle`, and `debounce` — so you can verify dedup logic without Valkey:
+`TestQueue` applies `deduplication` exactly like `Queue.add()`, with no extra flag. It mirrors the `glidemq_dedup` server function:
+
+- `simple` (default): skipped while the job that claimed the id still exists and is not `completed` or `failed`. Once it finishes, or is removed (for example by `removeOnComplete`), the id is free again.
+- `throttle`: skipped while less than `ttl` ms have passed since the id was claimed, whatever the job state. Without `ttl` nothing is throttled.
+- `debounce`: if the tracked job is `delayed`, it is removed (the queue emits `removed`) and the new job is added. Skipped while the tracked job is `waiting` or `active`.
+
+Skipped adds return `null`.
 
 ```typescript
-// Simple mode: second add with the same dedup id is rejected
-const a = await queue.add(
-  'task',
-  { v: 1 },
-  {
-    deduplication: { id: 'dedup-1', mode: 'simple' },
-  },
-);
-const b = await queue.add(
-  'task',
-  { v: 2 },
-  {
-    deduplication: { id: 'dedup-1', mode: 'simple' },
-  },
-);
+const queue = new TestQueue('tasks');
 
+// Simple mode: second add with the same dedup id is rejected while the first is pending
+const a = await queue.add('task', { v: 1 }, { deduplication: { id: 'dedup-1', mode: 'simple' } });
+const b = await queue.add('task', { v: 2 }, { deduplication: { id: 'dedup-1', mode: 'simple' } });
 expect(a).not.toBeNull();
-expect(b).toBeNull(); // deduplicated
+expect(b).toBeNull();
 
-// Throttle mode with TTL: after the TTL window expires the same id is accepted again
-const c = await queue.add(
-  'task',
-  { v: 3 },
-  {
-    deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 },
-  },
-);
+// Throttle mode: the same id is accepted again after the ttl window
+const c = await queue.add('task', { v: 3 }, { deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 } });
 expect(c).not.toBeNull();
-
-// Wait for TTL to expire
 await new Promise((r) => setTimeout(r, 60));
-
-const d = await queue.add(
-  'task',
-  { v: 4 },
-  {
-    deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 },
-  },
-);
-expect(d).not.toBeNull(); // accepted — window expired
+const d = await queue.add('task', { v: 4 }, { deduplication: { id: 'dedup-2', mode: 'throttle', ttl: 50 } });
+expect(d).not.toBeNull();
 ```
+
+Limitations: `delay` is not honoured in test mode, so the only `delayed` jobs a debounce can replace are retries waiting out their backoff. Production also replaces a `prioritized` job that has not been promoted yet; test mode has no `prioritized` state.
+
+Pass `new TestQueue(name, { dedup: false })` to ignore `deduplication` options (the pre-parity default). `{ dedup: true }` is still accepted and changes nothing.
 
 ---
 
