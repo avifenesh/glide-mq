@@ -142,11 +142,11 @@ await queue.drain(); // remove waiting jobs only
 await queue.drain(true); // also remove delayed/scheduled jobs
 
 // Remove ALL queue data from Valkey
-await queue.obliterate(); // fails if stream jobs are active (see note below)
+await queue.obliterate(); // fails if there are active jobs (stream or priority/LIFO)
 await queue.obliterate({ force: true }); // unconditional wipe
 ```
 
-The active-job check counts the stream's pending entries only. Active priority and LIFO jobs have no pending entry, so `obliterate()` without `force` does not see them and wipes the queue while they run.
+The active-job check counts both the stream's pending entries and active priority/LIFO claims.
 
 ### Cleaning old jobs
 

@@ -73,6 +73,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
     fcall: vi.fn().mockResolvedValue(LIBRARY_VERSION),
     functionLoad: vi.fn(),
     hset: vi.fn(),
+    get: vi.fn().mockResolvedValue(null),
     hget: vi.fn().mockResolvedValue(null),
     hgetall: vi.fn().mockResolvedValue([]),
     hdel: vi.fn(),
