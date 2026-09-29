@@ -182,6 +182,17 @@ A message a subscription's worker claimed but did not finish stays in that subsc
 - `lastActive` is shared by all subscriptions. While another subscription is still processing the same message, stall detection waits until that heartbeat stops.
 - A reclaimed message that the reclaiming worker has not started when it closes or pauses stays in its pending list and is reclaimed again, which counts one more stall.
 
+## Retention
+
+`removeOnComplete` and `removeOnFail` do not apply to broadcast messages: one message hash is shared by all subscriptions. Without `maxMessages`, every published message keeps its stream entry, job hash and completed/failed set member.
+
+`maxMessages` is a hard cap, applied on each publish:
+
+- The oldest entries are trimmed even when a subscription has not read them yet. That subscription never sees them, and no event is emitted. Size `maxMessages` for the lag of your slowest subscriber.
+- For each trimmed message, the publish also deletes its job hash, per-subscription hashes (`job:<id>:sub:<subscription>`), log and completed/failed set member.
+- A trimmed message that a subscription still has claimed, has scheduled for a retry, or has a newer retry entry for keeps its data until that settles. So does a message parked outside the stream (delayed, suspended, group-waiting, waiting-children). Claims held this way are re-checked by later publishes, so their data waits for the next publish.
+- One publish trims at most 1000 entries. Lowering `maxMessages` on a large stream converges over several publishes.
+
 ## HTTP proxy
 
 The proxy exposes broadcast publish and SSE fan-out over HTTP:

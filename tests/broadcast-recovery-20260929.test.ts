@@ -180,4 +180,74 @@ describeEachMode('Broadcast recovery 2026-09-29', (CONNECTION) => {
       await broadcast.close();
     }
   });
+
+  it('R2-9: maxMessages trim deletes the job hashes, sub hashes and ZSET members of trimmed messages', async () => {
+    const Q = uniqueQueue('bcr-trim');
+    const k = buildKeys(Q);
+    const broadcast = new Broadcast(Q, { connection: CONNECTION, maxMessages: 3 });
+    const done: string[] = [];
+    let first = true;
+    const worker = new BroadcastWorker(
+      Q,
+      async () => {
+        // One failed attempt creates the per-subscription hash.
+        if (first) {
+          first = false;
+          throw new Error('once');
+        }
+      },
+      { connection: CONNECTION, subscription: 'a', blockTimeout: 200, promotionInterval: 50 },
+    );
+    worker.on('completed', (job: any) => done.push(job.id));
+    try {
+      await worker.waitUntilReady();
+      const ids: string[] = [];
+      for (let i = 0; i < 8; i++) {
+        const id = await broadcast.publish('evt', { i }, { attempts: 2, backoff: { type: 'fixed', delay: 10 } });
+        ids.push(id!);
+        await waitFor(() => done.includes(id!), 5000);
+      }
+      expect(await cleanupClient.xlen(k.stream)).toBe(3);
+      const trimmed = ids.slice(0, 5);
+      for (const id of trimmed) {
+        expect(await cleanupClient.exists([k.job(id)])).toBe(0);
+        expect(await cleanupClient.zscore(k.completed, id)).toBeNull();
+      }
+      expect(await cleanupClient.exists([`${k.job(ids[0])}:sub:a`])).toBe(0);
+      for (const id of ids.slice(5)) {
+        expect(await cleanupClient.exists([k.job(id)])).toBe(1);
+      }
+    } finally {
+      await worker.close(true);
+      await broadcast.close();
+    }
+  });
+
+  it('R2-9: a trimmed message still claimed or scheduled for retry keeps its hash until settled', async () => {
+    const Q = uniqueQueue('bcr-trim-held');
+    const k = buildKeys(Q);
+    const broadcast = new Broadcast(Q, { connection: CONNECTION, maxMessages: 1 });
+    try {
+      const held = await broadcast.publish('evt', { n: 1 });
+      await cleanupClient.xgroupCreate(k.stream, 'a', '0');
+      const read = await cleanupClient.xreadgroup('a', 'c1', { [k.stream]: '>' }, { count: 1 });
+      const entryId = Object.keys(read[0].value)[0];
+      const retried = await broadcast.publish('evt', { n: 2 });
+      // A subscription scheduled a retry for the second message.
+      await cleanupClient.zadd(k.scheduled, [{ element: `${retried}||a`, score: Date.now() + 3600000 }]);
+      await broadcast.publish('evt', { n: 3 });
+
+      expect(await cleanupClient.xlen(k.stream)).toBe(1);
+      // The claim of the first message and the scheduled retry keep their hashes.
+      expect(await cleanupClient.exists([k.job(held!)])).toBe(1);
+      expect(await cleanupClient.exists([k.job(retried!)])).toBe(1);
+
+      await cleanupClient.xack(k.stream, 'a', [entryId]);
+      await broadcast.publish('evt', { n: 4 });
+      expect(await cleanupClient.exists([k.job(held!)])).toBe(0);
+      expect(await cleanupClient.exists([k.job(retried!)])).toBe(1);
+    } finally {
+      await broadcast.close();
+    }
+  });
 });

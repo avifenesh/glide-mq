@@ -1147,7 +1147,10 @@ redis.register_function('glidemq_promote', function(keys, args)
         else
           local jobName = redis.call('HGET', jobKey, 'name')
           if retryGroup then
-            redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name', jobName or '', 'retryGroup', retryGroup)
+            local retryEntryId = redis.call('XADD', streamKey, '*', 'jobId', jobId, 'name', jobName or '', 'retryGroup', retryGroup)
+            -- Newest stream entry of this broadcast message; glidemq_trimBroadcast
+            -- keeps the hash until that entry is trimmed too.
+            redis.call('HSET', jobKey, 'bcastEntry', retryEntryId)
           else
             xaddJob(streamKey, jobId, jobName)
           end
@@ -3502,6 +3505,136 @@ redis.register_function('glidemq_registerParent', function(keys, args)
     return 'already_completed'
   end
   return 'ok'
+end)
+
+-- Names of the consumer groups of a stream (none if the stream is missing).
+local function streamGroupNames(streamKey)
+  local names = {}
+  local ok, groups = pcall(redis.call, 'XINFO', 'GROUPS', streamKey)
+  if not ok or type(groups) ~= 'table' then return names end
+  for gi = 1, #groups do
+    local info = groups[gi]
+    if type(info) == 'table' then
+      for f = 1, #info, 2 do
+        if info[f] == 'name' then
+          names[#names + 1] = info[f + 1]
+          break
+        end
+      end
+    end
+  end
+  return names
+end
+
+local function entryPendingInAnyGroup(streamKey, groups, entryId)
+  for i = 1, #groups do
+    if #redis.call('XPENDING', streamKey, groups[i], entryId, entryId, 1) > 0 then return true end
+  end
+  return false
+end
+
+-- States parked outside the stream (groupq, suspended set, parent deps,
+-- scheduled set): the message still comes back, so trimming keeps it.
+local TRIM_KEEP_STATES = {
+  ['delayed'] = true, ['group-waiting'] = true, ['suspended'] = true, ['waiting-children'] = true,
+}
+
+-- Delete a broadcast message whose stream entries are all trimmed, once no
+-- claim (bcastHeld), scheduled retry or newer retry entry still needs it.
+local function deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, jobId)
+  local jobKey = prefix .. 'job:' .. jobId
+  local vals = redis.call('HMGET', jobKey, 'state', 'bcastHeld', 'bcastEntry')
+  if not vals[1] or TRIM_KEEP_STATES[vals[1]] then return end
+  if (tonumber(vals[2]) or 0) > 0 then return end
+  if vals[3] and #redis.call('XRANGE', streamKey, vals[3], vals[3]) > 0 then return end
+  local scheduledKey = keys[4]
+  if redis.call('ZSCORE', scheduledKey, jobId) then return end
+  local subKeys = {}
+  for i = 1, #groups do
+    if redis.call('ZSCORE', scheduledKey, jobId .. '||' .. groups[i]) then return end
+    subKeys[#subKeys + 1] = jobKey .. ':sub:' .. groups[i]
+  end
+  redis.call('ZREM', keys[2], jobId)
+  redis.call('ZREM', keys[3], jobId)
+  redis.call('UNLINK', jobKey, prefix .. 'log:' .. jobId)
+  for i = 1, #subKeys, 1000 do
+    redis.call('UNLINK', unpack(subKeys, i, math.min(i + 999, #subKeys)))
+  end
+end
+
+-- Trim a broadcast stream to maxLen entries (a hard cap: entries a
+-- subscription has not read yet are dropped too) and delete the job hashes,
+-- per-subscription hashes and completed/failed members of the trimmed
+-- messages. A trimmed entry still pending in some subscription keeps its
+-- message until that claim settles; later calls re-check those claims.
+-- KEYS: [streamKey, completedKey, failedKey, scheduledKey]
+-- ARGS: [maxLen, timestamp]
+-- Returns the number of trimmed entries.
+redis.register_function('glidemq_trimBroadcast', function(keys, args)
+  local streamKey = keys[1]
+  local maxLen = tonumber(args[1]) or 0
+  local timestamp = tonumber(args[2]) or 0
+  local prefix = string.sub(streamKey, 1, #streamKey - 6)
+  local heldKey = prefix .. 'bcast-held'
+  local excess = redis.call('XLEN', streamKey) - maxLen
+  local held = redis.call('ZRANGE', heldKey, 0, 99)
+  if excess <= 0 and #held == 0 then return 0 end
+  local groups = streamGroupNames(streamKey)
+  local trimmed = 0
+  local candidates = {}
+  if excess > 0 then
+    -- Bounded per call; each publish trims again, so a backlog converges.
+    local batch = math.min(excess, 1000)
+    local entries = redis.call('XRANGE', streamKey, '-', '+', 'COUNT', batch + 1)
+    local last = math.min(batch, #entries)
+    if #entries > batch then
+      redis.call('XTRIM', streamKey, 'MINID', entries[batch + 1][1])
+    else
+      redis.call('XTRIM', streamKey, 'MAXLEN', maxLen)
+    end
+    trimmed = last
+    for i = 1, last do
+      local entryId = entries[i][1]
+      local fields = entries[i][2]
+      local jobId = nil
+      for j = 1, #fields, 2 do
+        if fields[j] == 'jobId' then
+          jobId = fields[j + 1]
+          break
+        end
+      end
+      if jobId and redis.call('EXISTS', prefix .. 'job:' .. jobId) == 1 then
+        if entryPendingInAnyGroup(streamKey, groups, entryId) then
+          redis.call('HINCRBY', prefix .. 'job:' .. jobId, 'bcastHeld', 1)
+          redis.call('ZADD', heldKey, timestamp, entryId .. '|' .. jobId)
+        else
+          candidates[#candidates + 1] = jobId
+        end
+      end
+    end
+  end
+  -- Re-check claims held by earlier trims. A claim that is still pending
+  -- moves to the back so a stuck one does not block the rest.
+  for i = 1, #held do
+    local member = held[i]
+    local sep = string.find(member, '|', 1, true)
+    local entryId = string.sub(member, 1, sep - 1)
+    local jobId = string.sub(member, sep + 1)
+    if entryPendingInAnyGroup(streamKey, groups, entryId) then
+      redis.call('ZADD', heldKey, timestamp, member)
+    else
+      redis.call('ZREM', heldKey, member)
+      local jobKey = prefix .. 'job:' .. jobId
+      if redis.call('EXISTS', jobKey) == 1 then
+        if redis.call('HINCRBY', jobKey, 'bcastHeld', -1) <= 0 then redis.call('HDEL', jobKey, 'bcastHeld') end
+        candidates[#candidates + 1] = jobId
+      end
+    end
+  end
+  for i = 1, #candidates do
+    deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, candidates[i])
+  end
+  return trimmed
 end)
 
 redis.register_function('glidemq_removeJob', function(keys, args)

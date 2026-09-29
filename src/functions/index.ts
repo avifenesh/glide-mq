@@ -110,7 +110,9 @@ export const LIBRARY_NAME = 'glidemq';
 //   glidemq_fail honors optional skipEvents/skipMetrics args; addJob/dedup/addFlow reject a priority
 //   outside 0..2048 integers with an error reply, and changePriority returns error:invalid_priority for it.
 // Version 130: broadcast reclaimStalled counts stalls per subscription (job:<id>:sub:<group> 's') and,
-//   on an optional redispatch arg, replies the reclaimed entries so the worker runs them again.
+//   on an optional redispatch arg, replies the reclaimed entries so the worker runs them again;
+//   glidemq_trimBroadcast trims a broadcast stream and deletes the job data of trimmed messages;
+//   promote records the newest broadcast retry entry in the job hash (bcastEntry).
 export const LIBRARY_VERSION = '130';
 
 // Consumer group name used by workers
@@ -666,6 +668,21 @@ export async function failJob(
     args,
   );
   return result as string;
+}
+
+/**
+ * Trim a broadcast stream to `maxLen` entries and delete the job hashes,
+ * per-subscription hashes and completed/failed members of trimmed messages.
+ * Messages a subscription still has claimed or scheduled for retry are kept
+ * until they settle. Returns the number of trimmed entries.
+ */
+export async function trimBroadcast(client: Client, k: QueueKeys, maxLen: number, timestamp: number): Promise<number> {
+  const result = await client.fcall(
+    'glidemq_trimBroadcast',
+    [k.stream, k.completed, k.failed, k.scheduled],
+    [maxLen.toString(), timestamp.toString()],
+  );
+  return Number(result) || 0;
 }
 
 /**

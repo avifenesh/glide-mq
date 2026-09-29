@@ -547,8 +547,8 @@ glide-mq/
 
 Key differences from the standard `Worker`:
 
-- **No XDEL after processing.** Stream entries are intentionally retained so that all consumer groups can read them. Trimming is handled by `maxMessages` via XTRIM.
-- **Per-subscription retry tracking.** Each subscription tracks its own retry state via `{jobKey}:sub:{group}` keys, so one subscriber's failure does not affect another's delivery.
+- **No XDEL after processing.** Stream entries are intentionally retained so that all consumer groups can read them. Trimming is handled by `maxMessages` (`glidemq_trimBroadcast`), a hard cap that also deletes the job data of trimmed messages once no subscription holds them.
+- **Per-subscription retry tracking.** Each subscription tracks its own retry state via `{jobKey}:sub:{group}` keys, so one subscriber's failure does not affect another's delivery. Stall counts are per subscription too, and a stalled entry is run again by the worker whose stalled reclaim took it.
 - **broadcastMode flag.** All Lua function calls from `BroadcastWorker` pass a `broadcastMode` flag, which alters completion and failure logic to skip stream entry deletion and use group-scoped state instead.
 
 ## DAG Dependency Resolution

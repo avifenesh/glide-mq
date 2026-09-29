@@ -176,7 +176,7 @@ When a processor calls `moveToDelayed`, the job is moved to the scheduled ZSet w
 
 ### Broadcast
 
-Stream entries in broadcast queues are intentionally not deleted after processing (no XDEL). Entries are retained according to the `maxMessages` XTRIM policy. Each consumer group independently tracks its own read offset. After a restart, consumer groups resume from their last acknowledged position, so no subscriber misses messages that were added while it was down.
+Stream entries in broadcast queues are intentionally not deleted after processing (no XDEL). Each consumer group independently tracks its own read offset. After a restart, consumer groups resume from their last acknowledged position, so a subscriber sees the messages added while it was down as long as they are still in the stream. `maxMessages` is a hard cap: it trims the oldest entries on publish even when a subscription has not read them, and those messages are lost for that subscription. A message a subscription's worker claimed but did not finish is reclaimed and run again by another worker of the same subscription (see [Broadcast - Crash and stall recovery](./BROADCAST.md#crash-and-stall-recovery)).
 
 ## Practical Guidance
 

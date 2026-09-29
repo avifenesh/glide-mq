@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import type { BroadcastOptions, JobOptions, Client, RateLimitConfig } from './types';
 import { Queue } from './queue';
 import { buildKeys } from './utils';
+import { trimBroadcast } from './functions/index';
 import type { QueueKeys } from './functions/index';
 
 /**
@@ -65,14 +66,12 @@ export class Broadcast<D = any> extends EventEmitter {
   async publish(subject: string, data: D, opts?: JobOptions): Promise<string | null> {
     const job = await this.queue.add(subject, data, opts);
 
-    // Trim stream to maxMessages if configured (exact trim for a reliable hard limit)
+    // maxMessages is a hard cap: the trim also drops messages a slow
+    // subscription has not read yet. It deletes the job data of trimmed
+    // messages once no subscription still holds them.
     if (job && this.opts.maxMessages) {
       const client = await this.queue.getClient();
-      await client.xtrim(this.keys.stream, {
-        method: 'maxlen',
-        threshold: this.opts.maxMessages,
-        exact: true,
-      });
+      await trimBroadcast(client, this.keys, this.opts.maxMessages, Date.now());
     }
 
     return job ? job.id : null;
