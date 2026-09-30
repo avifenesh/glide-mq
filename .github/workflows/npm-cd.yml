@@ -73,5 +73,14 @@ jobs:
       - name: Verify
         if: github.event_name == 'push' || github.event.inputs.publish == 'true'
         run: |
-          sleep 10
-          npm view glide-mq@${{ env.VERSION }} version
+          # npm reports "being processed and may take a few minutes to become
+          # available" after an accepted publish; poll instead of a fixed sleep.
+          for i in $(seq 1 60); do
+            if npm view "glide-mq@${VERSION}" version >/dev/null 2>&1; then
+              echo "glide-mq@${VERSION} is visible on the registry"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "glide-mq@${VERSION} not visible after 10 minutes"
+          exit 1
