@@ -1207,7 +1207,8 @@ describe('Scheduler', () => {
     expect(mockClient.fcall).toHaveBeenCalledWith(
       'glidemq_reclaimStalled',
       [queueKeys.stream, queueKeys.events],
-      [CONSUMER_GROUP, 'c', '5000', '1', now.toString(), queueKeys.failed, '0', '5000', '1'],
+      // returnIds '1', redispatch '0'; the idle-consumer threshold is appended only when set.
+      [CONSUMER_GROUP, 'c', '5000', '1', now.toString(), queueKeys.failed, '0', '5000', '1', '0'],
     );
   });
 
