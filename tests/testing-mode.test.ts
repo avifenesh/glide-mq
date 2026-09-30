@@ -269,6 +269,14 @@ describe('TestQueue', () => {
 });
 
 describe('TestWorker', () => {
+  it('rejects a queue name where a TestQueue instance is required', () => {
+    expect(() => new TestWorker('test-q' as any, async () => 'ok')).toThrow(
+      'TestWorker expects a TestQueue instance as its first argument, got string',
+    );
+    expect(() => new TestWorker(undefined as any, async () => 'ok')).toThrow('got undefined');
+    expect(() => new TestWorker(null as any, async () => 'ok')).toThrow('got null');
+  });
+
   let queue: TestQueue;
   let worker: TestWorker;
 

@@ -2143,6 +2143,11 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     opts?: TestWorkerOptions,
   ) {
     super();
+    if (!(queue instanceof TestQueue)) {
+      throw new GlideMQError(
+        `TestWorker expects a TestQueue instance as its first argument, got ${queue === null ? 'null' : typeof queue}`,
+      );
+    }
     this.queue = queue;
 
     // Batch mode validation
