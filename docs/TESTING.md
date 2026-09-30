@@ -8,12 +8,14 @@ glide-mq ships a built-in in-memory backend so you can unit-test job processors 
 - [API Surface](#api-surface)
 - [Searching Jobs](#searching-jobs)
 - [Retry Behaviour in Tests](#retry-behaviour-in-tests)
+- [Delayed, Prioritized and Rate-Limited Jobs](#delayed-prioritized-and-rate-limited-jobs)
 - [Custom Job IDs in Tests](#custom-job-ids-in-tests)
 - [Batch Testing](#batch-testing)
 - [Deduplication Testing](#deduplication-testing)
 - [Step Jobs in Tests](#step-jobs-in-tests)
 - [AI Primitives in Tests](#ai-primitives-in-tests)
 - [Tips](#tips)
+- [Known Limitations](#known-limitations)
 
 ---
 
@@ -105,36 +107,61 @@ describe('email processor', () => {
 
 ### TestQueue
 
-| Method                         | Description                                                                                 |
-| ------------------------------ | ------------------------------------------------------------------------------------------- |
-| `add(name, data, opts?)`       | Enqueue a job; triggers processing immediately                                              |
-| `addBulk(jobs)`                | Enqueue multiple jobs                                                                       |
-| `getJob(id)`                   | Retrieve a job by ID                                                                        |
-| `getJobs(state, start?, end?)` | List jobs by state                                                                          |
-| `getJobCounts()`               | Returns `{ waiting, active, delayed, completed, failed }`                                   |
-| `searchJobs(opts)`             | Filter jobs by state, name, and/or data fields                                              |
-| `drain(delayed?)`              | Remove waiting jobs; pass `true` to also remove delayed jobs                                |
-| `pause()` / `resume()`         | Pause / resume the queue                                                                    |
-| `isPaused()`                   | Check pause state (synchronous, returns `boolean` - note: real `Queue.isPaused()` is async) |
-| `close()`                      | Close the queue                                                                             |
+| Method                                  | Description                                                                                                                          |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `add(name, data, opts?)`                | Enqueue a job; `delay` parks it in `delayed`, `priority` parks it in `prioritized`, otherwise a worker picks it up immediately       |
+| `addBulk(jobs)`                         | Enqueue multiple jobs                                                                                                                |
+| `addAndWait(name, data, opts?)`         | Add a job and resolve with its return value, or reject with the failed reason; `waitTimeout` (default 30 s) bounds the wait          |
+| `getJob(id)`                            | Retrieve a job by ID                                                                                                                 |
+| `getJobs(state, start?, end?)`          | List jobs by state. `waiting` follows the worker dispatch order, `delayed` follows the scheduled order and includes prioritized jobs |
+| `getJobCounts()`                        | Returns `{ waiting, active, delayed, completed, failed }`; `delayed` counts prioritized jobs too, like production                    |
+| `getJobCountByTypes()` / `count()`      | Alias for `getJobCounts()`; `count()` is the FIFO stream length (waiting and active FIFO jobs)                                       |
+| `searchJobs(opts)`                      | Filter jobs by state, name, and/or data fields                                                                                       |
+| `getJobLogs(id, start?, end?)`          | Read the lines a processor appended with `job.log()`                                                                                 |
+| `getSuspendedJobs(start?, end?, opts?)` | List suspended jobs ordered by their timeout deadline                                                                                |
+| `revoke(jobId)`                         | Fail a waiting / delayed / prioritized job with reason `revoked`, flag any other existing job; returns the same strings as `Queue`   |
+| `retryJobs(opts?)`                      | Move failed jobs back to waiting                                                                                                     |
+| `drain(delayed?)`                       | Remove waiting jobs; pass `true` to also remove delayed and prioritized jobs                                                         |
+| `obliterate(opts?)`                     | Wipe jobs, schedulers, dedup entries, budgets and metrics; refuses while jobs are active unless `{ force: true }`                    |
+| `pause()` / `resume()`                  | Pause / resume the queue                                                                                                             |
+| `isPaused()`                            | Check pause state (synchronous, returns `boolean` - note: real `Queue.isPaused()` is async)                                          |
+| `close()`                               | Close the queue, clear every timer and reject pending `addAndWait` calls                                                             |
 
 ### TestJob
 
-| Method                        | Description                                                                   |
-| ----------------------------- | ----------------------------------------------------------------------------- |
-| `changePriority(newPriority)` | Re-prioritize a job in the in-memory queue; mirrors `Job.changePriority()`    |
-| `changeDelay(newDelay)`       | Change the delay of a job in the in-memory queue; mirrors `Job.changeDelay()` |
-| `promote()`                   | Move delayed job to waiting immediately; mirrors `Job.promote()`              |
+| Method                                   | Description                                                                                                                                                       |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `changePriority(newPriority)`            | Same rules as `glidemq_changePriority`: waiting to prioritized, prioritized to waiting on 0, delayed keeps its place; throws `invalid_priority` / `invalid_state` |
+| `changeDelay(newDelay)`                  | Same rules as `glidemq_changeDelay`: reschedule a delayed job (0 releases it, or parks it as prioritized when it has a priority), park a waiting job; else throws |
+| `promote()`                              | Move a delayed job to waiting immediately; throws `Cannot promote: not_delayed` otherwise, like `Job.promote()`                                                   |
+| `getState()`                             | Current state, `'unknown'` once removed                                                                                                                           |
+| `isCompleted()` ... `isWaiting()`        | State helpers: `isCompleted`, `isFailed`, `isDelayed`, `isActive`, `isWaiting`, `isRevoked`                                                                       |
+| `waitUntilFinished(pollMs?, timeoutMs?)` | Poll until `completed` or `failed`, reject on timeout                                                                                                             |
+| `retry()`                                | Move a failed job back to waiting (attempts reset, TTL re-armed); throws `Cannot retry: not_failed`                                                               |
+| `remove()`                               | Remove the job; the queue emits `removed`                                                                                                                         |
+| `moveToFailed(err)`                      | From inside the processor: fail the active job instead of completing it, then the attempts / backoff rules apply                                                  |
+| `log(message)`                           | Append a log line readable through `queue.getJobLogs()`                                                                                                           |
+| `updateData(data)` / `updateProgress(p)` | Persist to the stored job                                                                                                                                         |
 
 ### TestWorker
 
-| Method / Event        | Description                                               |
-| --------------------- | --------------------------------------------------------- |
-| `on('active', fn)`    | Fired when a job starts processing — args: `(job, jobId)` |
-| `on('completed', fn)` | Fired when a job finishes successfully                    |
-| `on('failed', fn)`    | Fired on every failed attempt, including retried ones     |
-| `on('drained', fn)`   | Fired when the queue transitions from non-empty to empty  |
-| `close()`             | Stop the worker                                           |
+| Method / Event               | Description                                                                                                      |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `on('active', fn)`           | Fired when a job starts processing, args: `(job, jobId)`                                                         |
+| `on('completed', fn)`        | Fired when a job finishes successfully                                                                           |
+| `on('failed', fn)`           | Fired on every failed attempt, including retried ones (not on a `RateLimitError`)                                |
+| `on('drained', fn)`          | Fired when the queue transitions from non-empty to empty                                                         |
+| `pause(force?)` / `resume()` | Stop / restart taking jobs; without `force`, `pause()` resolves once the active jobs finish                      |
+| `isPaused()` / `isRunning()` | Worker pause state                                                                                               |
+| `rateLimit(ms)`              | Pause dispatch for `ms`, like `Worker.rateLimit()`                                                               |
+| `drain()`                    | Process everything waiting, prioritized or delayed, then close                                                   |
+| `waitUntilReady()`           | Resolves immediately (no connection to wait for)                                                                 |
+| `close()`                    | Stop the worker                                                                                                  |
+| `TestWorker.RateLimitError`  | Throw from a processor to requeue the job after the limiter window; `TestWorker.isRateLimitError(err)` checks it |
+
+Options: `concurrency`, `batch`, `limiter` (`{ max, duration }`, same semantics as `WorkerOptions.limiter`), `tokenLimiter`, `backoffStrategies`.
+
+The queue also emits `added`, `removed`, `promoted`, `delay-changed`, `priority-changed`, `revoked`, `retrying`, `completed`, `failed`, `suspended`, `resumed` and `drained`, mirroring the production event stream.
 
 ---
 
@@ -178,6 +205,39 @@ await queue.add('flaky', {}, { attempts: 3, backoff: { type: 'fixed', delay: 0 }
 await new Promise((r) => worker.once('completed', r));
 const done = await queue.searchJobs({ state: 'completed', name: 'flaky' });
 expect(done[0]?.attemptsMade).toBe(2);
+```
+
+---
+
+## Delayed, Prioritized and Rate-Limited Jobs
+
+Delayed and priority jobs follow the `glidemq_addJob` / `glidemq_promote` state machine:
+
+- `delay` parks the job in `delayed` until the timestamp passes, then it moves to `waiting` and the queue emits `promoted`. `job.promote()` releases it early, `job.changeDelay(ms)` reschedules it.
+- `priority > 0` without a delay parks the job in `prioritized`. It is counted under `delayed` by `getJobCounts()` and listed by `getJobs('delayed')`, exactly like the scheduled ZSet in production. An attached worker promotes it to `waiting` on its next pass (also while the queue is paused) and dispatches it before LIFO and FIFO jobs.
+- `debounce` deduplication replaces a tracked job that is still `delayed` or `prioritized`.
+
+Timers are real, so keep delays small in unit tests.
+
+```typescript
+const queue = new TestQueue('later');
+const job = await queue.add('reminder', {}, { delay: 50 });
+expect(await job!.getState()).toBe('delayed');
+await job!.promote();
+expect(await job!.getState()).toBe('waiting');
+```
+
+A processor that throws `TestWorker.RateLimitError` (or any error named `RateLimitError`, so the production `Worker.RateLimitError` works too) does not fail the job. As in production, the job is parked in `delayed` for `err.delayMs`, the worker `limiter.duration`, or 1000 ms, with `failedReason` `'rate limited'`; `attemptsMade` is unchanged, the queue emits `retrying`, no `failed` event fires, and the worker pauses dispatch for the same window.
+
+```typescript
+const worker = new TestWorker(
+  queue,
+  async (job) => {
+    if (await upstreamIsThrottled()) throw new TestWorker.RateLimitError();
+    return callUpstream(job.data);
+  },
+  { limiter: { max: 10, duration: 1000 } },
+);
 ```
 
 ---
@@ -277,8 +337,6 @@ const d = await queue.add('task', { v: 4 }, { deduplication: { id: 'dedup-2', mo
 expect(d).not.toBeNull();
 ```
 
-Limitations: `delay` is not honoured in test mode, so the only `delayed` jobs a debounce can replace are retries waiting out their backoff. Production also replaces a `prioritized` job that has not been promoted yet; test mode has no `prioritized` state.
-
 Pass `new TestQueue(name, { dedup: false })` to ignore `deduplication` options (the pre-parity default). `{ dedup: true }` is still accepted and changes nothing.
 
 ---
@@ -361,9 +419,10 @@ Call job.suspend() inside the processor, then queue.signal() from outside. Use g
 - **No connection config needed.** `TestQueue` takes only a name — no `connection` option.
 - **Options are validated like production.** `TestQueue.add()` runs the same checks as `Queue.add()` (priority <= 2048, payload size, `ttl`, `lockDuration`, `cost`, `jobId`, ordering key, `lifo` with ordering) and throws the same errors. `job.updateData()` and `job.updateProgress()` persist to the stored job, so `queue.getJob()` sees the new values.
 - **Processing is synchronous-ish.** `TestWorker` processes jobs immediately when they are added via `queue.add()`. In most tests you can check state right after the `await queue.add(...)` call.
-- **Dispatch order matches the worker.** Jobs with `priority > 0` run first (lower number = higher priority, FIFO within a priority), then `lifo` jobs (newest first), then plain FIFO jobs. A `lifo` job with a priority is dispatched as LIFO, like production. `queue.getJobs('waiting')` still lists jobs in insertion order.
+- **Dispatch order matches the worker.** Jobs with `priority > 0` run first (lower number = higher priority, FIFO within a priority), then `lifo` jobs (newest first), then plain FIFO jobs. A `lifo` job with a priority is dispatched as LIFO, like production. `queue.getJobs('waiting')` lists jobs in that same order.
 - **Retention is applied.** `removeOnComplete` / `removeOnFail` accept `true`, a count, or `{ age, count }` (age in seconds) and trim the completed / failed jobs exactly as the server functions do, before the `completed` / `failed` event fires. Jobs failed as `expired` by `ttl` are not removed, same as production.
-- **Delayed jobs are enqueued as waiting.** The `delay` option is accepted but not honoured in test mode — jobs start as `waiting` and are processed immediately. The only jobs in `delayed` are retries waiting out their backoff. Rate-limit errors thrown by a processor are treated as ordinary failures.
+- **Schedulers match the tick.** `repeatAfterComplete` waits for the produced job to complete or fail terminally before scheduling the next run. A scheduler run never applies `deduplication`, `delay` or `jobId` from a stored template, like `Scheduler.runSchedulers`.
+- **Budget pauses park the job.** With `onExceeded: 'pause'` a job whose flow budget is exhausted moves to `delayed` for 24 hours, like `moveActiveToDelayed` in production.
 - **Swap without changing processors.** Because `TestQueue` and `TestWorker` share the same interface as `Queue` and `Worker`, you can parameterise your processor code and pass either implementation.
 
 ```typescript
@@ -375,3 +434,20 @@ const worker = new Worker('tasks', myProcessor, { connection });
 const queue = new TestQueue('tasks');
 const worker = new TestWorker(queue, myProcessor);
 ```
+
+---
+
+## Known Limitations
+
+Behaviour that testing mode does not mirror. Everything else in this document follows the production state machine.
+
+- **Ordering keys and concurrency groups are not enforced.** `ordering` options are validated and stored, but jobs sharing a key run concurrently and in dispatch order. `job.rateLimitGroup()` and `queue.rateLimitGroup()` do not exist on the test classes.
+- **No global concurrency or queue-wide rate limit.** `setGlobalConcurrency`, `setGlobalRateLimit`, `removeGlobalRateLimit` and `getGlobalRateLimit` are not available; use the `TestWorker` `concurrency` and `limiter` options instead.
+- **No flows or DAGs.** There is no `FlowProducer` counterpart; `job.getChildrenValues()`, `job.getParents()` and `job.moveToWaitingChildren()` are not available. `getFlowUsage()` and flow budgets work through `opts.parent.id` and `setBudget()`.
+- **No dead-letter queue.** The `deadLetterQueue` worker option and `getDeadLetterJobs` / `getDeadLetterJob` / `removeDeadLetterJob` / `replayDeadLetterJob` are not available.
+- **No abort support.** `worker.abortJob()` and `job.abortSignal` are not available; `close()` waits for nothing and lets running processors finish on their own.
+- **Sandbox processors are CJS only.** A file path processor must be a `.js` (CommonJS) module; `.mjs` throws.
+- **`isPaused()` is synchronous** on `TestQueue`; the real `Queue.isPaused()` returns a promise. `await` works on both.
+- **Prioritized promotion is worker driven.** A priority job stays `prioritized` until a worker's next pass (a microtask), where production promotes on the scheduler tick. Without a worker it stays `prioritized`, as in production.
+- **Invalid legacy scheduler templates delete the scheduler** instead of skipping the run and reporting an error; templates are validated at `upsertJobScheduler()`, so this only affects hand-seeded entries.
+- **No connection.** `getClient()` does not exist and `TestQueue` takes no `connection` option.
