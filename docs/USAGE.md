@@ -856,6 +856,8 @@ Use queue.createJobIndex() to create an index with optional vector fields. Insid
 
 The index is built over job hashes using FT.CREATE. Base fields (name, state, timestamp, priority) are always included. Testing mode provides in-memory parity via TestJob.storeVector(), TestQueue.createJobIndex(), and TestQueue.vectorSearch().
 
+`vectorSearch` passes `opts.searchOptions` through to FT.SEARCH: `nocontent`, `dialect`, `verbatim`, `inorder`, `slop` and `sortby`. The `scorer` option was removed in 0.16: no released Valkey Search accepts SCORER and the client never sent it, so it had no effect. Unknown keys are still ignored at runtime.
+
 See [ADVANCED.md](./ADVANCED.md#vector-search-index-management) for index management details.
 
 ### Proxy Endpoints

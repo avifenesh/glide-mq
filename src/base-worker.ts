@@ -2760,12 +2760,16 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     await this.stopSchedulerOnClose(force);
 
     if (!force) {
-      // Closing the blocking client does not cancel an XREADGROUP BLOCK on
-      // the server: the connection keeps claiming entries into this
-      // consumer's PEL until the block expires, and nobody reads the reply.
-      // Those jobs then wait for stalled recovery and are charged a stall
-      // they never ran. Let the in-flight read return (at most blockTimeout)
-      // so its claims are handed back while the command client is open.
+      // Closing the blocking client mid-read strands claims: entries the
+      // server delivers to the in-flight XREADGROUP BLOCK between close()
+      // and the socket teardown land in this consumer's PEL with nobody to
+      // read the reply, and a cluster client keeps the block alive until it
+      // expires (speedkey 0.4.0 detaches a standalone connection in a few
+      // ms, which still leaves that window: 21/30 closes stranded an entry
+      // under continuous adds without this wait, 0/30 with it). Those jobs
+      // would wait for stalled recovery and be charged a stall they never
+      // ran. Let the in-flight read return (at most blockTimeout) so its
+      // claims are handed back while the command client is open.
       await this.settlePollLoop();
     }
     this.closeBlockingClient();

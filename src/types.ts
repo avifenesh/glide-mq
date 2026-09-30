@@ -401,8 +401,6 @@ export interface SearchQueryOptions {
   slop?: number;
   /** Sort results by field. */
   sortby?: { field: string; order?: 'ASC' | 'DESC' };
-  /** Scoring function name. */
-  scorer?: string;
 }
 
 /** Options for creating a Valkey Search index over job hashes. */
