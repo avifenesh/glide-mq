@@ -1828,8 +1828,15 @@ export async function registerParent(
  * the actual count of active list-sourced jobs (LIFO or priority).
  * Returns the drift amount corrected (0 if no correction was needed).
  */
-export async function healListActive(client: Client, keys: QueueKeys): Promise<number> {
-  const result = await client.fcall('glidemq_healListActive', [keys.id], []);
+export async function healListActive(
+  client: Client,
+  keys: QueueKeys,
+  scan?: { maxIter?: number; count?: number },
+): Promise<number> {
+  // Optional SCAN bounds for a re-seed (pages per call, keys per page); the
+  // library defaults to 500 x 100. Appended args, ignored by older libraries.
+  const args = scan ? [String(scan.maxIter ?? 500), String(scan.count ?? 100)] : [];
+  const result = await client.fcall('glidemq_healListActive', [keys.id], args);
   return Number(result) || 0;
 }
 

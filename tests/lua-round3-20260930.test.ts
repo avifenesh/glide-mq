@@ -515,21 +515,74 @@ describeEachMode('Lua round 3 2026-09-30', (CONNECTION) => {
     expect(await healEarlyDeps(cleanupClient, pk)).toBe(0);
   });
 
-  // Item 9b: heal re-seeds list-active-ids from a complete scan when the set
-  // went stale (downgrade and re-upgrade).
+  // Item 9b: with the seed marker missing (downgrade and re-upgrade), heal
+  // re-seeds list-active-ids from a complete scan.
   it('healListActive re-seeds a stale list-active-ids set', async () => {
     const Q = uniqueQueue('r3-heal-reseed');
     const k = buildKeys(Q);
     await cleanupClient.hset(k.job('7'), { id: '7', name: 'x', state: 'active', listSourced: '1' });
     await cleanupClient.set(k.listActive, '1');
-    await cleanupClient.hset(k.meta, { listActiveIds: '1' });
     // Stale set: a released claim is still a member, the live claim is missing.
     await cleanupClient.sadd(k.listActiveIds, ['stale']);
     expect(await healListActive(cleanupClient, k)).toBe(0);
+    expect(await cleanupClient.hget(k.meta, 'listActiveIds')).toBe('1');
     const members = (await cleanupClient.smembers(k.listActiveIds)) as Set<string>;
     expect([...members].map(String).sort()).toEqual(['7']);
     expect(String(await cleanupClient.get(k.listActive))).toBe('1');
   });
+
+  // Revuto (PR 318): heal trusts the seeded set and never SCANs while
+  // SCARD >= counter; it still corrects drift from the set.
+  it('healListActive uses the trusted set without a SCAN and corrects drift', async () => {
+    const Q = uniqueQueue('r3-heal-trusted');
+    const k = buildKeys(Q);
+    for (const id of ['7', '8']) {
+      await cleanupClient.hset(k.job(id), { id, name: 'x', state: 'active', listSourced: '1' });
+    }
+    await cleanupClient.set(k.listActive, '3');
+    await cleanupClient.hset(k.meta, { listActiveIds: '1' });
+    await cleanupClient.sadd(k.listActiveIds, ['7', '8', 'released']);
+    // A one-page, one-key scan bound: a SCAN could never complete here, so a
+    // correction proves the set was used.
+    expect(await cleanupClient.fcall('glidemq_healListActive', [k.id], ['1', '1'])).toBe(1);
+    expect(String(await cleanupClient.get(k.listActive))).toBe('2');
+    const members = (await cleanupClient.smembers(k.listActiveIds)) as Set<string>;
+    expect([...members].map(String).sort()).toEqual(['7', '8']);
+    expect(await cleanupClient.hget(k.meta, 'listActiveScanCursor')).toBeNull();
+  });
+
+  // Revuto (PR 318): with the seed marker missing, the re-seed SCAN resumes
+  // from a persisted cursor across calls and corrects once complete.
+  it('healListActive re-seeds across calls with a persisted cursor when the marker is missing', async () => {
+    const Q = uniqueQueue('r3-heal-reseed-pages');
+    const k = buildKeys(Q);
+    const prefix = k.id.slice(0, -2);
+    // Same-slot filler so this node's keyspace needs more than one SCAN page.
+    const filler = Array.from({ length: 64 }, (_, i) => `${prefix}filler:${i}`);
+    await cleanupClient.mset(Object.fromEntries(filler.map((key) => [key, '1'])));
+    await cleanupClient.hset(k.job('7'), { id: '7', name: 'x', state: 'active', listSourced: '1' });
+    await cleanupClient.set(k.listActive, '2');
+    await cleanupClient.sadd(k.listActiveIds, ['stale']);
+    // One page of at most one key per call: the scan cannot finish in one call.
+    expect(await cleanupClient.fcall('glidemq_healListActive', [k.id], ['1', '1'])).toBe(0);
+    const cursor = await cleanupClient.hget(k.meta, 'listActiveScanCursor');
+    expect(cursor).not.toBeNull();
+    expect(String(cursor)).not.toBe('0');
+    expect(await cleanupClient.hget(k.meta, 'listActiveIds')).toBeNull();
+    // Larger pages finish the scan over a few calls; the trusted marker appears only then.
+    let drift = 0;
+    for (let call = 0; call < 500 && (await cleanupClient.hget(k.meta, 'listActiveIds')) !== '1'; call++) {
+      drift = Number(await cleanupClient.fcall('glidemq_healListActive', [k.id], ['1', '1000']));
+    }
+    expect(await cleanupClient.hget(k.meta, 'listActiveIds')).toBe('1');
+    expect(drift).toBe(1);
+    expect(String(await cleanupClient.get(k.listActive))).toBe('1');
+    const members = (await cleanupClient.smembers(k.listActiveIds)) as Set<string>;
+    expect([...members].map(String)).toEqual(['7']);
+    expect(await cleanupClient.hget(k.meta, 'listActiveScanCursor')).toBeNull();
+    expect(await cleanupClient.exists([`${k.listActiveIds}:seed`])).toBe(0);
+    await cleanupClient.del(filler);
+  }, 30000);
 
   // Review fix 1: a GLOBAL_FULL claim stays in the PEL and is admitted when the
   // older claims finish, so racing workers at gc 1 keep FIFO and nothing starves.

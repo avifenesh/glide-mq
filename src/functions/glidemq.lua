@@ -2323,9 +2323,12 @@ end
 -- Bounded SCAN for active list-sourced jobs. All prefix:job:* keys share the
 -- queue hash tag, so SCAN sees the whole set on the local node. Returns the
 -- job IDs and whether the scan completed.
-local function scanActiveListIds(prefix, maxIter, count)
+-- Returns the active list claims found in up to maxIter SCAN pages from
+-- startCursor (default '0'), whether the scan wrapped to '0' (complete), and
+-- the cursor to continue from.
+local function scanActiveListIds(prefix, maxIter, count, startCursor)
   local pattern = prefix .. 'job:*'
-  local cursor = '0'
+  local cursor = startCursor or '0'
   local iter = 0
   local ids = {}
   repeat
@@ -2340,7 +2343,7 @@ local function scanActiveListIds(prefix, maxIter, count)
       end
     end
   until cursor == '0' or iter >= maxIter
-  return ids, cursor == '0'
+  return ids, cursor == '0', cursor
 end
 
 -- Active list-sourced job IDs, read from list-active-ids when it covers every
@@ -2348,12 +2351,12 @@ end
 -- only after one complete SCAN seeded it (claims activated by an older
 -- library are not in it) and while SCARD >= list-active (an older worker
 -- that does not maintain it). Returns the IDs and whether they are complete.
-local function activeListIds(prefix, maxIter, count, forceScan)
+local function activeListIds(prefix, maxIter, count)
   local listActiveKey = prefix .. 'list-active'
   local idsKey = listActiveIdsKey(listActiveKey)
   local metaKey = prefix .. 'meta'
   local counter = tonumber(redis.call('GET', listActiveKey)) or 0
-  if not forceScan and redis.call('HGET', metaKey, 'listActiveIds') == '1' and redis.call('SCARD', idsKey) >= counter then
+  if redis.call('HGET', metaKey, 'listActiveIds') == '1' and redis.call('SCARD', idsKey) >= counter then
     local ids = {}
     local members = redis.call('SMEMBERS', idsKey)
     for i = 1, #members do
@@ -4946,31 +4949,69 @@ redis.register_function('glidemq_healEarlyDeps', function(keys, args)
   return released
 end)
 
+-- Drop members of list-active-ids that are no longer active list claims and
+-- return how many live claims remain.
+local function pruneListActiveIds(prefix, idsKey)
+  local members = redis.call('SMEMBERS', idsKey)
+  local live = 0
+  for i = 1, #members do
+    if isActiveListClaim(prefix .. 'job:' .. members[i]) then
+      live = live + 1
+    else
+      redis.call('SREM', idsKey, members[i])
+    end
+  end
+  return live
+end
+
+-- Correct upward drift of the list-active counter (worker crashes between a
+-- list claim and its release). With the seed marker present and the set at
+-- least as large as the counter, the set is trusted and no SCAN runs. A
+-- mismatch (marker missing, or claims made by an older library missing from
+-- the set) re-seeds the set from a SCAN that resumes from a cursor kept in
+-- meta (listActiveScanCursor), so a large keyspace completes over several
+-- ticks; found claims accumulate in list-active-ids:seed and are merged when
+-- the scan wraps. Only a complete view corrects the counter.
+-- KEYS: [idKey]  ARGS: [maxIter?, count?] (SCAN pages per call, keys per page)
+-- Returns the drift removed from the counter (0 while a re-seed is incomplete).
 redis.register_function('glidemq_healListActive', function(keys, args)
   local idKey = keys[1]
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local listActiveKey = prefix .. 'list-active'
+  local idsKey = listActiveIdsKey(listActiveKey)
+  local metaKey = prefix .. 'meta'
+  local maxIter = tonumber(args[1]) or 500
+  local count = tonumber(args[2]) or 100
   local counter = tonumber(redis.call('GET', listActiveKey)) or 0
   if counter <= 0 then
     return 0
   end
-  -- Always SCAN here: list-active-ids can go stale across a library
-  -- downgrade and re-upgrade (claims made by the older library are missing,
-  -- claims it released are still members), so heal re-seeds the set from a
-  -- complete scan and only then trusts it again.
-  local ids, complete = activeListIds(prefix, 500, 100, true)
-  -- A partial scan undercounts active list jobs. Correcting from it would
-  -- lower list-active below the true count and let globalConcurrency
-  -- overcommit, so only a complete view may correct the counter or the set.
-  if not complete then return 0 end
-  local idsKey = listActiveIdsKey(listActiveKey)
-  local active = {}
-  for i = 1, #ids do active[ids[i]] = true end
-  local members = redis.call('SMEMBERS', idsKey)
-  for i = 1, #members do
-    if not active[members[i]] then redis.call('SREM', idsKey, members[i]) end
+  local live
+  if redis.call('HGET', metaKey, 'listActiveIds') == '1' and redis.call('SCARD', idsKey) >= counter then
+    live = pruneListActiveIds(prefix, idsKey)
+  else
+    local seedKey = idsKey .. ':seed'
+    local startCursor = redis.call('HGET', metaKey, 'listActiveScanCursor') or '0'
+    local ids, complete, nextCursor = scanActiveListIds(prefix, maxIter, count, startCursor)
+    for i = 1, #ids, 1000 do
+      redis.call('SADD', seedKey, unpack(ids, i, math.min(i + 999, #ids)))
+    end
+    if not complete then
+      redis.call('HSET', metaKey, 'listActiveScanCursor', nextCursor)
+      -- An abandoned partial seed (queue emptied mid-scan) must not linger.
+      redis.call('PEXPIRE', seedKey, 3600000)
+      return 0
+    end
+    local seeded = redis.call('SMEMBERS', seedKey)
+    for i = 1, #seeded, 1000 do
+      redis.call('SADD', idsKey, unpack(seeded, i, math.min(i + 999, #seeded)))
+    end
+    redis.call('DEL', seedKey)
+    redis.call('HDEL', metaKey, 'listActiveScanCursor')
+    live = pruneListActiveIds(prefix, idsKey)
+    redis.call('HSET', metaKey, 'listActiveIds', '1')
   end
-  local drift = counter - #ids
+  local drift = counter - live
   if drift > 0 then
     redis.call('DECRBY', listActiveKey, drift)
   end
