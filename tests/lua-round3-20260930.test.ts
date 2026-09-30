@@ -681,4 +681,38 @@ describeEachMode('Lua round 3 2026-09-30', (CONNECTION) => {
     expect(await cleanupClient.sismember(indexKey, parentId)).toBe(false);
     expect(await cleanupClient.scard(indexKey)).toBe(300);
   }, 20000);
+
+  // Review fix 4: a repeatAfterComplete entry parked on a job that was removed
+  // advances instead of waiting forever.
+  it('a parked repeatAfterComplete entry advances when its in-flight job is removed', async () => {
+    const Q = uniqueQueue('r3-rac-removed');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const worker = new Worker(Q, async () => {}, { connection: CONNECTION, promotionInterval: 100 });
+    try {
+      await worker.waitUntilReady();
+      // The scheduler keeps ticking while the worker is paused; nothing runs the jobs.
+      await worker.pause();
+      await queue.upsertJobScheduler('rac', { repeatAfterComplete: 200 }, { name: 'rac' });
+      await waitFor(async () => (await queue.getJobScheduler('rac'))?.nextRun === 0, 5000);
+      const parked = (await queue.getJobScheduler('rac'))!;
+      const firstId = parked.inflightJobId!;
+      expect(firstId).toBeTruthy();
+      await (await queue.getJob(firstId))!.remove();
+
+      await waitFor(async () => {
+        const entry = await queue.getJobScheduler('rac');
+        return !!entry && entry.nextRun !== 0 && entry.inflightJobId === firstId;
+      }, 5000);
+      // The chain continues: a new job is fired and becomes the in-flight one.
+      await waitFor(async () => {
+        const entry = await queue.getJobScheduler('rac');
+        return !!entry && entry.nextRun === 0 && entry.inflightJobId !== firstId;
+      }, 5000);
+      expect((await queue.getJobCounts()).waiting).toBe(1);
+    } finally {
+      await queue.removeJobScheduler('rac').catch(() => {});
+      await worker.close();
+      await queue.close();
+    }
+  }, 20000);
 });
