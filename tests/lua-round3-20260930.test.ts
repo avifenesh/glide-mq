@@ -639,3 +639,46 @@ describeEachMode('Lua round 3 2026-09-30', (CONNECTION) => {
     }
   });
 
+  // Review fix 3: healEarlyDeps continues from a persisted cursor, so a parent
+  // beyond the first page is still visited.
+  it('healEarlyDeps pages through a large index with a persisted cursor', async () => {
+    const PQ = uniqueQueue('r3-early-pages');
+    const pk = buildKeys(PQ);
+    const prefix = pk.id.slice(0, -2);
+    const indexKey = `${prefix}deps-early`;
+    // 300 parents that stay indexed: they exist, wait for children and hold a
+    // parked completion whose member is never registered.
+    const sticky: string[] = [];
+    for (let i = 0; i < 300; i++) {
+      const id = `sticky-${i}`;
+      sticky.push(id);
+      await cleanupClient.hset(pk.job(id), {
+        id,
+        name: 'p',
+        state: 'waiting-children',
+        depsEarly: '1',
+        'depearly:never': '1',
+      });
+    }
+    await cleanupClient.sadd(indexKey, sticky);
+    // One releasable parent among them.
+    const parentId = String(await addJob(cleanupClient, pk, 'parent', '{}', '{}', Date.now(), 0, 0, '', 0));
+    await cleanupClient.hset(pk.job(parentId), { state: 'waiting-children' });
+    await cleanupClient.del([pk.stream]);
+    const member = `${keyPrefix('glide', uniqueQueue('r3-early-pages-child'))}:c1`;
+    await completeChild(cleanupClient, pk, parentId, member);
+    await cleanupClient.sadd(pk.deps(parentId), [member]);
+
+    await healEarlyDeps(cleanupClient, pk, 100);
+    const cursor = await cleanupClient.hget(pk.meta, 'healEarlyCursor');
+    expect(cursor).not.toBeNull();
+    let released = (await cleanupClient.hget(pk.job(parentId), 'state')) === 'waiting';
+    for (let call = 0; call < 6 && !released; call++) {
+      await healEarlyDeps(cleanupClient, pk, 100);
+      released = (await cleanupClient.hget(pk.job(parentId), 'state')) === 'waiting';
+    }
+    expect(released).toBe(true);
+    expect(await cleanupClient.sismember(indexKey, parentId)).toBe(false);
+    expect(await cleanupClient.scard(indexKey)).toBe(300);
+  }, 20000);
+});

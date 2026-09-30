@@ -4912,8 +4912,16 @@ redis.register_function('glidemq_healEarlyDeps', function(keys, args)
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local indexKey = prefix .. 'deps-early'
   local max = tonumber(args[1]) or 100
-  if redis.call('EXISTS', indexKey) == 0 then return 0 end
-  local scan = redis.call('SSCAN', indexKey, '0', 'COUNT', max)
+  local metaKey = prefix .. 'meta'
+  if redis.call('EXISTS', indexKey) == 0 then
+    redis.call('HDEL', metaKey, 'healEarlyCursor')
+    return 0
+  end
+  -- Continue from the previous page so an index larger than one page is
+  -- fully visited across ticks (like stalledCursor for XAUTOCLAIM).
+  local startCursor = redis.call('HGET', metaKey, 'healEarlyCursor') or '0'
+  local scan = redis.call('SSCAN', indexKey, startCursor, 'COUNT', max)
+  redis.call('HSET', metaKey, 'healEarlyCursor', scan[1])
   local parents = scan[2]
   local released = 0
   for i = 1, #parents do
