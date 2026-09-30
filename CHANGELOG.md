@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`@glidemq/speedkey` ^0.4.0**: the client is now a re-import of upstream valkey-glide main (security advisories closed, multiplexed-connection deadlock fixed, close() detaches a blocked standalone connection). glide-mq keeps its graceful-close wait for the in-flight read: the cluster client's close() still leaves a blocked XREADGROUP attached for the block duration, and a claim delivered in the standalone teardown window would be lost with the rejected read (measured: 0 of 30 closes stranded an entry with the wait, 21 of 30 standalone and 30 of 30 cluster without it).
+- **`SearchQueryOptions.scorer` removed**: no released valkey-search accepts `SCORER` (it exists only on valkey-search main since 2026-08-31) and upstream glide does not expose it. JavaScript callers passing it were already ignored; TypeScript callers now get a type error.
+- **Proxy bounds**: `POST /queues/:name/retry` retries at most `maxPageSize` per call (default 1000) and returns `{ retried }`; `count > maxPageSize` or `count = 0` returns 400. `POST /queues/:name/jobs/wait` accepts `waitTimeout` up to the new `ProxyOptions.maxWaitTimeout` (default 60000 ms), and a client disconnect aborts the wait and frees the blocking connection. `GET /queues/:name/metrics` returns the whole per-minute hash and is not paged.
+- **Server function library version is `131`.** Workers and producers reload it on connect.
+- **Broadcast `trimmed` event**: `Broadcast` emits `('trimmed', { trimmed, unread })` after a publish that trims, where `unread` counts messages dropped before some subscription had read them.
+- **Server function library version is `132`.** Workers and producers reload it on connect.
+- **`DeadLetterQueueOptions.maxRetries` is deprecated** (never read; removal in the next major).
+- **The `active` stream event is no longer written anywhere**; `worker.on('active')` is unchanged.
+- **Proxy bounds**: `POST /queues/:name/retry` retries at most `maxPageSize` per call (default 1000) and returns `{ retried }`; `count > maxPageSize` or `count = 0` returns 400. `POST /queues/:name/jobs/wait` accepts `waitTimeout` up to the new `ProxyOptions.maxWaitTimeout` (default 60000 ms), and a client disconnect aborts the wait and frees the blocking connection. `GET /queues/:name/metrics` returns the whole per-minute hash and is not paged.
+- **Broadcast `trimmed` event**: `Broadcast` emits `('trimmed', { trimmed, unread })` after a publish that trims, where `unread` counts messages dropped before some subscription had read them.
+
 ### Fixed
 
 - **Switching a scheduler to `repeatAfterComplete` could still overlap the old mode's running job**: the tick now records the fired job on the entry (`inflightJobId`) and parks the entry until that job finishes; only that job advances it.
@@ -24,14 +37,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`RateLimitError` consumed an attempt**: the requeue incremented `attemptsMade` (or the broadcast per-subscription counter) and wrote `failedReason`. `glidemq_fail` takes an optional `requeueOnly` argument; the job is scheduled after the limiter delay with its counters untouched.
 - **Budget `onExceeded: 'pause'` re-delayed jobs by 24 hours with no way out**: paused jobs re-check every 60 seconds, `job.promote()` re-checks at once, and the new `Queue.updateFlowBudget(flowId, limits)` raises, lowers or removes limits and clears `exceeded` when they are no longer breached (`TestQueue.updateFlowBudget` mirrors it).
 - **Testing mode round 2**: `delay` is honored (jobs start `delayed`, promote on time, `promote()`/`changeDelay()` follow the server rules, debounce can replace them); priority jobs sit in `prioritized` until a worker pass; `RateLimitError` parks the job for the limiter window without consuming an attempt or emitting `failed` (`TestWorkerOptions.limiter`, `worker.rateLimit(ms)`); `getJobs('waiting')` follows dispatch order; the scheduler tick ignores template `delay`/`deduplication` like production; `repeatAfterComplete` waits for completion; budget `pause` parks in `delayed`. TestJob, TestQueue and TestWorker gained the production methods they lacked (`getState`, `is*`, `waitUntilFinished`, `retry`, `remove`, `moveToFailed`, `log`, `addAndWait`, `count`, `getJobCountByTypes`, `getJobLogs`, `getSuspendedJobs`, `revoke`, `obliterate`, `pause`/`resume`, `drain`). docs/TESTING.md lists the remaining limitations.
-
-### Changed
-
-- **Server function library version is `132`.** Workers and producers reload it on connect.
-- **`DeadLetterQueueOptions.maxRetries` is deprecated** (never read; removal in the next major).
-- **The `active` stream event is no longer written anywhere**; `worker.on('active')` is unchanged.
-- **Proxy bounds**: `POST /queues/:name/retry` retries at most `maxPageSize` per call (default 1000) and returns `{ retried }`; `count > maxPageSize` or `count = 0` returns 400. `POST /queues/:name/jobs/wait` accepts `waitTimeout` up to the new `ProxyOptions.maxWaitTimeout` (default 60000 ms), and a client disconnect aborts the wait and frees the blocking connection. `GET /queues/:name/metrics` returns the whole per-minute hash and is not paged.
-- **Broadcast `trimmed` event**: `Broadcast` emits `('trimmed', { trimmed, unread })` after a publish that trims, where `unread` counts messages dropped before some subscription had read them.
 
 ### Added
 
