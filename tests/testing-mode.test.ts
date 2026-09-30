@@ -508,12 +508,12 @@ describe('TestJob.promote', () => {
     expect(job!.opts.delay).toBe(0);
   });
 
-  it('is a no-op when delay is already 0', async () => {
+  it('rejects a job that is not delayed, like Job.promote', async () => {
     queue = new TestQueue('promote-noop');
     const job = await queue.add('task', { x: 1 });
     expect(job!.opts.delay).toBeUndefined();
-    await job!.promote();
-    expect(job!.opts.delay).toBe(0);
+    await expect(job!.promote()).rejects.toThrow('Cannot promote: not_delayed');
+    expect(job!.opts.delay).toBeUndefined();
   });
 });
 
@@ -1158,29 +1158,30 @@ describe('TestQueue scheduler runtime', () => {
     expect(await queue.getJobScheduler('oversized')).toBeNull();
   });
 
-  it('consumes testing-mode scheduler iterations even when the templated add is deduplicated', async () => {
-    queue = new TestQueue('sched-runtime-dedup', { dedup: true });
+  it('scheduler runs ignore stored template deduplication, delay and jobId, like the real tick', async () => {
+    queue = new TestQueue('sched-runtime-template-opts');
     worker = new TestWorker(queue, async () => 'ok');
     // Keep the seed job waiting: simple dedup releases the id once the job completes.
     await queue.pause();
 
-    await queue.add('seed', { ok: true }, { deduplication: { id: 'dup-key', mode: 'simple' } });
-    // upsertJobScheduler rejects template deduplication, so seed a stored legacy entry directly.
+    const seed = await queue.add('seed', { ok: true }, { deduplication: { id: 'dup-key', mode: 'simple' } });
+    // upsertJobScheduler rejects these template options, so seed a stored legacy entry directly.
     await queue.upsertJobScheduler(
-      'dedup-scheduler',
+      'legacy-scheduler',
       { every: 20, limit: 1 },
-      { name: 'dedup-job', data: { ok: true } },
+      { name: 'scheduled-job', data: { ok: true } },
     );
-    const seeded = (queue as any).schedulers.get('dedup-scheduler');
-    seeded.template.opts = { deduplication: { id: 'dup-key', mode: 'simple' } };
+    const seeded = (queue as any).schedulers.get('legacy-scheduler');
+    seeded.template.opts = { deduplication: { id: 'dup-key', mode: 'simple' }, delay: 60_000, jobId: 'fixed-id' };
 
-    const deadline = Date.now() + 500;
-    while ((await queue.getJobScheduler('dedup-scheduler')) && Date.now() < deadline) {
-      await new Promise<void>((r) => setTimeout(r, 20));
-    }
+    await waitFor(async () => (await queue.getJobScheduler('legacy-scheduler')) === null, 2000, 10);
 
-    expect(await queue.getJobScheduler('dedup-scheduler')).toBeNull();
-    expect(queue.jobs.size).toBe(1);
+    const produced = (await queue.searchJobs({ name: 'scheduled-job' }))[0];
+    expect(produced).toBeDefined();
+    expect(produced.id).not.toBe('fixed-id');
+    expect(produced.id).not.toBe(seed!.id);
+    expect(await produced.getState()).toBe('waiting');
+    expect(queue.jobs.size).toBe(2);
   });
 });
 
@@ -1987,10 +1988,10 @@ describe('TestWorker retry parity (T8)', () => {
       },
       { backoffStrategies: { custom: (attemptsMade) => attemptsMade * 7 } },
     );
-    const origSchedule = queue.scheduleRetry.bind(queue);
-    queue.scheduleRetry = (record, delay) => {
+    const origPark = queue.parkDelayed.bind(queue);
+    queue.parkDelayed = (record, delay) => {
       delays.push(delay);
-      origSchedule(record, delay);
+      origPark(record, delay);
     };
     let failed = 0;
     worker.on('failed', () => failed++);
@@ -2088,11 +2089,21 @@ describe('TestQueue deduplication parity (T10)', () => {
 
     const removed: string[] = [];
     queue.on('removed', (id: string) => removed.push(id));
-    queue.jobs.get(first!.id)!.state = 'delayed';
+    await first!.changeDelay(60_000);
     const replacement = await queue.add('t', { v: 3 }, opts);
     expect(replacement).not.toBeNull();
     expect(await queue.getJob(first!.id)).toBeNull();
     expect(removed).toEqual([first!.id]);
+  });
+
+  it('debounce mode replaces a job added with delay', async () => {
+    queue = new TestQueue('dedup-debounce-delay');
+    const opts = { deduplication: { id: 'd', mode: 'debounce' as const }, delay: 60_000 };
+    const first = await queue.add('t', { v: 1 }, opts);
+    const second = await queue.add('t', { v: 2 }, opts);
+    expect(second).not.toBeNull();
+    expect(await queue.getJob(first!.id)).toBeNull();
+    expect((await queue.getJobCounts()).delayed).toBe(1);
   });
 
   it('a duplicate custom jobId does not claim the dedup id', async () => {
@@ -2217,5 +2228,868 @@ describe('TestJob.moveToDelayed parity', () => {
     await expect(idle!.moveToDelayed(Date.now() + 1000)).rejects.toThrow(
       'moveToDelayed() can only be used while the job is active in a Worker',
     );
+  });
+});
+
+describe('TestQueue delayed jobs parity', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it('parks a job with delay in delayed and runs it once the delay elapses', async () => {
+    queue = new TestQueue('delay-basic');
+    const started: number[] = [];
+    worker = new TestWorker(queue, async () => {
+      started.push(Date.now());
+      return 'ok';
+    });
+    const t0 = Date.now();
+    const job = await queue.add('later', { x: 1 }, { delay: 60 });
+    expect(await job!.getState()).toBe('delayed');
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 1, completed: 0 });
+    expect((await queue.getJobs('delayed')).map((j) => j.id)).toEqual([job!.id]);
+    expect(await queue.getJobs('waiting')).toEqual([]);
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(started).toEqual([]);
+
+    await waitFor(() => started.length === 1, 2000, 5);
+    expect(started[0] - t0).toBeGreaterThanOrEqual(55);
+    expect(await job!.getState()).toBe('completed');
+    expect((await queue.getJobCounts()).delayed).toBe(0);
+  });
+
+  it('emits promoted when a delayed job returns to waiting', async () => {
+    queue = new TestQueue('delay-promoted-event');
+    const promoted: string[] = [];
+    queue.on('promoted', (id: string) => promoted.push(id));
+    const job = await queue.add('later', {}, { delay: 20 });
+    await waitFor(() => promoted.length === 1, 2000, 5);
+    expect(promoted).toEqual([job!.id]);
+    expect(await job!.getState()).toBe('waiting');
+  });
+
+  it('lists delayed jobs in scheduled order: priority, then due time', async () => {
+    queue = new TestQueue('delay-order');
+    const late = await queue.add('late', {}, { delay: 60_000 });
+    const soon = await queue.add('soon', {}, { delay: 30_000 });
+    const prio = await queue.add('prio', {}, { delay: 10_000, priority: 1 });
+    const ids = (await queue.getJobs('delayed')).map((j) => j.id);
+    expect(ids).toEqual([soon!.id, late!.id, prio!.id]);
+    expect((await queue.getJobs('delayed', 1, 1)).map((j) => j.id)).toEqual([late!.id]);
+  });
+
+  it('promote() moves a delayed job to waiting immediately and dispatches it', async () => {
+    queue = new TestQueue('delay-promote');
+    const done: string[] = [];
+    worker = new TestWorker(queue, async (job) => {
+      done.push(job.id);
+      return 'ok';
+    });
+    const job = await queue.add('later', {}, { delay: 60_000 });
+    expect(await job!.getState()).toBe('delayed');
+    await job!.promote();
+    expect(job!.opts.delay).toBe(0);
+    await waitFor(() => done.length === 1, 2000, 5);
+    expect(done).toEqual([job!.id]);
+    await expect(job!.promote()).rejects.toThrow('Cannot promote: not_delayed');
+  });
+
+  it('changeDelay follows glidemq_changeDelay state rules', async () => {
+    queue = new TestQueue('delay-change');
+    const delayed = await queue.add('a', {}, { delay: 60_000 });
+    const waiting = await queue.add('b', {});
+    const changed: [string, number][] = [];
+    queue.on('delay-changed', (id: string, delay: number) => changed.push([id, delay]));
+
+    await delayed!.changeDelay(120_000);
+    expect(await delayed!.getState()).toBe('delayed');
+    expect(delayed!.opts.delay).toBe(120_000);
+
+    await delayed!.changeDelay(0);
+    expect(await delayed!.getState()).toBe('waiting');
+    expect(delayed!.opts.delay).toBe(0);
+
+    await waiting!.changeDelay(0);
+    expect(await waiting!.getState()).toBe('waiting');
+
+    await waiting!.changeDelay(60_000);
+    expect(await waiting!.getState()).toBe('delayed');
+    expect((await queue.getJobCounts()).delayed).toBe(1);
+    expect((await queue.getJobs('waiting')).map((j) => j.id)).toEqual([delayed!.id]);
+    expect(changed).toEqual([
+      [delayed!.id, 120_000],
+      [delayed!.id, 0],
+      [waiting!.id, 60_000],
+    ]);
+
+    worker = new TestWorker(queue, async () => 'ok');
+    await waitFor(async () => (await delayed!.getState()) === 'completed', 2000, 5);
+    await expect(delayed!.changeDelay(10)).rejects.toThrow('Cannot change delay: invalid_state');
+    await waiting!.remove();
+    await expect(waiting!.changeDelay(10)).rejects.toThrow('Cannot change delay: not_found');
+  });
+
+  it('drain(true) removes delayed jobs and cancels their promotion', async () => {
+    queue = new TestQueue('delay-drain');
+    const done: string[] = [];
+    worker = new TestWorker(queue, async (job) => {
+      done.push(job.id);
+      return 'ok';
+    });
+    await queue.pause();
+    await queue.add('later', {}, { delay: 10 });
+    await queue.drain(true);
+    await queue.resume();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(done).toEqual([]);
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 0, completed: 0 });
+  });
+
+  it('a delayed job with priority is dispatched from the priority list after promotion', async () => {
+    queue = new TestQueue('delay-priority');
+    const order: string[] = [];
+    await queue.add('fifo', {});
+    await queue.add('prio-delayed', {}, { delay: 20, priority: 1 });
+    await queue.add('fifo-2', {});
+    await queue.pause();
+    await new Promise((r) => setTimeout(r, 40));
+    worker = new TestWorker(queue, async (job) => {
+      order.push(job.name);
+      return 'ok';
+    });
+    await queue.resume();
+    await waitFor(() => order.length === 3, 2000, 5);
+    expect(order).toEqual(['prio-delayed', 'fifo', 'fifo-2']);
+  });
+});
+
+describe('TestQueue prioritized state parity', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it('keeps a priority job in prioritized until a worker promotes it', async () => {
+    queue = new TestQueue('prio-state');
+    const job = await queue.add('p', {}, { priority: 2 });
+    expect(await job!.getState()).toBe('prioritized');
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 1 });
+    expect((await queue.getJobs('delayed')).map((j) => j.id)).toEqual([job!.id]);
+    expect(await queue.getJobs('waiting')).toEqual([]);
+    expect((await queue.searchJobs({ state: 'prioritized' })).map((j) => j.id)).toEqual([job!.id]);
+
+    const promoted: string[] = [];
+    queue.on('promoted', (id: string) => promoted.push(id));
+    worker = new TestWorker(queue, async () => 'ok');
+    await waitFor(async () => (await job!.getState()) === 'completed', 2000, 5);
+    expect(promoted).toEqual([job!.id]);
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 0, completed: 1 });
+  });
+
+  it('a worker promotes prioritized jobs to waiting while the queue is paused', async () => {
+    queue = new TestQueue('prio-paused');
+    const done: string[] = [];
+    worker = new TestWorker(queue, async (job) => {
+      done.push(job.id);
+      return 'ok';
+    });
+    await queue.pause();
+    const job = await queue.add('p', {}, { priority: 1 });
+    // The attached worker's promotion pass runs on the next microtask, before the add() caller resumes.
+    await waitFor(async () => (await job!.getState()) === 'waiting', 2000, 2);
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 1, delayed: 0 });
+    expect(done).toEqual([]);
+    await queue.resume();
+    await waitFor(() => done.length === 1, 2000, 5);
+  });
+
+  it('changePriority follows glidemq_changePriority state rules', async () => {
+    queue = new TestQueue('prio-change');
+    const changed: [string, number][] = [];
+    queue.on('priority-changed', (id: string, priority: number) => changed.push([id, priority]));
+    const waiting = await queue.add('w', {});
+    const prio = await queue.add('p', {}, { priority: 3 });
+    const delayed = await queue.add('d', {}, { delay: 60_000 });
+
+    await waiting!.changePriority(0);
+    expect(await waiting!.getState()).toBe('waiting');
+    await waiting!.changePriority(2);
+    expect(await waiting!.getState()).toBe('prioritized');
+    expect(waiting!.opts.priority).toBe(2);
+
+    await prio!.changePriority(1);
+    expect(await prio!.getState()).toBe('prioritized');
+    expect(prio!.opts.priority).toBe(1);
+    await prio!.changePriority(0);
+    expect(await prio!.getState()).toBe('waiting');
+    expect(prio!.opts.priority).toBe(0);
+
+    await delayed!.changePriority(4);
+    expect(await delayed!.getState()).toBe('delayed');
+    expect(delayed!.opts.priority).toBe(4);
+    expect((await queue.getJobs('delayed')).map((j) => j.id)).toEqual([waiting!.id, delayed!.id]);
+
+    expect(changed).toEqual([
+      [waiting!.id, 2],
+      [prio!.id, 1],
+      [prio!.id, 0],
+      [delayed!.id, 4],
+    ]);
+
+    await expect(prio!.changePriority(2049)).rejects.toThrow('Cannot change priority: invalid_priority');
+    await expect(prio!.changePriority(1.5)).rejects.toThrow('Cannot change priority: invalid_priority');
+
+    worker = new TestWorker(queue, async () => 'ok');
+    await waitFor(async () => (await prio!.getState()) === 'completed', 2000, 5);
+    await expect(prio!.changePriority(1)).rejects.toThrow('Cannot change priority: invalid_state');
+    await delayed!.remove();
+    await expect(delayed!.changePriority(1)).rejects.toThrow('Cannot change priority: not_found');
+  });
+
+  it('changeDelay moves between prioritized and delayed like production', async () => {
+    queue = new TestQueue('prio-delay');
+    const job = await queue.add('p', {}, { priority: 3 });
+    await job!.changeDelay(0);
+    expect(await job!.getState()).toBe('prioritized');
+    await job!.changeDelay(60_000);
+    expect(await job!.getState()).toBe('delayed');
+    await job!.changeDelay(0);
+    expect(await job!.getState()).toBe('prioritized');
+    expect((await queue.getJobCounts()).delayed).toBe(1);
+  });
+
+  it('debounce dedup replaces a prioritized job that has not been promoted', async () => {
+    queue = new TestQueue('prio-debounce');
+    const opts = { deduplication: { id: 'd', mode: 'debounce' as const }, priority: 1 };
+    const first = await queue.add('t', { v: 1 }, opts);
+    const second = await queue.add('t', { v: 2 }, opts);
+    expect(second).not.toBeNull();
+    expect(await queue.getJob(first!.id)).toBeNull();
+  });
+
+  it('drain() keeps prioritized jobs and drain(true) removes them', async () => {
+    queue = new TestQueue('prio-drain');
+    await queue.add('w', {});
+    const prio = await queue.add('p', {}, { priority: 1 });
+    await queue.drain();
+    expect(await prio!.getState()).toBe('prioritized');
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 1 });
+    await queue.drain(true);
+    expect(await queue.getJob(prio!.id)).toBeNull();
+  });
+
+  it('a prioritized job kept by drain() is still promoted and run by a worker attached later', async () => {
+    queue = new TestQueue('prio-drain-then-run');
+    await queue.add('w', {});
+    const prio = await queue.add('p', {}, { priority: 1 });
+    await queue.drain();
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 1 });
+
+    const done: string[] = [];
+    worker = new TestWorker(queue, async (job) => {
+      done.push(job.name);
+      return 'ok';
+    });
+    // Worker.drain() only returns once nothing is waiting, prioritized or delayed.
+    await Promise.race([
+      worker.drain(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('worker.drain() hung')), 2000)),
+    ]);
+    worker = undefined;
+    expect(done).toEqual(['p']);
+    expect(await prio!.getState()).toBe('completed');
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 0, completed: 1 });
+  });
+});
+
+describe('TestWorker rate limit parity', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it('requeues a RateLimitError job after the limiter window without counting an attempt', async () => {
+    queue = new TestQueue('rl-error');
+    const attempts: number[] = [];
+    const failed: string[] = [];
+    const retrying: [string, string][] = [];
+    worker = new TestWorker(
+      queue,
+      async (job) => {
+        attempts.push(Date.now());
+        if (attempts.length === 1) throw new TestWorker.RateLimitError();
+        return { attemptsMade: job.attemptsMade };
+      },
+      { limiter: { max: 100, duration: 60 } },
+    );
+    worker.on('failed', (job) => failed.push(job.id));
+    queue.on('retrying', (job, err: Error) => retrying.push([job.failedReason!, err.name]));
+
+    const job = await queue.add('limited', {});
+    await waitFor(async () => (await job!.getState()) === 'delayed', 2000, 2);
+    expect(await queue.getJob(job!.id)).toMatchObject({ attemptsMade: 0, failedReason: 'rate limited' });
+    expect(retrying).toEqual([['rate limited', 'RateLimitError']]);
+
+    await waitFor(() => attempts.length === 2, 2000, 5);
+    expect(attempts[1] - attempts[0]).toBeGreaterThanOrEqual(55);
+    await waitFor(async () => (await job!.getState()) === 'completed', 2000, 5);
+    expect((await queue.getJob(job!.id))!.returnvalue).toEqual({ attemptsMade: 0 });
+    expect(failed).toEqual([]);
+  });
+
+  it('honours err.delayMs, defaults to 1000ms without a limiter, and recognises the error by name', async () => {
+    queue = new TestQueue('rl-delay');
+    let calls = 0;
+    worker = new TestWorker(queue, async () => {
+      calls++;
+      if (calls === 1) {
+        const err = new Error('Rate limit exceeded') as Error & { delayMs?: number };
+        err.name = 'RateLimitError';
+        err.delayMs = 30;
+        throw err;
+      }
+      return 'ok';
+    });
+    const job = await queue.add('a', {});
+    await waitFor(() => calls === 2, 2000, 5);
+    await waitFor(async () => (await job!.getState()) === 'completed', 2000, 5);
+
+    expect(TestWorker.isRateLimitError(new TestWorker.RateLimitError())).toBe(true);
+    expect(TestWorker.isRateLimitError(new Error('x'))).toBe(false);
+    expect(new TestWorker.RateLimitError().message).toBe('Rate limit exceeded');
+  });
+
+  it('a RateLimitError pauses the worker for the delay before it dispatches other jobs', async () => {
+    queue = new TestQueue('rl-pause-others');
+    const started: [string, number][] = [];
+    let first = true;
+    worker = new TestWorker(queue, async (job) => {
+      started.push([job.name, Date.now()]);
+      if (first) {
+        first = false;
+        const err = new TestWorker.RateLimitError() as Error & { delayMs?: number };
+        err.delayMs = 60;
+        throw err;
+      }
+      return 'ok';
+    });
+    await queue.add('one', {});
+    await queue.add('two', {});
+    await waitFor(() => started.length === 3, 2000, 5);
+    expect(started.map(([n]) => n)).toEqual(['one', 'two', 'one']);
+    expect(started[1][1] - started[0][1]).toBeGreaterThanOrEqual(55);
+  });
+
+  it('limiter caps dispatches per window like glidemq_rateLimit', async () => {
+    queue = new TestQueue('rl-window');
+    const started: number[] = [];
+    worker = new TestWorker(
+      queue,
+      async () => {
+        started.push(Date.now());
+        return 'ok';
+      },
+      { concurrency: 10, limiter: { max: 2, duration: 80 } },
+    );
+    await queue.addBulk([1, 2, 3, 4].map((n) => ({ name: 'j', data: { n } })));
+    await waitFor(() => started.length === 4, 2000, 5);
+    expect(started[1] - started[0]).toBeLessThan(40);
+    expect(started[2] - started[0]).toBeGreaterThanOrEqual(75);
+    expect(started[3] - started[0]).toBeGreaterThanOrEqual(75);
+    expect(started[3] - started[2]).toBeLessThan(40);
+  });
+
+  it('rateLimit(ms) pauses dispatch for the given duration', async () => {
+    queue = new TestQueue('rl-manual');
+    const started: number[] = [];
+    worker = new TestWorker(queue, async () => {
+      started.push(Date.now());
+      return 'ok';
+    });
+    const t0 = Date.now();
+    await worker.rateLimit(60);
+    await queue.add('a', {});
+    await new Promise((r) => setTimeout(r, 20));
+    expect(started).toEqual([]);
+    await waitFor(() => started.length === 1, 2000, 5);
+    expect(started[0] - t0).toBeGreaterThanOrEqual(55);
+  });
+});
+
+describe('TestQueue.getJobs waiting order parity', () => {
+  it('lists waiting jobs in dispatch order: priority list, LIFO list, FIFO stream', async () => {
+    const queue = new TestQueue('waiting-order');
+    // A paused queue with a worker attached promotes priority jobs to waiting without running them.
+    await queue.pause();
+    const worker = new TestWorker(queue, async () => 'ok');
+    await queue.add('fifo-a', {});
+    await queue.add('p5', {}, { priority: 5 });
+    await queue.add('lifo-x', {}, { lifo: true });
+    await queue.add('p1-a', {}, { priority: 1 });
+    await queue.add('fifo-b', {});
+    await queue.add('lifo-y', {}, { lifo: true });
+    await queue.add('p1-b', {}, { priority: 1 });
+    await waitFor(async () => (await queue.getJobCounts()).waiting === 7, 2000, 2);
+
+    const names = (await queue.getJobs('waiting')).map((j) => j.name);
+    expect(names).toEqual(['p1-a', 'p1-b', 'p5', 'lifo-y', 'lifo-x', 'fifo-a', 'fifo-b']);
+    expect((await queue.getJobs('waiting', 2, 4)).map((j) => j.name)).toEqual(['p5', 'lifo-y', 'lifo-x']);
+    expect((await queue.getJobs('waiting', 5)).map((j) => j.name)).toEqual(['fifo-a', 'fifo-b']);
+
+    const order: string[] = [];
+    worker.on('completed', (job) => order.push(job.name));
+    await queue.resume();
+    await waitFor(() => order.length === 7, 2000, 5);
+    expect(order).toEqual(names);
+
+    await worker.close();
+    await queue.close();
+  });
+});
+
+describe('TestJob / TestQueue / TestWorker surface parity', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it('TestJob exposes the Job state helpers, waitUntilFinished and logs', async () => {
+    queue = new TestQueue('surface-job');
+    const job = await queue.add('a', {}, { delay: 30 });
+    expect(await job!.isDelayed()).toBe(true);
+    expect(await job!.isWaiting()).toBe(false);
+    worker = new TestWorker(queue, async (j) => {
+      await j.log('step one');
+      await j.log('step two');
+      return 'ok';
+    });
+    expect(await job!.waitUntilFinished(5, 2000)).toBe('completed');
+    expect(await job!.isCompleted()).toBe(true);
+    expect(await job!.isFailed()).toBe(false);
+    expect(await job!.isActive()).toBe(false);
+    expect(await queue.getJobLogs(job!.id)).toEqual({ logs: ['step one', 'step two'], count: 2 });
+    expect(await queue.getJobLogs(job!.id, 1, 1)).toEqual({ logs: ['step two'], count: 2 });
+    expect(await queue.getJobLogs('missing')).toEqual({ logs: [], count: 0 });
+    await expect(job!.log('x'.repeat(MAX_JOB_DATA_SIZE + 1))).rejects.toThrow('Log message exceeds maximum size');
+    const stuck = await queue.add('never', {}, { delay: 60_000 });
+    await expect(stuck!.waitUntilFinished(5, 30)).rejects.toThrow(`Job ${stuck!.id} did not finish within 30ms`);
+  });
+
+  it('TestJob.retry() moves a failed job back to waiting like glidemq_retryJob', async () => {
+    queue = new TestQueue('surface-retry');
+    let calls = 0;
+    worker = new TestWorker(queue, async () => {
+      calls++;
+      if (calls === 1) throw new Error('boom');
+      return 'ok';
+    });
+    const job = await queue.add('a', {}, { ttl: 60_000 });
+    expect(await job!.waitUntilFinished(5, 2000)).toBe('failed');
+    await expect(job!.retry()).resolves.toBeUndefined();
+    expect(job!.attemptsMade).toBe(0);
+    expect(job!.failedReason).toBeUndefined();
+    expect(await job!.waitUntilFinished(5, 2000)).toBe('completed');
+    await expect(job!.retry()).rejects.toThrow('Cannot retry: not_failed');
+    await job!.remove();
+    await expect(job!.retry()).rejects.toThrow('Cannot retry: not_found');
+  });
+
+  it('TestJob.moveToFailed() inside the processor fails the job instead of completing it', async () => {
+    queue = new TestQueue('surface-move-to-failed');
+    const outside = await queue.add('outside', {}, { delay: 60_000 });
+    await expect(outside!.moveToFailed(new Error('x'))).rejects.toThrow(
+      'moveToFailed can only be called while job is active in a Worker',
+    );
+    let calls = 0;
+    const completed: string[] = [];
+    const failed: string[] = [];
+    worker = new TestWorker(queue, async (job) => {
+      calls++;
+      if (calls === 1) {
+        await job.moveToFailed(new Error('manual failure'));
+        return 'ignored';
+      }
+      return 'ok';
+    });
+    worker.on('completed', (job) => completed.push(job.id));
+    worker.on('failed', (_job, err: Error) => failed.push(err.message));
+    const job = await queue.add('a', {}, { attempts: 2, backoff: { type: 'fixed', delay: 0 } });
+    expect(await job!.waitUntilFinished(5, 2000)).toBe('completed');
+    expect(failed).toEqual(['manual failure']);
+    expect(completed).toEqual([job!.id]);
+    expect((await queue.getJob(job!.id))!.attemptsMade).toBe(1);
+  });
+
+  it('addAndWait resolves with the return value and rejects with the failed reason', async () => {
+    queue = new TestQueue('surface-add-and-wait');
+    worker = new TestWorker(queue, async (job) => {
+      if (job.data.fail) throw new Error('bad input');
+      return { echoed: job.data.v };
+    });
+    await expect(queue.addAndWait('a', { v: 1 })).resolves.toEqual({ echoed: 1 });
+    await expect(queue.addAndWait('a', { fail: true })).rejects.toThrow('bad input');
+    await expect(queue.addAndWait('a', { v: 1 }, { waitTimeout: 0 })).rejects.toThrow(
+      'waitTimeout must be a positive finite number',
+    );
+    await expect(queue.addAndWait('a', { v: 1 }, { removeOnComplete: true })).rejects.toThrow(
+      'does not support removeOnComplete/removeOnFail',
+    );
+    await queue.add('dup', {}, { jobId: 'fixed' });
+    await expect(queue.addAndWait('dup', {}, { jobId: 'fixed' })).rejects.toThrow('returned null');
+    await expect(queue.addAndWait('slow', { v: 2 }, { delay: 60_000, waitTimeout: 20 })).rejects.toThrow(
+      'did not finish within 20ms',
+    );
+  });
+
+  it('count(), getJobCountByTypes() and getSuspendedJobs() mirror the Queue readers', async () => {
+    queue = new TestQueue('surface-counts');
+    await queue.add('fifo', {});
+    await queue.add('lifo', {}, { lifo: true });
+    await queue.add('prio', {}, { priority: 1 });
+    await queue.add('later', {}, { delay: 60_000 });
+    expect(await queue.count()).toBe(1);
+    expect(await queue.getJobCountByTypes()).toEqual(await queue.getJobCounts());
+
+    worker = new TestWorker(queue, async (job) => {
+      if (job.name === 'fifo') await job.suspend({ reason: 'wait', timeout: 60_000 });
+      return 'ok';
+    });
+    await waitFor(async () => (await queue.getSuspendedJobs()).length === 1, 2000, 5);
+    const suspended = await queue.getSuspendedJobs(0, -1, { excludeData: true });
+    expect(suspended.map((j) => j.name)).toEqual(['fifo']);
+    expect(suspended[0].data).toBeUndefined();
+  });
+
+  it('obliterate() refuses with active jobs unless forced, then wipes the queue', async () => {
+    queue = new TestQueue('surface-obliterate');
+    let release: () => void = () => {};
+    worker = new TestWorker(queue, () => new Promise<string>((r) => (release = () => r('ok'))));
+    await queue.add('active', {});
+    await queue.add('later', {}, { delay: 60_000 });
+    await queue.upsertJobScheduler('tick', { every: 60_000 }, { name: 'tick' });
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await expect(queue.obliterate()).rejects.toThrow(
+      'Cannot obliterate queue "surface-obliterate": 1 active jobs. Use { force: true } to override.',
+    );
+    await queue.obliterate({ force: true });
+    expect(await queue.getJobCounts()).toEqual({ waiting: 0, active: 0, delayed: 0, completed: 0, failed: 0 });
+    expect(await queue.getRepeatableJobs()).toEqual([]);
+    release();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(queue.jobs.size).toBe(0);
+  });
+
+  it('revoke() fails a waiting job with reason revoked and flags an active one', async () => {
+    queue = new TestQueue('surface-revoke');
+    const revoked: string[] = [];
+    queue.on('revoked', (id: string) => revoked.push(id));
+    const waiting = await queue.add('w', {});
+    const delayed = await queue.add('d', {}, { delay: 60_000 });
+    expect(await queue.revoke(waiting!.id)).toBe('revoked');
+    expect(await queue.revoke(delayed!.id)).toBe('revoked');
+    expect(await queue.revoke('missing')).toBe('not_found');
+    expect(await queue.getJob(waiting!.id)).toMatchObject({ failedReason: 'revoked' });
+    expect(await waiting!.isFailed()).toBe(true);
+    expect(await waiting!.isRevoked()).toBe(true);
+    expect((await queue.getJobCounts()).failed).toBe(2);
+
+    let release: () => void = () => {};
+    worker = new TestWorker(queue, () => new Promise<string>((r) => (release = () => r('ok'))));
+    const active = await queue.add('a', {});
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    expect(await queue.revoke(active!.id)).toBe('flagged');
+    expect(await active!.isRevoked()).toBe(true);
+    release();
+    expect(await active!.waitUntilFinished(5, 2000)).toBe('completed');
+    expect(revoked).toEqual([waiting!.id, delayed!.id, active!.id]);
+  });
+
+  it('TestWorker exposes pause/resume/isPaused/isRunning/waitUntilReady/drain like Worker', async () => {
+    queue = new TestQueue('surface-worker');
+    const done: string[] = [];
+    worker = new TestWorker(queue, async (job) => {
+      done.push(job.name);
+      return 'ok';
+    });
+    await worker.waitUntilReady();
+    expect(worker.isRunning()).toBe(true);
+    expect(worker.isPaused()).toBe(false);
+    await worker.pause();
+    expect(worker.isPaused()).toBe(true);
+    expect(worker.isRunning()).toBe(false);
+    await queue.add('held', {});
+    await new Promise((r) => setTimeout(r, 20));
+    expect(done).toEqual([]);
+    expect((await queue.getJobCounts()).waiting).toBe(1);
+    await worker.resume();
+    await waitFor(() => done.length === 1, 2000, 2);
+
+    await queue.add('one', {});
+    await queue.add('two', {}, { delay: 30 });
+    await worker.drain();
+    expect(done).toEqual(['held', 'one', 'two']);
+    expect(worker.isRunning()).toBe(false);
+    expect(await queue.getWorkers()).toEqual([]);
+    worker = undefined;
+  });
+
+  it('repeatAfterComplete schedulers wait for the job to finish before the next run', async () => {
+    queue = new TestQueue('surface-repeat-after-complete');
+    const runs: number[] = [];
+    worker = new TestWorker(queue, async () => {
+      runs.push(Date.now());
+      await new Promise((r) => setTimeout(r, 40));
+      return 'ok';
+    });
+    await queue.upsertJobScheduler('rac', { repeatAfterComplete: 30, limit: 3 }, { name: 'rac-job' });
+    await waitFor(() => runs.length === 3, 3000, 5);
+    // Each run starts at least processing time (40ms) + 30ms after the previous one.
+    expect(runs[1] - runs[0]).toBeGreaterThanOrEqual(65);
+    expect(runs[2] - runs[1]).toBeGreaterThanOrEqual(65);
+    const entry = await queue.getJobScheduler('rac');
+    expect(entry === null || entry.nextRun === 0 || entry.iterationCount === 3).toBe(true);
+    await waitFor(async () => (await queue.getJobScheduler('rac')) === null, 2000, 5);
+    expect((await queue.searchJobs({ name: 'rac-job' }))[0].schedulerName).toBe('rac');
+  });
+
+  it('a budget pause parks the job in delayed like moveActiveToDelayed', async () => {
+    queue = new TestQueue('surface-budget-pause');
+    queue.setBudget('flow', { maxTotalTokens: 1, onExceeded: 'pause' });
+    queue.budgets.get('flow')!.exceeded = true;
+    await queue.pause();
+    const job = await queue.add('capped', {});
+    queue.jobs.get(job!.id)!.budgetKey = 'flow';
+    worker = new TestWorker(queue, async () => 'never');
+    await queue.resume();
+    await waitFor(async () => (await job!.getState()) === 'delayed', 2000, 2);
+    expect((await queue.getJobs('delayed')).map((j) => j.id)).toEqual([job!.id]);
+  });
+});
+
+describe('TestWorker batch mode honours job.moveToFailed() (revuto #313)', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it('a moved-to-failed job is not completed when the batch succeeds', async () => {
+    queue = new TestQueue('batch-move-to-failed');
+    const completed: string[] = [];
+    const failed: [string, string][] = [];
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        for (const job of jobs) {
+          if (job.data.bad && job.attemptsMade === 0) await job.moveToFailed(new Error('manual failure'));
+        }
+        return jobs.map(() => 'ok');
+      },
+      { batch: { size: 10 } },
+    );
+    worker.on('completed', (job) => completed.push(job.name));
+    worker.on('failed', (job, err: Error) => failed.push([job.name, err.message]));
+    await queue.pause();
+    await queue.add('good', {});
+    const bad = await queue.add('bad', { bad: true }, { attempts: 2, backoff: { type: 'fixed', delay: 0 } });
+    await queue.resume();
+    expect(await bad!.waitUntilFinished(5, 2000)).toBe('completed');
+    expect(failed).toEqual([['bad', 'manual failure']]);
+    expect(completed.sort()).toEqual(['bad', 'good']);
+    expect((await queue.getJob(bad!.id))!.attemptsMade).toBe(1);
+  });
+
+  it('a moved-to-failed job stays failed through BatchError results and whole-batch throws', async () => {
+    queue = new TestQueue('batch-move-to-failed-error');
+    const failed: [string, string][] = [];
+    const completed: string[] = [];
+    let call = 0;
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        call++;
+        for (const job of jobs) if (job.data.move) await job.moveToFailed(new Error('moved'));
+        if (call === 1) throw new BatchError(jobs.map(() => 'fine'));
+        throw new Error('batch exploded');
+      },
+      { batch: { size: 10 } },
+    );
+    worker.on('failed', (job, err: Error) => failed.push([job.name, err.message]));
+    worker.on('completed', (job) => completed.push(job.name));
+    await queue.pause();
+    const moved = await queue.add('moved-1', { move: true });
+    await queue.add('plain-1', {});
+    await queue.resume();
+    expect(await moved!.waitUntilFinished(5, 2000)).toBe('failed');
+    expect(completed).toEqual(['plain-1']);
+
+    await queue.pause();
+    const moved2 = await queue.add('moved-2', { move: true });
+    const plain2 = await queue.add('plain-2', {});
+    await queue.resume();
+    expect(await moved2!.waitUntilFinished(5, 2000)).toBe('failed');
+    expect(await plain2!.waitUntilFinished(5, 2000)).toBe('failed');
+    expect(failed).toEqual([
+      ['moved-1', 'moved'],
+      ['moved-2', 'moved'],
+      ['plain-2', 'batch exploded'],
+    ]);
+  });
+});
+
+describe('TestWorker rate limit keeps queue order (revuto #313)', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it('a rate-limited worker does not pop LIFO jobs, so LIFO order is kept', async () => {
+    queue = new TestQueue('rl-lifo-order');
+    const order: string[] = [];
+    await queue.pause();
+    worker = new TestWorker(
+      queue,
+      async (job) => {
+        order.push(job.name);
+        return 'ok';
+      },
+      { concurrency: 1, limiter: { max: 1, duration: 40 } },
+    );
+    await queue.add('A', {}, { lifo: true });
+    await queue.add('B', {}, { lifo: true });
+    await queue.add('C', {}, { lifo: true });
+    await queue.resume();
+    await waitFor(() => order.length === 3, 3000, 5);
+    expect(order).toEqual(['C', 'B', 'A']);
+  });
+
+  it('priority and FIFO order are kept across rate-limit windows', async () => {
+    queue = new TestQueue('rl-mixed-order');
+    const order: string[] = [];
+    await queue.pause();
+    worker = new TestWorker(
+      queue,
+      async (job) => {
+        order.push(job.name);
+        return 'ok';
+      },
+      { concurrency: 1, limiter: { max: 1, duration: 40 } },
+    );
+    await queue.add('fifo-a', {});
+    await queue.add('p5', {}, { priority: 5 });
+    await queue.add('lifo-x', {}, { lifo: true });
+    await queue.add('p1', {}, { priority: 1 });
+    await queue.add('fifo-b', {});
+    await queue.add('lifo-y', {}, { lifo: true });
+    await queue.resume();
+    await waitFor(() => order.length === 6, 4000, 5);
+    expect(order).toEqual(['p1', 'p5', 'lifo-y', 'lifo-x', 'fifo-a', 'fifo-b']);
+  });
+});
+
+describe('waitingQueue holds each record at most once (revuto #313 round 2)', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  const duplicates = (q: TestQueue): string[] => {
+    const seen = new Set<string>();
+    const dupes: string[] = [];
+    for (const r of q.waitingQueue) {
+      if (seen.has(r.id)) dupes.push(r.id);
+      seen.add(r.id);
+    }
+    return dupes;
+  };
+
+  it('a job parked with changeDelay and promoted later is dispatched once, also in batch mode', async () => {
+    queue = new TestQueue('wq-park-once');
+    const job = await queue.add('once', {});
+    await job!.changeDelay(20);
+    expect(queue.waitingQueue.map((r) => r.id)).toEqual([]);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(duplicates(queue)).toEqual([]);
+
+    const seen: string[] = [];
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        seen.push(...jobs.map((j) => j.id));
+        return jobs.map(() => 'ok');
+      },
+      { batch: { size: 10 } },
+    );
+    await waitFor(async () => (await job!.getState()) === 'completed', 2000, 5);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(seen).toEqual([job!.id]);
+  });
+
+  it('never holds a record twice across park, promote, priority, revoke, remove and retry transitions', async () => {
+    queue = new TestQueue('wq-invariant');
+    await queue.pause();
+    const a = await queue.add('a', {});
+    const b = await queue.add('b', {}, { priority: 2 });
+    const c = await queue.add('c', {}, { lifo: true });
+    const d = await queue.add('d', {}, { delay: 10 });
+    const check = () => expect(duplicates(queue)).toEqual([]);
+    check();
+
+    await a!.changeDelay(10);
+    await b!.changeDelay(10);
+    check();
+    expect(queue.waitingQueue.map((r) => r.id)).toEqual([c!.id]);
+    await a!.promote();
+    await b!.changeDelay(0);
+    await d!.promote();
+    check();
+    await a!.changePriority(1);
+    await a!.changePriority(0);
+    await b!.changePriority(0);
+    await b!.changePriority(3);
+    check();
+    await a!.changeDelay(5);
+    await new Promise((r) => setTimeout(r, 20));
+    check();
+    expect(await queue.revoke(c!.id)).toBe('revoked');
+    await d!.remove();
+    check();
+    expect(await queue.retryJobs()).toBe(1);
+    check();
+    await queue.resume();
+    worker = new TestWorker(queue, async () => 'ok');
+    await waitFor(async () => (await queue.getJobCounts()).completed === 3, 2000, 5);
+    check();
+    expect(queue.waitingQueue).toEqual([]);
+    expect(await queue.getJobCounts()).toMatchObject({ waiting: 0, delayed: 0, completed: 3, failed: 0 });
   });
 });

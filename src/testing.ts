@@ -5,16 +5,14 @@
  * Usage:
  *   import { TestQueue, TestWorker } from 'glide-mq/testing';
  *
- * LIMITATION: repeatAfterComplete schedulers are accepted but behave like `every` schedulers
- * in testing mode (fire at regular intervals, not based on job completion). This is because
- * the in-memory implementation doesn't track job-to-scheduler linkage. For full repeatAfterComplete
- * behavior, use the real Queue/Worker with a Valkey instance.
+ * See docs/TESTING.md "Known limitations" for the behaviour that is not mirrored.
  */
 
 import { EventEmitter } from 'events';
 import path from 'path';
 import os from 'os';
 import type {
+  AddAndWaitOptions,
   JobOptions,
   JobUsage,
   UsageSummary,
@@ -40,6 +38,7 @@ import { JSON_SERIALIZER } from './types';
 import { GlideMQError, UnrecoverableError, BatchError, SuspendError, DelayedError } from './errors';
 import {
   MAX_JOB_DATA_SIZE,
+  MAX_JOB_PRIORITY,
   calculateBackoff,
   computeFollowingSchedulerNextRun,
   computeInitialSchedulerNextRun,
@@ -142,7 +141,7 @@ export interface TestJobRecord<D = any, R = any> {
   name: string;
   data: D;
   opts: JobOptions;
-  state: 'waiting' | 'active' | 'completed' | 'failed' | 'delayed' | 'suspended';
+  state: 'waiting' | 'prioritized' | 'active' | 'completed' | 'failed' | 'delayed' | 'suspended';
   attemptsMade: number;
   returnvalue: R | undefined;
   failedReason: string | undefined;
@@ -176,6 +175,18 @@ export interface TestJobRecord<D = any, R = any> {
   progress?: number | object;
   /** @internal Serializer of the owning queue, used by updateData. */
   serializer?: Serializer;
+  /** @internal Owning queue, used by state-changing TestJob methods. */
+  queue?: TestQueue<D, R>;
+  /** @internal Epoch ms at which a delayed job is due (the time part of the scheduled score). */
+  delayedUntil?: number;
+  /** @internal Log lines appended by job.log(). */
+  logs?: string[];
+  /** @internal Name of the repeatAfterComplete scheduler that produced this job. */
+  schedulerName?: string;
+  /** @internal Set by TestQueue.revoke(). */
+  revoked?: boolean;
+  /** @internal Error passed to job.moveToFailed() while active, consumed by the worker. */
+  movedToFailed?: Error;
 }
 
 /**
@@ -200,6 +211,7 @@ export class TestJob<D = any, R = any> {
   tpmTokens?: number;
   signals: SignalEntry[] = [];
   budgetKey?: string;
+  schedulerName?: string;
   /** @internal */ private _record: TestJobRecord<D, R>;
 
   constructor(record: TestJobRecord<D, R>) {
@@ -220,6 +232,7 @@ export class TestJob<D = any, R = any> {
     this.signals = record.signals ?? [];
     this.budgetKey = record.budgetKey;
     this.usage = record.usage;
+    this.schedulerName = record.schedulerName;
   }
 
   get currentFallback(): { model: string; provider?: string; metadata?: Record<string, unknown> } | undefined {
@@ -227,8 +240,13 @@ export class TestJob<D = any, R = any> {
     return this.opts.fallbacks[this.fallbackIndex - 1];
   }
 
-  async log(_message: string): Promise<void> {
-    // no-op in test mode
+  /** Append a log line, readable through TestQueue.getJobLogs(). */
+  async log(message: string): Promise<void> {
+    const byteLen = Buffer.byteLength(message, 'utf8');
+    if (byteLen > MAX_JOB_DATA_SIZE) {
+      throw new Error(`Log message exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE})`);
+    }
+    (this._record.logs ??= []).push(message);
   }
 
   async updateProgress(p: number | object): Promise<void> {
@@ -254,22 +272,148 @@ export class TestJob<D = any, R = any> {
 
   discarded = false;
 
+  /**
+   * Mirror glidemq_changePriority: a waiting job given a priority moves to
+   * prioritized, a prioritized job given 0 returns to waiting, a delayed job
+   * keeps its place with the new priority, other states throw.
+   */
   async changePriority(newPriority: number): Promise<void> {
     if (newPriority < 0) {
       throw new Error('Priority must be >= 0');
     }
+    if (!Number.isInteger(newPriority) || newPriority > MAX_JOB_PRIORITY) {
+      throw new Error('Cannot change priority: invalid_priority');
+    }
+    const queue = this.owningQueue();
+    const record = queue.jobs.get(this.id);
+    if (!record) throw new Error('Cannot change priority: not_found');
+    if (record.state === 'waiting') {
+      if (newPriority === 0 && (record.opts.priority ?? 0) === 0) return;
+      if (newPriority > 0) record.state = 'prioritized';
+    } else if (record.state === 'prioritized') {
+      if (newPriority === 0) record.state = 'waiting';
+    } else if (record.state !== 'delayed') {
+      throw new Error('Cannot change priority: invalid_state');
+    }
     this.opts.priority = newPriority;
+    queue.emit('priority-changed', this.id, newPriority);
   }
 
+  /**
+   * Mirror glidemq_changeDelay: a delayed job is rescheduled (or released when
+   * the delay becomes 0), a waiting job is parked in delayed, other states throw.
+   */
   async changeDelay(newDelay: number): Promise<void> {
     if (newDelay < 0) {
       throw new Error('Delay must be >= 0');
     }
+    const queue = this.owningQueue();
+    const record = queue.jobs.get(this.id);
+    if (!record) throw new Error('Cannot change delay: not_found');
+    if (record.state === 'delayed') {
+      if (newDelay === 0) {
+        // The job stays parked as prioritized when it has a priority, like the ZADD XX path.
+        queue.releaseDelayed(record, (record.opts.priority ?? 0) > 0);
+      } else {
+        queue.parkDelayed(record, newDelay);
+      }
+    } else if (record.state === 'waiting' || record.state === 'prioritized') {
+      if (newDelay === 0) return;
+      queue.parkDelayed(record, newDelay);
+    } else {
+      throw new Error('Cannot change delay: invalid_state');
+    }
     this.opts.delay = newDelay;
+    queue.emit('delay-changed', this.id, newDelay);
   }
 
+  /** Mirror glidemq_promoteJob: only a delayed job can be promoted. */
   async promote(): Promise<void> {
+    const queue = this.owningQueue();
+    const record = queue.jobs.get(this.id);
+    if (!record) throw new Error('Cannot promote: not_found');
+    if (record.state !== 'delayed') throw new Error('Cannot promote: not_delayed');
+    queue.releaseDelayed(record, false);
     this.opts.delay = 0;
+  }
+
+  /** Read the current state, 'unknown' once the job has been removed (like Job.getState). */
+  async getState(): Promise<string> {
+    const record = this._record.queue?.jobs.get(this.id);
+    return record ? record.state : 'unknown';
+  }
+
+  async isCompleted(): Promise<boolean> {
+    return (await this.getState()) === 'completed';
+  }
+
+  async isFailed(): Promise<boolean> {
+    return (await this.getState()) === 'failed';
+  }
+
+  async isDelayed(): Promise<boolean> {
+    return (await this.getState()) === 'delayed';
+  }
+
+  async isActive(): Promise<boolean> {
+    return (await this.getState()) === 'active';
+  }
+
+  async isWaiting(): Promise<boolean> {
+    return (await this.getState()) === 'waiting';
+  }
+
+  async isRevoked(): Promise<boolean> {
+    return this._record.queue?.jobs.get(this.id)?.revoked === true;
+  }
+
+  /** Poll until completed or failed, like Job.waitUntilFinished. */
+  async waitUntilFinished(pollIntervalMs = 500, timeoutMs = 30000): Promise<'completed' | 'failed'> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const state = await this.getState();
+      if (state === 'completed' || state === 'failed') {
+        return state;
+      }
+      await new Promise<void>((r) => setTimeout(r, pollIntervalMs));
+    }
+    throw new Error(`Job ${this.id} did not finish within ${timeoutMs}ms`);
+  }
+
+  /** Retry this failed job, like glidemq_retryJob: only a failed job can be retried. */
+  async retry(): Promise<void> {
+    const queue = this.owningQueue();
+    const record = queue.jobs.get(this.id);
+    if (!record) throw new Error('Cannot retry: not_found');
+    if (record.state !== 'failed') throw new Error('Cannot retry: not_failed');
+    queue.retryRecord(record, Date.now());
+    this.attemptsMade = 0;
+    this.failedReason = undefined;
+    this.finishedOn = undefined;
+  }
+
+  /**
+   * Fail the active job from inside the processor, like Job.moveToFailed. The
+   * worker then applies the attempts/backoff rules instead of completing the job.
+   */
+  async moveToFailed(err: Error): Promise<void> {
+    const record = this.owningQueue().jobs.get(this.id);
+    if (!record || record.state !== 'active') {
+      throw new GlideMQError('moveToFailed can only be called while job is active in a Worker');
+    }
+    record.movedToFailed = err;
+    this.failedReason = err.message;
+  }
+
+  /** Remove this job from the queue, like Job.remove(). */
+  async remove(): Promise<void> {
+    this.owningQueue().removeJob(this.id);
+  }
+
+  private owningQueue(): TestQueue<D, R> {
+    const queue = this._record.queue;
+    if (!queue) throw new Error('TestJob is not attached to a TestQueue');
+    return queue;
   }
 
   discard(): void {
@@ -370,6 +514,14 @@ export interface SearchJobsOptions {
   excludeData?: boolean;
 }
 
+/**
+ * Match a record state against a queried state. 'delayed' reads the scheduled
+ * ZSet in production, which also holds prioritized jobs.
+ */
+function matchesQueueState(state: TestJobRecord['state'], queried: TestJobRecord['state']): boolean {
+  return state === queried || (queried === 'delayed' && state === 'prioritized');
+}
+
 /** Check if all key-value pairs in filter exist in data (shallow match). */
 function matchesData(data: Record<string, unknown>, filter: Record<string, unknown>): boolean {
   for (const [key, value] of Object.entries(filter)) {
@@ -424,13 +576,11 @@ interface TestBudgetState {
 /**
  * In-memory test double for Queue. Suitable for unit tests without Valkey.
  *
- * Known limitations vs real Queue:
- * - No ordering key / concurrency group support
- * - No global concurrency or rate limiting
- * - No DAG / parent-child flows
- * - No batch processing
- * - repeatAfterComplete behaves like 'every'
- * - No sandbox processor support
+ * Known limitations vs real Queue (see docs/TESTING.md):
+ * - Ordering keys / concurrency groups are accepted but not enforced
+ * - No global concurrency or queue-wide rate limit (use the TestWorker limiter option)
+ * - No DAG / parent-child flows, no dead-letter queue
+ * - No sandbox ESM processors
  */
 export class TestQueue<D = any, R = any> extends EventEmitter {
   private static registry: Map<string, TestQueue<any, any>> = new Map();
@@ -458,7 +608,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private schedulerRunning = false;
   private nextSchedulerWakeAt: number | null = null;
   private suspendedTimeoutTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-  private retryTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private promotionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private waitRejectors: Set<(err: Error) => void> = new Set();
 
   constructor(name: string, opts?: TestQueueOptions) {
     super();
@@ -489,25 +640,114 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       }
       id = customJobId;
     } else {
-      id = String(++this.idCounter);
-      let retries = 0;
-      while (this.jobs.has(id)) {
-        if (++retries >= 1000) throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
-        id = String(++this.idCounter);
-      }
+      id = this.generateJobId();
     }
     // Record dedup key only after all checks pass (custom ID, etc.)
     if (dedup) {
       this.dedupEntries.set(dedup.id, { jobId: id, timestamp: now });
     }
-    const ttl = opts?.ttl ?? 0;
+    return this.insertRecord(name, serializedData, opts ?? {}, id, now, opts?.delay ?? 0);
+  }
+
+  /**
+   * Add a job and wait for its result, like Queue.addAndWait: resolves with the
+   * return value, rejects with the failed reason, the revoke, or a timeout.
+   */
+  async addAndWait(name: string, data: D, opts?: AddAndWaitOptions): Promise<R> {
+    const waitTimeout = opts?.waitTimeout ?? 30000;
+    if (!Number.isFinite(waitTimeout) || waitTimeout <= 0) {
+      throw new Error('waitTimeout must be a positive finite number');
+    }
+    if (opts?.removeOnComplete || opts?.removeOnFail) {
+      throw new GlideMQError(
+        'Queue.addAndWait does not support removeOnComplete/removeOnFail because it may need the job hash as a fallback.',
+      );
+    }
+    const { waitTimeout: _waitTimeout, ...jobOpts } = opts ?? {};
+    const job = await this.add(name, data, jobOpts as JobOptions);
+    if (!job) {
+      throw new GlideMQError(
+        'Queue.addAndWait() cannot wait on a deduplicated/skipped/duplicate-ID add that returned null.',
+      );
+    }
+    return this.waitForJobResult(job.id, waitTimeout);
+  }
+
+  private waitForJobResult(jobId: string, timeoutMs: number): Promise<R> {
+    return new Promise<R>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.waitRejectors.delete(rejectOnClose);
+        this.off('completed', onCompleted);
+        this.off('failed', onFailed);
+        this.off('revoked', onRevoked);
+      };
+      const rejectOnClose = (err: Error) => {
+        cleanup();
+        reject(err);
+      };
+      const onCompleted = (job: TestJob<D, R>, result: R) => {
+        if (job.id !== jobId) return;
+        cleanup();
+        resolve(result);
+      };
+      const onFailed = (job: TestJob<D, R>, err: Error) => {
+        if (job.id !== jobId) return;
+        cleanup();
+        reject(new Error(job.failedReason || err.message));
+      };
+      const onRevoked = (id: string) => {
+        if (id !== jobId) return;
+        cleanup();
+        reject(new Error('revoked'));
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Job ${jobId} did not finish within ${timeoutMs}ms`));
+      }, timeoutMs);
+      timer.unref?.();
+      this.waitRejectors.add(rejectOnClose);
+      this.on('completed', onCompleted);
+      this.on('failed', onFailed);
+      this.on('revoked', onRevoked);
+      // The worker may already have finished the job on the add() microtask.
+      const record = this.jobs.get(jobId);
+      if (record?.state === 'completed') onCompleted(new TestJob<D, R>(record), record.returnvalue as R);
+      else if (record?.state === 'failed') onFailed(new TestJob<D, R>(record), new Error(record.failedReason));
+    });
+  }
+
+  private generateJobId(): string {
+    let id = String(++this.idCounter);
+    let retries = 0;
+    while (this.jobs.has(id)) {
+      if (++retries >= 1000) throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
+      id = String(++this.idCounter);
+    }
+    return id;
+  }
+
+  /**
+   * Create the job record and enqueue it like glidemq_addJob: delayed when
+   * `delay` > 0, prioritized when it has a priority, otherwise waiting.
+   */
+  private insertRecord(
+    name: string,
+    serializedData: string,
+    opts: JobOptions,
+    id: string,
+    now: number,
+    delay: number,
+  ): TestJob<D, R> {
+    const ttl = opts.ttl ?? 0;
+    const priority = opts.priority ?? 0;
     // Roundtrip data through serializer to match production behavior
     const roundtrippedData = this.serializer.deserialize(serializedData) as D;
     const record: TestJobRecord<D, R> = {
       id,
       name,
       data: roundtrippedData,
-      opts: opts ?? {},
+      opts,
       state: 'waiting',
       attemptsMade: 0,
       returnvalue: undefined,
@@ -518,13 +758,66 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       expireAt: ttl > 0 ? now + ttl : undefined,
       fallbackIndex: 0,
       serializer: this.serializer,
+      queue: this,
     };
     this.jobs.set(id, record);
-    this.waitingQueue.push(record);
+    if (delay > 0) {
+      // glidemq_addJob parks the job in the scheduled ZSet until timestamp + delay.
+      this.parkDelayed(record, delay);
+    } else if (priority > 0) {
+      this.enqueuePrioritized(record);
+    } else {
+      this.enqueueWaiting(record);
+    }
 
     const job = new TestJob<D, R>(record);
     this.emit('added', job);
+    return job;
+  }
 
+  /**
+   * @internal Waiting jobs in the order Queue.getJobs('waiting') reads them:
+   * the priority list (lowest priority number first, FIFO within a priority),
+   * then the LIFO list (newest first), then the FIFO stream.
+   */
+  waitingInDispatchOrder(): TestJobRecord<D, R>[] {
+    const seen = new Set<string>();
+    const live: TestJobRecord<D, R>[] = [];
+    for (const record of this.waitingQueue) {
+      if (record.state !== 'waiting' || this.jobs.get(record.id) !== record || seen.has(record.id)) continue;
+      seen.add(record.id);
+      live.push(record);
+    }
+    for (const record of this.jobs.values()) {
+      if (record.state === 'waiting' && !seen.has(record.id)) live.push(record);
+    }
+    const priority = live
+      .filter((r) => !r.opts.lifo && (r.opts.priority ?? 0) > 0)
+      .sort((a, b) => (a.opts.priority ?? 0) - (b.opts.priority ?? 0));
+    const lifo = live.filter((r) => r.opts.lifo).reverse();
+    const fifo = live.filter((r) => !r.opts.lifo && (r.opts.priority ?? 0) === 0);
+    return priority.concat(lifo, fifo);
+  }
+
+  /**
+   * @internal Drop a record's dispatch entry. Called whenever a job leaves the
+   * waiting / prioritized states (park, remove, revoke) and before it is
+   * enqueued again, so waitingQueue never holds a record twice.
+   */
+  dequeueRecord(record: TestJobRecord<D, R>): void {
+    const q = this.waitingQueue;
+    let write = 0;
+    for (let read = 0; read < q.length; read++) {
+      if (q[read].id !== record.id) q[write++] = q[read];
+    }
+    q.length = write;
+  }
+
+  /** @internal Put a record in 'waiting' and wake the workers, like an XADD / list push. */
+  enqueueWaiting(record: TestJobRecord<D, R>): void {
+    this.dequeueRecord(record);
+    record.state = 'waiting';
+    this.waitingQueue.push(record);
     // Notify attached workers (microtask so the add() caller gets the job first)
     if (!this.paused) {
       queueMicrotask(() => {
@@ -533,8 +826,65 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
         }
       });
     }
+  }
 
-    return job;
+  /**
+   * @internal A priority job without delay waits in the scheduled ZSet as
+   * 'prioritized' until a worker's promotion pass moves it to 'waiting'. Wake
+   * the workers even when paused: production promotes on the scheduler tick.
+   */
+  enqueuePrioritized(record: TestJobRecord<D, R>): void {
+    this.dequeueRecord(record);
+    record.state = 'prioritized';
+    this.waitingQueue.push(record);
+    queueMicrotask(() => {
+      for (const w of this.workers) {
+        w.onJobAdded();
+      }
+    });
+  }
+
+  /** @internal Move every prioritized record to waiting, like glidemq_promote on a worker tick. */
+  promotePrioritized(): void {
+    for (const record of this.waitingQueue) {
+      if (record.state !== 'prioritized' || this.jobs.get(record.id) !== record) continue;
+      record.state = 'waiting';
+      this.emit('promoted', record.id);
+    }
+  }
+
+  /** @internal Park a record in 'delayed' for delayMs and schedule its promotion. */
+  parkDelayed(record: TestJobRecord<D, R>, delayMs: number): void {
+    this.dequeueRecord(record);
+    record.state = 'delayed';
+    this.schedulePromotion(record, delayMs);
+  }
+
+  /**
+   * @internal Release a delayed record now. Job.promote() sends it to waiting;
+   * changeDelay(0) keeps a priority job parked as prioritized.
+   */
+  releaseDelayed(record: TestJobRecord<D, R>, toPrioritized: boolean): void {
+    this.clearPromotion(record.id);
+    record.delayedUntil = undefined;
+    if (toPrioritized) {
+      this.enqueuePrioritized(record);
+      return;
+    }
+    this.enqueueWaiting(record);
+    this.emit('promoted', record.id);
+  }
+
+  /** @internal Delete a job and its timers, like glidemq_removeJob. Returns false when absent. */
+  removeJob(id: string): boolean {
+    const record = this.jobs.get(id);
+    if (!record) return false;
+    this.clearPromotion(id);
+    this.clearSuspendedTimeout(id);
+    this.dequeueRecord(record);
+    this.jobs.delete(id);
+    this.emit('removed', id);
+    return true;
   }
 
   /**
@@ -553,9 +903,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
     const record = this.jobs.get(existing.jobId);
     if (!record || record.state === 'completed' || record.state === 'failed') return false;
-    if (mode === 'debounce' && record.state === 'delayed') {
-      this.jobs.delete(record.id);
-      this.emit('removed', record.id);
+    if (mode === 'debounce' && (record.state === 'delayed' || record.state === 'prioritized')) {
+      this.removeJob(record.id);
       return false;
     }
     return mode === 'simple' || mode === 'debounce';
@@ -590,19 +939,29 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     end = -1,
     opts?: GetJobsOptions,
   ): Promise<TestJob<D, R>[]> {
-    const matching: TestJob<D, R>[] = [];
-    for (const record of this.jobs.values()) {
-      if (record.state === type) {
-        const job = new TestJob<D, R>(record);
-        if (opts?.excludeData) {
-          job.data = undefined as unknown as D;
-          job.returnvalue = undefined;
-        }
-        matching.push(job);
-      }
+    // The scheduled ZSet backs getJobs('delayed') and holds prioritized jobs too.
+    const records =
+      type === 'waiting'
+        ? this.waitingInDispatchOrder()
+        : [...this.jobs.values()].filter((r) => matchesQueueState(r.state, type));
+    if (type === 'delayed') {
+      // Scheduled ZSet order: score = priority * PRIORITY_SHIFT + due time, ties by id.
+      records.sort(
+        (a, b) =>
+          (a.opts.priority ?? 0) - (b.opts.priority ?? 0) ||
+          (a.delayedUntil ?? 0) - (b.delayedUntil ?? 0) ||
+          (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      );
     }
     const sliceEnd = end >= 0 ? end + 1 : undefined;
-    return matching.slice(start, sliceEnd);
+    return records.slice(start, sliceEnd).map((record) => {
+      const job = new TestJob<D, R>(record);
+      if (opts?.excludeData) {
+        job.data = undefined as unknown as D;
+        job.returnvalue = undefined;
+      }
+      return job;
+    });
   }
 
   /** Get counts by state. */
@@ -612,12 +971,109 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       const s = record.state;
       if (s === 'waiting') counts.waiting++;
       else if (s === 'active') counts.active++;
-      else if (s === 'delayed') counts.delayed++;
+      else if (s === 'delayed' || s === 'prioritized') counts.delayed++;
       else if (s === 'completed') counts.completed++;
       else if (s === 'failed') counts.failed++;
       // 'suspended' is not tracked in JobCounts
     }
     return counts;
+  }
+
+  /** Alias for getJobCounts(), like Queue.getJobCountByTypes(). */
+  async getJobCountByTypes(): Promise<JobCounts> {
+    return this.getJobCounts();
+  }
+
+  /**
+   * Stream length, like Queue.count(): FIFO jobs that are waiting or active.
+   * LIFO and priority jobs live in lists, delayed and prioritized jobs in the scheduled ZSet.
+   */
+  async count(): Promise<number> {
+    let n = 0;
+    for (const record of this.jobs.values()) {
+      if (
+        (record.state === 'waiting' || record.state === 'active') &&
+        !record.opts.lifo &&
+        !(record.opts.priority ?? 0)
+      ) {
+        n++;
+      }
+    }
+    return n;
+  }
+
+  /** Read the lines appended with job.log(), like Queue.getJobLogs() (LRANGE semantics). */
+  async getJobLogs(id: string, start = 0, end = -1): Promise<{ logs: string[]; count: number }> {
+    const logs = this.jobs.get(id)?.logs ?? [];
+    const sliceEnd = end >= 0 ? end + 1 : logs.length + end + 1;
+    return { logs: logs.slice(start, Math.max(start, sliceEnd)), count: logs.length };
+  }
+
+  /** Suspended jobs ordered by their timeout deadline, like Queue.getSuspendedJobs(). */
+  async getSuspendedJobs(start = 0, end = -1, opts?: GetJobsOptions): Promise<TestJob<D, R>[]> {
+    const deadline = (r: TestJobRecord<D, R>) =>
+      r.suspendTimeout && r.suspendTimeout > 0 ? (r.suspendedAt ?? 0) + r.suspendTimeout : Number.MAX_SAFE_INTEGER;
+    const records = [...this.jobs.values()]
+      .filter((r) => r.state === 'suspended')
+      .sort((a, b) => deadline(a) - deadline(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return records.slice(start, end >= 0 ? end + 1 : undefined).map((record) => {
+      const job = new TestJob<D, R>(record);
+      if (opts?.excludeData) {
+        job.data = undefined as unknown as D;
+        job.returnvalue = undefined;
+      }
+      return job;
+    });
+  }
+
+  /**
+   * Mirror glidemq_revoke: a waiting, delayed or prioritized job is failed with
+   * reason 'revoked'; any other existing job is only flagged (isRevoked()).
+   */
+  async revoke(jobId: string): Promise<string> {
+    const record = this.jobs.get(jobId);
+    if (!record) return 'not_found';
+    record.revoked = true;
+    if (record.state === 'waiting' || record.state === 'delayed' || record.state === 'prioritized') {
+      this.clearPromotion(jobId);
+      this.dequeueRecord(record);
+      record.delayedUntil = undefined;
+      record.state = 'failed';
+      record.failedReason = 'revoked';
+      record.finishedOn = Date.now();
+      this.emit('revoked', jobId);
+      return 'revoked';
+    }
+    this.emit('revoked', jobId);
+    return 'flagged';
+  }
+
+  /**
+   * Remove every job, scheduler, dedup entry, budget and metric of this queue,
+   * like Queue.obliterate(). Refuses while jobs are active unless `force` is set.
+   */
+  async obliterate(opts?: { force?: boolean }): Promise<void> {
+    if (!opts?.force) {
+      let active = 0;
+      for (const record of this.jobs.values()) if (record.state === 'active') active++;
+      if (active > 0) {
+        throw new Error(
+          `Cannot obliterate queue "${this.name}": ${active} active jobs. Use { force: true } to override.`,
+        );
+      }
+    }
+    this.clearSchedulerTimer();
+    this.clearAllSuspendedTimeouts();
+    for (const timer of this.promotionTimers.values()) clearTimeout(timer);
+    this.promotionTimers.clear();
+    this.jobs.clear();
+    this.dedupEntries.clear();
+    this.waitingQueue.length = 0;
+    this.schedulers.clear();
+    this.budgets.clear();
+    for (const buckets of this.metricsData.values()) buckets.clear();
+    this.indexConfig = null;
+    this.idCounter = 0;
   }
 
   /** Get metrics for completed or failed jobs with per-minute data points. */
@@ -692,7 +1148,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     const results: TestJob<D, R>[] = [];
     for (const record of this.jobs.values()) {
       if (opts.name !== undefined && record.name !== opts.name) continue;
-      if (opts.state !== undefined && record.state !== opts.state) continue;
+      if (opts.state !== undefined && !matchesQueueState(record.state, opts.state)) continue;
       if (opts.data !== undefined && !matchesData(record.data as Record<string, unknown>, opts.data)) continue;
       const job = new TestJob<D, R>(record);
       if (opts.excludeData) {
@@ -728,16 +1184,19 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   async drain(delayed?: boolean): Promise<void> {
     const toRemove: string[] = [];
     for (const [id, record] of this.jobs) {
-      if (record.state === 'waiting' || (delayed && record.state === 'delayed')) {
+      if (record.state === 'waiting' || (delayed && (record.state === 'delayed' || record.state === 'prioritized'))) {
         toRemove.push(id);
       }
     }
     for (const id of toRemove) {
+      this.clearPromotion(id);
       this.jobs.delete(id);
     }
-    // Clear waitingQueue - stale entries will be skipped by findNextWaiting,
-    // but draining waiting jobs means the queue should be empty.
-    this.waitingQueue.length = 0;
+    // Waiting entries are gone. Prioritized jobs survive a drain without the
+    // delayed flag (they sit in the scheduled ZSet in production) and must stay
+    // reachable for the next worker promotion pass.
+    const survivors = this.waitingQueue.filter((r) => r.state === 'prioritized' && this.jobs.get(r.id) === r);
+    this.waitingQueue.splice(0, this.waitingQueue.length, ...survivors);
     if (toRemove.length > 0) {
       this.emit('drained', toRemove.length);
     }
@@ -754,26 +1213,55 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       throw new Error('count must be a non-negative integer');
     }
     const limit = opts?.count ?? 0;
+    const now = Date.now();
     let retried = 0;
     for (const record of this.jobs.values()) {
       if (limit > 0 && retried >= limit) break;
       if (record.state !== 'failed') continue;
-      record.state = 'waiting';
-      record.attemptsMade = 0;
-      record.failedReason = undefined;
-      record.finishedOn = undefined;
-      this.waitingQueue.push(record);
+      this.retryRecord(record, now);
       retried++;
     }
-    // Notify workers so retried jobs get picked up
-    if (retried > 0 && !this.paused) {
-      queueMicrotask(() => {
-        for (const w of this.workers) {
-          w.onJobAdded();
-        }
-      });
-    }
     return retried;
+  }
+
+  /**
+   * @internal Mirror retryFailedJob: reset the attempt state, re-arm the TTL
+   * from the retry time and enqueue the job again.
+   */
+  retryRecord(record: TestJobRecord<D, R>, now: number): void {
+    record.attemptsMade = 0;
+    record.failedReason = undefined;
+    record.finishedOn = undefined;
+    const ttl = record.opts.ttl ?? 0;
+    record.expireAt = ttl > 0 ? now + ttl : undefined;
+    this.enqueueWaiting(record);
+  }
+
+  /** @internal Worker.drain() stops once nothing is waiting, prioritized or delayed. */
+  isDrainComplete(): boolean {
+    for (const record of this.jobs.values()) {
+      if (record.state === 'waiting' || record.state === 'prioritized' || record.state === 'delayed') return false;
+    }
+    return true;
+  }
+
+  /**
+   * @internal After a repeatAfterComplete job completes or terminally fails,
+   * schedule the next run (BaseWorker.updateSchedulerAfterComplete).
+   */
+  onSchedulerJobFinished(record: TestJobRecord<D, R>): void {
+    const name = record.schedulerName;
+    if (!name) return;
+    const entry = this.schedulers.get(name);
+    if (!entry || !entry.repeatAfterComplete || entry.nextRun !== 0) return;
+    const nextRun = computeFollowingSchedulerNextRun(entry, Date.now());
+    if (nextRun == null || (entry.limit != null && (entry.iterationCount ?? 0) >= entry.limit)) {
+      this.schedulers.delete(name);
+    } else {
+      entry.nextRun = nextRun;
+      this.schedulers.set(name, JSON.parse(JSON.stringify(entry)));
+    }
+    this.ensureSchedulerLoop();
   }
 
   /** List active workers attached to this queue. */
@@ -1241,34 +1729,45 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   }
 
   /**
-   * @internal Promote a job parked in 'delayed' by a retry or moveToDelayed back
-   * to 'waiting' once its delay elapses (the in-memory equivalent of glidemq_promote).
+   * @internal Promote a job parked in 'delayed' (delay option, retry backoff or
+   * moveToDelayed) back to 'waiting' once its delay elapses: the in-memory
+   * equivalent of glidemq_promote.
    */
-  scheduleRetry(record: TestJobRecord<D, R>, delayMs: number): void {
-    const existing = this.retryTimers.get(record.id);
-    if (existing) clearTimeout(existing);
-    const timer = setTimeout(
-      () => {
-        this.retryTimers.delete(record.id);
-        if (this.jobs.get(record.id) !== record || record.state !== 'delayed') return;
-        record.state = 'waiting';
-        this.waitingQueue.push(record);
-        if (!this.paused) {
-          for (const w of this.workers) w.onJobAdded();
-        }
-      },
-      Math.min(Math.max(0, delayMs), MAX_TIMEOUT_DELAY_MS),
-    );
+  schedulePromotion(record: TestJobRecord<D, R>, delayMs: number): void {
+    this.clearPromotion(record.id);
+    const wait = Math.min(Math.max(0, delayMs), MAX_TIMEOUT_DELAY_MS);
+    record.delayedUntil = Date.now() + wait;
+    const timer = setTimeout(() => {
+      this.promotionTimers.delete(record.id);
+      if (this.jobs.get(record.id) !== record || record.state !== 'delayed') return;
+      record.delayedUntil = undefined;
+      this.dequeueRecord(record);
+      record.state = 'waiting';
+      this.waitingQueue.push(record);
+      this.emit('promoted', record.id);
+      if (!this.paused) {
+        for (const w of this.workers) w.onJobAdded();
+      }
+    }, wait);
     timer.unref?.();
-    this.retryTimers.set(record.id, timer);
+    this.promotionTimers.set(record.id, timer);
+  }
+
+  private clearPromotion(jobId: string): void {
+    const timer = this.promotionTimers.get(jobId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.promotionTimers.delete(jobId);
   }
 
   /** Close the queue, clear timers, and detach all workers. */
   async close(): Promise<void> {
     this.clearSchedulerTimer();
     this.clearAllSuspendedTimeouts();
-    for (const timer of this.retryTimers.values()) clearTimeout(timer);
-    this.retryTimers.clear();
+    for (const timer of this.promotionTimers.values()) clearTimeout(timer);
+    this.promotionTimers.clear();
+    for (const reject of [...this.waitRejectors]) reject(new GlideMQError('Queue is closing'));
+    this.waitRejectors.clear();
     this.removeAllListeners();
     this.workers.clear();
     TestQueue.registry.delete(this.name);
@@ -1281,11 +1780,27 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
    * priority is dispatched from the LIFO list, like production promotion.
    */
   takeNextWaiting(): TestJobRecord<D, R> | undefined {
+    const best = this.nextWaitingIndex();
+    return best < 0 ? undefined : this.waitingQueue.splice(best, 1)[0];
+  }
+
+  /** @internal True when takeNextWaiting() would return a job. Does not pop anything. */
+  hasWaiting(): boolean {
+    return this.nextWaitingIndex() >= 0;
+  }
+
+  /** Compact the dispatch queue and return the index of the next job to dispatch, or -1. */
+  private nextWaitingIndex(): number {
+    this.promotePrioritized();
     const q = this.waitingQueue;
+    const seen = new Set<string>();
     let write = 0;
     for (let read = 0; read < q.length; read++) {
       const r = q[read];
-      if (r.state === 'waiting' && this.jobs.get(r.id) === r) q[write++] = r;
+      if (r.state === 'waiting' && this.jobs.get(r.id) === r && !seen.has(r.id)) {
+        seen.add(r.id);
+        q[write++] = r;
+      }
     }
     q.length = write;
 
@@ -1306,8 +1821,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     }
     if (best < 0) best = lifo;
     if (best < 0) best = q.length > 0 ? 0 : -1;
-    if (best < 0) return undefined;
-    return q.splice(best, 1)[0];
+    return best;
   }
 
   /**
@@ -1429,6 +1943,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     let nextDue = Number.POSITIVE_INFINITY;
     const now = Date.now();
     for (const entry of this.schedulers.values()) {
+      // nextRun 0 is the repeatAfterComplete "awaiting completion" sentinel.
+      if (entry.repeatAfterComplete && entry.nextRun === 0) continue;
       if (entry.nextRun != null && entry.nextRun < nextDue) {
         nextDue = entry.nextRun;
       }
@@ -1492,25 +2008,42 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
         const template = entry.template ?? {};
         const jobName = template.name ?? name;
-        let jobData = template.data !== undefined ? template.data : ({} as D);
+        const jobData = template.data !== undefined ? template.data : ({} as D);
+        let serialized: string;
         try {
-          const serialized = this.serializer.serialize(jobData);
-          const byteLen = Buffer.byteLength(serialized, 'utf8');
-          if (byteLen > MAX_JOB_DATA_SIZE) {
+          serialized = this.serializer.serialize(jobData);
+          if (Buffer.byteLength(serialized, 'utf8') > MAX_JOB_DATA_SIZE) {
             this.schedulers.delete(name);
             continue;
           }
-          jobData = this.serializer.deserialize(serialized) as D;
         } catch {
           this.schedulers.delete(name);
           continue;
         }
-        await this.add(jobName, jobData, template.opts as JobOptions | undefined);
+        // Like Scheduler.runSchedulers, a run calls glidemq_addJob directly: no
+        // deduplication, no custom jobId and delay 0, whatever the stored template says.
+        const created = this.insertRecord(
+          jobName,
+          serialized,
+          (template.opts as JobOptions | undefined) ?? {},
+          this.generateJobId(),
+          now,
+          0,
+        );
+        const isRepeatAfterComplete = entry.repeatAfterComplete != null && entry.repeatAfterComplete > 0;
+        if (isRepeatAfterComplete) {
+          const record = this.jobs.get(created.id);
+          if (record) record.schedulerName = name;
+        }
 
         entry.lastRun = now;
         entry.iterationCount = currentIterationCount + 1;
         if (entry.limit != null && entry.iterationCount >= entry.limit) {
           this.schedulers.delete(name);
+        } else if (isRepeatAfterComplete) {
+          // Sentinel: the worker schedules the next run when the job finishes.
+          entry.nextRun = 0;
+          this.schedulers.set(name, JSON.parse(JSON.stringify(entry)));
         } else {
           const nextRun = computeFollowingSchedulerNextRun(entry, now);
           if (nextRun == null) {
@@ -1533,6 +2066,12 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 export interface TestWorkerOptions {
   concurrency?: number;
   batch?: { size: number; timeout?: number };
+  /**
+   * Jobs-per-window rate limit, same shape as WorkerOptions.limiter. Mirrors
+   * glidemq_rateLimit: at most `max` dispatches per fixed `duration` window.
+   * Also the default pause after a processor throws RateLimitError.
+   */
+  limiter?: { max: number; duration: number };
   /** Token-per-minute rate limiting (in-memory only for testing mode). */
   tokenLimiter?: {
     maxTokens: number;
@@ -1552,6 +2091,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private concurrency: number;
   private activeCount = 0;
   private running = true;
+  private paused = false;
   private processing = false;
   private isDrained = true;
   private readonly batchMode: boolean;
@@ -1561,9 +2101,14 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingBatch: TestJobRecord<D, R>[] = [];
   private readonly tokenLimiter: TestWorkerOptions['tokenLimiter'];
+  private readonly limiter: TestWorkerOptions['limiter'];
   private readonly backoffStrategies: TestWorkerOptions['backoffStrategies'];
   private tpmLocalCounter = 0;
   private tpmWindowStart = 0;
+  private rateLimitUntil = 0;
+  private rateWindowStart = 0;
+  private rateWindowCount = 0;
+  private rateLimitTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     queue: TestQueue<D, R>,
@@ -1616,6 +2161,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
     this.concurrency = opts?.concurrency ?? 1;
     this.tokenLimiter = opts?.tokenLimiter;
+    this.limiter = opts?.limiter;
     this.backoffStrategies = opts?.backoffStrategies;
     this.id = `test-worker-${++TestWorker.idCounter}`;
     this.startedAt = Date.now();
@@ -1625,17 +2171,17 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     queue.onWorkerAttached();
 
     // Process any jobs already in the queue
-    queueMicrotask(() => this.drain());
+    queueMicrotask(() => this.wake());
   }
 
   /** @internal Called by TestQueue when a job is added. */
   onJobAdded(): void {
     if (!this.running) return;
-    this.drain();
+    this.wake();
   }
 
   /** Pull and process waiting jobs up to concurrency. */
-  private drain(): void {
+  private wake(): void {
     if (this.processing) return;
     this.processing = true;
 
@@ -1647,7 +2193,9 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   }
 
   private processAvailable(): void {
-    if (!this.running || this.queue.isPaused()) return;
+    if (!this.running) return;
+    this.queue.promotePrioritized();
+    if (this.queue.isPaused() || this.paused) return;
 
     if (this.batchMode) {
       this.processAvailableBatch();
@@ -1673,8 +2221,49 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
   }
 
+  /**
+   * Take the next waiting job unless the worker is rate limited. Like
+   * BaseWorker.waitForRateLimit before a fetch, a manual rateLimit(ms) /
+   * RateLimitError pause is honoured first, then the limiter window. While
+   * limited nothing is popped, so priority, LIFO and FIFO order are kept, and
+   * a wake-up timer resumes dispatch.
+   */
   private findNextWaiting(): TestJobRecord<D, R> | undefined {
+    if (!this.queue.hasWaiting()) return undefined;
+    const wait = this.acquireRateSlot();
+    if (wait > 0) {
+      this.wakeAfterRateLimit(wait);
+      return undefined;
+    }
     return this.queue.takeNextWaiting();
+  }
+
+  /** Returns 0 and counts a dispatch, or the ms to wait (mirrors glidemq_rateLimit). */
+  private acquireRateSlot(): number {
+    const now = Date.now();
+    if (this.rateLimitUntil > now) return this.rateLimitUntil - now;
+    if (!this.limiter || this.limiter.max <= 0) return 0;
+    const { max, duration } = this.limiter;
+    if (now - this.rateWindowStart >= duration) {
+      this.rateWindowStart = now;
+      this.rateWindowCount = 1;
+      return 0;
+    }
+    if (this.rateWindowCount >= max) return duration - (now - this.rateWindowStart);
+    this.rateWindowCount++;
+    return 0;
+  }
+
+  private wakeAfterRateLimit(ms: number): void {
+    if (this.rateLimitTimer) return;
+    this.rateLimitTimer = setTimeout(
+      () => {
+        this.rateLimitTimer = null;
+        if (this.running && !this.queue.isPaused() && !this.paused) this.processAvailable();
+      },
+      Math.min(Math.max(1, ms), MAX_TIMEOUT_DELAY_MS),
+    );
+    this.rateLimitTimer.unref?.();
   }
 
   private processJob(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
@@ -1702,8 +2291,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         const budget = this.queue.budgets.get(record.budgetKey);
         this.emit('budget-exceeded', job, record.id);
         if (budget?.onExceeded === 'pause') {
-          // Move back to waiting for later retry
-          record.state = 'waiting';
+          // Like moveActiveToDelayed(now + 24h): parked until the budget is raised and the job promoted.
+          this.queue.parkDelayed(record, 86_400_000);
           this.activeCount--;
           if (this.running && !this.queue.isPaused()) {
             this.processAvailable();
@@ -1721,6 +2310,12 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     this.waitForTokenLimitIfNeeded()
       .then(() => this.processor(job as any))
       .then((result) => {
+        if (record.movedToFailed) {
+          const err = record.movedToFailed;
+          record.movedToFailed = undefined;
+          this.handleFailure(record, job, err);
+          return;
+        }
         // Roundtrip returnvalue through serializer to match production behavior
         const s = this.queue.serializer;
         const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
@@ -1733,6 +2328,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
         this.emit('completed', job, roundtripped);
         this.queue.emit('completed', job, roundtripped);
+        this.queue.onSchedulerJobFinished(record);
 
         // Post-completion TPM tracking
         if (this.tokenLimiter) {
@@ -1780,12 +2376,14 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         }
         // moveToDelayed: park without counting an attempt, promote at the timestamp.
         if (err instanceof DelayedError) {
-          const delay = Math.max(0, err.delayedUntil - Date.now());
-          record.state = 'delayed';
-          this.queue.scheduleRetry(record, delay);
+          this.queue.parkDelayed(record, Math.max(0, err.delayedUntil - Date.now()));
           return;
         }
 
+        if (record.movedToFailed) {
+          err = record.movedToFailed;
+          record.movedToFailed = undefined;
+        }
         this.handleFailure(record, job, err);
       })
       .finally(() => {
@@ -1802,13 +2400,25 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
    * failedReason and emits the worker 'failed' event. A retryable failure parks
    * the job in 'delayed' for the backoff delay (queue emits 'retrying'); a
    * terminal failure moves it to 'failed', applies removeOnFail and emits the
-   * queue 'failed' event.
+   * queue 'failed' event. A RateLimitError is not a failure: the job is parked
+   * in 'delayed' for the limiter window with failedReason 'rate limited', no
+   * attempt is consumed, and the worker pauses dispatch for the same window.
    */
   private handleFailure(record: TestJobRecord<D, R>, job: TestJob<D, R>, err: Error): void {
+    const now = Date.now();
+    if (TestWorker.isRateLimitError(err)) {
+      const delayMs = (err as { delayMs?: number }).delayMs || this.limiter?.duration || 1000;
+      this.rateLimitUntil = now + delayMs;
+      record.failedReason = 'rate limited';
+      job.failedReason = 'rate limited';
+      record.processedOn = now;
+      this.queue.parkDelayed(record, delayMs);
+      this.queue.emit('retrying', job, err);
+      return;
+    }
     record.attemptsMade++;
     const skipRetry = job.discarded || err instanceof UnrecoverableError || err.name === 'UnrecoverableError';
     const maxAttempts = skipRetry ? 0 : (record.opts.attempts ?? 0);
-    const now = Date.now();
     record.failedReason = err.message;
     job.failedReason = err.message;
 
@@ -1824,11 +2434,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       if (record.opts.fallbacks && record.opts.fallbacks.length > 0) {
         record.fallbackIndex++;
       }
-      record.state = 'delayed';
       record.processedOn = now;
+      this.queue.parkDelayed(record, backoffDelay);
       this.emit('failed', job, err);
       this.queue.emit('retrying', job, err);
-      this.queue.scheduleRetry(record, backoffDelay);
       return;
     }
 
@@ -1839,6 +2448,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
     this.emit('failed', job, err);
     this.queue.emit('failed', job, err);
+    this.queue.onSchedulerJobFinished(record);
   }
 
   // ---- Batch processing ----
@@ -1893,13 +2503,13 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   }
 
   private takeWaitingRecord(): TestJobRecord<D, R> | undefined {
-    return this.queue.takeNextWaiting();
+    return this.findNextWaiting();
   }
 
   private flushBatch(): void {
     if (!this.running) return;
     this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
-    if (!this.queue.isPaused()) {
+    if (!this.queue.isPaused() && !this.paused) {
       while (this.pendingBatch.length < this.batchSize) {
         const record = this.takeWaitingRecord();
         if (!record) break;
@@ -1936,6 +2546,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         for (let i = 0; i < records.length; i++) {
           const record = records[i];
           const job = jobs[i];
+          if (this.settleMovedToFailed(record, job)) continue;
           const result = results[i];
           const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
           record.state = 'completed';
@@ -1947,6 +2558,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
           this.emit('completed', job, roundtripped);
           this.queue.emit('completed', job, roundtripped);
+          this.queue.onSchedulerJobFinished(record);
         }
       })
       .catch((err: Error) => {
@@ -1955,6 +2567,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           for (let i = 0; i < records.length; i++) {
             const record = records[i];
             const job = jobs[i];
+            if (this.settleMovedToFailed(record, job)) continue;
             const result = i < batchErr.results.length ? batchErr.results[i] : new Error('No result in BatchError');
 
             if (result instanceof Error) {
@@ -1972,6 +2585,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
               this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
               this.emit('completed', job, roundtripped);
               this.queue.emit('completed', job, roundtripped);
+              this.queue.onSchedulerJobFinished(record);
             }
           }
         } else {
@@ -1979,6 +2593,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           for (let i = 0; i < records.length; i++) {
             const record = records[i];
             const job = jobs[i];
+            if (this.settleMovedToFailed(record, job)) continue;
             this.handleFailure(record, job, err);
           }
         }
@@ -1989,6 +2604,19 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           this.processAvailable();
         }
       });
+  }
+
+  /**
+   * Like BaseWorker.skipMovedToFailed: a job that called moveToFailed() inside
+   * the processor is settled through the failure path, whatever the batch
+   * outcome for it. Returns true when the job was handled here.
+   */
+  private settleMovedToFailed(record: TestJobRecord<D, R>, job: TestJob<D, R>): boolean {
+    const err = record.movedToFailed;
+    if (!err) return false;
+    record.movedToFailed = undefined;
+    this.handleFailure(record, job, err);
+    return true;
   }
 
   /** Wait if the TPM counter exceeds the limit for the current window. */
@@ -2026,10 +2654,59 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     return this.activeCount;
   }
 
+  /** Pause dispatch for the given duration, like Worker.rateLimit(ms). */
+  async rateLimit(ms: number): Promise<void> {
+    this.rateLimitUntil = Date.now() + ms;
+  }
+
+  /** Resolves immediately: a TestWorker has no connection to wait for. */
+  async waitUntilReady(): Promise<void> {}
+
+  /** True while the worker is open and not paused, like Worker.isRunning(). */
+  isRunning(): boolean {
+    return this.running && !this.paused;
+  }
+
+  isPaused(): boolean {
+    return this.paused;
+  }
+
+  /** Stop taking jobs. Without `force`, resolves once the active jobs finish, like Worker.pause(). */
+  async pause(force?: boolean): Promise<void> {
+    this.paused = true;
+    if (!force) await this.waitForActiveJobs();
+  }
+
+  /** Resume taking jobs after pause(). */
+  async resume(): Promise<void> {
+    this.paused = false;
+    this.wake();
+  }
+
+  /** Process everything that is waiting, prioritized or delayed, then close, like Worker.drain(). */
+  async drain(): Promise<void> {
+    while (this.running) {
+      await this.waitForActiveJobs();
+      if (this.activeCount === 0 && this.queue.isDrainComplete()) break;
+      await new Promise<void>((r) => setTimeout(r, 10));
+    }
+    await this.close();
+  }
+
+  private async waitForActiveJobs(): Promise<void> {
+    while (this.activeCount > 0) {
+      await new Promise<void>((r) => setTimeout(r, 5));
+    }
+  }
+
   /** Stop processing and detach from the queue. */
   async close(): Promise<void> {
     this.running = false;
     this.clearBatchTimer();
+    if (this.rateLimitTimer) {
+      clearTimeout(this.rateLimitTimer);
+      this.rateLimitTimer = null;
+    }
     if (this.pendingBatch.length > 0) {
       const handoff = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
       this.pendingBatch = [];
@@ -2042,4 +2719,18 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
     this.removeAllListeners();
   }
+
+  /** Same check as Worker.isRateLimitError: instance or `name === 'RateLimitError'`. */
+  static isRateLimitError(error: Error): boolean {
+    return error instanceof TestWorker.RateLimitError || error.name === 'RateLimitError';
+  }
+
+  /** Throw from a processor to requeue the job after the limiter window, like Worker.RateLimitError. */
+  static RateLimitError = class extends Error {
+    delayMs?: number;
+    constructor() {
+      super('Rate limit exceeded');
+      this.name = 'RateLimitError';
+    }
+  };
 }

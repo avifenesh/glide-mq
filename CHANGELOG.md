@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Testing mode round 2**: `delay` is honored (jobs start `delayed`, promote on time, `promote()`/`changeDelay()` follow the server rules, debounce can replace them); priority jobs sit in `prioritized` until a worker pass; `RateLimitError` parks the job for the limiter window without consuming an attempt or emitting `failed` (`TestWorkerOptions.limiter`, `worker.rateLimit(ms)`); `getJobs('waiting')` follows dispatch order; the scheduler tick ignores template `delay`/`deduplication` like production; `repeatAfterComplete` waits for completion; budget `pause` parks in `delayed`. TestJob, TestQueue and TestWorker gained the production methods they lacked (`getState`, `is*`, `waitUntilFinished`, `retry`, `remove`, `moveToFailed`, `log`, `addAndWait`, `count`, `getJobCountByTypes`, `getJobLogs`, `getSuspendedJobs`, `revoke`, `obliterate`, `pause`/`resume`, `drain`). docs/TESTING.md lists the remaining limitations.
+
 ### Added
 
 - **Cron syntax parity with cron-parser**: month and weekday names, day-of-week `7`, `?`, `N/step`, an optional leading seconds field, `L`, `LW`, `<n>W` in day-of-month and `<d>L`, `<d>#<n>` in day-of-week. A test oracle compares `nextCronOccurrence` with cron-parser 4.9.0 (the version BullMQ uses) over 44 patterns in four zones: 0 mismatches outside DST transitions, where glide-mq keeps cronie's rules. Seconds patterns are honored by the parser; the scheduler still fires on its promotion tick, so sub-tick periods produce one job per tick.
