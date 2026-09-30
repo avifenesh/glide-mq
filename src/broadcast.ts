@@ -28,6 +28,9 @@ import type { QueueKeys } from './functions/index';
  * await broadcast.publish('order.placed', { orderId: 42 });
  * // Both workers receive the message
  * ```
+ *
+ * Events: 'error' (from the underlying queue) and, with `maxMessages`,
+ * 'trimmed' ({ trimmed, unread }) after a publish that trimmed the stream.
  */
 export class Broadcast<D = any> extends EventEmitter {
   readonly name: string;
@@ -74,10 +77,12 @@ export class Broadcast<D = any> extends EventEmitter {
 
     // maxMessages is a hard cap: the trim also drops messages a slow
     // subscription has not read yet. It deletes the job data of trimmed
-    // messages once no subscription still holds them.
+    // messages once no subscription still holds them, and reports the
+    // (message, subscription) pairs dropped unread through 'trimmed'.
     if (job && this.opts.maxMessages) {
       const client = await this.queue.getClient();
-      await trimBroadcast(client, this.keys, this.opts.maxMessages, Date.now());
+      const result = await trimBroadcast(client, this.keys, this.opts.maxMessages, Date.now());
+      if (result.trimmed > 0) this.emit('trimmed', result);
     }
 
     return job ? job.id : null;

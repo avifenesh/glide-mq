@@ -113,7 +113,12 @@ export const LIBRARY_NAME = 'glidemq';
 //   on an optional redispatch arg, replies the reclaimed entries so the worker runs them again;
 //   glidemq_trimBroadcast trims a broadcast stream and deletes the job data of trimmed messages;
 //   promote records the newest broadcast retry entry in the job hash (bcastEntry).
-export const LIBRARY_VERSION = '130';
+// Version 131: glidemq_fail takes an optional requeueOnly arg (RateLimitError) that schedules the retry
+//   without counting the attempt or writing failedReason; glidemq_updateFlowBudget changes budget limits
+//   and re-evaluates the exceeded flag; glidemq_failAndFetchNext fails a job and fetches the next one
+//   (the fetch phases of completeAndFetchNext) in one call; glidemq_trimBroadcast replies
+//   {trimmed, unread} instead of the trimmed count.
+export const LIBRARY_VERSION = '131';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -556,45 +561,7 @@ export async function completeAndFetchNext(
   const raw = await client.fcall('glidemq_completeAndFetchNext', keys, args);
 
   // Fast path: array protocol from Lua function
-  if (Array.isArray(raw)) {
-    const notificationOffset =
-      raw.length >= 2 && String(raw.at(-2)) === PARENT_NOTIFICATIONS_MARKER ? raw.length - 2 : raw.length;
-    const parentNotifications = notificationOffset < raw.length ? parseParentNotifications(raw.at(-1)) : [];
-    const tag = String(raw[0]);
-    if (tag === 'NEXT_NONE') {
-      return { completed: raw[1] != null ? String(raw[1]) : jobId, next: false, parentNotifications };
-    }
-    if (tag === 'CURRENT_REVOKED') {
-      return {
-        completed: raw[1] != null ? String(raw[1]) : jobId,
-        next: 'CURRENT_REVOKED',
-        parentNotifications: [],
-      };
-    }
-    if (tag === 'NEXT_REVOKED') {
-      return {
-        completed: raw[1] != null ? String(raw[1]) : jobId,
-        next: 'REVOKED',
-        nextJobId: String(raw[2]),
-        nextEntryId: String(raw[3]),
-        parentNotifications,
-      };
-    }
-    if (tag === 'NEXT_HASH') {
-      const hash: Record<string, string> = Object.create(null);
-      for (let i = 4; i + 1 < notificationOffset; i += 2) {
-        hash[String(raw[i])] = String(raw[i + 1]);
-      }
-      return {
-        completed: raw[1] != null ? String(raw[1]) : jobId,
-        next: hash,
-        nextJobId: String(raw[2]),
-        nextEntryId: String(raw[3]),
-        parentNotifications,
-      };
-    }
-    throw new Error(`Unexpected glidemq_completeAndFetchNext tag: ${tag}`);
-  }
+  if (Array.isArray(raw)) return parseChainReply(raw, jobId, 'glidemq_completeAndFetchNext');
 
   // Backward compatibility: JSON protocol (older library versions)
   const parsed = JSON.parse(String(raw));
@@ -625,6 +592,103 @@ export async function completeAndFetchNext(
 }
 
 /**
+ * Parse the array reply of the chain functions: {'NEXT_NONE', jobId, ...},
+ * {'CURRENT_REVOKED', jobId}, {'NEXT_REVOKED', jobId, nextJobId, nextEntryId, ...}
+ * or {'NEXT_HASH', jobId, nextJobId, nextEntryId, field1, value1, ..., ...}.
+ * Cross-queue completions append the parent notifications marker and payload.
+ */
+function parseChainReply(raw: unknown[], jobId: string, func: string): CompleteAndFetchResult {
+  const notificationOffset =
+    raw.length >= 2 && String(raw.at(-2)) === PARENT_NOTIFICATIONS_MARKER ? raw.length - 2 : raw.length;
+  const parentNotifications = notificationOffset < raw.length ? parseParentNotifications(raw.at(-1)) : [];
+  const tag = String(raw[0]);
+  const completed = raw[1] != null ? String(raw[1]) : jobId;
+  if (tag === 'NEXT_NONE') {
+    return { completed, next: false, parentNotifications };
+  }
+  if (tag === 'CURRENT_REVOKED') {
+    return { completed, next: 'CURRENT_REVOKED', parentNotifications: [] };
+  }
+  if (tag === 'NEXT_REVOKED') {
+    return {
+      completed,
+      next: 'REVOKED',
+      nextJobId: String(raw[2]),
+      nextEntryId: String(raw[3]),
+      parentNotifications,
+    };
+  }
+  if (tag === 'NEXT_HASH') {
+    const hash: Record<string, string> = Object.create(null);
+    for (let i = 4; i + 1 < notificationOffset; i += 2) {
+      hash[String(raw[i])] = String(raw[i + 1]);
+    }
+    return {
+      completed,
+      next: hash,
+      nextJobId: String(raw[2]),
+      nextEntryId: String(raw[3]),
+      parentNotifications,
+    };
+  }
+  throw new Error(`Unexpected ${func} tag: ${tag}`);
+}
+
+export interface FailAndFetchResult extends CompleteAndFetchResult {
+  /** glidemq_fail outcome for the failed job: 'retrying', 'failed' or 'removed'. */
+  failResult: string;
+}
+
+/**
+ * Fail a job and fetch the next one in the same FCALL (glidemq_failAndFetchNext,
+ * library 131). Same semantics as failJob for the failed job; the fetch
+ * phases are those of completeAndFetchNext. Rejects with "Function not found"
+ * on an older library; callers fall back to failJob.
+ */
+export async function failAndFetchNext(
+  client: Client,
+  k: QueueKeys,
+  jobId: string,
+  entryId: string,
+  failedReason: string,
+  timestamp: number,
+  maxAttempts: number,
+  backoffDelay: number,
+  group: string,
+  consumer: string,
+  removeOnFail?: boolean | number | { age: number; count: number },
+  skipEvents?: boolean,
+  skipMetrics?: boolean,
+): Promise<FailAndFetchResult> {
+  const { mode, count, age } = encodeRetention(removeOnFail);
+  const args = [
+    jobId,
+    entryId,
+    failedReason,
+    timestamp.toString(),
+    maxAttempts.toString(),
+    backoffDelay.toString(),
+    group,
+    mode,
+    count.toString(),
+    age.toString(),
+    '0',
+    skipEvents ? '1' : '0',
+    skipMetrics ? '1' : '0',
+    consumer,
+  ];
+  const raw = await client.fcall(
+    'glidemq_failAndFetchNext',
+    [k.stream, k.failed, k.scheduled, k.events, k.job(jobId), k.metricsFailed],
+    args,
+  );
+  if (!Array.isArray(raw) || raw.length < 2) {
+    throw new Error(`Unexpected glidemq_failAndFetchNext reply: ${String(raw)}`);
+  }
+  return { failResult: String(raw[0]), ...parseChainReply(raw.slice(1), jobId, 'glidemq_failAndFetchNext') };
+}
+
+/**
  * Fail a job: XACK, retry with backoff if attempts remain, else move to failed ZSet.
  * Optionally applies retention cleanup based on removeOnFail.
  * Returns "failed" or "retrying".
@@ -643,7 +707,48 @@ export async function failJob(
   broadcastMode?: boolean,
   skipEvents?: boolean,
   skipMetrics?: boolean,
+  requeueOnly?: boolean,
 ): Promise<string> {
+  const { keys, args } = failJobCall(
+    k,
+    jobId,
+    entryId,
+    failedReason,
+    timestamp,
+    maxAttempts,
+    backoffDelay,
+    group,
+    removeOnFail,
+    broadcastMode,
+    skipEvents,
+    skipMetrics,
+    requeueOnly,
+  );
+  const result = await client.fcall('glidemq_fail', keys, args);
+  return result as string;
+}
+
+/**
+ * Build the KEYS/ARGS of a glidemq_fail call. `requeueOnly` (a RateLimitError)
+ * schedules the retry after backoffDelay without counting the attempt; an
+ * older library ignores the flag and counts it, so maxAttempts must still
+ * allow the retry.
+ */
+export function failJobCall(
+  k: QueueKeys,
+  jobId: string,
+  entryId: string,
+  failedReason: string,
+  timestamp: number,
+  maxAttempts: number,
+  backoffDelay: number,
+  group: string = CONSUMER_GROUP,
+  removeOnFail?: boolean | number | { age: number; count: number },
+  broadcastMode?: boolean,
+  skipEvents?: boolean,
+  skipMetrics?: boolean,
+  requeueOnly?: boolean,
+): { keys: string[]; args: string[] } {
   const { mode, count, age } = encodeRetention(removeOnFail);
   const args = [
     jobId,
@@ -657,32 +762,47 @@ export async function failJob(
     count.toString(),
     age.toString(),
   ];
-  if (skipEvents || skipMetrics) {
+  if (requeueOnly) {
+    args.push(broadcastMode ? '1' : '0', skipEvents ? '1' : '0', skipMetrics ? '1' : '0', '1');
+  } else if (skipEvents || skipMetrics) {
     args.push(broadcastMode ? '1' : '0', skipEvents ? '1' : '0', skipMetrics ? '1' : '0');
   } else if (broadcastMode) {
     args.push('1');
   }
-  const result = await client.fcall(
-    'glidemq_fail',
-    [k.stream, k.failed, k.scheduled, k.events, k.job(jobId), k.metricsFailed],
-    args,
-  );
-  return result as string;
+  return { keys: [k.stream, k.failed, k.scheduled, k.events, k.job(jobId), k.metricsFailed], args };
+}
+
+export interface TrimBroadcastResult {
+  /** Stream entries trimmed by this call. */
+  trimmed: number;
+  /**
+   * (entry, subscription) pairs dropped before that subscription read them.
+   * 0 on a library older than 131, which reports only the trimmed count.
+   */
+  unread: number;
 }
 
 /**
  * Trim a broadcast stream to `maxLen` entries and delete the job hashes,
  * per-subscription hashes and completed/failed members of trimmed messages.
  * Messages a subscription still has claimed or scheduled for retry are kept
- * until they settle. Returns the number of trimmed entries.
+ * until they settle.
  */
-export async function trimBroadcast(client: Client, k: QueueKeys, maxLen: number, timestamp: number): Promise<number> {
+export async function trimBroadcast(
+  client: Client,
+  k: QueueKeys,
+  maxLen: number,
+  timestamp: number,
+): Promise<TrimBroadcastResult> {
   const result = await client.fcall(
     'glidemq_trimBroadcast',
     [k.stream, k.completed, k.failed, k.scheduled],
     [maxLen.toString(), timestamp.toString()],
   );
-  return Number(result) || 0;
+  if (Array.isArray(result)) {
+    return { trimmed: Number(result[0]) || 0, unread: Number(result[1]) || 0 };
+  }
+  return { trimmed: Number(result) || 0, unread: 0 };
 }
 
 /**
@@ -1625,6 +1745,21 @@ export async function sweepSuspended(
 /**
  * Check whether a budget has been exceeded. Returns 'ok', 'exceeded', or 'no_budget'.
  */
+/**
+ * Raise or lower the limits of a flow budget and re-evaluate its exceeded
+ * flag. A null value deletes the field. Returns 'ok', 'exceeded' or 'no_budget'.
+ */
+export async function updateFlowBudget(
+  client: Client,
+  budgetKey: string,
+  fields: Record<string, string | null>,
+): Promise<string> {
+  const args: string[] = [];
+  for (const [field, value] of Object.entries(fields)) args.push(field, value ?? '');
+  const result = await client.fcall('glidemq_updateFlowBudget', [budgetKey], args);
+  return result as string;
+}
+
 export async function checkBudget(client: Client, budgetKey: string): Promise<string> {
   const result = await client.fcall('glidemq_checkBudget', [budgetKey], []);
   return result as string;

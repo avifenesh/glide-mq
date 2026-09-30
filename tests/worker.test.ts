@@ -27,6 +27,7 @@ function makeMockClient(overrides: Record<string, unknown> = {}) {
       if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
       if (func === 'glidemq_complete') return Promise.resolve(1);
       if (func === 'glidemq_fail') return Promise.resolve('failed');
+      if (func === 'glidemq_failAndFetchNext') return Promise.resolve(['failed', 'NEXT_NONE', String(args?.[0] ?? '')]);
       if (func === 'glidemq_promote') return Promise.resolve(0);
       if (func === 'glidemq_nextDue') return Promise.resolve(-1);
       if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
@@ -415,12 +416,20 @@ describe('Worker', () => {
     await worker.waitUntilReady();
     await vi.advanceTimersByTimeAsync(100);
 
-    // failJob is called via fcall('glidemq_fail', ...)
-    expect(mockCommandClient.fcall).toHaveBeenCalledWith(
-      'glidemq_fail',
-      [keys.stream, keys.failed, keys.scheduled, keys.events, keys.job('2'), keys.metricsFailed],
-      expect.arrayContaining(['2', '1234567890-0', 'Processing failed']),
+    // The failure lands through glidemq_fail or the chained glidemq_failAndFetchNext (same leading keys and args).
+    const failCall = (mockCommandClient.fcall as any).mock.calls.find(
+      (call: any[]) => call[0] === 'glidemq_fail' || call[0] === 'glidemq_failAndFetchNext',
     );
+    expect(failCall).toBeDefined();
+    expect(failCall[1].slice(0, 6)).toEqual([
+      keys.stream,
+      keys.failed,
+      keys.scheduled,
+      keys.events,
+      keys.job('2'),
+      keys.metricsFailed,
+    ]);
+    expect(failCall[2]).toEqual(expect.arrayContaining(['2', '1234567890-0', 'Processing failed']));
 
     expect(failedJobs).toHaveLength(1);
     expect(failedJobs[0].err.message).toBe('Processing failed');
@@ -469,7 +478,7 @@ describe('Worker', () => {
       'active',
     ]);
 
-    mockCommandClient.fcall = vi.fn().mockImplementation((func: string) => {
+    mockCommandClient.fcall = vi.fn().mockImplementation((func: string, _keys?: string[], args?: string[]) => {
       if (func === 'glidemq_version') return Promise.resolve(LIBRARY_VERSION);
       if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
       if (func === 'glidemq_promote') return Promise.resolve(0);
@@ -479,6 +488,7 @@ describe('Worker', () => {
       if (func === 'glidemq_completeAndFetchNext')
         return Promise.resolve(JSON.stringify({ completed: '3', next: false }));
       if (func === 'glidemq_fail') return Promise.resolve('failed');
+      if (func === 'glidemq_failAndFetchNext') return Promise.resolve(['failed', 'NEXT_NONE', String(args?.[0] ?? '')]);
       return Promise.resolve(LIBRARY_VERSION);
     });
 
@@ -542,7 +552,7 @@ describe('Worker', () => {
       'active',
     ]);
 
-    mockCommandClient.fcall = vi.fn().mockImplementation((func: string) => {
+    mockCommandClient.fcall = vi.fn().mockImplementation((func: string, _keys?: string[], args?: string[]) => {
       if (func === 'glidemq_version') return Promise.resolve(LIBRARY_VERSION);
       if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
       if (func === 'glidemq_promote') return Promise.resolve(0);
@@ -550,6 +560,7 @@ describe('Worker', () => {
       if (func === 'glidemq_moveToActive') return Promise.resolve(jobHash);
       if (func === 'glidemq_moveActiveToDelayed') return Promise.resolve('error:not_active');
       if (func === 'glidemq_fail') return Promise.resolve('failed');
+      if (func === 'glidemq_failAndFetchNext') return Promise.resolve(['failed', 'NEXT_NONE', String(args?.[0] ?? '')]);
       return Promise.resolve(LIBRARY_VERSION);
     });
 
@@ -562,7 +573,11 @@ describe('Worker', () => {
       [keys.job('6'), keys.stream, keys.scheduled, keys.events],
       ['6', '4234567890-0', '1700000000000', delayedUntil.toString(), CONSUMER_GROUP, '{"step":"check"}'],
     );
-    expect((mockCommandClient.fcall as any).mock.calls.some((call: any[]) => call[0] === 'glidemq_fail')).toBe(true);
+    expect(
+      (mockCommandClient.fcall as any).mock.calls.some(
+        (call: any[]) => call[0] === 'glidemq_fail' || call[0] === 'glidemq_failAndFetchNext',
+      ),
+    ).toBe(true);
 
     await worker.close(true);
   });
@@ -606,7 +621,7 @@ describe('Worker', () => {
       'active',
     ]);
 
-    mockCommandClient.fcall = vi.fn().mockImplementation((func: string) => {
+    mockCommandClient.fcall = vi.fn().mockImplementation((func: string, _keys?: string[], args?: string[]) => {
       if (func === 'glidemq_version') return Promise.resolve(LIBRARY_VERSION);
       if (func === 'glidemq_checkConcurrency') return Promise.resolve(-1);
       if (func === 'glidemq_promote') return Promise.resolve(0);
@@ -614,6 +629,7 @@ describe('Worker', () => {
       if (func === 'glidemq_moveToActive') return Promise.resolve(jobHash);
       if (func === 'glidemq_moveActiveToDelayed') return Promise.resolve('ok');
       if (func === 'glidemq_fail') return Promise.resolve('failed');
+      if (func === 'glidemq_failAndFetchNext') return Promise.resolve(['failed', 'NEXT_NONE', String(args?.[0] ?? '')]);
       return Promise.resolve(LIBRARY_VERSION);
     });
 
@@ -675,9 +691,9 @@ describe('Worker', () => {
       if (func === 'glidemq_promote') return Promise.resolve(0);
       if (func === 'glidemq_reclaimStalled') return Promise.resolve(0);
       if (func === 'glidemq_moveToActive') return Promise.resolve(jobHash);
-      if (func === 'glidemq_fail') {
+      if (func === 'glidemq_fail' || func === 'glidemq_failAndFetchNext') {
         expect(args).toEqual(expect.arrayContaining(['5', '3234567890-0', 'not really delayed']));
-        return Promise.resolve('failed');
+        return Promise.resolve(func === 'glidemq_fail' ? 'failed' : ['failed', 'NEXT_NONE', '5']);
       }
       return Promise.resolve(LIBRARY_VERSION);
     });
@@ -689,7 +705,11 @@ describe('Worker', () => {
     expect(
       (mockCommandClient.fcall as any).mock.calls.some((call: any[]) => call[0] === 'glidemq_moveActiveToDelayed'),
     ).toBe(false);
-    expect((mockCommandClient.fcall as any).mock.calls.some((call: any[]) => call[0] === 'glidemq_fail')).toBe(true);
+    expect(
+      (mockCommandClient.fcall as any).mock.calls.some(
+        (call: any[]) => call[0] === 'glidemq_fail' || call[0] === 'glidemq_failAndFetchNext',
+      ),
+    ).toBe(true);
 
     await worker.close(true);
   });

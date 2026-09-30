@@ -1363,6 +1363,362 @@ redis.register_function('glidemq_complete', function(keys, args)
   return #parentNotifications > 0 and cjson.encode(parentNotifications) or ''
 end)
 
+-- Fetch phases shared by completeAndFetchNext and failAndFetchNext: pop the
+-- next job from the priority list, the LIFO list or the stream, gate it
+-- (ordering, group concurrency, token bucket, rate window) and activate it.
+-- Returns {'NEXT_NONE', jobId}, {'NEXT_REVOKED', jobId, nextJobId, nextEntryId}
+-- or {'NEXT_HASH', jobId, nextJobId, nextEntryId, field1, value1, ...}.
+local function fetchNextForChain(prefix, streamKey, eventsKey, failedMetricsKey, group, consumer, timestamp, skipEvents, skipMetrics, jobId)
+  -- Return protocol (array-based to avoid cjson encode/decode per job):
+  -- Cross-queue completions append '__glidemq_parent_notifications__', JSON members.
+  -- {'NEXT_NONE', completedJobId, ...}
+  -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId, ...}
+  -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ..., ...}
+
+  -- Phase 1.0: Try priority list first (highest priority: priority > LIFO > FIFO)
+  local priorityKey = prefix .. 'priority'
+  for _priAttempt = 1, 3 do
+    local priJobId = redis.call('RPOP', priorityKey)
+    if not priJobId then
+      break  -- priority list is empty
+    end
+
+    local priJobKey = prefix .. 'job:' .. priJobId
+    -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' (3 → 1)
+    local priMeta = redis.call('HMGET', priJobKey, 'state', 'revoked', 'expireAt', 'groupKey', 'orderingSeq')
+    if priMeta[1] and isActivatableState(priMeta[1]) then
+      if priMeta[2] ~= '1' then
+        local priExpireAt = tonumber(priMeta[3])
+        if not priExpireAt or priExpireAt <= 0 or timestamp <= priExpireAt then
+          -- Check ordering/group gates for priority-list jobs
+          local priGroupKey = priMeta[4]
+          if priGroupKey and priGroupKey ~= '' then
+            local priGroupHashKey = prefix .. 'group:' .. priGroupKey
+            local priGrpFields = redis.call('HGETALL', priGroupHashKey)
+            local priGrp = {}
+            for pf = 1, #priGrpFields, 2 do priGrp[priGrpFields[pf]] = priGrpFields[pf + 1] end
+            local priOrdSeq = tonumber(priMeta[5]) or 0
+            local priNextSeq = tonumber(priGrp.nextSeq) or 0
+            if priNextSeq > 0 then
+              local priAdv = advancePastSkips(priGroupHashKey, priNextSeq)
+              if priAdv > priNextSeq then
+                redis.call('HSET', priGroupHashKey, 'nextSeq', tostring(priAdv))
+                priNextSeq = priAdv
+              end
+            end
+            local priMaxConc = tonumber(priGrp.maxConcurrency) or 0
+            local priActive = tonumber(priGrp.active) or 0
+            local priWaitListKey = prefix .. 'groupq:' .. priGroupKey
+            local priReturning = (priOrdSeq > 0 and priNextSeq > 0 and priOrdSeq < priNextSeq)
+            -- Ordering gate or concurrency gate (skip for returning step-jobs)
+            if (priOrdSeq > 0 and priNextSeq > 0 and priOrdSeq > priNextSeq) or
+               (priMaxConc > 0 and priActive >= priMaxConc and not priReturning) then
+              local priScore = priOrdSeq > 0 and priOrdSeq or tonumber(priJobId) or 0
+              redis.call('ZADD', priWaitListKey, priScore, priJobId)
+              redis.call('HSET', priJobKey, 'state', 'group-waiting')
+            else
+              local priTbCapacity = tonumber(priGrp.tbCapacity) or 0
+              local priTbBlocked = false
+              local priTbDelay = 0
+              local priJobCostVal = 0
+              if priTbCapacity > 0 then
+                local priTbTokens = tbRefill(priGroupHashKey, priGrp, tonumber(timestamp))
+                priJobCostVal = tonumber(redis.call('HGET', priJobKey, 'cost')) or 1000
+                if priJobCostVal > priTbCapacity then
+                  local priProcessedOn = tonumber(redis.call('HGET', priJobKey, 'processedOn')) or tonumber(timestamp)
+                  redis.call('ZADD', prefix .. 'failed', tonumber(timestamp), priJobId)
+                  redis.call('HSET', priJobKey,
+                    'state', 'failed',
+                    'failedReason', 'cost exceeds token bucket capacity',
+                    'finishedOn', tostring(timestamp))
+                  advanceRepeatAfterComplete(priJobKey, prefix, tonumber(timestamp))
+                  if skipEvents ~= '1' then emitEvent(eventsKey, 'failed', priJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
+                  if skipMetrics ~= '1' then recordMetrics(prefix .. 'metrics:failed', tonumber(timestamp), tonumber(timestamp) - priProcessedOn) end
+                  if priOrdSeq > 0 then
+                    markOrderingDone(priJobKey, priJobId, priGroupKey, priOrdSeq)
+                    closeOrderingHoleAndPromote(priJobKey, priJobId, tonumber(timestamp))
+                  end
+                elseif priTbTokens < priJobCostVal then
+                  priTbBlocked = true
+                  local priTbRefillRateVal = math.max(tonumber(priGrp.tbRefillRate) or 0, 1)
+                  priTbDelay = math.ceil((priJobCostVal - priTbTokens) * 1000 / priTbRefillRateVal)
+                end
+              end
+              local priRateMax = tonumber(priGrp.rateMax) or 0
+              local priRlBlocked = false
+              local priRlDelay = 0
+              if not priTbBlocked and priJobCostVal <= priTbCapacity and priRateMax > 0 then
+                local priRateDuration = tonumber(priGrp.rateDuration) or 0
+                local priRateWindowStart = tonumber(priGrp.rateWindowStart) or 0
+                local priRateCount = tonumber(priGrp.rateCount) or 0
+                if priRateDuration > 0 and timestamp - priRateWindowStart < priRateDuration and priRateCount >= priRateMax then
+                  priRlBlocked = true
+                  priRlDelay = (priRateWindowStart + priRateDuration) - timestamp
+                end
+              end
+              if priTbBlocked or priRlBlocked then
+                redis.call('ZADD', priWaitListKey, groupqScore(priJobKey, priJobId), priJobId)
+                redis.call('HSET', priJobKey, 'state', 'group-waiting')
+                redis.call('ZADD', prefix .. 'ratelimited', tonumber(timestamp) + math.max(priTbDelay, priRlDelay), priGroupKey)
+                return {'NEXT_NONE', jobId}
+              elseif priTbCapacity > 0 and priJobCostVal > priTbCapacity then
+                -- Failed above; try the next priority job.
+              else
+                if priTbCapacity > 0 then
+                  redis.call('HINCRBY', priGroupHashKey, 'tbTokens', -priJobCostVal)
+                end
+                if priRateMax > 0 then
+                  local priRateDuration = tonumber(priGrp.rateDuration) or 0
+                  if priRateDuration > 0 then
+                    local priRateWindowStart = tonumber(priGrp.rateWindowStart) or 0
+                    if timestamp - priRateWindowStart >= priRateDuration then
+                      redis.call('HSET', priGroupHashKey, 'rateWindowStart', tostring(timestamp), 'rateCount', '1')
+                    else
+                      redis.call('HINCRBY', priGroupHashKey, 'rateCount', 1)
+                    end
+                  end
+                end
+                redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
+                if not priReturning then
+                  redis.call('HINCRBY', priGroupHashKey, 'active', 1)
+                end
+                if priOrdSeq > 0 and not priReturning then
+                  redis.call('HSET', priGroupHashKey, 'nextSeq', tostring(priOrdSeq + 1))
+                  redis.call('ZREM', priWaitListKey, priJobId)
+                end
+                local priJobFields = redis.call('HGETALL', priJobKey)
+                incrListActive(prefix .. 'list-active', {priJobId})
+                return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
+              end
+            end
+          else
+            -- Non-group job: activate directly
+            redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
+            local priJobFields = redis.call('HGETALL', priJobKey)
+            incrListActive(prefix .. 'list-active', {priJobId})
+            return {'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}
+          end
+        else
+          expireJob(priJobKey, priJobId, prefix, timestamp, priMeta[1], nil, nil, nil)
+        end
+      end
+    end
+  end
+
+  -- Phase 1.5: Try LIFO list (before stream), retry up to 3 times
+  local lifoKey = prefix .. 'lifo'
+  for _lifoAttempt = 1, 3 do
+    local lifoJobId = redis.call('RPOP', lifoKey)
+    if not lifoJobId then
+      break  -- LIFO list is empty
+    end
+
+    local lifoJobKey = prefix .. 'job:' .. lifoJobId
+    -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' (3 → 1)
+    local lifoMeta = redis.call('HMGET', lifoJobKey, 'state', 'revoked', 'expireAt')
+    if lifoMeta[1] and isActivatableState(lifoMeta[1]) then
+      if lifoMeta[2] ~= '1' then
+        local lifoExpireAt = tonumber(lifoMeta[3])
+        if not lifoExpireAt or lifoExpireAt <= 0 or timestamp <= lifoExpireAt then
+          redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
+          local lifoJobFields = redis.call('HGETALL', lifoJobKey)
+          incrListActive(prefix .. 'list-active', {lifoJobId})
+          return {'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}
+        else
+          expireJob(lifoJobKey, lifoJobId, prefix, timestamp, lifoMeta[1], nil, nil, nil)
+        end
+      end
+    end
+  end
+
+  -- Phase 2: Fetch next job (non-blocking XREADGROUP), skip expired (up to 3 attempts)
+  local nextJobId, nextEntryId, nextJobKey
+  local nextGroupKey = nil
+  local nextOrderingSeq = nil
+  for _fetchAttempt = 1, 3 do
+    local nextEntries = redis.call('XREADGROUP', 'GROUP', group, consumer, 'COUNT', 1, 'STREAMS', streamKey, '>')
+    if not nextEntries or #nextEntries == 0 then
+      return {'NEXT_NONE', jobId}
+    end
+    local streamData = nextEntries[1]
+    local entries = streamData[2]
+    if not entries or #entries == 0 then
+      return {'NEXT_NONE', jobId}
+    end
+    local nextEntry = entries[1]
+    nextEntryId = nextEntry[1]
+    local nextFields = nextEntry[2]
+    nextJobId = nil
+    for i = 1, #nextFields, 2 do
+      if nextFields[i] == 'jobId' then
+        nextJobId = nextFields[i + 1]
+        break
+      end
+    end
+    if not nextJobId then
+      return {'NEXT_NONE', jobId}
+    end
+    nextJobKey = prefix .. 'job:' .. nextJobId
+    -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' + HGET 'groupKey' (4 → 1)
+    local nextMeta = redis.call('HMGET', nextJobKey, 'state', 'revoked', 'expireAt', 'groupKey', 'orderingSeq')
+    if not nextMeta[1] then
+      -- state is nil: job hash does not exist
+      return {'NEXT_NONE', jobId}
+    end
+    if nextMeta[2] == '1' then
+      return {'NEXT_REVOKED', jobId, nextJobId, nextEntryId}
+    end
+    -- Inline expiry check (avoids checkExpired's redundant HGET)
+    local nextExpireAt = tonumber(nextMeta[3])
+    if not isActivatableState(nextMeta[1]) then
+      -- Stale entry for a job that is already running or finished elsewhere.
+      redis.call('XACK', streamKey, group, nextEntryId)
+      redis.call('XDEL', streamKey, nextEntryId)
+      nextJobId = nil
+    elseif nextExpireAt and nextExpireAt > 0 and timestamp > nextExpireAt then
+      local curState = nextMeta[1]
+      expireJob(nextJobKey, nextJobId, prefix, timestamp, curState, nil, nil, nil)
+      redis.call('XACK', streamKey, group, nextEntryId)
+      redis.call('XDEL', streamKey, nextEntryId)
+      nextJobId = nil
+    else
+      nextGroupKey = nextMeta[4]
+      nextOrderingSeq = nextMeta[5]
+      break
+    end
+  end
+  if not nextJobId then
+    return {'NEXT_NONE', jobId}
+  end
+
+  -- Phase 3: Activate next job (same as moveToActive)
+  if nextGroupKey and nextGroupKey ~= '' then
+    local nextGroupHashKey = prefix .. 'group:' .. nextGroupKey
+    -- Load all group fields in one call
+    local nGrpFields = redis.call('HGETALL', nextGroupHashKey)
+    local nGrp = {}
+    for nf = 1, #nGrpFields, 2 do nGrp[nGrpFields[nf]] = nGrpFields[nf + 1] end
+    local nextMaxConc = tonumber(nGrp.maxConcurrency) or 0
+    local nextActive = tonumber(nGrp.active) or 0
+    local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
+    -- Ordering gate
+    local nextJobOrderingSeq = tonumber(nextOrderingSeq) or 0
+    local nextReturning = false
+    if nextJobOrderingSeq > 0 then
+      local nextExpectedSeq = tonumber(nGrp.nextSeq) or 0
+      if nextExpectedSeq > 0 then
+        local relAdv = advancePastSkips(nextGroupHashKey, nextExpectedSeq)
+        if relAdv > nextExpectedSeq then
+          redis.call('HSET', nextGroupHashKey, 'nextSeq', tostring(relAdv))
+          nextExpectedSeq = relAdv
+        end
+      end
+      if nextExpectedSeq > 0 and nextJobOrderingSeq > nextExpectedSeq then
+        redis.call('XACK', streamKey, group, nextEntryId)
+        redis.call('XDEL', streamKey, nextEntryId)
+        redis.call('ZADD', nextWaitListKey, nextJobOrderingSeq, nextJobId)
+        redis.call('HSET', nextJobKey, 'state', 'group-waiting')
+        return {'NEXT_NONE', jobId}
+      end
+      nextReturning = (nextExpectedSeq > 0 and nextJobOrderingSeq < nextExpectedSeq)
+    end
+    -- Concurrency gate (skip for returning step-jobs)
+    if nextMaxConc > 0 and nextActive >= nextMaxConc and not nextReturning then
+      redis.call('XACK', streamKey, group, nextEntryId)
+      redis.call('XDEL', streamKey, nextEntryId)
+      redis.call('ZADD', nextWaitListKey, groupqScore(nextJobKey, nextJobId), nextJobId)
+      redis.call('HSET', nextJobKey, 'state', 'group-waiting')
+      return {'NEXT_NONE', jobId}
+    end
+    -- Token bucket gate (read-only)
+    local nextTbCapacity = tonumber(nGrp.tbCapacity) or 0
+    local nextTbBlocked = false
+    local nextTbDelay = 0
+    local nextTbTokens = 0
+    local nextJobCostVal = 0
+    if nextTbCapacity > 0 then
+      nextTbTokens = tbRefill(nextGroupHashKey, nGrp, tonumber(timestamp))
+      nextJobCostVal = tonumber(redis.call('HGET', nextJobKey, 'cost')) or 1000
+      -- DLQ guard: cost > capacity
+      if nextJobCostVal > nextTbCapacity then
+        local nextProcessedOn = tonumber(redis.call('HGET', nextJobKey, 'processedOn')) or tonumber(timestamp)
+        redis.call('XACK', streamKey, group, nextEntryId)
+        redis.call('XDEL', streamKey, nextEntryId)
+        redis.call('ZADD', prefix .. 'failed', tonumber(timestamp), nextJobId)
+        markOrderingDone(nextJobKey, nextJobId, nextGroupKey, nextJobOrderingSeq)
+        redis.call('HSET', nextJobKey,
+          'state', 'failed',
+          'failedReason', 'cost exceeds token bucket capacity',
+          'finishedOn', tostring(timestamp))
+        advanceRepeatAfterComplete(nextJobKey, prefix, tonumber(timestamp))
+        if skipEvents ~= '1' then emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
+        if skipMetrics ~= '1' then recordMetrics(failedMetricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn) end
+        closeOrderingHoleAndPromote(nextJobKey, nextJobId, tonumber(timestamp))
+        return {'NEXT_NONE', jobId}
+      end
+      if nextTbTokens < nextJobCostVal then
+        nextTbBlocked = true
+        local nextTbRefillRateVal = math.max(tonumber(nGrp.tbRefillRate) or 0, 1)
+        nextTbDelay = math.ceil((nextJobCostVal - nextTbTokens) * 1000 / nextTbRefillRateVal)
+      end
+    end
+    -- Sliding window gate (read-only)
+    local nextRateMax = tonumber(nGrp.rateMax) or 0
+    local nextRlBlocked = false
+    local nextRlDelay = 0
+    if nextRateMax > 0 then
+      local nextRateDuration = tonumber(nGrp.rateDuration) or 0
+      local nextRateWindowStart = tonumber(nGrp.rateWindowStart) or 0
+      local nextRateCount = tonumber(nGrp.rateCount) or 0
+      if nextRateDuration > 0 and timestamp - nextRateWindowStart < nextRateDuration and nextRateCount >= nextRateMax then
+        nextRlBlocked = true
+        nextRlDelay = (nextRateWindowStart + nextRateDuration) - timestamp
+      end
+    end
+    -- If ANY gate blocked: park + register
+    if nextTbBlocked or nextRlBlocked then
+      redis.call('XACK', streamKey, group, nextEntryId)
+      redis.call('XDEL', streamKey, nextEntryId)
+      local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
+      redis.call('ZADD', nextWaitListKey, groupqScore(nextJobKey, nextJobId), nextJobId)
+      redis.call('HSET', nextJobKey, 'state', 'group-waiting')
+      local nextMaxDelay = math.max(nextTbDelay, nextRlDelay)
+      local rateLimitedKey = prefix .. 'ratelimited'
+      redis.call('ZADD', rateLimitedKey, tonumber(timestamp) + nextMaxDelay, nextGroupKey)
+      return {'NEXT_NONE', jobId}
+    end
+    -- All gates passed: mutate state
+    if nextTbCapacity > 0 then
+      redis.call('HINCRBY', nextGroupHashKey, 'tbTokens', -nextJobCostVal)
+    end
+    if nextRateMax > 0 then
+      local nextRateDuration = tonumber(nGrp.rateDuration) or 0
+      if nextRateDuration > 0 then
+        local nextRateWindowStart = tonumber(nGrp.rateWindowStart) or 0
+        if timestamp - nextRateWindowStart >= nextRateDuration then
+          redis.call('HSET', nextGroupHashKey, 'rateWindowStart', tostring(timestamp), 'rateCount', '1')
+        else
+          redis.call('HINCRBY', nextGroupHashKey, 'rateCount', 1)
+        end
+      end
+    end
+    if not nextReturning then
+      redis.call('HINCRBY', nextGroupHashKey, 'active', 1)
+    end
+    if nextJobOrderingSeq > 0 and not nextReturning then
+      redis.call('HSET', nextGroupHashKey, 'nextSeq', tostring(nextJobOrderingSeq + 1))
+      redis.call('ZREM', nextWaitListKey, nextJobId)
+    end
+  end
+  redis.call('HSET', nextJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '0')
+  local nextHash = redis.call('HGETALL', nextJobKey)
+  local out = {'NEXT_HASH', jobId, nextJobId, nextEntryId}
+  for i = 1, #nextHash do
+    out[#out + 1] = nextHash[i]
+  end
+  return out
+end
+
 redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   local streamKey = keys[1]
   local completedKey = keys[2]
@@ -1529,357 +1885,12 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
     return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
   end
 
-  -- Return protocol (array-based to avoid cjson encode/decode per job):
-  -- Cross-queue completions append '__glidemq_parent_notifications__', JSON members.
-  -- {'NEXT_NONE', completedJobId, ...}
-  -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId, ...}
-  -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ..., ...}
-
-  -- Phase 1.0: Try priority list first (highest priority: priority > LIFO > FIFO)
-  local priorityKey = prefix .. 'priority'
-  for _priAttempt = 1, 3 do
-    local priJobId = redis.call('RPOP', priorityKey)
-    if not priJobId then
-      break  -- priority list is empty
-    end
-
-    local priJobKey = prefix .. 'job:' .. priJobId
-    -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' (3 → 1)
-    local priMeta = redis.call('HMGET', priJobKey, 'state', 'revoked', 'expireAt', 'groupKey', 'orderingSeq')
-    if priMeta[1] and isActivatableState(priMeta[1]) then
-      if priMeta[2] ~= '1' then
-        local priExpireAt = tonumber(priMeta[3])
-        if not priExpireAt or priExpireAt <= 0 or timestamp <= priExpireAt then
-          -- Check ordering/group gates for priority-list jobs
-          local priGroupKey = priMeta[4]
-          if priGroupKey and priGroupKey ~= '' then
-            local priGroupHashKey = prefix .. 'group:' .. priGroupKey
-            local priGrpFields = redis.call('HGETALL', priGroupHashKey)
-            local priGrp = {}
-            for pf = 1, #priGrpFields, 2 do priGrp[priGrpFields[pf]] = priGrpFields[pf + 1] end
-            local priOrdSeq = tonumber(priMeta[5]) or 0
-            local priNextSeq = tonumber(priGrp.nextSeq) or 0
-            if priNextSeq > 0 then
-              local priAdv = advancePastSkips(priGroupHashKey, priNextSeq)
-              if priAdv > priNextSeq then
-                redis.call('HSET', priGroupHashKey, 'nextSeq', tostring(priAdv))
-                priNextSeq = priAdv
-              end
-            end
-            local priMaxConc = tonumber(priGrp.maxConcurrency) or 0
-            local priActive = tonumber(priGrp.active) or 0
-            local priWaitListKey = prefix .. 'groupq:' .. priGroupKey
-            local priReturning = (priOrdSeq > 0 and priNextSeq > 0 and priOrdSeq < priNextSeq)
-            -- Ordering gate or concurrency gate (skip for returning step-jobs)
-            if (priOrdSeq > 0 and priNextSeq > 0 and priOrdSeq > priNextSeq) or
-               (priMaxConc > 0 and priActive >= priMaxConc and not priReturning) then
-              local priScore = priOrdSeq > 0 and priOrdSeq or tonumber(priJobId) or 0
-              redis.call('ZADD', priWaitListKey, priScore, priJobId)
-              redis.call('HSET', priJobKey, 'state', 'group-waiting')
-            else
-              local priTbCapacity = tonumber(priGrp.tbCapacity) or 0
-              local priTbBlocked = false
-              local priTbDelay = 0
-              local priJobCostVal = 0
-              if priTbCapacity > 0 then
-                local priTbTokens = tbRefill(priGroupHashKey, priGrp, tonumber(timestamp))
-                priJobCostVal = tonumber(redis.call('HGET', priJobKey, 'cost')) or 1000
-                if priJobCostVal > priTbCapacity then
-                  local priProcessedOn = tonumber(redis.call('HGET', priJobKey, 'processedOn')) or tonumber(timestamp)
-                  redis.call('ZADD', prefix .. 'failed', tonumber(timestamp), priJobId)
-                  redis.call('HSET', priJobKey,
-                    'state', 'failed',
-                    'failedReason', 'cost exceeds token bucket capacity',
-                    'finishedOn', tostring(timestamp))
-                  advanceRepeatAfterComplete(priJobKey, prefix, tonumber(timestamp))
-                  if skipEvents ~= '1' then emitEvent(eventsKey, 'failed', priJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
-                  if skipMetrics ~= '1' then recordMetrics(prefix .. 'metrics:failed', tonumber(timestamp), tonumber(timestamp) - priProcessedOn) end
-                  if priOrdSeq > 0 then
-                    markOrderingDone(priJobKey, priJobId, priGroupKey, priOrdSeq)
-                    closeOrderingHoleAndPromote(priJobKey, priJobId, tonumber(timestamp))
-                  end
-                elseif priTbTokens < priJobCostVal then
-                  priTbBlocked = true
-                  local priTbRefillRateVal = math.max(tonumber(priGrp.tbRefillRate) or 0, 1)
-                  priTbDelay = math.ceil((priJobCostVal - priTbTokens) * 1000 / priTbRefillRateVal)
-                end
-              end
-              local priRateMax = tonumber(priGrp.rateMax) or 0
-              local priRlBlocked = false
-              local priRlDelay = 0
-              if not priTbBlocked and priJobCostVal <= priTbCapacity and priRateMax > 0 then
-                local priRateDuration = tonumber(priGrp.rateDuration) or 0
-                local priRateWindowStart = tonumber(priGrp.rateWindowStart) or 0
-                local priRateCount = tonumber(priGrp.rateCount) or 0
-                if priRateDuration > 0 and timestamp - priRateWindowStart < priRateDuration and priRateCount >= priRateMax then
-                  priRlBlocked = true
-                  priRlDelay = (priRateWindowStart + priRateDuration) - timestamp
-                end
-              end
-              if priTbBlocked or priRlBlocked then
-                redis.call('ZADD', priWaitListKey, groupqScore(priJobKey, priJobId), priJobId)
-                redis.call('HSET', priJobKey, 'state', 'group-waiting')
-                redis.call('ZADD', prefix .. 'ratelimited', tonumber(timestamp) + math.max(priTbDelay, priRlDelay), priGroupKey)
-                return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
-              elseif priTbCapacity > 0 and priJobCostVal > priTbCapacity then
-                -- Failed above; try the next priority job.
-              else
-                if priTbCapacity > 0 then
-                  redis.call('HINCRBY', priGroupHashKey, 'tbTokens', -priJobCostVal)
-                end
-                if priRateMax > 0 then
-                  local priRateDuration = tonumber(priGrp.rateDuration) or 0
-                  if priRateDuration > 0 then
-                    local priRateWindowStart = tonumber(priGrp.rateWindowStart) or 0
-                    if timestamp - priRateWindowStart >= priRateDuration then
-                      redis.call('HSET', priGroupHashKey, 'rateWindowStart', tostring(timestamp), 'rateCount', '1')
-                    else
-                      redis.call('HINCRBY', priGroupHashKey, 'rateCount', 1)
-                    end
-                  end
-                end
-                redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
-                if not priReturning then
-                  redis.call('HINCRBY', priGroupHashKey, 'active', 1)
-                end
-                if priOrdSeq > 0 and not priReturning then
-                  redis.call('HSET', priGroupHashKey, 'nextSeq', tostring(priOrdSeq + 1))
-                  redis.call('ZREM', priWaitListKey, priJobId)
-                end
-                local priJobFields = redis.call('HGETALL', priJobKey)
-                incrListActive(prefix .. 'list-active', {priJobId})
-                return appendParentNotifications({'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}, parentNotifications)
-              end
-            end
-          else
-            -- Non-group job: activate directly
-            redis.call('HSET', priJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
-            local priJobFields = redis.call('HGETALL', priJobKey)
-            incrListActive(prefix .. 'list-active', {priJobId})
-            return appendParentNotifications({'NEXT_HASH', jobId, priJobId, '', unpack(priJobFields)}, parentNotifications)
-          end
-        else
-          expireJob(priJobKey, priJobId, prefix, timestamp, priMeta[1], nil, nil, nil)
-        end
-      end
-    end
-  end
-
-  -- Phase 1.5: Try LIFO list (before stream), retry up to 3 times
-  local lifoKey = prefix .. 'lifo'
-  for _lifoAttempt = 1, 3 do
-    local lifoJobId = redis.call('RPOP', lifoKey)
-    if not lifoJobId then
-      break  -- LIFO list is empty
-    end
-
-    local lifoJobKey = prefix .. 'job:' .. lifoJobId
-    -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' (3 → 1)
-    local lifoMeta = redis.call('HMGET', lifoJobKey, 'state', 'revoked', 'expireAt')
-    if lifoMeta[1] and isActivatableState(lifoMeta[1]) then
-      if lifoMeta[2] ~= '1' then
-        local lifoExpireAt = tonumber(lifoMeta[3])
-        if not lifoExpireAt or lifoExpireAt <= 0 or timestamp <= lifoExpireAt then
-          redis.call('HSET', lifoJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '1')
-          local lifoJobFields = redis.call('HGETALL', lifoJobKey)
-          incrListActive(prefix .. 'list-active', {lifoJobId})
-          return appendParentNotifications({'NEXT_HASH', jobId, lifoJobId, '', unpack(lifoJobFields)}, parentNotifications)
-        else
-          expireJob(lifoJobKey, lifoJobId, prefix, timestamp, lifoMeta[1], nil, nil, nil)
-        end
-      end
-    end
-  end
-
-  -- Phase 2: Fetch next job (non-blocking XREADGROUP), skip expired (up to 3 attempts)
-  local nextJobId, nextEntryId, nextJobKey
-  local nextGroupKey = nil
-  local nextOrderingSeq = nil
-  for _fetchAttempt = 1, 3 do
-    local nextEntries = redis.call('XREADGROUP', 'GROUP', group, consumer, 'COUNT', 1, 'STREAMS', streamKey, '>')
-    if not nextEntries or #nextEntries == 0 then
-      return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
-    end
-    local streamData = nextEntries[1]
-    local entries = streamData[2]
-    if not entries or #entries == 0 then
-      return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
-    end
-    local nextEntry = entries[1]
-    nextEntryId = nextEntry[1]
-    local nextFields = nextEntry[2]
-    nextJobId = nil
-    for i = 1, #nextFields, 2 do
-      if nextFields[i] == 'jobId' then
-        nextJobId = nextFields[i + 1]
-        break
-      end
-    end
-    if not nextJobId then
-      return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
-    end
-    nextJobKey = prefix .. 'job:' .. nextJobId
-    -- Single HMGET replaces EXISTS + HGET 'revoked' + checkExpired HGET 'expireAt' + HGET 'groupKey' (4 → 1)
-    local nextMeta = redis.call('HMGET', nextJobKey, 'state', 'revoked', 'expireAt', 'groupKey', 'orderingSeq')
-    if not nextMeta[1] then
-      -- state is nil: job hash does not exist
-      return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
-    end
-    if nextMeta[2] == '1' then
-      return appendParentNotifications({'NEXT_REVOKED', jobId, nextJobId, nextEntryId}, parentNotifications)
-    end
-    -- Inline expiry check (avoids checkExpired's redundant HGET)
-    local nextExpireAt = tonumber(nextMeta[3])
-    if not isActivatableState(nextMeta[1]) then
-      -- Stale entry for a job that is already running or finished elsewhere.
-      redis.call('XACK', streamKey, group, nextEntryId)
-      redis.call('XDEL', streamKey, nextEntryId)
-      nextJobId = nil
-    elseif nextExpireAt and nextExpireAt > 0 and timestamp > nextExpireAt then
-      local curState = nextMeta[1]
-      expireJob(nextJobKey, nextJobId, prefix, timestamp, curState, nil, nil, nil)
-      redis.call('XACK', streamKey, group, nextEntryId)
-      redis.call('XDEL', streamKey, nextEntryId)
-      nextJobId = nil
-    else
-      nextGroupKey = nextMeta[4]
-      nextOrderingSeq = nextMeta[5]
-      break
-    end
-  end
-  if not nextJobId then
-    return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
-  end
-
-  -- Phase 3: Activate next job (same as moveToActive)
-  if nextGroupKey and nextGroupKey ~= '' then
-    local nextGroupHashKey = prefix .. 'group:' .. nextGroupKey
-    -- Load all group fields in one call
-    local nGrpFields = redis.call('HGETALL', nextGroupHashKey)
-    local nGrp = {}
-    for nf = 1, #nGrpFields, 2 do nGrp[nGrpFields[nf]] = nGrpFields[nf + 1] end
-    local nextMaxConc = tonumber(nGrp.maxConcurrency) or 0
-    local nextActive = tonumber(nGrp.active) or 0
-    local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
-    -- Ordering gate
-    local nextJobOrderingSeq = tonumber(nextOrderingSeq) or 0
-    local nextReturning = false
-    if nextJobOrderingSeq > 0 then
-      local nextExpectedSeq = tonumber(nGrp.nextSeq) or 0
-      if nextExpectedSeq > 0 then
-        local relAdv = advancePastSkips(nextGroupHashKey, nextExpectedSeq)
-        if relAdv > nextExpectedSeq then
-          redis.call('HSET', nextGroupHashKey, 'nextSeq', tostring(relAdv))
-          nextExpectedSeq = relAdv
-        end
-      end
-      if nextExpectedSeq > 0 and nextJobOrderingSeq > nextExpectedSeq then
-        redis.call('XACK', streamKey, group, nextEntryId)
-        redis.call('XDEL', streamKey, nextEntryId)
-        redis.call('ZADD', nextWaitListKey, nextJobOrderingSeq, nextJobId)
-        redis.call('HSET', nextJobKey, 'state', 'group-waiting')
-        return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
-      end
-      nextReturning = (nextExpectedSeq > 0 and nextJobOrderingSeq < nextExpectedSeq)
-    end
-    -- Concurrency gate (skip for returning step-jobs)
-    if nextMaxConc > 0 and nextActive >= nextMaxConc and not nextReturning then
-      redis.call('XACK', streamKey, group, nextEntryId)
-      redis.call('XDEL', streamKey, nextEntryId)
-      redis.call('ZADD', nextWaitListKey, groupqScore(nextJobKey, nextJobId), nextJobId)
-      redis.call('HSET', nextJobKey, 'state', 'group-waiting')
-      return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
-    end
-    -- Token bucket gate (read-only)
-    local nextTbCapacity = tonumber(nGrp.tbCapacity) or 0
-    local nextTbBlocked = false
-    local nextTbDelay = 0
-    local nextTbTokens = 0
-    local nextJobCostVal = 0
-    if nextTbCapacity > 0 then
-      nextTbTokens = tbRefill(nextGroupHashKey, nGrp, tonumber(timestamp))
-      nextJobCostVal = tonumber(redis.call('HGET', nextJobKey, 'cost')) or 1000
-      -- DLQ guard: cost > capacity
-      if nextJobCostVal > nextTbCapacity then
-        local nextProcessedOn = tonumber(redis.call('HGET', nextJobKey, 'processedOn')) or tonumber(timestamp)
-        redis.call('XACK', streamKey, group, nextEntryId)
-        redis.call('XDEL', streamKey, nextEntryId)
-        redis.call('ZADD', prefix .. 'failed', tonumber(timestamp), nextJobId)
-        markOrderingDone(nextJobKey, nextJobId, nextGroupKey, nextJobOrderingSeq)
-        redis.call('HSET', nextJobKey,
-          'state', 'failed',
-          'failedReason', 'cost exceeds token bucket capacity',
-          'finishedOn', tostring(timestamp))
-        advanceRepeatAfterComplete(nextJobKey, prefix, tonumber(timestamp))
-        if skipEvents ~= '1' then emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
-        if skipMetrics ~= '1' then recordMetrics(metricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn) end
-        closeOrderingHoleAndPromote(nextJobKey, nextJobId, tonumber(timestamp))
-        return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
-      end
-      if nextTbTokens < nextJobCostVal then
-        nextTbBlocked = true
-        local nextTbRefillRateVal = math.max(tonumber(nGrp.tbRefillRate) or 0, 1)
-        nextTbDelay = math.ceil((nextJobCostVal - nextTbTokens) * 1000 / nextTbRefillRateVal)
-      end
-    end
-    -- Sliding window gate (read-only)
-    local nextRateMax = tonumber(nGrp.rateMax) or 0
-    local nextRlBlocked = false
-    local nextRlDelay = 0
-    if nextRateMax > 0 then
-      local nextRateDuration = tonumber(nGrp.rateDuration) or 0
-      local nextRateWindowStart = tonumber(nGrp.rateWindowStart) or 0
-      local nextRateCount = tonumber(nGrp.rateCount) or 0
-      if nextRateDuration > 0 and timestamp - nextRateWindowStart < nextRateDuration and nextRateCount >= nextRateMax then
-        nextRlBlocked = true
-        nextRlDelay = (nextRateWindowStart + nextRateDuration) - timestamp
-      end
-    end
-    -- If ANY gate blocked: park + register
-    if nextTbBlocked or nextRlBlocked then
-      redis.call('XACK', streamKey, group, nextEntryId)
-      redis.call('XDEL', streamKey, nextEntryId)
-      local nextWaitListKey = prefix .. 'groupq:' .. nextGroupKey
-      redis.call('ZADD', nextWaitListKey, groupqScore(nextJobKey, nextJobId), nextJobId)
-      redis.call('HSET', nextJobKey, 'state', 'group-waiting')
-      local nextMaxDelay = math.max(nextTbDelay, nextRlDelay)
-      local rateLimitedKey = prefix .. 'ratelimited'
-      redis.call('ZADD', rateLimitedKey, tonumber(timestamp) + nextMaxDelay, nextGroupKey)
-      return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
-    end
-    -- All gates passed: mutate state
-    if nextTbCapacity > 0 then
-      redis.call('HINCRBY', nextGroupHashKey, 'tbTokens', -nextJobCostVal)
-    end
-    if nextRateMax > 0 then
-      local nextRateDuration = tonumber(nGrp.rateDuration) or 0
-      if nextRateDuration > 0 then
-        local nextRateWindowStart = tonumber(nGrp.rateWindowStart) or 0
-        if timestamp - nextRateWindowStart >= nextRateDuration then
-          redis.call('HSET', nextGroupHashKey, 'rateWindowStart', tostring(timestamp), 'rateCount', '1')
-        else
-          redis.call('HINCRBY', nextGroupHashKey, 'rateCount', 1)
-        end
-      end
-    end
-    if not nextReturning then
-      redis.call('HINCRBY', nextGroupHashKey, 'active', 1)
-    end
-    if nextJobOrderingSeq > 0 and not nextReturning then
-      redis.call('HSET', nextGroupHashKey, 'nextSeq', tostring(nextJobOrderingSeq + 1))
-      redis.call('ZREM', nextWaitListKey, nextJobId)
-    end
-  end
-  redis.call('HSET', nextJobKey, 'state', 'active', 'processedOn', tostring(timestamp), 'lastActive', tostring(timestamp), 'listSourced', '0')
-  local nextHash = redis.call('HGETALL', nextJobKey)
-  local out = {'NEXT_HASH', jobId, nextJobId, nextEntryId}
-  for i = 1, #nextHash do
-    out[#out + 1] = nextHash[i]
-  end
-  return appendParentNotifications(out, parentNotifications)
+  return appendParentNotifications(
+    fetchNextForChain(prefix, streamKey, eventsKey, prefix .. 'metrics:failed', group, consumer, timestamp, skipEvents, skipMetrics, jobId),
+    parentNotifications)
 end)
 
-redis.register_function('glidemq_fail', function(keys, args)
+local function failJobCore(keys, args, requeueOnly)
   local streamKey = keys[1]
   local failedKey = keys[2]
   local scheduledKey = keys[3]
@@ -1913,16 +1924,22 @@ redis.register_function('glidemq_fail', function(keys, args)
   local attemptsMade
   if broadcastMode == '1' then
     local subKey = jobKey .. ':sub:' .. group
-    attemptsMade = redis.call('HINCRBY', subKey, 'a', 1)
+    if requeueOnly then
+      attemptsMade = tonumber(redis.call('HGET', subKey, 'a')) or 0
+    else
+      attemptsMade = redis.call('HINCRBY', subKey, 'a', 1)
+    end
     -- Keep the counter for 24h past the scheduled retry, so a backoff longer
     -- than 24h does not reset the attempts.
     redis.call('EXPIRE', subKey, 86400 + math.ceil(math.max(backoffDelay, 0) / 1000))
+  elseif requeueOnly then
+    attemptsMade = tonumber(redis.call('HGET', jobKey, 'attemptsMade')) or 0
   else
     attemptsMade = redis.call('HINCRBY', jobKey, 'attemptsMade', 1)
   end
-  if maxAttempts > 0 and attemptsMade < maxAttempts then
+  if requeueOnly or (maxAttempts > 0 and attemptsMade < maxAttempts) then
     -- Advance fallback chain if the job has fallbacks configured
-    local optsRaw = redis.call('HGET', jobKey, 'opts')
+    local optsRaw = (not requeueOnly) and redis.call('HGET', jobKey, 'opts') or nil
     if optsRaw and string.find(optsRaw, '"fallbacks"') then
       local fbIdx = tonumber(redis.call('HGET', jobKey, 'fallbackIndex') or '0') or 0
       redis.call('HSET', jobKey, 'fallbackIndex', tostring(fbIdx + 1))
@@ -1935,11 +1952,15 @@ redis.register_function('glidemq_fail', function(keys, args)
       member = jobId .. '||' .. group
     end
     redis.call('ZADD', scheduledKey, score, member)
-    redis.call('HSET', jobKey,
-      'state', 'delayed',
-      'failedReason', failedReason,
-      'processedOn', tostring(timestamp)
-    )
+    if requeueOnly then
+      redis.call('HSET', jobKey, 'state', 'delayed', 'processedOn', tostring(timestamp))
+    else
+      redis.call('HSET', jobKey,
+        'state', 'delayed',
+        'failedReason', failedReason,
+        'processedOn', tostring(timestamp)
+      )
+    end
     -- Only release group slot if not an ordering-key job (ordering jobs hold the slot through retries)
     local failOrdSeq = tonumber(redis.call('HGET', jobKey, 'orderingSeq')) or 0
     if failOrdSeq > 0 then
@@ -2002,6 +2023,33 @@ redis.register_function('glidemq_fail', function(keys, args)
     if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
     return 'failed'
   end
+end
+
+redis.register_function('glidemq_fail', function(keys, args)
+  -- args[14] '1': requeue after backoffDelay without counting the attempt (a
+  -- RateLimitError). No attempt increment, no failedReason, no fallback
+  -- advance; the job always comes back.
+  return failJobCore(keys, args, args[14] == '1')
+end)
+
+-- glidemq_fail followed by the fetch phases of completeAndFetchNext, so a
+-- failed job does not break the worker's chain (1 RTT per failure).
+-- KEYS: as glidemq_fail. ARGS: glidemq_fail args 1..13, then the consumer name.
+-- Returns {failResult, 'NEXT_NONE' | 'NEXT_REVOKED' | 'NEXT_HASH', ...} (see fetchNextForChain).
+redis.register_function('glidemq_failAndFetchNext', function(keys, args)
+  local failResult = failJobCore(keys, args, false)
+  local jobId = args[1]
+  local prefix = string.sub(keys[5], 1, #keys[5] - #('job:' .. jobId))
+  local consumer = args[14] or ''
+  local out
+  if (args[11] or '0') == '1' or consumer == '' or isQueuePaused(prefix) then
+    out = {'NEXT_NONE', jobId}
+  else
+    out = fetchNextForChain(prefix, keys[1], keys[4], keys[6], args[7], consumer, tonumber(args[4]),
+      args[12] or '0', args[13] or '0', jobId)
+  end
+  table.insert(out, 1, failResult)
+  return out
 end)
 
 redis.register_function('glidemq_reclaimStalled', function(keys, args)
@@ -3508,22 +3556,37 @@ redis.register_function('glidemq_registerParent', function(keys, args)
 end)
 
 -- Names of the consumer groups of a stream (none if the stream is missing).
+-- Consumer group names of a stream, plus each group's last-delivered-id.
 local function streamGroupNames(streamKey)
   local names = {}
+  local lastDelivered = {}
   local ok, groups = pcall(redis.call, 'XINFO', 'GROUPS', streamKey)
-  if not ok or type(groups) ~= 'table' then return names end
+  if not ok or type(groups) ~= 'table' then return names, lastDelivered end
   for gi = 1, #groups do
     local info = groups[gi]
     if type(info) == 'table' then
+      local name, last = nil, '0-0'
       for f = 1, #info, 2 do
-        if info[f] == 'name' then
-          names[#names + 1] = info[f + 1]
-          break
-        end
+        if info[f] == 'name' then name = info[f + 1] end
+        if info[f] == 'last-delivered-id' then last = info[f + 1] end
+      end
+      if name then
+        names[#names + 1] = name
+        lastDelivered[name] = last
       end
     end
   end
-  return names
+  return names, lastDelivered
+end
+
+-- True when stream id a is newer than b ('ms-seq' strings).
+local function streamIdGreater(a, b)
+  local aMs, aSeq = string.match(a, '^(%d+)%-(%d+)$')
+  local bMs, bSeq = string.match(b, '^(%d+)%-(%d+)$')
+  if not aMs or not bMs then return false end
+  aMs, aSeq, bMs, bSeq = tonumber(aMs), tonumber(aSeq), tonumber(bMs), tonumber(bSeq)
+  if aMs ~= bMs then return aMs > bMs end
+  return aSeq > bSeq
 end
 
 local function entryPendingInAnyGroup(streamKey, groups, entryId)
@@ -3569,7 +3632,8 @@ end
 -- message until that claim settles; later calls re-check those claims.
 -- KEYS: [streamKey, completedKey, failedKey, scheduledKey]
 -- ARGS: [maxLen, timestamp]
--- Returns the number of trimmed entries.
+-- Returns {trimmed, unread}: the number of trimmed entries and the number of
+-- (entry, subscription) pairs dropped before that subscription read them.
 redis.register_function('glidemq_trimBroadcast', function(keys, args)
   local streamKey = keys[1]
   local maxLen = tonumber(args[1]) or 0
@@ -3578,9 +3642,10 @@ redis.register_function('glidemq_trimBroadcast', function(keys, args)
   local heldKey = prefix .. 'bcast-held'
   local excess = redis.call('XLEN', streamKey) - maxLen
   local held = redis.call('ZRANGE', heldKey, 0, 99)
-  if excess <= 0 and #held == 0 then return 0 end
-  local groups = streamGroupNames(streamKey)
+  if excess <= 0 and #held == 0 then return {0, 0} end
+  local groups, lastDelivered = streamGroupNames(streamKey)
   local trimmed = 0
+  local unread = 0
   local candidates = {}
   if excess > 0 then
     -- Bounded per call; each publish trims again, so a backlog converges.
@@ -3596,6 +3661,9 @@ redis.register_function('glidemq_trimBroadcast', function(keys, args)
     for i = 1, last do
       local entryId = entries[i][1]
       local fields = entries[i][2]
+      for g = 1, #groups do
+        if streamIdGreater(entryId, lastDelivered[groups[g]] or '0-0') then unread = unread + 1 end
+      end
       local jobId = nil
       for j = 1, #fields, 2 do
         if fields[j] == 'jobId' then
@@ -3634,7 +3702,7 @@ redis.register_function('glidemq_trimBroadcast', function(keys, args)
   for i = 1, #candidates do
     deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, candidates[i])
   end
-  return trimmed
+  return {trimmed, unread}
 end)
 
 redis.register_function('glidemq_removeJob', function(keys, args)
@@ -4811,6 +4879,35 @@ redis.register_function('glidemq_sweepSuspended', function(keys, args)
   return count
 end)
 
+-- True when the charged usage of a budget hash is over any of its limits:
+-- weighted total tokens, total cost, or a per-category token/cost cap.
+local function budgetLimitsExceeded(budgetKey, maxTokensJson, maxCostsJson)
+  local maxTotalTokens = tonumber(redis.call('HGET', budgetKey, 'maxTotalTokens')) or 0
+  local usedTokens = tonumber(redis.call('HGET', budgetKey, 'usedTokens')) or 0
+  if maxTotalTokens > 0 and usedTokens > maxTotalTokens then return true end
+
+  local maxTotalCost = tonumber(redis.call('HGET', budgetKey, 'maxTotalCost')) or 0
+  local usedCost = tonumber(redis.call('HGET', budgetKey, 'usedCost')) or 0
+  if maxTotalCost > 0 and usedCost > maxTotalCost then return true end
+
+  local ok3, maxTokens = pcall(cjson.decode, maxTokensJson)
+  if ok3 and type(maxTokens) == 'table' then
+    for cat, limit in pairs(maxTokens) do
+      local used = tonumber(redis.call('HGET', budgetKey, 'usedTokens:' .. cat)) or 0
+      if tonumber(limit) and tonumber(limit) > 0 and used > tonumber(limit) then return true end
+    end
+  end
+
+  local ok4, maxCosts = pcall(cjson.decode, maxCostsJson)
+  if ok4 and type(maxCosts) == 'table' then
+    for cat, limit in pairs(maxCosts) do
+      local used = tonumber(redis.call('HGET', budgetKey, 'usedCost:' .. cat)) or 0
+      if tonumber(limit) and tonumber(limit) > 0 and used > tonumber(limit) then return true end
+    end
+  end
+  return false
+end
+
 redis.register_function('glidemq_checkBudget', function(keys, args)
   local budgetKey = keys[1]
   local exists = redis.call('EXISTS', budgetKey)
@@ -4856,45 +4953,33 @@ redis.register_function('glidemq_recordUsageAndCheckBudget', function(keys, args
     end
   end
 
-  -- Check weighted total tokens cap
-  local maxTotalTokens = tonumber(redis.call('HGET', budgetKey, 'maxTotalTokens')) or 0
-  local usedTokens = tonumber(redis.call('HGET', budgetKey, 'usedTokens')) or 0
-  if maxTotalTokens > 0 and usedTokens > maxTotalTokens then
+  if budgetLimitsExceeded(budgetKey, maxTokensJson, maxCostsJson) then
     redis.call('HSET', budgetKey, 'exceeded', '1')
     return 'exceeded'
   end
+  return 'ok'
+end)
 
-  -- Check total cost cap
-  local maxTotalCost = tonumber(redis.call('HGET', budgetKey, 'maxTotalCost')) or 0
-  local usedCost = tonumber(redis.call('HGET', budgetKey, 'usedCost')) or 0
-  if maxTotalCost > 0 and usedCost > maxTotalCost then
+-- Raise or lower the limits of a flow budget and re-evaluate its exceeded
+-- flag against the usage already charged.
+-- KEYS: [budgetKey]
+-- ARGS: [field1, value1, field2, value2, ...]; an empty value deletes the field.
+-- Returns 'no_budget', 'exceeded' or 'ok'.
+redis.register_function('glidemq_updateFlowBudget', function(keys, args)
+  local budgetKey = keys[1]
+  if redis.call('EXISTS', budgetKey) == 0 then return 'no_budget' end
+  for i = 1, #args - 1, 2 do
+    if args[i + 1] == '' then
+      redis.call('HDEL', budgetKey, args[i])
+    else
+      redis.call('HSET', budgetKey, args[i], args[i + 1])
+    end
+  end
+  local limits = redis.call('HMGET', budgetKey, 'maxTokens', 'maxCosts')
+  if budgetLimitsExceeded(budgetKey, limits[1] or '{}', limits[2] or '{}') then
     redis.call('HSET', budgetKey, 'exceeded', '1')
     return 'exceeded'
   end
-
-  -- Check per-category token limits
-  local ok3, maxTokens = pcall(cjson.decode, maxTokensJson)
-  if ok3 and type(maxTokens) == 'table' then
-    for cat, limit in pairs(maxTokens) do
-      local used = tonumber(redis.call('HGET', budgetKey, 'usedTokens:' .. cat)) or 0
-      if tonumber(limit) and tonumber(limit) > 0 and used > tonumber(limit) then
-        redis.call('HSET', budgetKey, 'exceeded', '1')
-        return 'exceeded'
-      end
-    end
-  end
-
-  -- Check per-category cost limits
-  local ok4, maxCosts = pcall(cjson.decode, maxCostsJson)
-  if ok4 and type(maxCosts) == 'table' then
-    for cat, limit in pairs(maxCosts) do
-      local used = tonumber(redis.call('HGET', budgetKey, 'usedCost:' .. cat)) or 0
-      if tonumber(limit) and tonumber(limit) > 0 and used > tonumber(limit) then
-        redis.call('HSET', budgetKey, 'exceeded', '1')
-        return 'exceeded'
-      end
-    end
-  end
-
+  redis.call('HDEL', budgetKey, 'exceeded')
   return 'ok'
 end)

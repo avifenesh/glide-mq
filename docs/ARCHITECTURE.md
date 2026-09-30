@@ -143,6 +143,8 @@ redis.register_function('glidemq_complete', function(keys, args) ... end)
 | glidemq_complete                  | 5    | XACK stream, ZADD completed, HSET job, XADD event, check parent deps                     |
 | glidemq_completeAndFetchNext      | 5    | Complete current + fetch next in single RTT                                              |
 | glidemq_fail                      | 6    | XACK stream, ZADD failed or ZADD scheduled (retry), HSET job, XADD event                 |
+| glidemq_failAndFetchNext          | 6    | glidemq_fail + the fetch phases of completeAndFetchNext in single RTT (non-broadcast)    |
+| glidemq_updateFlowBudget          | 1    | HSET/HDEL budget limits, re-evaluate exceeded against charged usage                      |
 | glidemq_reclaimStalled            | 2    | XAUTOCLAIM on stream, HSET stalled count, move to failed if exceeded                     |
 | glidemq_reclaimStalledListJobs    | 2    | Stall detection for LIFO/priority list-sourced jobs via bounded SCAN                     |
 | glidemq_pause                     | 2    | HSET meta paused=1, XADD event                                                           |
@@ -282,6 +284,7 @@ class Queue<D = any, R = any> extends EventEmitter {
   // AI primitives
   getFlowUsage(parentJobId: string): Promise<FlowUsage>;
   getFlowBudget(flowId: string): Promise<FlowBudget | null>;
+  updateFlowBudget(flowId: string, limits: Partial<BudgetLimits>): Promise<FlowBudget | null>;
   readStream(jobId: string, opts?: ReadStreamOptions): Promise<StreamEntry[]>;
   signal(jobId: string, name: string, data?: any): Promise<boolean>;
   getSuspendInfo(jobId: string): Promise<SuspendInfo | null>;

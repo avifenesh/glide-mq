@@ -144,7 +144,8 @@ describeEachMode('Follow-ups 2026-09-29', (CONNECTION) => {
     try {
       await worker.waitUntilReady();
       const job = await queue.add('a', {}, { attempts: 2 });
-      await waitFor(async () => (await queue.getJobCounts()).failed === 1, 8000);
+      // The 'failed' event follows the fail FCALL; wait for it, not only for the count.
+      await waitFor(async () => failed.length === 2 && (await queue.getJobCounts()).failed === 1, 8000);
       expect(failed).toEqual([job!.id, job!.id]);
       expect((await eventTypes(Q)).filter((t) => t === 'retrying' || t === 'failed')).toEqual([]);
       expect(await cleanupClient.hlen(k.metricsFailed)).toBe(0);
