@@ -199,7 +199,7 @@ The proxy exposes the same rollup over HTTP at `GET /usage/summary`.
 
 ### Budget exceeded events
 
-When a flow budget is exceeded (via glidemq_recordUsageAndCheckBudget), the budget hash exceeded field is set to 1. Subsequent jobs in the flow are either failed or paused depending on the onExceeded setting.
+When a flow budget is exceeded (via glidemq_recordUsageAndCheckBudget), the budget hash exceeded field is set to 1. Subsequent jobs in the flow are either failed or paused depending on the onExceeded setting. queue.updateFlowBudget(flowId, limits) changes the limits and re-evaluates the flag; paused jobs re-check the budget every 60 seconds.
 
 Budget state can be queried via queue.getFlowBudget(flowId) which returns { maxTotalTokens, maxTokens, tokenWeights, maxTotalCost, maxCosts, costUnit, usedTokens, usedCost, exceeded, onExceeded }.
 
@@ -213,11 +213,11 @@ When tokenLimiter is configured on a worker, token consumption is tracked either
 
 When you want live observability from another process or language, the HTTP proxy exposes three SSE surfaces:
 
-| Path | Description |
-| ---- | ----------- |
-| `/queues/:name/events` | Queue-wide lifecycle events with `Last-Event-ID` / `?lastId=` replay |
-| `/queues/:name/jobs/:id/stream` | Per-job output stream for `job.stream()` / `job.streamChunk()` |
-| `/broadcast/:name/events` | Broadcast fan-out SSE stream with `subscription` and optional `subjects` filters |
+| Path                            | Description                                                                      |
+| ------------------------------- | -------------------------------------------------------------------------------- |
+| `/queues/:name/events`          | Queue-wide lifecycle events with `Last-Event-ID` / `?lastId=` replay             |
+| `/queues/:name/jobs/:id/stream` | Per-job output stream for `job.stream()` / `job.streamChunk()`                   |
+| `/broadcast/:name/events`       | Broadcast fan-out SSE stream with `subscription` and optional `subjects` filters |
 
 These endpoints require the proxy to be created with `connection`, because they allocate blocking readers internally.
 

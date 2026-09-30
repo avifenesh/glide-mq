@@ -817,9 +817,9 @@ See [ADVANCED.md](./ADVANCED.md#fallback-chains) for details on how the chain ad
 
 ### Budget Middleware (Flow-level Token/Cost Caps)
 
-Enforce hard caps on total tokens and/or cost across all jobs in a flow. Pass a budget option to FlowProducer.add() with maxTotalTokens, maxTotalCost, and onExceeded (fail or pause). Per-category limits are also supported via maxTokens (e.g. `{ input: 5000 }`), tokenWeights (e.g. `{ output: 4 }`), maxCosts, and costUnit. When an attempt of a job in a budgeted flow ends, whether it completes or fails, the worker charges the usage it reported with reportUsage() through glidemq_recordUsageAndCheckBudget, which atomically increments counters and checks limits. A retry that reports no new usage is not charged again. Batch workers do not charge budgets.
+Enforce hard caps on total tokens and/or cost across all jobs in a flow. Pass a budget option to FlowProducer.add() with maxTotalTokens, maxTotalCost, and onExceeded (fail or pause). Per-category limits are also supported via maxTokens (e.g. `{ input: 5000 }`), tokenWeights (e.g. `{ output: 4 }`), maxCosts, and costUnit. When an attempt of a job in a budgeted flow ends, whether it completes or fails, the worker charges the usage it reported with reportUsage() through glidemq_recordUsageAndCheckBudget, which atomically increments counters and checks limits. A retry that reports no new usage is not charged again. Batch workers charge and check budgets the same way, per job.
 
-Query budget state via queue.getFlowBudget(flowId). Budget state is stored in glide:{queueName}:budget:{flowId}.
+Query budget state via queue.getFlowBudget(flowId). Change the limits of a running flow with queue.updateFlowBudget(flowId, limits): only the given fields change, null deletes a limit, and the exceeded flag is re-evaluated against the usage already charged. With onExceeded 'pause', paused jobs re-check the budget every 60 seconds (Worker.BUDGET_PAUSE_RECHECK_MS), so raising the limits resumes the flow within that interval; job.promote() re-checks at once. Budget state is stored in glide:{queueName}:budget:{flowId}.
 
 ```typescript
 const flow = new FlowProducer({ connection });
@@ -831,6 +831,9 @@ const node = await flow.add(
 // Check budget state
 const budget = await queue.getFlowBudget(node.job.id);
 // { maxTotalTokens: 10000, maxTotalCost: 0.50, usedTokens: 0, usedCost: 0, exceeded: false, ... }
+
+// Raise the cost cap of a running flow; clears exceeded when usage fits the new limits
+await queue.updateFlowBudget(node.job.id, { maxTotalCost: 1.0 });
 ```
 
 ### Dual-axis Rate Limiting (RPM + TPM)

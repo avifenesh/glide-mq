@@ -20,6 +20,7 @@ import {
   computeFollowingSchedulerNextRun,
   computeWeightedTotal,
   hashDataToRecord,
+  isFunctionNotFound,
   nextReconnectDelay,
   parseCrossQueueParentNotification,
   parseJsonRecord,
@@ -49,6 +50,7 @@ import {
   completeJob,
   isCompleteJobRevoked,
   completeAndFetchNext,
+  failAndFetchNext,
   type CompleteAndFetchResult,
   completeChild,
   failJob,
@@ -156,6 +158,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   protected scheduler: Scheduler | null = null;
   protected initPromise: Promise<void>;
   protected rateLimitUntil = 0;
+  /** Set once glidemq_failAndFetchNext is missing from the loaded library (rolling upgrade). */
+  private failAndFetchNextUnavailable = false;
   protected isDrained = true;
   protected reconnectBackoff = 0;
   protected internalEvents = new EventEmitter().setMaxListeners(0);
@@ -202,6 +206,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * documented as best-effort: an evicted job runs the main processor.
    */
   static readonly MAX_SUSPEND_CONTINUATIONS = 10000;
+  /**
+   * How long a job of a budget with onExceeded 'pause' waits in delayed
+   * before the worker re-checks the budget. Raise the limits with
+   * Queue.updateFlowBudget() to resume; Job.promote() re-checks sooner.
+   */
+  static readonly BUDGET_PAUSE_RECHECK_MS = 60_000;
   protected serializer: Serializer;
   protected readonly batchMode: boolean;
   protected readonly batchSize: number;
@@ -729,6 +739,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           continue;
         }
 
+        if (await this.divertIfBudgetExceeded(job, entry.jobId, entry.entryId)) continue;
+
         this.startHeartbeat(entry.jobId, job.opts.lockDuration);
         batch.push({ jobId: entry.jobId, entryId: entry.entryId, job });
       }
@@ -843,7 +855,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         const err = new Error(`Batch processor returned ${len} results but batch had ${batch.length} jobs`);
         for (const entry of batch) {
           if (await this.skipMovedToFailed(entry.job)) continue;
-          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, err);
+          await this.failProcessedJob(entry.job, entry.jobId, entry.entryId, err);
         }
         return;
       }
@@ -892,7 +904,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
         if (result instanceof Error) {
           const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : result;
-          await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
+          await this.failProcessedJob(entry.job, entry.jobId, entry.entryId, failure);
         } else {
           let returnvalue: string;
           try {
@@ -927,7 +939,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       for (const entry of batch) {
         if (await this.skipMovedToFailed(entry.job)) continue;
         const failure = (await this.isJobRevoked(entry.jobId)) ? new UnrecoverableError('revoked') : thrownError;
-        await this.handleJobFailure(entry.job, entry.jobId, entry.entryId, failure);
+        await this.failProcessedJob(entry.job, entry.jobId, entry.entryId, failure);
       }
     }
   }
@@ -1047,6 +1059,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       entry.job.returnvalue = result;
       entry.job.finishedOn = Date.now();
       if (this.hasCompletedListeners) this.emit('completed', entry.job, result);
+
+      try {
+        await this.chargeUsageToBudget(entry.job, entry.jobId, false);
+      } catch (err) {
+        this.emit('error', err);
+      }
 
       if (this.opts.tokenLimiter) {
         const tpmTokens = Math.max(entry.job.usage?.totalTokens ?? 0, entry.job.tpmTokens ?? 0);
@@ -1338,9 +1356,10 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       const delayMs = (error as any).delayMs || (this.opts.limiter?.duration ?? 1000);
       this.rateLimitUntil = Date.now() + delayMs;
       try {
-        // glidemq_fail increments the attempt counter it compares against:
-        // the job hash in normal mode, the per-subscription hash in broadcast
-        // mode. One above the post-increment value always retries.
+        // requeueOnly: the job returns after delayMs without counting the
+        // attempt. An older library ignores the flag and increments the
+        // counter it compares against (job hash, or per-subscription hash in
+        // broadcast mode); one above the post-increment value still retries.
         const attemptsMade = await this.getAttemptsMade(job, jobId);
         await failJob(
           this.commandClient,
@@ -1356,6 +1375,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           this.broadcastMode ? true : undefined,
           this.skipEvents,
           this.skipMetrics,
+          true,
         );
       } catch (e) {
         this.emit('error', e);
@@ -1363,19 +1383,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       return false;
     }
 
-    const configuredAttempts = job.opts.attempts ?? 0;
-    // .name fallback handles cross-realm errors or sandbox IPC where instanceof may fail
-    const skipRetry = job.discarded || error instanceof UnrecoverableError || error.name === 'UnrecoverableError';
-    const maxAttempts = skipRetry ? 0 : configuredAttempts;
-    let backoffDelay = 0;
-    if (maxAttempts > 0 && job.opts.backoff) {
-      const attemptsMade = await this.getAttemptsMade(job, jobId);
-      const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
-      backoffDelay = strategyFn
-        ? strategyFn(attemptsMade + 1, error)
-        : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, attemptsMade + 1, job.opts.backoff.jitter);
-    }
-
+    const { maxAttempts, backoffDelay } = await this.planFailure(job, jobId, error);
     const failResult = await failJob(
       this.commandClient,
       this.queueKeys,
@@ -1391,7 +1399,35 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.skipEvents,
       this.skipMetrics,
     );
+    return this.finishFailure(job, error, failResult);
+  }
 
+  /** Attempts cap and backoff for this failure, as glidemq_fail expects them. */
+  private async planFailure(
+    job: Job<D, R>,
+    jobId: string,
+    error: Error,
+  ): Promise<{ maxAttempts: number; backoffDelay: number }> {
+    const configuredAttempts = job.opts.attempts ?? 0;
+    // .name fallback handles cross-realm errors or sandbox IPC where instanceof may fail
+    const skipRetry = job.discarded || error instanceof UnrecoverableError || error.name === 'UnrecoverableError';
+    const maxAttempts = skipRetry ? 0 : configuredAttempts;
+    let backoffDelay = 0;
+    if (maxAttempts > 0 && job.opts.backoff) {
+      const attemptsMade = await this.getAttemptsMade(job, jobId);
+      const strategyFn = this.opts.backoffStrategies?.[job.opts.backoff.type];
+      backoffDelay = strategyFn
+        ? strategyFn(attemptsMade + 1, error)
+        : calculateBackoff(job.opts.backoff.type, job.opts.backoff.delay, attemptsMade + 1, job.opts.backoff.jitter);
+    }
+    return { maxAttempts, backoffDelay };
+  }
+
+  /**
+   * After glidemq_fail ran: DLQ copy on a terminal failure, 'failed' event,
+   * repeatAfterComplete scheduling. Returns true when the failure was terminal.
+   */
+  private async finishFailure(job: Job<D, R>, error: Error, failResult: string): Promise<boolean> {
     if (failResult === 'failed' && this.opts.deadLetterQueue && this.commandClient) {
       await this.moveToDLQ(job, error);
     }
@@ -1404,6 +1440,86 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
 
     return failResult === 'failed';
+  }
+
+  /**
+   * Fail a processed job and, on the plain (non-broadcast, running) path,
+   * fetch the next job in the same FCALL so the chain survives a failure.
+   * Returns the fetch result to chain on, or null when the failure went
+   * through handleJobFailure (rate limit, broadcast, close/pause, old library).
+   */
+  private async failAndChain(
+    job: Job<D, R>,
+    jobId: string,
+    entryId: string,
+    error: Error,
+  ): Promise<CompleteAndFetchResult | null> {
+    // Tokens a failed attempt spent are real spend; count them.
+    try {
+      await this.chargeUsageToBudget(job, jobId, true);
+    } catch (err) {
+      this.emit('error', err);
+    }
+    const client = this.commandClient;
+    if (
+      !client ||
+      this.broadcastMode ||
+      this.closing ||
+      this.paused ||
+      this.failAndFetchNextUnavailable ||
+      BaseWorker.isRateLimitError(error)
+    ) {
+      await this.handleJobFailure(job, jobId, entryId, error);
+      return null;
+    }
+    const { maxAttempts, backoffDelay } = await this.planFailure(job, jobId, error);
+    let result;
+    try {
+      result = await failAndFetchNext(
+        client,
+        this.queueKeys,
+        jobId,
+        entryId,
+        error.message,
+        Date.now(),
+        maxAttempts,
+        backoffDelay,
+        this.consumerGroup,
+        this.consumerId,
+        job.opts.removeOnFail,
+        this.skipEvents,
+        this.skipMetrics,
+      );
+    } catch (err) {
+      if (!isFunctionNotFound(err)) throw err;
+      // Older library without glidemq_failAndFetchNext: the call did nothing.
+      this.failAndFetchNextUnavailable = true;
+      const failResult = await failJob(
+        client,
+        this.queueKeys,
+        jobId,
+        entryId,
+        error.message,
+        Date.now(),
+        maxAttempts,
+        backoffDelay,
+        this.consumerGroup,
+        job.opts.removeOnFail,
+        undefined,
+        this.skipEvents,
+        this.skipMetrics,
+      );
+      await this.finishFailure(job, error, failResult);
+      return null;
+    }
+    // The next job is already claimed. A throw here (DLQ add, a 'failed'
+    // listener) must not strand it without a heartbeat until stall reclaim.
+    try {
+      await this.finishFailure(job, error, result.failResult);
+    } catch (err) {
+      this.emit('error', err);
+    }
+    return result;
   }
 
   /**
@@ -1583,7 +1699,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   /**
    * Process a job through its full lifecycle: activate, run processor, complete, fetch next.
    * Used for both c=1 (inline, blocking poll loop) and c>1 (dispatched via dispatchJob).
-   * Chains into the next job via completeAndFetchNext to reuse the same dispatch slot.
+   * Chains into the next job via completeAndFetchNext (or failAndFetchNext
+   * after a failure) to reuse the same dispatch slot.
    */
   protected async processJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
@@ -1643,36 +1760,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       this.isDrained = false;
       if (this.hasActiveListeners) this.emit('active', job, currentJobId);
 
-      // Pre-dispatch budget check: if budget already exceeded, fail immediately
-      if (job.budgetKey && this.commandClient) {
-        const budgetStatus = await checkBudget(this.commandClient, job.budgetKey);
-        if (budgetStatus === 'exceeded') {
-          const onExceeded = await this.getBudgetOnExceeded(job.budgetKey);
-          this.emit('budget-exceeded', job, currentJobId);
-          if (onExceeded === 'pause') {
-            // Move to delayed with a long backoff so it can be resumed
-            try {
-              await moveActiveToDelayed(
-                this.commandClient,
-                this.queueKeys,
-                currentJobId,
-                currentEntryId,
-                Date.now() + 86400000,
-                undefined,
-                Date.now(),
-                this.consumerGroup,
-                this.broadcastMode ? true : undefined,
-              );
-            } catch (err) {
-              const e = err instanceof Error ? err : new Error(String(err));
-              await this.handleJobFailure(job, currentJobId, currentEntryId, e);
-            }
-          } else {
-            await this.handleJobFailure(job, currentJobId, currentEntryId, new Error('Budget exceeded'));
-          }
-          return;
-        }
-      }
+      if (await this.divertIfBudgetExceeded(job, currentJobId, currentEntryId)) return;
 
       // Check for suspend continuation: if this job was previously suspended on this
       // worker and has an onResume callback, run it instead of the main processor.
@@ -1823,126 +1911,121 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         return;
       }
 
+      let fetchResult: CompleteAndFetchResult;
       if (processError || aborted) {
         // close(true) aborted it; leave it active for stalled recovery.
         if (aborted && this.forceClosing) return;
         if (await this.skipMovedToFailed(job)) return;
-        // Tokens a failed attempt spent are real spend; count them.
-        try {
-          await this.chargeUsageToBudget(job, currentJobId, true);
-        } catch (err) {
-          this.emit('error', err);
-        }
         const confirmedRevoked = aborted && (await this.isJobRevoked(currentJobId));
-        await this.handleJobFailure(
+        const chained = await this.failAndChain(
           job,
           currentJobId,
           currentEntryId,
           confirmedRevoked ? new UnrecoverableError('revoked') : (processError ?? new Error('Job aborted')),
         );
-        return;
-      }
+        if (!chained) return;
+        fetchResult = chained;
+      } else {
+        if (await this.skipMovedToFailed(job)) return;
 
-      if (await this.skipMovedToFailed(job)) return;
+        if (!this.commandClient) return;
 
-      if (!this.commandClient) return;
-
-      let returnvalue: string;
-      try {
-        returnvalue = processResult !== undefined ? this.serializer.serialize(processResult) : 'null';
-      } catch (serializeErr) {
-        const err = serializeErr instanceof Error ? serializeErr : new Error(String(serializeErr));
-        await this.handleJobFailure(
-          job,
-          currentJobId,
-          currentEntryId,
-          new Error(`Serializer failed on return value: ${err.message}`),
-        );
-        return;
-      }
-      // UTF-8 worst case: 4 bytes per char. Skip Buffer.byteLength for small strings.
-      if (returnvalue.length > MAX_JOB_DATA_SIZE / 4) {
-        const byteLen = Buffer.byteLength(returnvalue, 'utf8');
-        if (byteLen > MAX_JOB_DATA_SIZE) {
+        let returnvalue: string;
+        try {
+          returnvalue = processResult !== undefined ? this.serializer.serialize(processResult) : 'null';
+        } catch (serializeErr) {
+          const err = serializeErr instanceof Error ? serializeErr : new Error(String(serializeErr));
           await this.handleJobFailure(
             job,
             currentJobId,
             currentEntryId,
-            new Error(
-              `Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller return values or store large data externally.`,
-            ),
+            new Error(`Serializer failed on return value: ${err.message}`),
           );
           return;
         }
-      }
-      const now = Date.now();
-      // close() and pause() set their flag before waitForActiveJobs.
-      // Completing without fetch-next avoids claiming a job this worker will
-      // not process now; chaining under a backlog would never let pause() land.
-      let fetchResult: CompleteAndFetchResult;
-      if (this.closing || this.paused) {
-        const notifications = await completeJob(
-          this.commandClient,
-          this.queueKeys,
-          currentJobId,
-          currentEntryId,
-          returnvalue,
-          now,
-          this.consumerGroup,
-          job.opts.removeOnComplete,
-          undefined,
-          this.broadcastMode ? true : undefined,
-          this.skipEvents,
-          this.skipMetrics,
-        );
-        if (isCompleteJobRevoked(notifications)) {
-          await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
-          return;
+        // UTF-8 worst case: 4 bytes per char. Skip Buffer.byteLength for small strings.
+        if (returnvalue.length > MAX_JOB_DATA_SIZE / 4) {
+          const byteLen = Buffer.byteLength(returnvalue, 'utf8');
+          if (byteLen > MAX_JOB_DATA_SIZE) {
+            await this.handleJobFailure(
+              job,
+              currentJobId,
+              currentEntryId,
+              new Error(
+                `Return value exceeds maximum size (${byteLen} bytes > ${MAX_JOB_DATA_SIZE} bytes). Use smaller return values or store large data externally.`,
+              ),
+            );
+            return;
+          }
         }
-        fetchResult = { completed: currentJobId, next: false as const, parentNotifications: notifications };
-      } else {
-        fetchResult = await completeAndFetchNext(
-          this.commandClient,
-          this.queueKeys,
-          currentJobId,
-          currentEntryId,
-          returnvalue,
-          now,
-          this.consumerGroup,
-          this.consumerId,
-          job.opts.removeOnComplete,
-          undefined,
-          completionHints,
-          this.broadcastMode ? true : undefined,
-          job.processedOn,
-          !!job.parentIds,
-          this.skipEvents,
-          this.skipMetrics,
-        );
+        const now = Date.now();
+        // close() and pause() set their flag before waitForActiveJobs.
+        // Completing without fetch-next avoids claiming a job this worker will
+        // not process now; chaining under a backlog would never let pause() land.
+        if (this.closing || this.paused) {
+          const notifications = await completeJob(
+            this.commandClient,
+            this.queueKeys,
+            currentJobId,
+            currentEntryId,
+            returnvalue,
+            now,
+            this.consumerGroup,
+            job.opts.removeOnComplete,
+            undefined,
+            this.broadcastMode ? true : undefined,
+            this.skipEvents,
+            this.skipMetrics,
+          );
+          if (isCompleteJobRevoked(notifications)) {
+            await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
+            return;
+          }
+          fetchResult = { completed: currentJobId, next: false as const, parentNotifications: notifications };
+        } else {
+          fetchResult = await completeAndFetchNext(
+            this.commandClient,
+            this.queueKeys,
+            currentJobId,
+            currentEntryId,
+            returnvalue,
+            now,
+            this.consumerGroup,
+            this.consumerId,
+            job.opts.removeOnComplete,
+            undefined,
+            completionHints,
+            this.broadcastMode ? true : undefined,
+            job.processedOn,
+            !!job.parentIds,
+            this.skipEvents,
+            this.skipMetrics,
+          );
 
-        if (fetchResult.next === 'CURRENT_REVOKED') {
-          await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
-          return;
+          if (fetchResult.next === 'CURRENT_REVOKED') {
+            await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
+            return;
+          }
         }
-      }
-      await this.notifyCrossQueueParents(fetchResult.parentNotifications);
-      job.returnvalue = processResult;
-      job.finishedOn = now;
-      if (this.hasCompletedListeners) this.emit('completed', job, processResult);
+        await this.notifyCrossQueueParents(fetchResult.parentNotifications);
+        job.returnvalue = processResult;
+        job.finishedOn = now;
+        if (this.hasCompletedListeners) this.emit('completed', job, processResult);
 
-      await this.chargeUsageToBudget(job, currentJobId, false);
+        await this.chargeUsageToBudget(job, currentJobId, false);
 
-      // Post-completion TPM tracking: increment counter for token rate limiting.
-      // Use whichever is larger: usage.totalTokens or explicit tpmTokens.
-      if (this.opts.tokenLimiter) {
-        const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
-        if (tpmTokens > 0) {
-          await this.incrementTpmCounter(tpmTokens);
+        // Post-completion TPM tracking: increment counter for token rate limiting.
+        // Use whichever is larger: usage.totalTokens or explicit tpmTokens.
+        if (this.opts.tokenLimiter) {
+          const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
+          if (tpmTokens > 0) {
+            await this.incrementTpmCounter(tpmTokens);
+          }
         }
-      }
 
-      if (job.schedulerName) {
-        await this.updateSchedulerAfterComplete(job.schedulerName, now);
+        if (job.schedulerName) {
+          await this.updateSchedulerAfterComplete(job.schedulerName, now);
+        }
       }
 
       // CAF raced with close() or pause(): the next job is already claimed.
@@ -2027,6 +2110,54 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Pre-dispatch budget check. A job whose flow budget is already exceeded
+   * does not run: onExceeded 'fail' fails it, 'pause' parks it in delayed.
+   * Returns true when the job was diverted.
+   */
+  private async divertIfBudgetExceeded(job: Job<D, R>, jobId: string, entryId: string): Promise<boolean> {
+    if (!job.budgetKey || !this.commandClient) return false;
+    const budgetStatus = await checkBudget(this.commandClient, job.budgetKey);
+    if (budgetStatus !== 'exceeded') return false;
+    const onExceeded = await this.getBudgetOnExceeded(job.budgetKey);
+    this.emit('budget-exceeded', job, jobId);
+    if (onExceeded === 'pause') {
+      // Park in delayed; each promotion re-checks the budget until it is raised.
+      try {
+        await moveActiveToDelayed(
+          this.commandClient,
+          this.queueKeys,
+          jobId,
+          entryId,
+          Date.now() + BaseWorker.BUDGET_PAUSE_RECHECK_MS,
+          undefined,
+          Date.now(),
+          this.consumerGroup,
+          this.broadcastMode ? true : undefined,
+        );
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        await this.handleJobFailure(job, jobId, entryId, e);
+      }
+    } else {
+      await this.handleJobFailure(job, jobId, entryId, new Error('Budget exceeded'));
+    }
+    return true;
+  }
+
+  /**
+   * Fail an attempt whose processor ran. Tokens the attempt spent are real
+   * spend, so its reported usage is charged to the flow budget first.
+   */
+  private async failProcessedJob(job: Job<D, R>, jobId: string, entryId: string, error: Error): Promise<void> {
+    try {
+      await this.chargeUsageToBudget(job, jobId, true);
+    } catch (err) {
+      this.emit('error', err);
+    }
+    await this.handleJobFailure(job, jobId, entryId, error);
   }
 
   /**

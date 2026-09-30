@@ -374,6 +374,12 @@ export function nextReconnectDelay(currentDelay: number, maxMs = 30000): number 
  * Convert a HashDataType array ({ field, value }[]) from hgetall to a plain Record.
  * Returns null if the array is empty, falsy (key does not exist) or not an array.
  */
+/** True for the error an FCALL raises when the loaded library lacks the function (rolling upgrade). */
+export function isFunctionNotFound(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /function not found|function not loaded/i.test(msg);
+}
+
 export function hashDataToRecord(
   hashData: { field?: unknown; key?: unknown; value: unknown }[] | null,
 ): Record<string, string> | null {
