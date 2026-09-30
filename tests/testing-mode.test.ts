@@ -274,6 +274,7 @@ describe('TestWorker', () => {
       'TestWorker expects a TestQueue instance as its first argument, got string',
     );
     expect(() => new TestWorker(undefined as any, async () => 'ok')).toThrow('got undefined');
+    expect(() => new TestWorker(null as any, async () => 'ok')).toThrow('got null');
   });
 
   let queue: TestQueue;
