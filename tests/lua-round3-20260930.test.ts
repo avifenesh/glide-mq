@@ -530,4 +530,80 @@ describeEachMode('Lua round 3 2026-09-30', (CONNECTION) => {
     expect([...members].map(String).sort()).toEqual(['7']);
     expect(String(await cleanupClient.get(k.listActive))).toBe('1');
   });
-});
+
+  // Review fix 1: a GLOBAL_FULL claim stays in the PEL and is admitted when the
+  // older claims finish, so racing workers at gc 1 keep FIFO and nothing starves.
+  it('workers racing at globalConcurrency 1 complete a burst in FIFO order', async () => {
+    const Q = uniqueQueue('r3-gc-fifo');
+    const queue = new Queue(Q, { connection: CONNECTION });
+    let active = 0;
+    let maxActive = 0;
+    const done: string[] = [];
+    const processor = async (job: any) => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 60));
+      active--;
+      done.push(job.id);
+    };
+    const opts = { connection: CONNECTION, concurrency: 1, blockTimeout: 200 };
+    await queue.setGlobalConcurrency(1);
+    const w1 = new Worker(Q, processor, opts);
+    const w2 = new Worker(Q, processor, opts);
+    try {
+      await waitFor(
+        async () => (await consumerNames(buildKeys(Q).stream, CONSUMER_GROUP).catch(() => [])).length === 2,
+        5000,
+      );
+      const ids: string[] = [];
+      for (let i = 0; i < 8; i++) ids.push((await queue.add('j', { i }))!.id);
+      await waitFor(() => done.length === ids.length, 20000);
+      expect(maxActive).toBe(1);
+      expect(done).toEqual(ids);
+    } finally {
+      await Promise.all([w1.close(), w2.close()]);
+      await queue.close();
+    }
+  }, 30000);
+
+  // Review fix 1: the chain fetch respects the global cap while another
+  // worker holds an un-activated claim.
+  it('completeAndFetchNext does not claim past globalConcurrency', async () => {
+    const Q = uniqueQueue('r3-gc-chain');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    try {
+      await queue.setGlobalConcurrency(1);
+      const j1 = await queue.add('a', {});
+      await queue.add('b', {});
+      await queue.add('c', {});
+      await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true }).catch(() => {});
+      const readEntry = async (consumer: string): Promise<string> => {
+        const res = await cleanupClient.xreadgroup(CONSUMER_GROUP, consumer, { [k.stream]: '>' }, { count: 1 });
+        return String(Object.keys(res[0].value)[0]);
+      };
+      const e1 = await readEntry('w1');
+      await readEntry('w2'); // held by w2, not activated
+      expect(
+        typeof (await moveToActive(
+          cleanupClient,
+          k,
+          j1!.id,
+          Date.now(),
+          k.stream,
+          e1,
+          CONSUMER_GROUP,
+          undefined,
+          true,
+        )),
+      ).toBe('object');
+      // w1 completes: the held claim of w2 fills the single slot, so no chain claim.
+      const result = await completeAndFetchNext(cleanupClient, k, j1!.id, e1, 'null', Date.now(), CONSUMER_GROUP, 'w1');
+      expect(result.next).toBe(false);
+      expect(result.listsEmpty).toBe(false);
+      expect(await cleanupClient.xlen(k.stream)).toBe(2);
+    } finally {
+      await queue.close();
+    }
+  });
+

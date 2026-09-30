@@ -1200,9 +1200,9 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       return true;
     }
     if (moveResult === 'GLOBAL_FULL') {
-      // The claim is outside the queue's globalConcurrency: hand the entry
-      // back (XACK, re-add as waiting). The next poll's checkConcurrency waits
-      // for a slot.
+      // Still outside the queue's globalConcurrency after the bounded hold
+      // (activateStreamClaim) or in a batch: hand the entry back (XACK,
+      // re-added as waiting). The next poll's checkConcurrency waits for a slot.
       try {
         await this.deferOutOfOrderJob(jobId, entryId);
       } catch (err) {
@@ -1715,6 +1715,75 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   /**
    * Re-enqueue out-of-order jobs instead of holding an active slot.
    */
+  /** First retry delay of a GLOBAL_FULL hold; doubles up to GLOBAL_FULL_BACKOFF_MAX_MS. */
+  protected static readonly GLOBAL_FULL_BACKOFF_MIN_MS = 20;
+  protected static readonly GLOBAL_FULL_BACKOFF_MAX_MS = 250;
+
+  /**
+   * How long a GLOBAL_FULL stream claim is held in the PEL before it is handed
+   * back: half the shorter of lockDuration and stalledInterval, so a healthy
+   * worker returns the claim well before stalled reclaim could take it.
+   */
+  protected globalFullHoldMs(): number {
+    return Math.max(100, Math.min(this.lockDuration, this.stalledInterval) / 2);
+  }
+
+  /** Wait up to `ms` for a slot to free in this worker (or close()). */
+  private waitForGlobalSlot(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.internalEvents.off('slotFree', done);
+        this.internalEvents.off('closing', done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      this.internalEvents.once('slotFree', done);
+      this.internalEvents.once('closing', done);
+    });
+  }
+
+  /**
+   * moveToActive for a claim. A stream claim refused with GLOBAL_FULL keeps its
+   * place in the PEL (admission is oldest-first over pending claims) and is
+   * retried with a capped backoff until admitted, the hold expires (the caller
+   * then hands it back) or close()/pause() lands (handed back here, 'HELD_BACK').
+   */
+  protected async activateStreamClaim(jobId: string, entryId: string): Promise<MoveToActiveResult | 'HELD_BACK'> {
+    const attempt = () =>
+      moveToActive(
+        this.commandClient!,
+        this.queueKeys,
+        jobId,
+        Date.now(),
+        this.queueKeys.stream,
+        entryId,
+        this.consumerGroup,
+        this.broadcastMode ? true : undefined,
+        this.globalConcurrencyEnabled,
+      );
+    let result = await attempt();
+    if (result !== 'GLOBAL_FULL' || entryId === '') return result;
+    const deadline = Date.now() + this.globalFullHoldMs();
+    let backoff = BaseWorker.GLOBAL_FULL_BACKOFF_MIN_MS;
+    while (result === 'GLOBAL_FULL' && this.running && this.commandClient) {
+      if (this.closing || this.paused) {
+        await this.deferPausedActivation({ jobId, entryId });
+        return 'HELD_BACK';
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return result;
+      await this.waitForGlobalSlot(Math.min(backoff, remaining));
+      backoff = Math.min(backoff * 2, BaseWorker.GLOBAL_FULL_BACKOFF_MAX_MS);
+      if (this.closing || this.paused) {
+        await this.deferPausedActivation({ jobId, entryId });
+        return 'HELD_BACK';
+      }
+      result = await attempt();
+    }
+    return result;
+  }
+
   protected async deferOutOfOrderJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
     await deferActive(
@@ -1755,17 +1824,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     while (this.running && !this.closing && this.commandClient) {
       // Activate the job (skip if we already have a pre-fetched hash from completeAndFetchNext)
       if (!currentHash) {
-        const moveResult = await moveToActive(
-          this.commandClient,
-          this.queueKeys,
-          currentJobId,
-          Date.now(),
-          this.queueKeys.stream,
-          currentEntryId,
-          this.consumerGroup,
-          this.broadcastMode ? true : undefined,
-          this.globalConcurrencyEnabled,
-        );
+        const moveResult = await this.activateStreamClaim(currentJobId, currentEntryId);
+        if (moveResult === 'HELD_BACK') return;
         if (await this.handleMoveToActiveEdgeCase(moveResult, currentJobId, currentEntryId)) return;
         currentHash = moveResult as Record<string, string>;
       }

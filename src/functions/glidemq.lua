@@ -1458,6 +1458,18 @@ local function fetchNextForChain(prefix, streamKey, eventsKey, failedMetricsKey,
   -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId, ...}
   -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ..., ...}
 
+  -- Global concurrency: a claim held in the PEL by a worker waiting for a slot
+  -- (GLOBAL_FULL) counts as pending, so a chain claim here would overshoot.
+  local gcLimit = tonumber(redis.call('HGET', prefix .. 'meta', 'globalConcurrency')) or 0
+  if gcLimit > 0 then
+    local ok_gc, pendingSummary = pcall(redis.call, 'XPENDING', streamKey, group)
+    local pendingCount = (ok_gc and pendingSummary and tonumber(pendingSummary[1])) or 0
+    local listActiveCount = tonumber(redis.call('GET', prefix .. 'list-active')) or 0
+    if pendingCount + listActiveCount >= gcLimit then
+      return {'NEXT_NONE', jobId}
+    end
+  end
+
   -- Phase 1.0: Try priority list first (highest priority: priority > LIFO > FIFO)
   local priorityKey = prefix .. 'priority'
   local listsEmpty = false
