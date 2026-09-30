@@ -566,3 +566,381 @@ describe('HTTP proxy hardening - broadcast publish options', () => {
     expect((await res.json()).error).toMatch(/priority or lifo/);
   });
 });
+
+describe('HTTP proxy hardening - bounded retry', () => {
+  const { Queue: DistQueue } = require('../dist/queue') as typeof import('../src/queue');
+  const { Worker: DistWorker } = require('../dist/worker') as typeof import('../src/worker');
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+  const queueName = `proxy-hard-${RUN_ID}-retry`;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    const proxy = createProxyServer({ connection: CONNECTION, maxPageSize: 2 });
+    proxyClose = proxy.close;
+    ({ baseUrl, server } = await listen(proxy.app));
+
+    const worker = new DistWorker(
+      queueName,
+      async () => {
+        throw new Error('boom');
+      },
+      { connection: CONNECTION, concurrency: 1, blockTimeout: 500 },
+    );
+    const queue = new DistQueue(queueName, { connection: CONNECTION });
+    try {
+      await worker.waitUntilReady();
+      for (let i = 0; i < 3; i++) {
+        await queue.add(`fail-${i}`, {}, { attempts: 1 });
+      }
+      await waitFor(async () => (await queue.getJobCounts()).failed === 3, 15000);
+    } finally {
+      await worker.close(true);
+      await queue.close();
+    }
+  }, 30000);
+
+  afterAll(async () => {
+    server.closeAllConnections?.();
+    await proxyClose();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  }, 30000);
+
+  async function retry(body?: unknown): Promise<Response> {
+    return fetch(`${baseUrl}/queues/${queueName}/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body ?? {}),
+    });
+  }
+
+  it('rejects a count above maxPageSize and the retry-all sentinel 0', async () => {
+    const oversized = await retry({ count: 3 });
+    expect(oversized.status).toBe(400);
+    expect((await oversized.json()).error).toMatch(/maximum page size \(2\)/);
+
+    const zero = await retry({ count: 0 });
+    expect(zero.status).toBe(400);
+
+    const zeroQuery = await fetch(`${baseUrl}/queues/${queueName}/retry?count=0`, { method: 'POST' });
+    expect(zeroQuery.status).toBe(400);
+  });
+
+  it('retries at most maxPageSize jobs when count is omitted and returns the retried count', async () => {
+    const res = await retry();
+    expect(res.status).toBe(200);
+    expect((await res.json()).retried).toBe(2);
+
+    const counts = await (await fetch(`${baseUrl}/queues/${queueName}/counts`)).json();
+    expect(counts.failed).toBe(1);
+  });
+});
+
+describe('HTTP proxy hardening - shared client for flows and usage', () => {
+  let cleanupClient: any;
+  const queueName = `proxy-hard-${RUN_ID}-shared`;
+
+  afterAll(async () => {
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  });
+
+  it('POST /flows and GET /usage/summary reuse the shared command client', async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    const originalCreateClient = connectionModule.createClient;
+    let created = 0;
+    connectionModule.createClient = async (conn: any) => {
+      created += 1;
+      return originalCreateClient(conn);
+    };
+
+    const proxy = createProxyServer({ connection: CONNECTION });
+    const { baseUrl, server } = await listen(proxy.app);
+    try {
+      const counts = await fetch(`${baseUrl}/queues/${queueName}/counts`);
+      expect(counts.status).toBe(200);
+
+      for (let i = 0; i < 2; i++) {
+        const flow = await fetch(`${baseUrl}/flows`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            flow: { name: 'root', queueName, data: {}, children: [{ name: 'child', queueName, data: {} }] },
+          }),
+        });
+        expect(flow.status).toBe(201);
+        const dag = await fetch(`${baseUrl}/flows`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dag: { nodes: [{ name: `d${i}`, queueName, data: {} }] } }),
+        });
+        expect(dag.status).toBe(201);
+        const usage = await fetch(`${baseUrl}/usage/summary?windowMs=60000&queues=${queueName}`);
+        expect(usage.status).toBe(200);
+      }
+      expect(created).toBe(1);
+    } finally {
+      connectionModule.createClient = originalCreateClient;
+      server.closeAllConnections?.();
+      await proxy.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+describe('HTTP proxy hardening - SSE errors after headers', () => {
+  const { Queue: DistQueue } = require('../dist/queue') as typeof import('../src/queue');
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+  const logged: Array<{ err: Error; queueName: string }> = [];
+  const queueName = `proxy-hard-${RUN_ID}-sse-errors`;
+  const restores: Array<() => void> = [];
+  let failNextXread: string | null = null;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    connectionModule.createBlockingClient = async (conn: any) => {
+      const client = await originalCreateBlockingClient(conn);
+      const message = failNextXread;
+      if (message) {
+        failNextXread = null;
+        client.xread = async () => {
+          throw new Error(message);
+        };
+      }
+      return client;
+    };
+    const proxy = createProxyServer({
+      connection: CONNECTION,
+      onError: (err, name) => {
+        logged.push({ err, queueName: name });
+      },
+    });
+    proxyClose = proxy.close;
+    ({ baseUrl, server } = await listen(proxy.app));
+  });
+
+  afterEach(() => {
+    for (const restore of restores.splice(0).reverse()) restore();
+    failNextXread = null;
+    logged.length = 0;
+  });
+
+  afterAll(async () => {
+    connectionModule.createBlockingClient = originalCreateBlockingClient;
+    server.closeAllConnections?.();
+    await proxyClose();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  }, 30000);
+
+  async function expectStreamEndsWithError(path: string, message: string): Promise<void> {
+    const res = await fetch(`${baseUrl}${path}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/event-stream');
+    await res.text();
+    expect(logged).toHaveLength(1);
+    expect(logged[0].err.message).toBe(message);
+    expect(logged[0].queueName).toBe(queueName);
+  }
+
+  it('queue events: reports a read failure through onError and ends the stream', async () => {
+    failNextXread = 'xread failed 10.0.0.7:6379';
+    await expectStreamEndsWithError(`/queues/${queueName}/events`, 'xread failed 10.0.0.7:6379');
+  });
+
+  it('job events: reports a read failure through onError and ends the stream', async () => {
+    const addRes = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'seed', data: {} }),
+    });
+    expect(addRes.status).toBe(201);
+    const { id } = await addRes.json();
+    failNextXread = 'xread failed 10.0.0.8:6379';
+    await expectStreamEndsWithError(`/queues/${queueName}/jobs/${id}/events`, 'xread failed 10.0.0.8:6379');
+  });
+
+  it('job stream: reports a read failure through onError and ends the stream', async () => {
+    const addRes = await fetch(`${baseUrl}/queues/${queueName}/jobs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'seed-stream', data: {} }),
+    });
+    expect(addRes.status).toBe(201);
+    const { id } = await addRes.json();
+    const original = DistQueue.prototype.readStream;
+    DistQueue.prototype.readStream = async () => {
+      throw new Error('xrange failed 10.0.0.9:6379');
+    };
+    restores.push(() => {
+      DistQueue.prototype.readStream = original;
+    });
+    await expectStreamEndsWithError(`/queues/${queueName}/jobs/${id}/stream`, 'xrange failed 10.0.0.9:6379');
+  });
+});
+
+describe('HTTP proxy hardening - jobs/wait bounds', () => {
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+  const queueName = `proxy-hard-${RUN_ID}-wait`;
+  const blockingClients: TrackedClient[] = [];
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    connectionModule.createBlockingClient = async (conn: any) => {
+      const client = await originalCreateBlockingClient(conn);
+      const entry: TrackedClient = { closed: false };
+      const close = client.close.bind(client);
+      client.close = (...args: unknown[]) => {
+        entry.closed = true;
+        return close(...args);
+      };
+      blockingClients.push(entry);
+      return client;
+    };
+    const proxy = createProxyServer({ connection: CONNECTION, maxWaitTimeout: 20000 });
+    proxyClose = proxy.close;
+    ({ baseUrl, server } = await listen(proxy.app));
+  });
+
+  afterEach(() => {
+    blockingClients.length = 0;
+  });
+
+  afterAll(async () => {
+    connectionModule.createBlockingClient = originalCreateBlockingClient;
+    server.closeAllConnections?.();
+    await proxyClose();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  }, 30000);
+
+  it('rejects an invalid maxWaitTimeout at startup', () => {
+    expect(() => createProxyServer({ connection: CONNECTION, maxWaitTimeout: 0 })).toThrow(/maxWaitTimeout/);
+    expect(() => createProxyServer({ connection: CONNECTION, maxWaitTimeout: 1.5 })).toThrow(/maxWaitTimeout/);
+  });
+
+  it('returns 400 when waitTimeout exceeds maxWaitTimeout', async () => {
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs/wait`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'too-long', data: {}, opts: { waitTimeout: 20001 } }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/maxWaitTimeout \(20000\)/);
+    expect(blockingClients).toHaveLength(0);
+  });
+
+  it('releases the blocking client when the HTTP client disconnects before the result', async () => {
+    const body = JSON.stringify({ name: 'never-processed', data: {}, opts: { waitTimeout: 15000 } });
+    const url = new URL(`${baseUrl}/queues/${queueName}/jobs/wait`);
+    const req = http.request({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    });
+    req.on('error', () => undefined);
+    req.end(body);
+
+    await waitFor(() => blockingClients.length === 1, 5000);
+    await sleep(100);
+    req.destroy();
+    await waitFor(() => blockingClients[0].closed, 3000);
+  });
+
+  it('releases the blocking client when the disconnect lands while add() is still running', async () => {
+    const { Queue: DistQueue } = require('../dist/queue') as typeof import('../src/queue');
+    const originalAdd = DistQueue.prototype.add;
+    let releaseAdd!: () => void;
+    const addGate = new Promise<void>((resolve) => {
+      releaseAdd = resolve;
+    });
+    let addReached!: () => void;
+    const reachedAdd = new Promise<void>((resolve) => {
+      addReached = resolve;
+    });
+    DistQueue.prototype.add = async function (this: any, ...args: any[]) {
+      addReached();
+      await addGate;
+      return originalAdd.apply(this, args as any);
+    } as any;
+
+    try {
+      const body = JSON.stringify({ name: 'abort-during-add', data: {}, opts: { waitTimeout: 15000 } });
+      const url = new URL(`${baseUrl}/queues/${queueName}/jobs/wait`);
+      const req = http.request({
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      });
+      req.on('error', () => undefined);
+      req.end(body);
+
+      await reachedAdd;
+      expect(blockingClients).toHaveLength(1);
+      req.destroy();
+      await sleep(100);
+      releaseAdd();
+      await waitFor(() => blockingClients[0].closed, 3000);
+    } finally {
+      DistQueue.prototype.add = originalAdd;
+    }
+  });
+});
+
+describe('HTTP proxy hardening - mounted behind a parent body parser', () => {
+  const express = require('express') as typeof import('express');
+  let server: Server;
+  let baseUrl: string;
+  let proxyClose: () => Promise<void>;
+  let cleanupClient: any;
+  const queueName = `proxy-hard-${RUN_ID}-parent-app`;
+
+  beforeAll(async () => {
+    cleanupClient = await createCleanupClient(CONNECTION);
+    const proxy = createProxyServer({ connection: CONNECTION });
+    proxyClose = proxy.close;
+    const parent = express();
+    parent.use(express.json());
+    parent.use(async (_req, _res, next) => {
+      await sleep(20);
+      next();
+    });
+    parent.use(proxy.app);
+    ({ baseUrl, server } = await listen(parent));
+  });
+
+  afterAll(async () => {
+    server.closeAllConnections?.();
+    await proxyClose();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await flushQueue(cleanupClient, queueName).catch(() => undefined);
+    cleanupClient?.close();
+  }, 30000);
+
+  it('jobs/wait still answers when the request body was consumed before the handler ran', async () => {
+    const res = await fetch(`${baseUrl}/queues/${queueName}/jobs/wait`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'no-worker', data: {}, opts: { waitTimeout: 300 } }),
+      signal: AbortSignal.timeout(5000),
+    });
+    expect(res.status).toBe(504);
+    expect((await res.json()).error).toMatch(/did not finish within 300ms/);
+  });
+});

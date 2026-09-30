@@ -30,10 +30,17 @@ export interface ProxyOptions {
   compression?: 'none' | 'gzip';
   /**
    * Maximum items per list or batch request: `start`/`end` spans on job, DLQ, and suspended
-   * listings, `count` on DLQ replay-all, and `limit` on clean. An omitted `end` (or `end=-1`)
-   * returns at most this many items. Default: 1000.
+   * listings, `count` on DLQ replay-all and retry, and `limit` on clean. An omitted `end` (or
+   * `end=-1`) returns at most this many items. Default: 1000.
    */
   maxPageSize?: number;
+  /**
+   * Upper bound in ms for `opts.waitTimeout` on `POST /queues/:name/jobs/wait`; larger values
+   * return 400. An omitted `waitTimeout` uses 30000 capped at this value. Each in-flight wait
+   * holds a dedicated blocking connection, released early if the HTTP client disconnects.
+   * Default: 60000.
+   */
+  maxWaitTimeout?: number;
   /**
    * Callback for queue-level errors and for internal request errors. 5xx responses return a
    * generic message; the underlying error is passed here. Defaults to console.error if not provided.
@@ -178,6 +185,7 @@ export interface DrainResponse {
 
 /** Response body for POST /queues/:name/retry. */
 export interface RetryJobsResponse {
+  /** Number of failed jobs moved back to delayed, at most `count` (default `maxPageSize`). */
   retried: number;
 }
 

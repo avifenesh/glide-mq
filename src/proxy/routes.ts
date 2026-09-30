@@ -14,6 +14,8 @@ import type { AddJobRequest, AddJobResponse, AddJobSkippedResponse, ProxyOptions
 
 const MAX_BULK_SIZE = 1000;
 const DEFAULT_MAX_PAGE_SIZE = MAX_BULK_SIZE;
+const DEFAULT_WAIT_TIMEOUT_MS = 30000;
+const DEFAULT_MAX_WAIT_TIMEOUT_MS = 60000;
 const MIN_JOB_OPTS_LOCK_DURATION_MS = 1000;
 const MAX_JOB_OPTS_LOCK_DURATION_MS = 86_400_000;
 const SSE_BLOCK_MS = 5000;
@@ -313,9 +315,15 @@ function trackDisconnect(req: Request, res: Response): DisconnectTracker {
     closed = true;
     for (const fn of listeners.splice(0)) fn();
   };
-  req.once('close', markClosed);
+  // A request whose body was consumed (POST through express.json) is auto-destroyed and emits
+  // 'close' while the socket is still open; only a dead socket counts as a disconnect there.
+  // The response 'close' fires on a lost connection regardless of body handling.
+  req.once('close', () => {
+    if (req.socket?.destroyed || res.destroyed) markClosed();
+  });
   res.once('close', markClosed);
-  if (req.destroyed || res.destroyed || req.socket?.destroyed) markClosed();
+  // Same rule for the initial state: a consumed body leaves req.destroyed true on a live socket.
+  if (res.destroyed || req.socket?.destroyed) markClosed();
   return {
     get closed() {
       return closed;
@@ -720,6 +728,10 @@ export function createRoutes(
   if (!Number.isSafeInteger(maxPageSize) || maxPageSize < 1) {
     throw new Error('ProxyOptions.maxPageSize must be a positive integer');
   }
+  const maxWaitTimeout = opts.maxWaitTimeout ?? DEFAULT_MAX_WAIT_TIMEOUT_MS;
+  if (!Number.isSafeInteger(maxWaitTimeout) || maxWaitTimeout < 1) {
+    throw new Error('ProxyOptions.maxWaitTimeout must be a positive integer');
+  }
   const flowPrefix = opts.prefix ?? 'glide';
   const errorHandler =
     opts.onError ??
@@ -739,6 +751,19 @@ export function createRoutes(
       errorHandler(err instanceof Error ? err : new Error(String(err)), param(req, 'name') ?? '');
     }
     return { status, message };
+  }
+
+  /**
+   * An error after SSE headers went out cannot become a JSON response. Report it through
+   * onError with the queue name and end the stream so the client sees a clean close.
+   */
+  function endSseWithError(err: unknown, req: Request, res: Response): void {
+    errorHandler(err instanceof Error ? err : new Error(String(err)), param(req, 'name') ?? '');
+    try {
+      res.end();
+    } catch {
+      /* ignore */
+    }
   }
 
   function requireConnection(feature: string) {
@@ -1264,6 +1289,7 @@ export function createRoutes(
   });
 
   router.post('/queues/:name/jobs/wait', async (req: Request, res: Response) => {
+    const disconnect = trackDisconnect(req, res);
     try {
       if (!checkAllowlist(req, res)) return;
 
@@ -1276,11 +1302,26 @@ export function createRoutes(
       if (validationError) {
         throw httpError(400, validationError);
       }
+      const requestedWait = body.opts?.waitTimeout as number | undefined;
+      if (requestedWait !== undefined && requestedWait > maxWaitTimeout) {
+        throw httpError(400, `opts.waitTimeout exceeds maxWaitTimeout (${maxWaitTimeout})`);
+      }
+      const waitTimeout = requestedWait ?? Math.min(DEFAULT_WAIT_TIMEOUT_MS, maxWaitTimeout);
 
       const queue = await getQueue(param(req, 'name'));
-      const result = await queue.addAndWait(body.name, body.data ?? null, body.opts as any);
+      // A client that leaves stops the wait and frees its blocking connection; the job stays queued.
+      const abort = new AbortController();
+      disconnect.onClose(() => abort.abort());
+      if (disconnect.closed) return;
+      const result = await queue.addAndWait(body.name, body.data ?? null, {
+        ...(body.opts as any),
+        signal: abort.signal,
+        waitTimeout,
+      });
+      if (disconnect.closed) return;
       res.status(200).json({ result });
     } catch (err) {
+      if (disconnect.closed) return;
       let mapped = err;
       if (err instanceof Error && (err as any).status == null) {
         if (err.message.includes('did not finish within')) {
@@ -1517,7 +1558,7 @@ export function createRoutes(
         const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
-        res.end();
+        endSseWithError(err, req, res);
       }
     }
   });
@@ -1624,7 +1665,7 @@ export function createRoutes(
         const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
-        res.end();
+        endSseWithError(err, req, res);
       }
     }
   });
@@ -1708,7 +1749,7 @@ export function createRoutes(
         const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
-        res.end();
+        endSseWithError(err, req, res);
       }
     }
   });
@@ -1821,9 +1862,12 @@ export function createRoutes(
       if (!checkAllowlist(req, res)) return;
       const body = req.body as { count?: unknown } | undefined;
       const countRaw = typeof body?.count === 'number' ? String(body.count) : queryValue(req, 'count');
-      const count = countRaw !== undefined ? parseInteger(countRaw, 'count', { min: 0 }) : undefined;
+      const count = countRaw !== undefined ? parseInteger(countRaw, 'count', { min: 1 }) : maxPageSize;
+      if (count > maxPageSize) {
+        throw httpError(400, `count exceeds maximum page size (${maxPageSize})`);
+      }
       const queue = await getQueue(param(req, 'name'));
-      const retried = await queue.retryJobs(count !== undefined ? { count } : undefined);
+      const retried = await queue.retryJobs({ count });
       res.status(200).json({ retried });
     } catch (err) {
       const { status, message } = resolveError(err, req);
@@ -1963,8 +2007,10 @@ export function createRoutes(
         throw httpError(400, nestedOptsError);
       }
 
+      // The producer borrows the proxy's shared command client; close() releases the
+      // reference without closing the client, which the proxy owns.
       const producer = new FlowProducer({
-        client: opts.client,
+        client: await getSharedClient(),
         connection: opts.connection,
         prefix: opts.prefix,
       });
@@ -2177,7 +2223,7 @@ export function createRoutes(
           : undefined;
 
       const summary = await Queue.getUsageSummary({
-        client: opts.client,
+        client: await getSharedClient(),
         connection: opts.connection,
         endTime,
         prefix: opts.prefix,
@@ -2371,7 +2417,7 @@ export function createRoutes(
         const { status, message } = resolveError(err, req);
         res.status(status).json({ error: message });
       } else {
-        res.end();
+        endSseWithError(err, req, res);
       }
     }
   });
