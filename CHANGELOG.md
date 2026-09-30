@@ -10,6 +10,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Proxy `POST` routes could misread a consumed request body as a disconnect**: `trackDisconnect` counted `req` `close`, which Node emits once the JSON body is consumed while the socket is still open. It now relies on `res` `close` and a dead socket, so `jobs/wait` and other body-reading routes are not cut short.
+- **Proxy SSE failures after headers were silent**: errors on `/queues/:name/events`, `/jobs/:id/events`, `/jobs/:id/stream` and `/broadcast/:name/events` now reach `onError(err, queueName)` before the stream ends.
+- **Proxy opened a Valkey client per request** for `POST /flows` and `GET /usage/summary`; both use the shared command client.
 - **Batch workers never charged or checked flow budgets**: batch completion and every batch failure path now charge reported usage once per job (same `usage:budgeted` marker as single-job workers), and each batch entry is diverted when its budget is already exceeded.
 - **`RateLimitError` consumed an attempt**: the requeue incremented `attemptsMade` (or the broadcast per-subscription counter) and wrote `failedReason`. `glidemq_fail` takes an optional `requeueOnly` argument; the job is scheduled after the limiter delay with its counters untouched.
 - **Budget `onExceeded: 'pause'` re-delayed jobs by 24 hours with no way out**: paused jobs re-check every 60 seconds, `job.promote()` re-checks at once, and the new `Queue.updateFlowBudget(flowId, limits)` raises, lowers or removes limits and clears `exceeded` when they are no longer breached (`TestQueue.updateFlowBudget` mirrors it).
@@ -17,17 +20,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Proxy bounds**: `POST /queues/:name/retry` retries at most `maxPageSize` per call (default 1000) and returns `{ retried }`; `count > maxPageSize` or `count = 0` returns 400. `POST /queues/:name/jobs/wait` accepts `waitTimeout` up to the new `ProxyOptions.maxWaitTimeout` (default 60000 ms), and a client disconnect aborts the wait and frees the blocking connection. `GET /queues/:name/metrics` returns the whole per-minute hash and is not paged.
 - **Server function library version is `131`.** Workers and producers reload it on connect.
 - **Broadcast `trimmed` event**: `Broadcast` emits `('trimmed', { trimmed, unread })` after a publish that trims, where `unread` counts messages dropped before some subscription had read them.
+
+### Added
+
+- **`Queue.addAndWait` accepts `signal?: AbortSignal`**: aborting rejects with a `GlideMQError` named `AbortError` and releases the blocking connection; the job stays queued.
+- **Cron syntax parity with cron-parser**: month and weekday names, day-of-week `7`, `?`, `N/step`, an optional leading seconds field, `L`, `LW`, `<n>W` in day-of-month and `<d>L`, `<d>#<n>` in day-of-week. A test oracle compares `nextCronOccurrence` with cron-parser 4.9.0 (the version BullMQ uses) over 44 patterns in four zones: 0 mismatches outside DST transitions, where glide-mq keeps cronie's rules. Seconds patterns are honored by the parser; the scheduler still fires on its promotion tick, so sub-tick periods produce one job per tick.
+- **Bun and Deno support**: verified on Bun 1.4.2 and Deno 2.9.7 (NAPI client load, Queue/Worker/QueueEvents, gzip, worker_threads and forked sandboxes, flows, broadcast, signals). `npm run compat:bun` / `compat:deno` run the smoke against a local Valkey, CI runs both, and docs/COMPATIBILITY.md lists the required Deno permissions and the known gaps.
 
 ### Performance
 
 - **Failed jobs keep the fetch chain alive**: `glidemq_failAndFetchNext` fails the current job and fetches the next one in one call (1 round trip instead of about 4). Rate-limit requeues, batch and broadcast workers keep the previous path. On a library that lacks the function the worker falls back to `glidemq_fail` once per process.
-
-### Added
-
-- **Cron syntax parity with cron-parser**: month and weekday names, day-of-week `7`, `?`, `N/step`, an optional leading seconds field, `L`, `LW`, `<n>W` in day-of-month and `<d>L`, `<d>#<n>` in day-of-week. A test oracle compares `nextCronOccurrence` with cron-parser 4.9.0 (the version BullMQ uses) over 44 patterns in four zones: 0 mismatches outside DST transitions, where glide-mq keeps cronie's rules. Seconds patterns are honored by the parser; the scheduler still fires on its promotion tick, so sub-tick periods produce one job per tick.
-- **Bun and Deno support**: verified on Bun 1.4.2 and Deno 2.9.7 (NAPI client load, Queue/Worker/QueueEvents, gzip, worker_threads and forked sandboxes, flows, broadcast, signals). `npm run compat:bun` / `compat:deno` run the smoke against a local Valkey, CI runs both, and docs/COMPATIBILITY.md lists the required Deno permissions and the known gaps.
 
 ---
 

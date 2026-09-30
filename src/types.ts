@@ -277,6 +277,11 @@ export interface JobOptions {
 export interface AddAndWaitOptions extends JobOptions {
   /** Maximum time to wait for a completed/failed event before rejecting. Default: 30000ms. */
   waitTimeout?: number;
+  /**
+   * Abort the wait early. The job stays enqueued; the call rejects with an AbortError and
+   * releases its dedicated blocking connection.
+   */
+  signal?: AbortSignal;
 }
 
 /** Configuration for time-window rate limiting. */
