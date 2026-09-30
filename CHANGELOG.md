@@ -13,13 +13,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`@glidemq/speedkey` ^0.4.0**: the client is now a re-import of upstream valkey-glide main (security advisories closed, multiplexed-connection deadlock fixed, close() detaches a blocked standalone connection). glide-mq keeps its graceful-close wait for the in-flight read: the cluster client's close() still leaves a blocked XREADGROUP attached for the block duration, and a claim delivered in the standalone teardown window would be lost with the rejected read (measured: 0 of 30 closes stranded an entry with the wait, 21 of 30 standalone and 30 of 30 cluster without it).
 - **`SearchQueryOptions.scorer` removed**: no released valkey-search accepts `SCORER` (it exists only on valkey-search main since 2026-08-31) and upstream glide does not expose it. JavaScript callers passing it were already ignored; TypeScript callers now get a type error.
 - **Proxy bounds**: `POST /queues/:name/retry` retries at most `maxPageSize` per call (default 1000) and returns `{ retried }`; `count > maxPageSize` or `count = 0` returns 400. `POST /queues/:name/jobs/wait` accepts `waitTimeout` up to the new `ProxyOptions.maxWaitTimeout` (default 60000 ms), and a client disconnect aborts the wait and frees the blocking connection. `GET /queues/:name/metrics` returns the whole per-minute hash and is not paged.
-- **Server function library version is `131`.** Workers and producers reload it on connect.
 - **Broadcast `trimmed` event**: `Broadcast` emits `('trimmed', { trimmed, unread })` after a publish that trims, where `unread` counts messages dropped before some subscription had read them.
 - **Server function library version is `132`.** Workers and producers reload it on connect.
 - **`DeadLetterQueueOptions.maxRetries` is deprecated** (never read; removal in the next major).
 - **The `active` stream event is no longer written anywhere**; `worker.on('active')` is unchanged.
-- **Proxy bounds**: `POST /queues/:name/retry` retries at most `maxPageSize` per call (default 1000) and returns `{ retried }`; `count > maxPageSize` or `count = 0` returns 400. `POST /queues/:name/jobs/wait` accepts `waitTimeout` up to the new `ProxyOptions.maxWaitTimeout` (default 60000 ms), and a client disconnect aborts the wait and frees the blocking connection. `GET /queues/:name/metrics` returns the whole per-minute hash and is not paged.
-- **Broadcast `trimmed` event**: `Broadcast` emits `('trimmed', { trimmed, unread })` after a publish that trims, where `unread` counts messages dropped before some subscription had read them.
 
 ### Fixed
 
