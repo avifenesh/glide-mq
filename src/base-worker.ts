@@ -2763,13 +2763,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       // Closing the blocking client mid-read strands claims: entries the
       // server delivers to the in-flight XREADGROUP BLOCK between close()
       // and the socket teardown land in this consumer's PEL with nobody to
-      // read the reply, and a cluster client keeps the block alive until it
-      // expires (speedkey 0.4.0 detaches a standalone connection in a few
-      // ms, which still leaves that window: 21/30 closes stranded an entry
-      // under continuous adds without this wait, 0/30 with it). Those jobs
-      // would wait for stalled recovery and be charged a stall they never
-      // ran. Let the in-flight read return (at most blockTimeout) so its
-      // claims are handed back while the command client is open.
+      // read the reply. speedkey 0.4.2 detaches both standalone and cluster
+      // connections within a few ms, but the window is the socket-teardown
+      // round trip: on localhost 0/30 closes stranded an entry with or
+      // without this wait (0.3.0: 30/30 without it), and glide has no typed
+      // CLIENT UNBLOCK to close it server-side on a real network. Stranded
+      // jobs would wait for stalled recovery and be charged a stall they
+      // never ran. Let the in-flight read return (at most blockTimeout) so
+      // its claims are handed back while the command client is open.
       await this.settlePollLoop();
     }
     this.closeBlockingClient();
