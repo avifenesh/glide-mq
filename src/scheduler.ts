@@ -11,12 +11,15 @@ import {
   reclaimStalledWithIds,
   reclaimStalledListJobsWithIds,
   addJobArgs,
+  casSchedulerEntry,
   nextDueAt,
   tryLock,
   renewLock,
   unlock,
   completeChild,
+  healEarlyDeps,
   healListActive,
+  schedulerAwaitInflight,
   sweepSuspended,
 } from './functions/index';
 import {
@@ -55,6 +58,11 @@ export interface SchedulerOptions {
    * consumer's PEL. The worker must run them again; nobody else will.
    */
   onRedispatch?: (entries: { jobId: string; entryId: string }[]) => void;
+  /**
+   * Stalled reclaim deletes consumers of the group that hold no pending entry
+   * and have been idle longer than this (ms). 0 disables it.
+   */
+  idleConsumerMs?: number;
 }
 
 /**
@@ -79,6 +87,7 @@ export class Scheduler {
   private onError?: (err: Error) => void;
   private onStalled?: (jobId: string) => void;
   private onRedispatch?: (entries: { jobId: string; entryId: string }[]) => void;
+  private idleConsumerMs: number;
   private serializer: Serializer;
   private promotionTimer: ReturnType<typeof setInterval> | null = null;
   private promotionWakeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -106,6 +115,7 @@ export class Scheduler {
     this.onError = opts.onError;
     this.onStalled = opts.onStalled;
     this.onRedispatch = opts.onRedispatch;
+    this.idleConsumerMs = opts.idleConsumerMs ?? 0;
     this.serializer = opts.serializer ?? JSON_SERIALIZER;
   }
 
@@ -181,6 +191,7 @@ export class Scheduler {
       this.promoteDelayed()
         .then(() => this.promoteRateLimitedGroups())
         .then(() => this.flushCrossQueueParentNotifies())
+        .then(() => this.healEarlyDependencies())
         .then(() => this.runSchedulers())
         .then(() => {
           this.onPromotionTick?.();
@@ -343,6 +354,19 @@ export class Scheduler {
   }
 
   /**
+   * Release parents whose last child completion was parked before an older
+   * producer registered the child with a plain SADD (no later completion
+   * counts it). Bounded per call; a no-op when no parent is indexed.
+   */
+  private async healEarlyDependencies(): Promise<void> {
+    try {
+      await healEarlyDeps(this.client, this.queueKeys);
+    } catch (err) {
+      this.reportError(err);
+    }
+  }
+
+  /**
    * Every 10th promotion tick, verify the list-active counter against the actual
    * count of active list-sourced jobs. Corrects upward drift caused by worker crashes.
    */
@@ -373,6 +397,7 @@ export class Scheduler {
         this.consumerGroup,
         this.broadcastMode,
         this.lockDuration,
+        this.idleConsumerMs,
       );
     }
     const result = await reclaimStalledWithIds(
@@ -386,6 +411,7 @@ export class Scheduler {
       this.broadcastMode,
       this.lockDuration,
       redispatch,
+      this.idleConsumerMs,
     );
     this.reportStalled(result.stalledIds);
     if (result.redispatch.length > 0) {
@@ -433,6 +459,31 @@ export class Scheduler {
     );
     this.reportStalled(stalledIds);
     return count;
+  }
+
+  /**
+   * A repeatAfterComplete entry parked at nextRun 0 waits for inflightJobId to
+   * complete. If that job's hash is gone (job.remove()) or terminal while the
+   * entry is still parked, schedule the next run from now. Written with a
+   * compare-and-set over the entry as read, so a concurrent completion wins.
+   */
+  private async advanceParkedEntry(
+    schedulerName: string,
+    rawEntry: string,
+    config: SchedulerEntry,
+    now: number,
+    pendingDeletions: string[],
+  ): Promise<void> {
+    const state = await this.client.hget(this.queueKeys.job(config.inflightJobId!), 'state');
+    const stateStr = state == null ? null : String(state);
+    if (stateStr != null && stateStr !== 'completed' && stateStr !== 'failed') return;
+    const nextRun = computeFollowingSchedulerNextRun(config, now);
+    if (nextRun == null || (config.limit != null && (config.iterationCount ?? 0) >= config.limit)) {
+      pendingDeletions.push(schedulerName);
+      return;
+    }
+    config.nextRun = nextRun;
+    await casSchedulerEntry(this.client, this.queueKeys, schedulerName, rawEntry, JSON.stringify(config));
   }
 
   private schedulerLockKey(name: string): string {
@@ -489,7 +540,9 @@ export class Scheduler {
     }, renewEveryMs);
 
     let fired = 0;
-    const pendingJobs: { keys: string[]; args: string[] }[] = [];
+    // Each fired job is written with the id reserved for it (INCRBY on the id
+    // counter) so the entry can record it as inflightJobId in the same batch.
+    const pendingJobs: { schedulerName: string; keys: string[]; args: string[]; config: SchedulerEntry | null }[] = [];
     const pendingUpdates: Record<string, string> = Object.create(null);
     const pendingDeletions: string[] = [];
     let pendingUpdateCount = 0;
@@ -508,9 +561,10 @@ export class Scheduler {
         }
 
         const schedulerName = String(entry.field);
+        const rawEntry = String(entry.value);
         let config: SchedulerEntry;
         try {
-          config = JSON.parse(String(entry.value));
+          config = JSON.parse(rawEntry);
         } catch {
           continue;
         }
@@ -519,6 +573,13 @@ export class Scheduler {
           !config.pattern && !isValidSchedulerEvery(config.every) && !isValidSchedulerEvery(config.repeatAfterComplete);
         if (invalid) {
           pendingDeletions.push(schedulerName);
+          continue;
+        }
+
+        if (config.nextRun === 0 && isValidSchedulerEvery(config.repeatAfterComplete) && config.inflightJobId) {
+          // Parked on a job that was removed, or that finished without its
+          // completion advancing the entry: nothing else will, so advance here.
+          await this.advanceParkedEntry(schedulerName, rawEntry, config, now, pendingDeletions);
           continue;
         }
 
@@ -590,8 +651,23 @@ export class Scheduler {
 
         const isRepeatAfterComplete = isValidSchedulerEvery(config.repeatAfterComplete);
 
-        pendingJobs.push(
-          addJobArgs(
+        // Switched from every/pattern while the job that mode fired is still
+        // running: park the entry and let that job's completion start the chain.
+        if (isRepeatAfterComplete && config.inflightJobId) {
+          const held = await schedulerAwaitInflight(
+            this.client,
+            this.queueKeys,
+            schedulerName,
+            rawEntry,
+            config.inflightJobId,
+          );
+          if (held !== 'finished') continue;
+        }
+
+        pendingJobs.push({
+          schedulerName,
+          config,
+          ...addJobArgs(
             this.queueKeys,
             jobName,
             jobData,
@@ -613,27 +689,27 @@ export class Scheduler {
             lifo,
             '',
             '',
-            isRepeatAfterComplete ? schedulerName : '',
+            schedulerName,
           ),
-        );
+        });
 
         config.lastRun = now;
         config.iterationCount = currentIterationCount + 1;
         if (config.limit != null && config.iterationCount >= config.limit) {
           pendingDeletions.push(schedulerName);
+          pendingJobs[pendingJobs.length - 1].config = null;
         } else if (isRepeatAfterComplete) {
           // Set nextRun to 0 (sentinel: awaiting completion). The worker will
           // update nextRun after the job completes or terminally fails.
           config.nextRun = 0;
-          pendingUpdates[schedulerName] = JSON.stringify(config);
           pendingUpdateCount++;
         } else {
           const nextRun = preparedNextRun ?? computeFollowingSchedulerNextRun(config, now);
           if (nextRun == null) {
             pendingDeletions.push(schedulerName);
+            pendingJobs[pendingJobs.length - 1].config = null;
           } else {
             config.nextRun = nextRun;
-            pendingUpdates[schedulerName] = JSON.stringify(config);
             pendingUpdateCount++;
           }
         }
@@ -652,6 +728,18 @@ export class Scheduler {
       if (!lockStillHeld) {
         markTickLockLost();
         return 0;
+      }
+
+      if (pendingJobs.length > 0) {
+        const lastId = Number(await this.client.incrBy(this.queueKeys.id, pendingJobs.length));
+        pendingJobs.forEach((pending, i) => {
+          const jobId = String(lastId - pendingJobs.length + i + 1);
+          pending.args[16] = jobId;
+          if (pending.config) {
+            pending.config.inflightJobId = jobId;
+            pendingUpdates[pending.schedulerName] = JSON.stringify(pending.config);
+          }
+        });
       }
 
       // This batch intentionally uses MULTI/EXEC so job creation and scheduler

@@ -197,7 +197,7 @@ const jobs = await dag(
 - DAG validation runs automatically - cycles are detected and rejected with `CycleError`.
 - Jobs are submitted level by level in reverse-topological order (dependents first, prerequisites last) so each node's BullMQ-parents already exist by the time we wire it; all jobs within a level are pipelined in a single batch, so submission cost is O(levels) round trips rather than O(N). Before the leaf level is added, each leaf is registered in all of its dependents' deps sets, so a parent is never released by a fast sibling while another of its deps is still being wired.
 - If any parent fails or is dead-lettered, dependent jobs remain blocked indefinitely (manual cleanup required).
-- Cross-queue dependencies are supported - each node can specify its own `queueName`.
+- Cross-queue dependencies are supported - each node can specify its own `queueName`. A child that completes before its registration reaches the parent is parked on the parent (`depearly`) and counted once the registration lands. A producer on a library before 126 registers with a plain `SADD`, which cannot count a parked completion; the scheduler tick's `glidemq_healEarlyDeps` counts it and releases the parent, so a mixed-version rollout does not leave a parent waiting for children that already finished.
 
 ### Reading results from multiple parents
 

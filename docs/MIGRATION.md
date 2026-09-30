@@ -613,7 +613,7 @@ The processor function signature is identical. The only change is the connection
 | `'removed'`           | `'removed'`          | Full                                                                                      |
 | `'retries-exhausted'` | `'failed'`           | Changed - check `job.attemptsMade >= job.opts.attempts`                                   |
 | `'waiting'`           | -                    | Gap                                                                                       |
-| `'active'`            | `'active'`           | Partial - emitted only on some activation paths; do not rely on it                        |
+| `'active'`            | -                    | Gap - use `worker.on('active')`; the events stream carries no activation event            |
 | `'delayed'`           | -                    | Gap (`'retrying'` carries the backoff `delay`)                                            |
 | `'drained'`           | `'drained'`          | Changed - emitted by `queue.drain()` with `jobId` = removed count, not when queue empties |
 | `'cleaned'`           | `'cleaned'`          | Changed - emitted by `queue.clean()` with `jobId` = removed count                         |
@@ -943,7 +943,7 @@ await queue.add('job', data, {
 
 Custom backoff strategies moved from `settings.backoffStrategy` to `backoffStrategies` map - see [Worker section](#worker).
 
-**`timeout` fails the attempt** - glide-mq enforces `opts.timeout` in the worker. When it passes, the attempt fails with `Job timeout exceeded` and `job.abortSignal` fires. Normal retry and backoff rules apply to that failure. The processor promise is not killed (a sandboxed processor still running 5 seconds after the abort is terminated), so check `job.abortSignal` for cooperative cancellation:
+**`timeout` fails the attempt** - glide-mq enforces `opts.timeout` in the worker. When it passes, the attempt fails with `Job timeout exceeded` and `job.abortSignal` fires. Normal retry and backoff rules apply to that failure. The processor promise is not killed (a sandboxed processor still running 5 seconds after the abort is terminated), so check `job.abortSignal` for cooperative cancellation. After the abort the worker no longer owns the job: in a sandboxed processor `job.updateProgress()`, `job.updateData()` and `job.moveToDelayed()` reject with `Job aborted`; `job.log()` still works so the processor can record why it stopped:
 
 ```ts
 const worker = new Worker(

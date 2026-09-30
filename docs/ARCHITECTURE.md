@@ -70,7 +70,7 @@ added --> stream (ready) --> PEL (active) --> completed (ZSet)
                      stream (re-queued)
 ```
 
-`moveToActive` may return `GROUP_RATE_LIMITED` when a job's ordering-key sliding window rate limit is exceeded, or `GROUP_TOKEN_LIMITED` when the token bucket has insufficient tokens. In both cases, the job is parked in the `glide:{queueName}:ratelimited` ZSet with a score equal to the earliest eligible timestamp. The scheduler's promotion loop picks it up once capacity is available. If a job's `cost` exceeds the bucket's `tbCapacity`, `moveToActive` fails the job (`ERR:COST_EXCEEDS_CAPACITY`) and a worker with `deadLetterQueue` adds a DLQ copy. A job failed this way inside `completeAndFetchNext` gets no DLQ copy.
+`moveToActive` may return `GROUP_RATE_LIMITED` when a job's ordering-key sliding window rate limit is exceeded, or `GROUP_TOKEN_LIMITED` when the token bucket has insufficient tokens. In both cases, the job is parked in the `glide:{queueName}:ratelimited` ZSet with a score equal to the earliest eligible timestamp. The scheduler's promotion loop picks it up once capacity is available. If a job's `cost` exceeds the bucket's `tbCapacity`, the job is failed at activation: `moveToActive` returns `ERR:COST_EXCEEDS_CAPACITY`, and `completeAndFetchNext` / `failAndFetchNext` list the job in a trailing `__glidemq_failed_activations__` marker of their reply. In both cases a worker with `deadLetterQueue` adds the DLQ copy. A job failed this way by the scheduler tick's group promotion (`promoteRateLimited`) has no worker context and gets no DLQ copy.
 
 ### LIFO Mode
 
@@ -131,59 +131,63 @@ redis.register_function('glidemq_complete', function(keys, args) ... end)
 
 ### Functions (49 in 1 library, not 53 scripts)
 
-| Function                          | Keys | Purpose                                                                                  |
-| --------------------------------- | ---- | ---------------------------------------------------------------------------------------- |
-| glidemq_version                   | 1    | Return library version                                                                   |
-| glidemq_addJob                    | 4    | INCR id, HSET job, XADD stream or ZADD scheduled, XADD event (skippable via skipEvents)  |
-| glidemq_promote                   | 3    | ZRANGEBYSCORE scheduled, XADD to stream, ZREM from scheduled                             |
-| glidemq_nextDue                   | 2    | Return next due timestamp from scheduled and rate-limited ZSets                          |
-| glidemq_tryLock                   | 1    | Acquire a distributed lock (SET NX PX)                                                   |
-| glidemq_unlock                    | 1    | Release a distributed lock (compare-and-delete)                                          |
-| glidemq_renewLock                 | 1    | Renew a distributed lock TTL (compare-and-expire)                                        |
-| glidemq_complete                  | 5    | XACK stream, ZADD completed, HSET job, XADD event, check parent deps                     |
-| glidemq_completeAndFetchNext      | 5    | Complete current + fetch next in single RTT                                              |
-| glidemq_fail                      | 6    | XACK stream, ZADD failed or ZADD scheduled (retry), HSET job, XADD event                 |
-| glidemq_failAndFetchNext          | 6    | glidemq_fail + the fetch phases of completeAndFetchNext in single RTT (non-broadcast)    |
-| glidemq_updateFlowBudget          | 1    | HSET/HDEL budget limits, re-evaluate exceeded against charged usage                      |
-| glidemq_reclaimStalled            | 2    | XAUTOCLAIM on stream, HSET stalled count, move to failed if exceeded                     |
-| glidemq_reclaimStalledListJobs    | 2    | Stall detection for LIFO/priority list-sourced jobs via bounded SCAN                     |
-| glidemq_pause                     | 2    | HSET meta paused=1, XADD event                                                           |
-| glidemq_resume                    | 2    | HSET meta paused=0, XADD event                                                           |
-| glidemq_dedup                     | 5-6  | Check dedup hash, skip or add based on mode (simple/throttle/debounce)                   |
-| glidemq_rateLimit                 | 2    | Check/increment rate counter, return delay if exceeded                                   |
-| glidemq_promoteRateLimited        | 2    | Move rate-limited jobs back to stream                                                    |
-| glidemq_checkConcurrency          | 3    | Check global concurrency limit before processing                                         |
-| glidemq_rpopAndReserve            | 4    | Atomic RPOP from LIFO/priority list with global concurrency enforcement                  |
-| glidemq_moveToActive              | 2    | Set job state to active, record processedOn timestamp                                    |
-| glidemq_deferActive               | 3    | Return active job to stream for reprocessing                                             |
-| glidemq_addFlow                   | N    | Atomic: create parent + children, set deps, add children to stream/scheduled             |
-| glidemq_completeChild             | 4    | Remove from parent deps set, if deps empty -> re-queue parent                            |
-| glidemq_registerParent            | 6    | Register additional parent for DAG multi-parent jobs                                     |
-| glidemq_removeJob                 | 7    | Clean job hash, remove from all sets/streams                                             |
-| glidemq_clean                     | 3    | Bulk-remove old completed/failed jobs by age                                             |
-| glidemq_revoke                    | 5    | Revoke a job by ID                                                                       |
-| glidemq_changePriority            | 4    | Re-prioritize a waiting/delayed job                                                      |
-| glidemq_changeDelay               | 4    | Change delay of a delayed job                                                            |
-| glidemq_promoteJob                | 4    | Move a delayed job to waiting immediately                                                |
-| glidemq_moveActiveToDelayed       | 4    | Move active job to delayed state for step-job workflows                                  |
-| glidemq_moveToWaitingChildren     | 3    | Move active job to waiting-children state                                                |
-| glidemq_searchByName              | 1    | Search jobs by name pattern across state sets/streams                                    |
-| glidemq_drain                     | 6    | Remove all waiting (and optionally delayed) jobs                                         |
-| glidemq_retryJobs                 | 4    | Bulk-retry failed jobs                                                                   |
-| glidemq_healListActive            | 1    | Self-heal list-active counter drift caused by worker crashes                             |
-| glidemq_suspend                   | 4    | Move active job to suspended state, release group slot                                   |
-| glidemq_signal                    | 5    | Deliver a signal to a suspended job and re-queue it                                      |
-| glidemq_sweepSuspended            | 4    | Fail suspended jobs whose timeout has passed                                             |
-| glidemq_checkBudget               | 1    | Check if a flow budget has been exceeded                                                 |
-| glidemq_recordUsageAndCheckBudget | 1    | Atomically increment usage counters and check budget limits                              |
-| glidemq_rateLimitGroup            | N    | Per-group rate limiting for ordering keys                                                |
-| glidemq_rateLimitGroupExternal    | 2    | External rate limit trigger for groups                                                   |
-| glidemq_popLists                  | 2    | Check priority + LIFO lists in a single FCALL instead of 2 separate RPOPs                |
-| glidemq_popListsReserve           | 3    | Like popLists, and also INCRBY list-active for the popped jobs (used by current workers) |
-| glidemq_getActiveListJobIds       | 1    | List active priority/LIFO job IDs via bounded SCAN (partial on very large keyspaces)     |
-| glidemq_retryJob                  | 3    | Retry one failed job; errors unless the job is in the failed state                       |
-| glidemq_updateJobFields           | 2    | HSET fields on an existing job hash (never recreates a removed job), optional event      |
-| glidemq_casSchedulerEntry         | 1    | Write a scheduler entry only if it still holds the value the caller read                 |
+| Function                          | Keys | Purpose                                                                                                      |
+| --------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------ |
+| glidemq_version                   | 1    | Return library version                                                                                       |
+| glidemq_addJob                    | 4    | INCR id, HSET job, XADD stream or ZADD scheduled, XADD event (skippable via skipEvents)                      |
+| glidemq_promote                   | 3    | ZRANGEBYSCORE scheduled, XADD to stream, ZREM from scheduled                                                 |
+| glidemq_nextDue                   | 2    | Return next due timestamp from scheduled and rate-limited ZSets                                              |
+| glidemq_tryLock                   | 1    | Acquire a distributed lock (SET NX PX)                                                                       |
+| glidemq_unlock                    | 1    | Release a distributed lock (compare-and-delete)                                                              |
+| glidemq_renewLock                 | 1    | Renew a distributed lock TTL (compare-and-expire)                                                            |
+| glidemq_complete                  | 5    | XACK stream, ZADD completed, HSET job, XADD event, check parent deps                                         |
+| glidemq_completeAndFetchNext      | 5    | Complete current + fetch next in single RTT; trailing markers list jobs failed at activation and empty lists |
+| glidemq_fail                      | 6    | XACK stream, ZADD failed or ZADD scheduled (retry), HSET job, XADD event                                     |
+| glidemq_failAndFetchNext          | 6    | glidemq_fail + the fetch phases of completeAndFetchNext in single RTT (non-broadcast)                        |
+| glidemq_updateFlowBudget          | 1    | HSET/HDEL budget limits, re-evaluate exceeded against charged usage                                          |
+| glidemq_reclaimStalled            | 2    | XAUTOCLAIM on stream, HSET stalled count, move to failed if exceeded                                         |
+| glidemq_reclaimStalledListJobs    | 2    | Stall detection for LIFO/priority list-sourced jobs via bounded SCAN                                         |
+| glidemq_removeIdleConsumer        | 1    | XGROUP DELCONSUMER for the calling consumer when it holds no pending entry                                   |
+| glidemq_recoverBroadcastClaims    | 1    | XCLAIM parked broadcast entries the consumer still owns                                                      |
+| glidemq_schedulerAwaitInflight    | 2    | Park a repeatAfterComplete entry while the old mode's job is still running                                   |
+| glidemq_healEarlyDeps             | 1    | Count parked early child completions registered later by a plain SADD, release parents                       |
+| glidemq_pause                     | 2    | HSET meta paused=1, XADD event                                                                               |
+| glidemq_resume                    | 2    | HSET meta paused=0, XADD event                                                                               |
+| glidemq_dedup                     | 5-6  | Check dedup hash, skip or add based on mode (simple/throttle/debounce)                                       |
+| glidemq_rateLimit                 | 2    | Check/increment rate counter, return delay if exceeded                                                       |
+| glidemq_promoteRateLimited        | 2    | Move rate-limited jobs back to stream                                                                        |
+| glidemq_checkConcurrency          | 3    | Check global concurrency limit before processing                                                             |
+| glidemq_rpopAndReserve            | 4    | Atomic RPOP from LIFO/priority list with global concurrency enforcement                                      |
+| glidemq_moveToActive              | 2    | Set job state to active, record processedOn timestamp; enforce globalConcurrency (GLOBAL_FULL)               |
+| glidemq_deferActive               | 3    | Return active job to stream for reprocessing                                                                 |
+| glidemq_addFlow                   | N    | Atomic: create parent + children, set deps, add children to stream/scheduled                                 |
+| glidemq_completeChild             | 4    | Remove from parent deps set, if deps empty -> re-queue parent                                                |
+| glidemq_registerParent            | 6    | Register additional parent for DAG multi-parent jobs                                                         |
+| glidemq_removeJob                 | 7    | Clean job hash, remove from all sets/streams                                                                 |
+| glidemq_clean                     | 3    | Bulk-remove old completed/failed jobs by age                                                                 |
+| glidemq_revoke                    | 5    | Revoke a job by ID                                                                                           |
+| glidemq_changePriority            | 4    | Re-prioritize a waiting/delayed job                                                                          |
+| glidemq_changeDelay               | 4    | Change delay of a delayed job                                                                                |
+| glidemq_promoteJob                | 4    | Move a delayed job to waiting immediately                                                                    |
+| glidemq_moveActiveToDelayed       | 4    | Move active job to delayed state for step-job workflows                                                      |
+| glidemq_moveToWaitingChildren     | 3    | Move active job to waiting-children state                                                                    |
+| glidemq_searchByName              | 1    | Search jobs by name pattern across state sets/streams                                                        |
+| glidemq_drain                     | 6    | Remove all waiting (and optionally delayed) jobs                                                             |
+| glidemq_retryJobs                 | 4    | Bulk-retry failed jobs                                                                                       |
+| glidemq_healListActive            | 1    | Self-heal list-active counter drift caused by worker crashes                                                 |
+| glidemq_suspend                   | 4    | Move active job to suspended state, release group slot                                                       |
+| glidemq_signal                    | 5    | Deliver a signal to a suspended job and re-queue it                                                          |
+| glidemq_sweepSuspended            | 4    | Fail suspended jobs whose timeout has passed                                                                 |
+| glidemq_checkBudget               | 1    | Check if a flow budget has been exceeded                                                                     |
+| glidemq_recordUsageAndCheckBudget | 1    | Atomically increment usage counters and check budget limits                                                  |
+| glidemq_rateLimitGroup            | N    | Per-group rate limiting for ordering keys                                                                    |
+| glidemq_rateLimitGroupExternal    | 2    | External rate limit trigger for groups                                                                       |
+| glidemq_popLists                  | 2    | Check priority + LIFO lists in a single FCALL instead of 2 separate RPOPs                                    |
+| glidemq_popListsReserve           | 3    | Like popLists, and also INCRBY list-active for the popped jobs (used by current workers)                     |
+| glidemq_getActiveListJobIds       | 1    | List active priority/LIFO job IDs via bounded SCAN (partial on very large keyspaces)                         |
+| glidemq_retryJob                  | 3    | Retry one failed job; errors unless the job is in the failed state                                           |
+| glidemq_updateJobFields           | 2    | HSET fields on an existing job hash (never recreates a removed job), optional event                          |
+| glidemq_casSchedulerEntry         | 1    | Write a scheduler entry only if it still holds the value the caller read                                     |
 
 ### speedkey API for Functions
 

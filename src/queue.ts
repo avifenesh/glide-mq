@@ -1512,6 +1512,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
         const now = Date.now();
         let iterationCount = 0;
         let lastRun: number | undefined;
+        let inflightJobId: string | undefined;
         let nextRun = computeInitialSchedulerNextRun(
           {
             pattern: schedule.pattern,
@@ -1527,6 +1528,9 @@ export class Queue<D = any, R = any> extends EventEmitter {
         if (existingRaw != null) {
           try {
             const existing = JSON.parse(String(existingRaw)) as SchedulerEntry;
+            // The job the last tick fired: a mode switch to repeatAfterComplete
+            // waits for it (scheduler tick) and only its completion advances.
+            inflightJobId = existing.inflightJobId;
             const boundsUnchanged =
               existing.tz === schedule.tz && existing.startDate === startDate && existing.endDate === endDate;
             const scheduleUnchanged =
@@ -1577,6 +1581,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
           compression: this.opts.compression === 'gzip' ? 'gzip' : undefined,
           lastRun,
           nextRun,
+          inflightJobId,
         };
 
         const expected = existingRaw == null ? '' : String(existingRaw);

@@ -175,12 +175,13 @@ Both `Broadcast` and `BroadcastWorker` support graceful shutdown via `close()`. 
 
 ## Crash and stall recovery
 
-A message a subscription's worker claimed but did not finish stays in that subscription's pending entries list: the worker was killed, force-closed with `close(true)`, or received the message while it was closing. Another `BroadcastWorker` on the same subscription reclaims it once the claim has been idle for `stalledInterval` and the message's `lastActive` is older than `lockDuration`, then runs it again. Other subscriptions are not affected.
+A message a subscription's worker claimed but did not finish stays in that subscription's pending entries list: the worker was killed or force-closed with `close(true)`. Another `BroadcastWorker` on the same subscription reclaims it once the claim has been idle for `stalledInterval` and the subscription's own heartbeat for the message (`job:<id>:sub:<subscription>` field `la`, written at activation and by the worker heartbeat) is older than `lockDuration`, then runs it again. Other subscriptions are not affected.
 
 - Stalls are counted per subscription, in `job:<id>:sub:<subscription>` (24h TTL). After more than `maxStalledCount` stalls in one subscription, the message fails, like a terminal processor failure in that subscription (the message hash, shared by all subscriptions, is marked failed).
 - Recovery needs a running `BroadcastWorker` on that subscription. A restarted process gets a new consumer ID, so its own old claims are recovered the same way.
-- `lastActive` is shared by all subscriptions. While another subscription is still processing the same message, stall detection waits until that heartbeat stops.
-- A reclaimed message that the reclaiming worker has not started when it closes or pauses stays in its pending list and is reclaimed again, which counts one more stall.
+- Heartbeats are per subscription, so a subscription still processing the message does not hide a stall in another one. A message activated by a library before 132 has no per-subscription heartbeat yet; for it the shared `lastActive` is used.
+- A worker that received or reclaimed a message and then paused or closed before running it hands the claim back: the claim stays in its pending list, marked as handed back, and the next reclaim runs the message without counting a stall. A paused worker re-takes only the parked claims it still owns when it resumes; one another worker reclaimed meanwhile is left to that worker.
+- A graceful `close()` deletes the worker's consumer from the subscription once it holds no pending entry; stalled reclaim deletes other consumers that hold nothing and have been idle for a long time.
 
 ## Retention
 

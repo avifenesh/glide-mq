@@ -6,6 +6,19 @@ local PRIORITY_SHIFT = 4398046511104
 -- also advance repeatAfterComplete schedulers.
 local advanceRepeatAfterComplete
 
+-- Jobs the current chain call (completeAndFetchNext, failAndFetchNext) failed
+-- at activation (cost over token bucket capacity). The reply lists them so the
+-- worker can add the DLQ copy; nil outside a chain call.
+local activationFailures = nil
+local function noteActivationFailure(jobId, reason)
+  if activationFailures then
+    activationFailures[#activationFailures + 1] = { id = jobId, reason = reason }
+  end
+end
+-- Set by fetchNextForChain when NEXT_NONE came from empty priority and LIFO
+-- lists and an empty stream: the worker skips its pre-block list pop.
+local chainListsEmpty = false
+
 -- Guarded decrement of the per-queue list-active counter.
 -- Used at every site that tracks completion/failure/release of a list-sourced
 -- job (entryId == ''). The guard is required because healListActive cannot
@@ -234,7 +247,6 @@ local function releaseParentIfReady(parentDepsKey, parentJobKey, parentStreamKey
   if remaining <= 0 and redis.call('HGET', parentJobKey, 'state') == 'waiting-children' then
     redis.call('HSET', parentJobKey, 'state', 'waiting')
     xaddJob(parentStreamKey, parentId, redis.call('HGET', parentJobKey, 'name'))
-    emitEvent(parentEventsKey, 'active', parentId, nil)
   end
   return remaining
 end
@@ -275,6 +287,10 @@ local function completeParentDependency(parentDepsKey, parentJobKey, parentStrea
   if redis.call('SISMEMBER', parentDepsKey, depsMember) == 0 then
     if redis.call('HSETNX', parentJobKey, 'depearly:' .. depsMember, '1') == 1 then
       redis.call('HINCRBY', parentJobKey, 'depsEarly', 1)
+      -- Index the parent so glidemq_healEarlyDeps can count this completion
+      -- if the member is later registered with a plain SADD (older producer)
+      -- and no further child completion arrives.
+      redis.call('SADD', string.sub(parentJobKey, 1, #parentJobKey - #('job:' .. parentId)) .. 'deps-early', parentId)
     end
     local doneCount = tonumber(redis.call('HGET', parentJobKey, 'depsCompleted')) or 0
     return redis.call('SCARD', parentDepsKey) - doneCount
@@ -434,6 +450,7 @@ local function releaseGroupSlotAndPromote(jobKey, jobId, now, hintGroupKey, keep
             'failedReason', 'cost exceeds token bucket capacity',
             'finishedOn', tostring(ts))
           advanceRepeatAfterComplete(headJobKey, prefix, ts)
+          noteActivationFailure(headJobId, 'cost exceeds token bucket capacity')
           emitEvent(prefix .. 'events', 'failed', headJobId, {'failedReason', 'cost exceeds token bucket capacity'})
           recordMetrics(metricsKey, ts, ts - processedOn)
           closeOrderingHole(headJobKey, headJobId, ts)
@@ -549,6 +566,22 @@ local function appendParentNotifications(result, notifications)
   result[#result + 1] = '__glidemq_parent_notifications__'
   result[#result + 1] = cjson.encode(notifications)
   return result
+end
+
+-- Close a chain call: append the activation-failure marker (before the parent
+-- notifications marker, which parsers read from the end) and stop collecting.
+local function finishChainReply(result, notifications)
+  if activationFailures and #activationFailures > 0 then
+    result[#result + 1] = '__glidemq_failed_activations__'
+    result[#result + 1] = cjson.encode(activationFailures)
+  end
+  activationFailures = nil
+  if chainListsEmpty then
+    result[#result + 1] = '__glidemq_lists_empty__'
+    result[#result + 1] = '1'
+  end
+  chainListsEmpty = false
+  return appendParentNotifications(result, notifications or {})
 end
 
 local function addParentNotification(notifications, seen, member)
@@ -781,9 +814,10 @@ local function extractLockDurationFromOpts(optsJson)
   return lockDuration
 end
 
--- Advance a repeat-after-complete scheduler from its awaiting-completion
--- sentinel in the same FCALL as a terminal server-side failure.
-local function replaceTopLevelJsonZero(raw, field, replacement)
+-- Replace the numeric value of a top-level JSON field in place. Only that
+-- token changes, so Lua CJSON cannot round high-precision numbers nested in
+-- the job template. Returns nil when the field is absent or not a number.
+local function replaceTopLevelJsonNumber(raw, field, replacement)
   local target = '"' .. field .. '"'
   local depth = 0
   local inString = false
@@ -810,10 +844,13 @@ local function replaceTopLevelJsonZero(raw, field, replacement)
           while string.match(string.sub(raw, valueStart, valueStart), '%s') do
             valueStart = valueStart + 1
           end
-          local nextChar = string.sub(raw, valueStart + 1, valueStart + 1)
-          if string.sub(raw, valueStart, valueStart) == '0' and (nextChar == ',' or nextChar == '}') then
-            return string.sub(raw, 1, valueStart - 1) .. replacement .. string.sub(raw, valueStart + 1)
+          local _, valueEnd = string.find(raw, '^-?[%d%.eE%+%-]+', valueStart)
+          if not valueEnd then return nil end
+          local nextChar = string.sub(raw, valueEnd + 1, valueEnd + 1)
+          if nextChar == ',' or nextChar == '}' or string.match(nextChar, '%s') then
+            return string.sub(raw, 1, valueStart - 1) .. replacement .. string.sub(raw, valueEnd + 1)
           end
+          return nil
         end
       end
       inString = true
@@ -827,6 +864,16 @@ local function replaceTopLevelJsonZero(raw, field, replacement)
   return nil
 end
 
+local function schedulerJobId(jobKey, prefix)
+  local marker = prefix .. 'job:'
+  if string.sub(jobKey, 1, #marker) == marker then
+    return string.sub(jobKey, #marker + 1)
+  end
+  return jobKey
+end
+
+-- Advance a repeat-after-complete scheduler from its awaiting-completion
+-- sentinel in the same FCALL as a terminal server-side failure.
 advanceRepeatAfterComplete = function(jobKey, prefix, timestamp)
   local schedulerName = redis.call('HGET', jobKey, 'schedulerName')
   if not schedulerName or schedulerName == '' then return end
@@ -839,6 +886,10 @@ advanceRepeatAfterComplete = function(jobKey, prefix, timestamp)
   if not ok or type(config) ~= 'table' then return end
   local repeatMs = tonumber(config['repeatAfterComplete']) or 0
   if repeatMs <= 0 or tonumber(config['nextRun']) ~= 0 then return end
+  -- The tick records the job it fired (inflightJobId); a job from an earlier
+  -- chain or from the previous mode does not advance the entry.
+  local inflight = config['inflightJobId']
+  if type(inflight) == 'string' and inflight ~= '' and inflight ~= schedulerJobId(jobKey, prefix) then return end
 
   local nextRun = timestamp + repeatMs
   local endDate = tonumber(config['endDate'])
@@ -849,11 +900,37 @@ advanceRepeatAfterComplete = function(jobKey, prefix, timestamp)
     return
   end
 
-  -- Replace only the top-level sentinel so Lua CJSON cannot round
-  -- high-precision numbers nested in the job template.
-  local updated = replaceTopLevelJsonZero(raw, 'nextRun', tostring(nextRun))
+  local updated = replaceTopLevelJsonNumber(raw, 'nextRun', tostring(nextRun))
   if not updated then return end
   redis.call('HSET', schedulersKey, schedulerName, updated)
+end
+
+-- Delete consumers of a group that hold no pending entry and have been idle
+-- longer than idleMs, skipping the caller. Bounded to MAX_CONSUMER_DELETES per
+-- call; XINFO CONSUMERS itself lists every consumer of the group.
+local MAX_CONSUMER_DELETES = 20
+local function deleteIdleConsumers(streamKey, group, keep, idleMs)
+  local ok, consumers = pcall(redis.call, 'XINFO', 'CONSUMERS', streamKey, group)
+  if not ok or type(consumers) ~= 'table' then return 0 end
+  local deleted = 0
+  for i = 1, #consumers do
+    local info = consumers[i]
+    local name, pending, idle = nil, 0, 0
+    if type(info) == 'table' then
+      for f = 1, #info, 2 do
+        if info[f] == 'name' then name = info[f + 1]
+        elseif info[f] == 'pending' then pending = tonumber(info[f + 1]) or 0
+        elseif info[f] == 'idle' then idle = tonumber(info[f + 1]) or 0
+        end
+      end
+    end
+    if name and name ~= keep and pending == 0 and idle > idleMs then
+      redis.call('XGROUP', 'DELCONSUMER', streamKey, group, name)
+      deleted = deleted + 1
+      if deleted >= MAX_CONSUMER_DELETES then break end
+    end
+  end
+  return deleted
 end
 
 -- Apply stall logic to a job: increment stalledCount, fail if over max, else emit stalled event.
@@ -863,6 +940,12 @@ end
 local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp, subKey)
   local stalledCount
   if subKey then
+    -- The previous owner handed the claim back (closed or paused before
+    -- running it): not a stall. Second return value marks the hand-back.
+    if redis.call('HGET', subKey, 'hb') == '1' then
+      redis.call('HDEL', subKey, 'hb')
+      return false, true
+    end
     stalledCount = redis.call('HINCRBY', subKey, 's', 1)
     -- Same retention as the per-subscription retry counter; never shorten a
     -- longer TTL a scheduled retry set.
@@ -1375,11 +1458,25 @@ local function fetchNextForChain(prefix, streamKey, eventsKey, failedMetricsKey,
   -- {'NEXT_REVOKED', completedJobId, nextJobId, nextEntryId, ...}
   -- {'NEXT_HASH', completedJobId, nextJobId, nextEntryId, field1, value1, field2, value2, ..., ...}
 
+  -- Global concurrency: a claim held in the PEL by a worker waiting for a slot
+  -- (GLOBAL_FULL) counts as pending, so a chain claim here would overshoot.
+  local gcLimit = tonumber(redis.call('HGET', prefix .. 'meta', 'globalConcurrency')) or 0
+  if gcLimit > 0 then
+    local ok_gc, pendingSummary = pcall(redis.call, 'XPENDING', streamKey, group)
+    local pendingCount = (ok_gc and pendingSummary and tonumber(pendingSummary[1])) or 0
+    local listActiveCount = tonumber(redis.call('GET', prefix .. 'list-active')) or 0
+    if pendingCount + listActiveCount >= gcLimit then
+      return {'NEXT_NONE', jobId}
+    end
+  end
+
   -- Phase 1.0: Try priority list first (highest priority: priority > LIFO > FIFO)
   local priorityKey = prefix .. 'priority'
+  local listsEmpty = false
   for _priAttempt = 1, 3 do
     local priJobId = redis.call('RPOP', priorityKey)
     if not priJobId then
+      listsEmpty = true
       break  -- priority list is empty
     end
 
@@ -1432,6 +1529,7 @@ local function fetchNextForChain(prefix, streamKey, eventsKey, failedMetricsKey,
                     'failedReason', 'cost exceeds token bucket capacity',
                     'finishedOn', tostring(timestamp))
                   advanceRepeatAfterComplete(priJobKey, prefix, tonumber(timestamp))
+                  noteActivationFailure(priJobId, 'cost exceeds token bucket capacity')
                   if skipEvents ~= '1' then emitEvent(eventsKey, 'failed', priJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
                   if skipMetrics ~= '1' then recordMetrics(prefix .. 'metrics:failed', tonumber(timestamp), tonumber(timestamp) - priProcessedOn) end
                   if priOrdSeq > 0 then
@@ -1507,9 +1605,11 @@ local function fetchNextForChain(prefix, streamKey, eventsKey, failedMetricsKey,
 
   -- Phase 1.5: Try LIFO list (before stream), retry up to 3 times
   local lifoKey = prefix .. 'lifo'
+  local lifoEmpty = false
   for _lifoAttempt = 1, 3 do
     local lifoJobId = redis.call('RPOP', lifoKey)
     if not lifoJobId then
+      lifoEmpty = true
       break  -- LIFO list is empty
     end
 
@@ -1538,11 +1638,13 @@ local function fetchNextForChain(prefix, streamKey, eventsKey, failedMetricsKey,
   for _fetchAttempt = 1, 3 do
     local nextEntries = redis.call('XREADGROUP', 'GROUP', group, consumer, 'COUNT', 1, 'STREAMS', streamKey, '>')
     if not nextEntries or #nextEntries == 0 then
+      chainListsEmpty = listsEmpty and lifoEmpty
       return {'NEXT_NONE', jobId}
     end
     local streamData = nextEntries[1]
     local entries = streamData[2]
     if not entries or #entries == 0 then
+      chainListsEmpty = listsEmpty and lifoEmpty
       return {'NEXT_NONE', jobId}
     end
     local nextEntry = entries[1]
@@ -1651,6 +1753,7 @@ local function fetchNextForChain(prefix, streamKey, eventsKey, failedMetricsKey,
           'failedReason', 'cost exceeds token bucket capacity',
           'finishedOn', tostring(timestamp))
         advanceRepeatAfterComplete(nextJobKey, prefix, tonumber(timestamp))
+        noteActivationFailure(nextJobId, 'cost exceeds token bucket capacity')
         if skipEvents ~= '1' then emitEvent(prefix .. 'events', 'failed', nextJobId, {'failedReason', 'cost exceeds token bucket capacity'}) end
         if skipMetrics ~= '1' then recordMetrics(failedMetricsKey, tonumber(timestamp), tonumber(timestamp) - nextProcessedOn) end
         closeOrderingHoleAndPromote(nextJobKey, nextJobId, tonumber(timestamp))
@@ -1750,6 +1853,8 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
   if cur[1] == '1' then
     return {'CURRENT_REVOKED', jobId}
   end
+  activationFailures = {}
+  chainListsEmpty = false
   local processedOn
   if hintProcessedOn ~= '' then
     processedOn = tonumber(hintProcessedOn) or timestamp
@@ -1877,15 +1982,15 @@ redis.register_function('glidemq_completeAndFetchNext', function(keys, args)
 
   -- In broadcast mode: do not fetch next (avoids XDEL of next entry which would break other consumer groups)
   if broadcastMode == '1' then
-    return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
+    return finishChainReply({'NEXT_NONE', jobId}, parentNotifications)
   end
 
   -- Queue.pause(): finish the current job but do not claim the next one.
   if isQueuePaused(prefix) then
-    return appendParentNotifications({'NEXT_NONE', jobId}, parentNotifications)
+    return finishChainReply({'NEXT_NONE', jobId}, parentNotifications)
   end
 
-  return appendParentNotifications(
+  return finishChainReply(
     fetchNextForChain(prefix, streamKey, eventsKey, prefix .. 'metrics:failed', group, consumer, timestamp, skipEvents, skipMetrics, jobId),
     parentNotifications)
 end)
@@ -2037,6 +2142,8 @@ end)
 -- KEYS: as glidemq_fail. ARGS: glidemq_fail args 1..13, then the consumer name.
 -- Returns {failResult, 'NEXT_NONE' | 'NEXT_REVOKED' | 'NEXT_HASH', ...} (see fetchNextForChain).
 redis.register_function('glidemq_failAndFetchNext', function(keys, args)
+  activationFailures = {}
+  chainListsEmpty = false
   local failResult = failJobCore(keys, args, false)
   local jobId = args[1]
   local prefix = string.sub(keys[5], 1, #keys[5] - #('job:' .. jobId))
@@ -2048,6 +2155,7 @@ redis.register_function('glidemq_failAndFetchNext', function(keys, args)
     out = fetchNextForChain(prefix, keys[1], keys[4], keys[6], args[7], consumer, tonumber(args[4]),
       args[12] or '0', args[13] or '0', jobId)
   end
+  out = finishChainReply(out, nil)
   table.insert(out, 1, failResult)
   return out
 end)
@@ -2081,9 +2189,14 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   -- {count, {stalledId...}, {jobId, entryId, ...}}. Older callers omit it and
   -- keep the entry parked in the reclaiming consumer's PEL.
   local redispatch = broadcastMode == '1' and args[10] == '1'
+  -- Optional (library 132): consumers of this group with no pending entries
+  -- that have been idle longer than this many ms are deleted (at most
+  -- MAX_CONSUMER_DELETES per call), so dead workers do not accumulate.
+  local idleConsumerMs = tonumber(args[11]) or 0
   local stalledIds = {}
   local redispatched = {}
   local function reply(count)
+    if idleConsumerMs > 0 then deleteIdleConsumers(streamKey, group, consumer, idleConsumerMs) end
     if redispatch then return {count, stalledIds, redispatched} end
     if not returnIds then return count end
     local out = {count}
@@ -2131,6 +2244,14 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       else
       local vals = redis.call('HMGET', jobKey, 'lastActive', 'opts')
       local lastActive = tonumber(vals[1])
+      local subKey = nil
+      if broadcastMode == '1' then
+        subKey = jobKey .. ':sub:' .. group
+        -- Per-subscription heartbeat (library 132); older activations only
+        -- wrote the shared lastActive.
+        local subLastActive = tonumber(redis.call('HGET', subKey, 'la'))
+        if subLastActive then lastActive = subLastActive end
+      end
       local jobLockDuration = extractLockDurationFromOpts(vals[2])
       local effectiveIdle
       if jobLockDuration > 0 then
@@ -2143,10 +2264,8 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
       if lastActive and (timestamp - lastActive) < effectiveIdle then
         count = count + 1
       else
-      local subKey = nil
-      if broadcastMode == '1' then subKey = jobKey .. ':sub:' .. group end
-      local failed = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp, subKey)
-      if not failed then stalledIds[#stalledIds + 1] = jobId end
+      local failed, handedBack = applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, maxStalledCount, timestamp, subKey)
+      if not failed and not handedBack then stalledIds[#stalledIds + 1] = jobId end
       if failed then
         if entryId ~= '' then redis.call('XACK', streamKey, group, entryId) end
         if entryId ~= '' and broadcastMode ~= '1' then redis.call('XDEL', streamKey, entryId) end
@@ -2181,6 +2300,21 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
   return reply(count)
 end)
 
+-- Remove this consumer from its group when it holds no pending entry. Checked
+-- and deleted in one step: XGROUP DELCONSUMER would drop pending entries.
+-- KEYS: [streamKey]  ARGS: [group, consumer]  Reply: 1 deleted, 0 kept.
+redis.register_function('glidemq_removeIdleConsumer', function(keys, args)
+  local streamKey = keys[1]
+  local group = args[1]
+  local consumer = args[2]
+  local ok, pending = pcall(redis.call, 'XPENDING', streamKey, group, '-', '+', 1, consumer)
+  if not ok then return 0 end
+  if pending and #pending > 0 then return 0 end
+  local okDel, deleted = pcall(redis.call, 'XGROUP', 'DELCONSUMER', streamKey, group, consumer)
+  if not okDel then return 0 end
+  return 1
+end)
+
 local function isActiveListClaim(jobKey)
   local vals = redis.call('HMGET', jobKey, 'state', 'listSourced', 'lifo', 'priority')
   return vals[1] == 'active' and isListSourced(vals[2], vals[3], vals[4])
@@ -2189,9 +2323,12 @@ end
 -- Bounded SCAN for active list-sourced jobs. All prefix:job:* keys share the
 -- queue hash tag, so SCAN sees the whole set on the local node. Returns the
 -- job IDs and whether the scan completed.
-local function scanActiveListIds(prefix, maxIter, count)
+-- Returns the active list claims found in up to maxIter SCAN pages from
+-- startCursor (default '0'), whether the scan wrapped to '0' (complete), and
+-- the cursor to continue from.
+local function scanActiveListIds(prefix, maxIter, count, startCursor)
   local pattern = prefix .. 'job:*'
-  local cursor = '0'
+  local cursor = startCursor or '0'
   local iter = 0
   local ids = {}
   repeat
@@ -2206,7 +2343,7 @@ local function scanActiveListIds(prefix, maxIter, count)
       end
     end
   until cursor == '0' or iter >= maxIter
-  return ids, cursor == '0'
+  return ids, cursor == '0', cursor
 end
 
 -- Active list-sourced job IDs, read from list-active-ids when it covers every
@@ -2937,6 +3074,27 @@ local function moveToActiveClaim(keys, args)
     end
     return 'EXPIRED'
   end
+  -- Global concurrency for stream claims (optional arg 6, library 132). The
+  -- XREADGROUP claim already counts in XPENDING, so the cap is decided here:
+  -- the oldest claims within the cap keep their slots, a newer one is handed
+  -- back by the worker (deferActive). List claims reserve in rpopAndReserve.
+  if (args[6] or '0') == '1' and streamKey ~= '' and entryId ~= '' and group ~= '' and broadcastMode ~= '1' then
+    local gc = tonumber(redis.call('HGET', prefix .. 'meta', 'globalConcurrency')) or 0
+    if gc > 0 then
+      local allowed = gc - (tonumber(redis.call('GET', prefix .. 'list-active')) or 0)
+      if allowed <= 0 then return 'GLOBAL_FULL' end
+      local ok_gp, pendingSummary = pcall(redis.call, 'XPENDING', streamKey, group)
+      local pendingCount = (ok_gp and pendingSummary and tonumber(pendingSummary[1])) or 0
+      if pendingCount > allowed then
+        local oldest = redis.call('XPENDING', streamKey, group, '-', '+', allowed)
+        local within = false
+        for oi = 1, #oldest do
+          if oldest[oi][1] == entryId then within = true break end
+        end
+        if not within then return 'GLOBAL_FULL' end
+      end
+    end
+  end
   if groupKey and groupKey ~= '' then
     local groupHashKey = prefix .. 'group:' .. groupKey
     -- Load all group fields in one call
@@ -3103,6 +3261,15 @@ local RELEASED_LIST_CLAIM = {
 redis.register_function('glidemq_moveToActive', function(keys, args)
   local result = moveToActiveClaim(keys, args)
   local jobId = args[4] or ''
+  -- Broadcast: the heartbeat is per subscription (job:<id>:sub:<group> 'la'),
+  -- so a stall in one subscription is not masked by another still running
+  -- the same message. Activation also clears the hand-back mark (hb).
+  if type(result) == 'table' and (args[5] or '0') == '1' and (args[3] or '') ~= '' then
+    local subKey = keys[1] .. ':sub:' .. args[3]
+    redis.call('HSET', subKey, 'la', tostring(tonumber(args[1]) or 0))
+    redis.call('HDEL', subKey, 'hb')
+    if redis.call('PTTL', subKey) < 86400000 then redis.call('PEXPIRE', subKey, 86400000) end
+  end
   -- List claims carry no entryId. Activation also tracks claims popped by the
   -- legacy non-reserving glidemq_popLists.
   if (args[2] or '') == '' and jobId ~= '' then
@@ -3127,8 +3294,21 @@ redis.register_function('glidemq_deferActive', function(keys, args)
   local broadcastMode = args[4] or '0'
   local pausedRestore = args[5] or '0'
   -- Broadcast + pause: leave the PEL claim on this subscription. XADD would
-  -- duplicate the message for every other consumer group.
+  -- duplicate the message for every other consumer group. Mark the claim as
+  -- handed back (hb) so the next stalled reclaim does not count a stall; with
+  -- the optional consumer arg only a claim this consumer still owns is marked.
   if pausedRestore == '1' and broadcastMode == '1' then
+    local consumer = args[7] or ''
+    local owned = true
+    if consumer ~= '' and entryId ~= '' then
+      local okP, pend = pcall(redis.call, 'XPENDING', streamKey, group, entryId, entryId, 1)
+      owned = okP and type(pend) == 'table' and #pend > 0 and pend[1][2] == consumer
+    end
+    if owned and redis.call('EXISTS', jobKey) == 1 then
+      local subKey = jobKey .. ':sub:' .. group
+      redis.call('HSET', subKey, 'hb', '1')
+      if redis.call('PTTL', subKey) < 86400000 then redis.call('PEXPIRE', subKey, 86400000) end
+    end
     return 0
   end
   local exists = redis.call('EXISTS', jobKey)
@@ -3186,6 +3366,40 @@ redis.register_function('glidemq_deferActive', function(keys, args)
     end
   end
   return 1
+end)
+
+-- Re-take broadcast entries this worker parked (pause or redispatch) that it
+-- still owns. An entry another consumer reclaimed meanwhile is skipped, so
+-- the message is not run twice in one subscription. Clears the hb mark.
+-- KEYS: [streamKey]  ARGS: [group, consumer, entryId...]
+-- Reply: { {entryId, {field, value, ...}}, ... } for the entries re-taken.
+redis.register_function('glidemq_recoverBroadcastClaims', function(keys, args)
+  local streamKey = keys[1]
+  local group = args[1]
+  local consumer = args[2]
+  local prefix = string.sub(streamKey, 1, #streamKey - 6)
+  local out = {}
+  for i = 3, #args do
+    local entryId = args[i]
+    local okP, pend = pcall(redis.call, 'XPENDING', streamKey, group, entryId, entryId, 1)
+    if okP and type(pend) == 'table' and #pend > 0 and pend[1][2] == consumer then
+      local claimed = redis.call('XCLAIM', streamKey, group, consumer, 0, entryId)
+      for c = 1, #claimed do
+        local entry = claimed[c]
+        if type(entry) == 'table' and entry[2] then
+          out[#out + 1] = entry
+          local fields = entry[2]
+          for f = 1, #fields, 2 do
+            if fields[f] == 'jobId' then
+              redis.call('HDEL', prefix .. 'job:' .. fields[f + 1] .. ':sub:' .. group, 'hb')
+              break
+            end
+          end
+        end
+      end
+    end
+  end
+  return out
 end)
 
 redis.register_function('glidemq_addFlow', function(keys, args)
@@ -3492,6 +3706,23 @@ redis.register_function('glidemq_casSchedulerEntry', function(keys, args)
   return 1
 end)
 
+-- Mode switch to repeatAfterComplete while the job the old mode fired is
+-- still running: park the entry (nextRun 0) so that job's completion starts
+-- the chain. Check and write happen in one step, so a completion that landed
+-- first (and left the held nextRun alone) reads as terminal and the tick fires.
+-- keys: schedulers, in-flight job hash. args: name, entry as read.
+-- Reply: 1 parked, 0 job finished or gone (fire normally), -1 entry changed.
+redis.register_function('glidemq_schedulerAwaitInflight', function(keys, args)
+  local current = redis.call('HGET', keys[1], args[1])
+  if not current or current ~= args[2] then return -1 end
+  local state = redis.call('HGET', keys[2], 'state')
+  if not state or state == 'completed' or state == 'failed' then return 0 end
+  local updated = replaceTopLevelJsonNumber(current, 'nextRun', '0')
+  if not updated then return -1 end
+  redis.call('HSET', keys[1], args[1], updated)
+  return 1
+end)
+
 redis.register_function('glidemq_completeChild', function(keys, args)
   local depsKey = keys[1]
   local parentJobKey = keys[2]
@@ -3604,12 +3835,52 @@ local TRIM_KEEP_STATES = {
 
 -- Delete a broadcast message whose stream entries are all trimmed, once no
 -- claim (bcastHeld), scheduled retry or newer retry entry still needs it.
-local function deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, jobId)
+-- A retry entry promoted by a library before 130 was not recorded in
+-- bcastEntry. When some subscription retried this message, look for its
+-- retry entry among the oldest stream entries (bounded) before deleting.
+-- Retry entries among the oldest 1000 stream entries, indexed by job id. Read
+-- once per trim call (lazily, only when a candidate needs it), so the work is
+-- O(range) per call and not per candidate.
+local function legacyRetryIndex(streamKey)
+  local index = {}
+  local entries = redis.call('XRANGE', streamKey, '-', '+', 'COUNT', 1000)
+  for i = 1, #entries do
+    local fields = entries[i][2]
+    local entryJobId, isRetry = nil, false
+    for f = 1, #fields, 2 do
+      if fields[f] == 'jobId' then entryJobId = fields[f + 1] end
+      if fields[f] == 'retryGroup' then isRetry = true end
+    end
+    if isRetry and entryJobId and not index[entryJobId] then index[entryJobId] = entries[i][1] end
+  end
+  return index
+end
+
+local function findLegacyRetryEntry(jobId, groups, jobKey, legacyRetries)
+  local retried = false
+  for i = 1, #groups do
+    if (tonumber(redis.call('HGET', jobKey .. ':sub:' .. groups[i], 'a')) or 0) > 0 then
+      retried = true
+      break
+    end
+  end
+  if not retried then return nil end
+  return legacyRetries()[jobId]
+end
+
+local function deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, jobId, legacyRetries)
   local jobKey = prefix .. 'job:' .. jobId
   local vals = redis.call('HMGET', jobKey, 'state', 'bcastHeld', 'bcastEntry')
   if not vals[1] or TRIM_KEEP_STATES[vals[1]] then return end
   if (tonumber(vals[2]) or 0) > 0 then return end
   if vals[3] and #redis.call('XRANGE', streamKey, vals[3], vals[3]) > 0 then return end
+  if not vals[3] then
+    local legacyRetry = findLegacyRetryEntry(jobId, groups, jobKey, legacyRetries)
+    if legacyRetry then
+      redis.call('HSET', jobKey, 'bcastEntry', legacyRetry)
+      return
+    end
+  end
   local scheduledKey = keys[4]
   if redis.call('ZSCORE', scheduledKey, jobId) then return end
   local subKeys = {}
@@ -3699,8 +3970,13 @@ redis.register_function('glidemq_trimBroadcast', function(keys, args)
       end
     end
   end
+  local legacyIndex = nil
+  local function legacyRetries()
+    if not legacyIndex then legacyIndex = legacyRetryIndex(streamKey) end
+    return legacyIndex
+  end
   for i = 1, #candidates do
-    deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, candidates[i])
+    deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, candidates[i], legacyRetries)
   end
   return {trimmed, unread}
 end)
@@ -4213,7 +4489,6 @@ redis.register_function('glidemq_moveToWaitingChildren', function(keys, args)
   if depsCompleted >= totalDeps then
     redis.call('HSET', jobKey, 'state', 'waiting')
     xaddJob(streamKey, jobId, redis.call('HGET', jobKey, 'name'))
-    emitEvent(eventsKey, 'active', jobId, nil)
     if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
     return 'completed'
   end
@@ -4631,30 +4906,114 @@ redis.register_function('glidemq_updateJobFields', function(keys, args)
   return 1
 end)
 
+-- Count parked early completions of parents whose child registration came
+-- through a plain SADD (producer on a library before 126) and release a
+-- parent that is complete. Bounded: at most `max` parents per call.
+-- KEYS: [idKey]  ARGS: [max]  Reply: number of parents released.
+redis.register_function('glidemq_healEarlyDeps', function(keys, args)
+  local idKey = keys[1]
+  local prefix = string.sub(idKey, 1, #idKey - 2)
+  local indexKey = prefix .. 'deps-early'
+  local max = tonumber(args[1]) or 100
+  local metaKey = prefix .. 'meta'
+  if redis.call('EXISTS', indexKey) == 0 then
+    redis.call('HDEL', metaKey, 'healEarlyCursor')
+    return 0
+  end
+  -- Continue from the previous page so an index larger than one page is
+  -- fully visited across ticks (like stalledCursor for XAUTOCLAIM).
+  local startCursor = redis.call('HGET', metaKey, 'healEarlyCursor') or '0'
+  local scan = redis.call('SSCAN', indexKey, startCursor, 'COUNT', max)
+  redis.call('HSET', metaKey, 'healEarlyCursor', scan[1])
+  local parents = scan[2]
+  local released = 0
+  for i = 1, #parents do
+    local parentId = parents[i]
+    local parentJobKey = prefix .. 'job:' .. parentId
+    if redis.call('EXISTS', parentJobKey) == 0 then
+      redis.call('SREM', indexKey, parentId)
+    else
+      local depsKey = prefix .. 'deps:' .. parentId
+      if countEarlyDeps(depsKey, parentJobKey) then
+        local before = redis.call('HGET', parentJobKey, 'state')
+        releaseParentIfReady(depsKey, parentJobKey, prefix .. 'stream', prefix .. 'events', parentId)
+        if before == 'waiting-children' and redis.call('HGET', parentJobKey, 'state') == 'waiting' then
+          released = released + 1
+        end
+      end
+      if (tonumber(redis.call('HGET', parentJobKey, 'depsEarly')) or 0) <= 0 then
+        redis.call('SREM', indexKey, parentId)
+      end
+    end
+  end
+  return released
+end)
+
+-- Drop members of list-active-ids that are no longer active list claims and
+-- return how many live claims remain.
+local function pruneListActiveIds(prefix, idsKey)
+  local members = redis.call('SMEMBERS', idsKey)
+  local live = 0
+  for i = 1, #members do
+    if isActiveListClaim(prefix .. 'job:' .. members[i]) then
+      live = live + 1
+    else
+      redis.call('SREM', idsKey, members[i])
+    end
+  end
+  return live
+end
+
+-- Correct upward drift of the list-active counter (worker crashes between a
+-- list claim and its release). With the seed marker present and the set at
+-- least as large as the counter, the set is trusted and no SCAN runs. A
+-- mismatch (marker missing, or claims made by an older library missing from
+-- the set) re-seeds the set from a SCAN that resumes from a cursor kept in
+-- meta (listActiveScanCursor), so a large keyspace completes over several
+-- ticks; found claims accumulate in list-active-ids:seed and are merged when
+-- the scan wraps. Only a complete view corrects the counter.
+-- KEYS: [idKey]  ARGS: [maxIter?, count?] (SCAN pages per call, keys per page)
+-- Returns the drift removed from the counter (0 while a re-seed is incomplete).
 redis.register_function('glidemq_healListActive', function(keys, args)
   local idKey = keys[1]
   local prefix = string.sub(idKey, 1, #idKey - 2)
   local listActiveKey = prefix .. 'list-active'
+  local idsKey = listActiveIdsKey(listActiveKey)
+  local metaKey = prefix .. 'meta'
+  local maxIter = tonumber(args[1]) or 500
+  local count = tonumber(args[2]) or 100
   local counter = tonumber(redis.call('GET', listActiveKey)) or 0
   if counter <= 0 then
     return 0
   end
-  local ids, complete = activeListIds(prefix, 500, 100)
-  -- A partial scan undercounts active list jobs. Correcting from it would
-  -- lower list-active below the true count and let globalConcurrency
-  -- overcommit, so only a complete view may correct the counter.
-  if not complete then return 0 end
-  local drift = counter - #ids
+  local live
+  if redis.call('HGET', metaKey, 'listActiveIds') == '1' and redis.call('SCARD', idsKey) >= counter then
+    live = pruneListActiveIds(prefix, idsKey)
+  else
+    local seedKey = idsKey .. ':seed'
+    local startCursor = redis.call('HGET', metaKey, 'listActiveScanCursor') or '0'
+    local ids, complete, nextCursor = scanActiveListIds(prefix, maxIter, count, startCursor)
+    for i = 1, #ids, 1000 do
+      redis.call('SADD', seedKey, unpack(ids, i, math.min(i + 999, #ids)))
+    end
+    if not complete then
+      redis.call('HSET', metaKey, 'listActiveScanCursor', nextCursor)
+      -- An abandoned partial seed (queue emptied mid-scan) must not linger.
+      redis.call('PEXPIRE', seedKey, 3600000)
+      return 0
+    end
+    local seeded = redis.call('SMEMBERS', seedKey)
+    for i = 1, #seeded, 1000 do
+      redis.call('SADD', idsKey, unpack(seeded, i, math.min(i + 999, #seeded)))
+    end
+    redis.call('DEL', seedKey)
+    redis.call('HDEL', metaKey, 'listActiveScanCursor')
+    live = pruneListActiveIds(prefix, idsKey)
+    redis.call('HSET', metaKey, 'listActiveIds', '1')
+  end
+  local drift = counter - live
   if drift > 0 then
     redis.call('DECRBY', listActiveKey, drift)
-    -- Mirror the correction in list-active-ids: keep only the active claims.
-    local idsKey = listActiveIdsKey(listActiveKey)
-    local active = {}
-    for i = 1, #ids do active[ids[i]] = true end
-    local members = redis.call('SMEMBERS', idsKey)
-    for i = 1, #members do
-      if not active[members[i]] then redis.call('SREM', idsKey, members[i]) end
-    end
   end
   return drift
 end)

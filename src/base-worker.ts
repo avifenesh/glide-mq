@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { randomBytes } from 'crypto';
 import os from 'os';
-import { Batch, ClusterBatch, TimeUnit } from '@glidemq/speedkey';
+import { Batch, ClusterBatch, ExpireOptions, TimeUnit } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient, GlideReturnType } from '@glidemq/speedkey';
 import type {
   WorkerOptions,
@@ -55,10 +55,12 @@ import {
   completeChild,
   failJob,
   addJob,
+  casSchedulerEntry,
   rateLimit as rateLimitFn,
   rateLimitGroup as rateLimitGroupFn,
   moveToActive,
   moveToActiveCall,
+  type MoveToActiveResult,
   parseMoveToActiveResult,
   completeJobCall,
   parseCompleteJobResult,
@@ -66,6 +68,7 @@ import {
   moveToWaitingChildren,
   suspendJob,
   deferActive,
+  removeIdleConsumer,
   checkBudget,
   recordUsageAndCheckBudget,
   updateJobFields,
@@ -181,7 +184,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * claims parked during a queue-pause activation race and claims stalled
    * reclaim moved into this PEL. Drained by XCLAIM by ID in pollOnce.
    */
-  protected pausedBroadcastEntries = new Set<string>();
+  /** Broadcast entries parked in this consumer's PEL (pause or redispatch): entryId to jobId. */
+  protected pausedBroadcastEntries = new Map<string, string>();
+  /**
+   * Set when the last chain call reported NEXT_NONE with empty lists and stream
+   * (library 132); the next poll skips its pre-block list pop if still fresh.
+   */
+  protected listsEmptyAt = 0;
+  protected static readonly LISTS_EMPTY_FRESH_MS = 100;
   protected cachedRateLimitMax = 0;
   protected cachedRateLimitDuration = 0;
 
@@ -402,9 +412,12 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       },
       onRedispatch: this.broadcastMode
         ? (entries) => {
-            for (const entry of entries) this.pausedBroadcastEntries.add(entry.entryId);
+            for (const entry of entries) this.pausedBroadcastEntries.set(entry.entryId, entry.jobId);
           }
         : undefined,
+      // Item 4: dead consumers with no pending entry are removed by stalled
+      // reclaim once idle well past any blocking read of a live worker.
+      idleConsumerMs: Math.max(10 * this.stalledInterval, 3 * this.blockTimeout, 60_000),
       onError: (err) => {
         if (!this.closing) {
           this.emit('error', err);
@@ -966,6 +979,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           e.entryId,
           this.consumerGroup,
           broadcast,
+          this.globalConcurrencyEnabled,
         ),
       ];
     }
@@ -980,6 +994,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
           e.entryId,
           this.consumerGroup,
           broadcast,
+          this.globalConcurrencyEnabled,
         );
         batch.fcall('glidemq_moveToActive', keys, args);
       }
@@ -1111,18 +1126,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * Returns true if the result was handled (caller should return), false if the hash is valid.
    */
   protected async handleMoveToActiveEdgeCase(
-    moveResult:
-      | Record<string, string>
-      | 'REVOKED'
-      | 'PAUSED'
-      | 'EXPIRED'
-      | 'GROUP_FULL'
-      | 'GROUP_RATE_LIMITED'
-      | 'GROUP_TOKEN_LIMITED'
-      | 'GROUP_ORDERED'
-      | 'ERR:COST_EXCEEDS_CAPACITY'
-      | 'STALE'
-      | null,
+    moveResult: MoveToActiveResult,
     jobId: string,
     entryId: string,
     deferPausedRestore = true,
@@ -1195,6 +1199,17 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       }
       return true;
     }
+    if (moveResult === 'GLOBAL_FULL') {
+      // Still outside the queue's globalConcurrency after the bounded hold
+      // (activateStreamClaim) or in a batch: hand the entry back (XACK,
+      // re-added as waiting). The next poll's checkConcurrency waits for a slot.
+      try {
+        await this.deferOutOfOrderJob(jobId, entryId);
+      } catch (err) {
+        this.emit('error', err);
+      }
+      return true;
+    }
     if (moveResult === 'ERR:COST_EXCEEDS_CAPACITY' && this.opts.deadLetterQueue) {
       // moveToActive failed the job terminally; give it the DLQ copy that
       // worker-side terminal failures get.
@@ -1233,10 +1248,15 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         entry.entryId,
         this.consumerGroup,
         this.broadcastMode ? true : undefined,
-        { pausedRestore: true, undoGroupClaim: entry.undoGroupClaim },
+        {
+          pausedRestore: true,
+          undoGroupClaim: entry.undoGroupClaim,
+          // Broadcast only: marks the parked claim handed back when still owned.
+          consumer: this.broadcastMode ? this.consumerId : undefined,
+        },
       );
       if (this.broadcastMode && entry.entryId !== '') {
-        this.pausedBroadcastEntries.add(entry.entryId);
+        this.pausedBroadcastEntries.set(entry.entryId, entry.jobId);
       }
     } catch (err) {
       this.emit('error', err);
@@ -1436,7 +1456,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
     // Terminal failure: schedule next run for repeatAfterComplete schedulers
     if (failResult === 'failed' && job.schedulerName) {
-      await this.updateSchedulerAfterComplete(job.schedulerName, Date.now());
+      await this.updateSchedulerAfterComplete(job.schedulerName, job.id, Date.now());
     }
 
     return failResult === 'failed';
@@ -1535,7 +1555,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     }
     if (this.hasFailedListeners) this.emit('failed', job, error);
     if (terminal && job.schedulerName) {
-      await this.updateSchedulerAfterComplete(job.schedulerName, Date.now());
+      await this.updateSchedulerAfterComplete(job.schedulerName, job.id, Date.now());
     }
   }
 
@@ -1588,9 +1608,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    *    stuck at nextRun=0 (awaiting completion sentinel) indefinitely.
    * 2. Revoked jobs never trigger this update, leaving the scheduler permanently
    *    stuck.
-   * 3. Race conditions: The idempotency check (nextRun === 0) prevents duplicate
-   *    updates from stalled reclaim, but doesn't prevent races with concurrent
-   *    upsertJobScheduler/removeJobScheduler (those use scheduler lock, this doesn't).
+   * 3. The entry is written with a compare-and-set over the value read here, so a
+   *    concurrent upsertJobScheduler is not overwritten; the losing side retries.
    *
    * MITIGATION: Run multiple workers for redundancy. Manually remove/re-add the
    * scheduler to recover from stuck state.
@@ -1598,32 +1617,46 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
    * Stalled recovery, TTL expiry, suspend timeout, capacity rejection, and
    * group-rate failure advance the scheduler atomically in Lua.
    */
-  protected async updateSchedulerAfterComplete(schedulerName: string, now: number): Promise<void> {
+  protected async updateSchedulerAfterComplete(schedulerName: string, jobId: string, now: number): Promise<void> {
     if (!this.commandClient) return;
     try {
-      const raw = await this.commandClient.hget(this.queueKeys.schedulers, schedulerName);
-      if (raw == null) return; // scheduler was deleted while job was in flight
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const raw = await this.commandClient.hget(this.queueKeys.schedulers, schedulerName);
+        if (raw == null) return; // scheduler was deleted while job was in flight
 
-      let config: SchedulerEntry;
-      try {
-        config = JSON.parse(String(raw));
-      } catch {
-        return;
-      }
+        let config: SchedulerEntry;
+        try {
+          config = JSON.parse(String(raw));
+        } catch {
+          return;
+        }
 
-      if (!config.repeatAfterComplete) return;
+        if (!config.repeatAfterComplete) return;
 
-      // Idempotency: only update if nextRun is 0 (awaiting completion sentinel).
-      // This prevents duplicate updates from stalled reclaim or double-processing.
-      if (config.nextRun !== 0) return;
+        // Idempotency: only update if nextRun is 0 (awaiting completion sentinel).
+        // This prevents duplicate updates from stalled reclaim or double-processing.
+        if (config.nextRun !== 0) return;
+        // Only the job the tick fired (or the old-mode job it parked on) advances the entry.
+        if (config.inflightJobId && config.inflightJobId !== jobId) return;
 
-      const nextRun = computeFollowingSchedulerNextRun(config, now);
-      if (nextRun == null || (config.limit != null && (config.iterationCount ?? 0) >= config.limit)) {
-        await this.commandClient.hdel(this.queueKeys.schedulers, [schedulerName]);
-      } else {
+        const nextRun = computeFollowingSchedulerNextRun(config, now);
+        if (nextRun == null || (config.limit != null && (config.iterationCount ?? 0) >= config.limit)) {
+          await this.commandClient.hdel(this.queueKeys.schedulers, [schedulerName]);
+          return;
+        }
         config.nextRun = nextRun;
         // Don't overwrite lastRun - it was set by runSchedulers when the job was enqueued
-        await this.commandClient.hset(this.queueKeys.schedulers, { [schedulerName]: JSON.stringify(config) });
+        if (
+          await casSchedulerEntry(
+            this.commandClient,
+            this.queueKeys,
+            schedulerName,
+            String(raw),
+            JSON.stringify(config),
+          )
+        ) {
+          return;
+        }
       }
     } catch (err) {
       this.emit('error', err instanceof Error ? err : new Error(String(err)));
@@ -1682,6 +1715,75 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
   /**
    * Re-enqueue out-of-order jobs instead of holding an active slot.
    */
+  /** First retry delay of a GLOBAL_FULL hold; doubles up to GLOBAL_FULL_BACKOFF_MAX_MS. */
+  protected static readonly GLOBAL_FULL_BACKOFF_MIN_MS = 20;
+  protected static readonly GLOBAL_FULL_BACKOFF_MAX_MS = 250;
+
+  /**
+   * How long a GLOBAL_FULL stream claim is held in the PEL before it is handed
+   * back: half the shorter of lockDuration and stalledInterval, so a healthy
+   * worker returns the claim well before stalled reclaim could take it.
+   */
+  protected globalFullHoldMs(): number {
+    return Math.max(100, Math.min(this.lockDuration, this.stalledInterval) / 2);
+  }
+
+  /** Wait up to `ms` for a slot to free in this worker (or close()). */
+  private waitForGlobalSlot(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.internalEvents.off('slotFree', done);
+        this.internalEvents.off('closing', done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      this.internalEvents.once('slotFree', done);
+      this.internalEvents.once('closing', done);
+    });
+  }
+
+  /**
+   * moveToActive for a claim. A stream claim refused with GLOBAL_FULL keeps its
+   * place in the PEL (admission is oldest-first over pending claims) and is
+   * retried with a capped backoff until admitted, the hold expires (the caller
+   * then hands it back) or close()/pause() lands (handed back here, 'HELD_BACK').
+   */
+  protected async activateStreamClaim(jobId: string, entryId: string): Promise<MoveToActiveResult | 'HELD_BACK'> {
+    const attempt = () =>
+      moveToActive(
+        this.commandClient!,
+        this.queueKeys,
+        jobId,
+        Date.now(),
+        this.queueKeys.stream,
+        entryId,
+        this.consumerGroup,
+        this.broadcastMode ? true : undefined,
+        this.globalConcurrencyEnabled,
+      );
+    let result = await attempt();
+    if (result !== 'GLOBAL_FULL' || entryId === '') return result;
+    const deadline = Date.now() + this.globalFullHoldMs();
+    let backoff = BaseWorker.GLOBAL_FULL_BACKOFF_MIN_MS;
+    while (result === 'GLOBAL_FULL' && this.running && this.commandClient) {
+      if (this.closing || this.paused) {
+        await this.deferPausedActivation({ jobId, entryId });
+        return 'HELD_BACK';
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return result;
+      await this.waitForGlobalSlot(Math.min(backoff, remaining));
+      backoff = Math.min(backoff * 2, BaseWorker.GLOBAL_FULL_BACKOFF_MAX_MS);
+      if (this.closing || this.paused) {
+        await this.deferPausedActivation({ jobId, entryId });
+        return 'HELD_BACK';
+      }
+      result = await attempt();
+    }
+    return result;
+  }
+
   protected async deferOutOfOrderJob(jobId: string, entryId: string): Promise<void> {
     if (!this.commandClient) return;
     await deferActive(
@@ -1722,16 +1824,8 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     while (this.running && !this.closing && this.commandClient) {
       // Activate the job (skip if we already have a pre-fetched hash from completeAndFetchNext)
       if (!currentHash) {
-        const moveResult = await moveToActive(
-          this.commandClient,
-          this.queueKeys,
-          currentJobId,
-          Date.now(),
-          this.queueKeys.stream,
-          currentEntryId,
-          this.consumerGroup,
-          this.broadcastMode ? true : undefined,
-        );
+        const moveResult = await this.activateStreamClaim(currentJobId, currentEntryId);
+        if (moveResult === 'HELD_BACK') return;
         if (await this.handleMoveToActiveEdgeCase(moveResult, currentJobId, currentEntryId)) return;
         currentHash = moveResult as Record<string, string>;
       }
@@ -1981,7 +2075,13 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
             await this.handleJobFailure(job, currentJobId, currentEntryId, new UnrecoverableError('revoked'));
             return;
           }
-          fetchResult = { completed: currentJobId, next: false as const, parentNotifications: notifications };
+          fetchResult = {
+            completed: currentJobId,
+            next: false as const,
+            parentNotifications: notifications,
+            failedActivations: [],
+            listsEmpty: false,
+          };
         } else {
           fetchResult = await completeAndFetchNext(
             this.commandClient,
@@ -2024,7 +2124,15 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         }
 
         if (job.schedulerName) {
-          await this.updateSchedulerAfterComplete(job.schedulerName, now);
+          await this.updateSchedulerAfterComplete(job.schedulerName, job.id, now);
+        }
+      }
+
+      // Jobs the chain call failed at activation get the DLQ copy that
+      // worker-side terminal failures get.
+      if (fetchResult.failedActivations.length > 0 && this.opts.deadLetterQueue) {
+        for (const failed of fetchResult.failedActivations) {
+          await this.moveFailedJobToDLQ(failed.jobId);
         }
       }
 
@@ -2046,6 +2154,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
 
       // No next job - return to poll loop
       if (fetchResult.next === false) {
+        if (fetchResult.listsEmpty) this.listsEmptyAt = Date.now();
         if (!this.isDrained && this.activeCount <= 1) {
           this.isDrained = true;
           this.emit('drained');
@@ -2220,11 +2329,20 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (interval <= 0) return;
     const client = this.commandClient;
     const jobKey = this.queueKeys.job(jobId);
+    // Broadcast: stall detection reads the per-subscription heartbeat (sub
+    // hash 'la'), so one subscription's stall is not masked by another still
+    // running the message. The shared lastActive is kept for older reclaimers.
+    const subKey = this.broadcastMode ? `${jobKey}:sub:${this.consumerGroup}` : null;
     const timer = setInterval(() => {
       // lastActive refresh and revocation check share one round trip.
+      const now = Date.now().toString();
       execPipeline(client, (batch) => {
-        batch.hset(jobKey, { lastActive: Date.now().toString() });
+        batch.hset(jobKey, { lastActive: now });
         batch.hget(jobKey, 'revoked');
+        if (subKey) {
+          batch.hset(subKey, { la: now });
+          batch.pexpire(subKey, 86_400_000, { expireOption: ExpireOptions.HasNoExpiry });
+        }
       })
         .then((results) => {
           if (String(results?.[1]) === '1') this.abortJob(jobId);
@@ -2511,6 +2629,28 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     if (!force) {
       await this.waitForActiveJobs();
     }
+    await this.handBackParkedBroadcastEntries(false);
+  }
+
+  /**
+   * Broadcast entries this consumer parked (pause or stalled redispatch) and
+   * never ran: mark them handed back so a reclaim by another worker does not
+   * count a stall. The claims stay in this consumer's PEL; on resume
+   * recoverBroadcastClaims re-takes the ones still owned.
+   */
+  private async handBackParkedBroadcastEntries(forget: boolean): Promise<void> {
+    if (!this.commandClient || this.pausedBroadcastEntries.size === 0) return;
+    for (const [entryId, jobId] of this.pausedBroadcastEntries) {
+      try {
+        await deferActive(this.commandClient, this.queueKeys, jobId, entryId, this.consumerGroup, true, {
+          pausedRestore: true,
+          consumer: this.consumerId,
+        });
+      } catch (err) {
+        this.emit('error', err);
+      }
+    }
+    if (forget) this.pausedBroadcastEntries.clear();
   }
 
   /**
@@ -2634,6 +2774,16 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
       // Claims handed back by the last poll can register after a snapshot.
       // Nothing new is dispatched once closing is set, so this terminates.
       while (this.activePromises.size > 0) await this.waitForActiveJobs();
+    }
+    await this.handBackParkedBroadcastEntries(true);
+    if (!force && this.commandClient) {
+      // A consumer with no pending entry has nothing left to recover; drop it
+      // from the group so dead consumers do not accumulate.
+      try {
+        await removeIdleConsumer(this.commandClient, this.queueKeys, this.consumerGroup, this.consumerId);
+      } catch {
+        // Stalled reclaim removes idle consumers later.
+      }
     }
 
     if (this.sandboxClose) {

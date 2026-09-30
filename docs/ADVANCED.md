@@ -230,7 +230,7 @@ This mode is useful for:
 
 Upserting a `repeatAfterComplete` scheduler while its job is running (for example from inside the processor) keeps waiting for that job: the next run is scheduled when it completes, using the new interval, and `iterationCount` is kept unless `tz`, `startDate` or `endDate` changed. It never starts a second, overlapping chain. To force an immediate run, remove the scheduler and upsert it again.
 
-Switching an existing `every` or `pattern` scheduler to `repeatAfterComplete` does not fire at once: the first run stays at the old mode's `nextRun` (or a later `startDate`). Jobs from the old mode are not tracked, so one that is still running past that time can overlap the first `repeatAfterComplete` run.
+Switching an existing `every` or `pattern` scheduler to `repeatAfterComplete` does not fire at once: the first run stays at the old mode's `nextRun` (or a later `startDate`). Every scheduler entry records the job its last tick fired (`inflightJobId`). If that job is still running when the held `nextRun` passes, the tick parks the entry (`nextRun` 0) and the first `repeatAfterComplete` run is scheduled `repeatAfterComplete` ms after that job completes or fails terminally, so the two never overlap. Only the recorded job advances a parked entry; a job from an earlier chain that finishes late is ignored.
 
 `repeatAfterComplete` is mutually exclusive with `pattern` and `every`. Bounded options (`startDate`, `endDate`, `limit`) work normally with this mode.
 
@@ -508,7 +508,7 @@ await queue.add('bulk-export', data, {
 
 **Check order**: when both concurrency, token bucket, and sliding window are configured, the gates are checked in order: concurrency -> token bucket -> sliding window. All applicable limits must pass. Strict FIFO is maintained - jobs never skip ahead of earlier jobs in the same group.
 
-**Cost validation**: a job with `cost` greater than `capacity` is rejected at enqueue time. If a previously valid job becomes invalid (e.g., capacity was lowered), it is failed at activation with `cost exceeds token bucket capacity`. A worker with `deadLetterQueue` adds a DLQ copy when the failure happens in `moveToActive`; a job failed this way inside `completeAndFetchNext` gets no DLQ copy.
+**Cost validation**: a job with `cost` greater than `capacity` is rejected at enqueue time. If a previously valid job becomes invalid (e.g., capacity was lowered), it is failed at activation with `cost exceeds token bucket capacity`. A worker with `deadLetterQueue` adds a DLQ copy whether the failure happens in `moveToActive` or while `completeAndFetchNext` / `failAndFetchNext` fetch the next job or promote the group. A job failed by the scheduler tick's rate-limited group promotion gets no DLQ copy (no worker owns it).
 
 **Differences from sliding window** (`rateLimit`):
 
@@ -634,7 +634,7 @@ await queue.setGlobalConcurrency(20);
 await queue.setGlobalConcurrency(0);
 ```
 
-Workers read the limit from queue metadata on each scheduler tick. Priority and LIFO jobs are popped with an atomic check (`glidemq_rpopAndReserve`). For stream jobs, the `glidemq_checkConcurrency` call runs before `XREADGROUP` as a separate call, so workers polling at the same time can briefly overshoot the limit.
+Workers read the limit from queue metadata on each scheduler tick. Priority and LIFO jobs are popped with an atomic check (`glidemq_rpopAndReserve`). Stream jobs are gated twice: `glidemq_checkConcurrency` before `XREADGROUP` keeps a worker from reading when the queue is full, and `glidemq_moveToActive` enforces the cap at activation. A stream claim counts in the consumer group's pending list as soon as `XREADGROUP` returns it, so activation ranks the pending claims by entry id: the oldest `globalConcurrency - listActive` claims keep their slots, a newer claim gets `GLOBAL_FULL`. The worker keeps that claim in the pending list (so it keeps its place in the order) and retries the activation with a capped backoff (20 ms doubling to 250 ms, woken early by a completion in the same worker) until it is admitted, for at most half the shorter of `lockDuration` and `stalledInterval`; only after that bound, or in batch mode, is the entry handed back (`glidemq_deferActive`: XACK, re-added to the stream as waiting, which costs it its position). `close()` and `pause()` hand a held claim back at once. `completeAndFetchNext` does not claim the next stream job while pending claims plus list claims already fill the cap, so a held claim is not overtaken by a chain. Workers polling at the same time therefore never run more than `globalConcurrency` jobs and drain a burst in FIFO order. The rank check runs only when the pending count exceeds the free slots.
 
 ---
 
@@ -787,6 +787,8 @@ const failedJobs = await dlqQueue.getJobs('waiting');
 // Or use the convenience method on the original queue
 const dlqJobs = await queue.getDeadLetterJobs(0, 49);
 ```
+
+A job is copied when it fails terminally, which the job's own `attempts` option decides; `deadLetterQueue.maxRetries` is not read (deprecated, removed in the next major version).
 
 The DLQ entry is a best-effort copy. The original job stays in the `failed` state of its own queue (subject to `removeOnFail`), and if writing the copy fails the worker emits `error` and moves on. The entry is added to the DLQ queue as a new waiting job named like the original, whose data is a JSON envelope: `{ originalQueue, originalJobId, data, failedReason, attemptsMade }`. A worker on the DLQ queue would process these entries.
 

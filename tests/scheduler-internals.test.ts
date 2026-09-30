@@ -59,6 +59,8 @@ describe('Scheduler internals', () => {
           }),
         },
       ]),
+      // The tick reserves the fired job ids (INCRBY on the id counter).
+      incrBy: vi.fn(async () => 1),
       exec,
     } as any;
     const errors: Error[] = [];

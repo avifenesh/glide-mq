@@ -1,7 +1,7 @@
 import { RequestError } from '@glidemq/speedkey';
 import type { GlideReturnType, GlideString } from '@glidemq/speedkey';
 import type { Client } from '../types';
-import { buildKeys, parseCrossQueueParentNotification } from '../utils';
+import { buildKeys, isFunctionNotFound, parseCrossQueueParentNotification } from '../utils';
 import { librarySourceFrom, loadLibraryFile } from './load-library-source';
 
 export const LIBRARY_NAME = 'glidemq';
@@ -118,7 +118,17 @@ export const LIBRARY_NAME = 'glidemq';
 //   and re-evaluates the exceeded flag; glidemq_failAndFetchNext fails a job and fetches the next one
 //   (the fetch phases of completeAndFetchNext) in one call; glidemq_trimBroadcast replies
 //   {trimmed, unread} instead of the trimmed count.
-export const LIBRARY_VERSION = '131';
+// Version 132: scheduler entries record inflightJobId and glidemq_schedulerAwaitInflight parks a
+//   repeatAfterComplete entry while the old mode's job still runs; completeAndFetchNext/failAndFetchNext
+//   append optional trailing markers (__glidemq_failed_activations__ for jobs failed at activation,
+//   __glidemq_lists_empty__ when lists and stream were empty); glidemq_moveToActive enforces
+//   globalConcurrency for stream claims on an optional arg (GLOBAL_FULL); glidemq_removeIdleConsumer and
+//   an optional reclaimStalled arg delete consumers with no pending entry; broadcast heartbeats and stall
+//   checks use the per-subscription 'la' field, deferActive marks handed-back claims (hb) that reclaim
+//   does not count as stalls, glidemq_recoverBroadcastClaims re-takes only owned entries, trimBroadcast
+//   looks up pre-130 retry entries; glidemq_healEarlyDeps releases parents registered by a plain SADD;
+//   healListActive re-seeds list-active-ids from a complete scan; no 'active' event is written anywhere.
+export const LIBRARY_VERSION = '132';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -365,7 +375,32 @@ export async function renewLock(client: Client, lockKey: string, token: string, 
 const RETENTION_NONE = { mode: '0', count: 0, age: 0 } as const;
 const RETENTION_TRUE = { mode: 'true', count: 0, age: 0 } as const;
 const PARENT_NOTIFICATIONS_MARKER = '__glidemq_parent_notifications__';
+const FAILED_ACTIVATIONS_MARKER = '__glidemq_failed_activations__';
+const LISTS_EMPTY_MARKER = '__glidemq_lists_empty__';
 const COMPLETE_REVOKED_MARKER = '__glidemq_complete_revoked__';
+
+/** A job the chain call failed at activation (server-side terminal failure). */
+export interface FailedActivation {
+  jobId: string;
+  reason: string;
+}
+
+function parseFailedActivations(raw: unknown): FailedActivation[] {
+  if (typeof raw !== 'string' || raw === '') return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: FailedActivation[] = [];
+    for (const entry of parsed) {
+      if (entry && typeof entry === 'object' && typeof (entry as { id?: unknown }).id === 'string') {
+        out.push({ jobId: (entry as { id: string }).id, reason: String((entry as { reason?: unknown }).reason ?? '') });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
 
 function parseParentNotifications(raw: unknown): string[] {
   if (typeof raw !== 'string' || raw === '') return [];
@@ -495,6 +530,19 @@ export interface CompleteAndFetchResult {
   nextEntryId?: string;
   /** Retryable cross-queue parent notifications recorded by the completion FCALL. */
   parentNotifications: string[];
+  /**
+   * Jobs the call failed terminally at activation (cost over token bucket
+   * capacity) while fetching the next job or promoting a group. A worker with a
+   * dead letter queue adds their DLQ copies. Library 132+; empty before.
+   */
+  failedActivations: FailedActivation[];
+  /**
+   * NEXT_NONE because the priority list, the LIFO list and the stream were all
+   * empty when the call looked (library 132+). The poll loop skips its
+   * pre-block list pop. False for every other NEXT_NONE (pause, group parking,
+   * token bucket) and for older libraries.
+   */
+  listsEmpty: boolean;
 }
 
 export interface CompleteAndFetchHints {
@@ -566,7 +614,13 @@ export async function completeAndFetchNext(
   // Backward compatibility: JSON protocol (older library versions)
   const parsed = JSON.parse(String(raw));
   if (!parsed.next || parsed.next === false) {
-    return { completed: parsed.completed, next: false, parentNotifications: [] };
+    return {
+      completed: parsed.completed,
+      next: false,
+      parentNotifications: [],
+      failedActivations: [],
+      listsEmpty: false,
+    };
   }
   if (parsed.next === 'REVOKED') {
     return {
@@ -575,6 +629,8 @@ export async function completeAndFetchNext(
       nextJobId: parsed.nextJobId,
       nextEntryId: parsed.nextEntryId,
       parentNotifications: [],
+      failedActivations: [],
+      listsEmpty: false,
     };
   }
   const parsedHash = parsed.next as string[];
@@ -588,6 +644,8 @@ export async function completeAndFetchNext(
     nextJobId: parsed.nextJobId,
     nextEntryId: parsed.nextEntryId,
     parentNotifications: [],
+    failedActivations: [],
+    listsEmpty: false,
   };
 }
 
@@ -598,16 +656,32 @@ export async function completeAndFetchNext(
  * Cross-queue completions append the parent notifications marker and payload.
  */
 function parseChainReply(raw: unknown[], jobId: string, func: string): CompleteAndFetchResult {
-  const notificationOffset =
-    raw.length >= 2 && String(raw.at(-2)) === PARENT_NOTIFICATIONS_MARKER ? raw.length - 2 : raw.length;
-  const parentNotifications = notificationOffset < raw.length ? parseParentNotifications(raw.at(-1)) : [];
+  // Trailing markers, each followed by one payload: parent notifications last,
+  // failed activations before it. Read from the end until no marker matches.
+  let end = raw.length;
+  let parentNotifications: string[] = [];
+  let failedActivations: FailedActivation[] = [];
+  let listsEmpty = false;
+  while (end >= 2) {
+    const marker = String(raw[end - 2]);
+    if (marker === PARENT_NOTIFICATIONS_MARKER) {
+      parentNotifications = parseParentNotifications(raw[end - 1]);
+    } else if (marker === FAILED_ACTIVATIONS_MARKER) {
+      failedActivations = parseFailedActivations(raw[end - 1]);
+    } else if (marker === LISTS_EMPTY_MARKER) {
+      listsEmpty = String(raw[end - 1]) === '1';
+    } else {
+      break;
+    }
+    end -= 2;
+  }
   const tag = String(raw[0]);
   const completed = raw[1] != null ? String(raw[1]) : jobId;
   if (tag === 'NEXT_NONE') {
-    return { completed, next: false, parentNotifications };
+    return { completed, next: false, parentNotifications, failedActivations, listsEmpty };
   }
   if (tag === 'CURRENT_REVOKED') {
-    return { completed, next: 'CURRENT_REVOKED', parentNotifications: [] };
+    return { completed, next: 'CURRENT_REVOKED', parentNotifications: [], failedActivations: [], listsEmpty: false };
   }
   if (tag === 'NEXT_REVOKED') {
     return {
@@ -616,11 +690,13 @@ function parseChainReply(raw: unknown[], jobId: string, func: string): CompleteA
       nextJobId: String(raw[2]),
       nextEntryId: String(raw[3]),
       parentNotifications,
+      failedActivations,
+      listsEmpty: false,
     };
   }
   if (tag === 'NEXT_HASH') {
     const hash: Record<string, string> = Object.create(null);
-    for (let i = 4; i + 1 < notificationOffset; i += 2) {
+    for (let i = 4; i + 1 < end; i += 2) {
       hash[String(raw[i])] = String(raw[i + 1]);
     }
     return {
@@ -629,6 +705,8 @@ function parseChainReply(raw: unknown[], jobId: string, func: string): CompleteA
       nextJobId: String(raw[2]),
       nextEntryId: String(raw[3]),
       parentNotifications,
+      failedActivations,
+      listsEmpty: false,
     };
   }
   throw new Error(`Unexpected ${func} tag: ${tag}`);
@@ -819,22 +897,43 @@ export async function reclaimStalled(
   group: string = CONSUMER_GROUP,
   broadcastMode?: boolean,
   workerLockDuration: number = 0,
+  idleConsumerMs: number = 0,
 ): Promise<number> {
-  const result = await client.fcall(
-    'glidemq_reclaimStalled',
-    [k.stream, k.events],
-    [
-      group,
-      consumer,
-      minIdleMs.toString(),
-      maxStalledCount.toString(),
-      timestamp.toString(),
-      k.failed,
-      broadcastMode ? '1' : '0',
-      workerLockDuration.toString(),
-    ],
-  );
+  const args = [
+    group,
+    consumer,
+    minIdleMs.toString(),
+    maxStalledCount.toString(),
+    timestamp.toString(),
+    k.failed,
+    broadcastMode ? '1' : '0',
+    workerLockDuration.toString(),
+  ];
+  // Appended optional args (returnIds, redispatch, idleConsumerMs); older
+  // libraries ignore them.
+  if (idleConsumerMs > 0) args.push('0', '0', Math.trunc(idleConsumerMs).toString());
+  const result = await client.fcall('glidemq_reclaimStalled', [k.stream, k.events], args);
   return result as number;
+}
+
+/**
+ * Delete this consumer from the group when it holds no pending entry, in one
+ * step with the check (glidemq_removeIdleConsumer, library 132). Returns
+ * whether it was deleted; false on an older library.
+ */
+export async function removeIdleConsumer(
+  client: Client,
+  k: QueueKeys,
+  group: string,
+  consumer: string,
+): Promise<boolean> {
+  try {
+    const result = await client.fcall('glidemq_removeIdleConsumer', [k.stream], [group, consumer]);
+    return Number(result) === 1;
+  } catch (err) {
+    if (!isFunctionNotFound(err)) throw err;
+    return false;
+  }
 }
 
 /** Reply of a stalled reclaim that asked for the IDs of the jobs it returned to waiting. */
@@ -887,6 +986,7 @@ export async function reclaimStalledWithIds(
   broadcastMode?: boolean,
   workerLockDuration: number = 0,
   redispatch?: boolean,
+  idleConsumerMs: number = 0,
 ): Promise<ReclaimStalledResult> {
   const args = [
     group,
@@ -898,8 +998,9 @@ export async function reclaimStalledWithIds(
     broadcastMode ? '1' : '0',
     workerLockDuration.toString(),
     '1',
+    broadcastMode && redispatch ? '1' : '0',
   ];
-  if (broadcastMode && redispatch) args.push('1');
+  if (idleConsumerMs > 0) args.push(Math.trunc(idleConsumerMs).toString());
   const result = await client.fcall('glidemq_reclaimStalled', [k.stream, k.events], args);
   return parseReclaimStalledResult(result);
 }
@@ -1047,6 +1148,8 @@ export async function popLists(client: Client, k: QueueKeys, count: number): Pro
  * - 'GROUP_RATE_LIMITED' if the job's group exceeded its rate limit (job was parked)
  * - 'GROUP_TOKEN_LIMITED' if the job's group has insufficient tokens (job was parked)
  * - 'ERR:COST_EXCEEDS_CAPACITY' if the job cost exceeds token bucket capacity (job was failed)
+ * - 'GLOBAL_FULL' if `enforceGlobalConcurrency` was set and this stream claim is outside the
+ *   queue's globalConcurrency (job left waiting in the PEL; the worker hands it back)
  * - Record<string, string> with all job fields otherwise
  */
 export async function moveToActive(
@@ -1058,7 +1161,22 @@ export async function moveToActive(
   entryId: string = '',
   group: string = '',
   broadcastMode?: boolean,
-): Promise<
+  enforceGlobalConcurrency?: boolean,
+): Promise<MoveToActiveResult> {
+  const { keys, args } = moveToActiveCall(
+    k,
+    jobId,
+    timestamp,
+    streamKey,
+    entryId,
+    group,
+    broadcastMode,
+    enforceGlobalConcurrency,
+  );
+  return parseMoveToActiveResult(await client.fcall('glidemq_moveToActive', keys, args));
+}
+
+export type MoveToActiveResult =
   | Record<string, string>
   | 'REVOKED'
   | 'PAUSED'
@@ -1069,11 +1187,8 @@ export async function moveToActive(
   | 'GROUP_ORDERED'
   | 'ERR:COST_EXCEEDS_CAPACITY'
   | 'STALE'
-  | null
-> {
-  const { keys, args } = moveToActiveCall(k, jobId, timestamp, streamKey, entryId, group, broadcastMode);
-  return parseMoveToActiveResult(await client.fcall('glidemq_moveToActive', keys, args));
-}
+  | 'GLOBAL_FULL'
+  | null;
 
 /** Keys and args of a glidemq_moveToActive call, for direct FCALL or a pipeline. */
 export function moveToActiveCall(
@@ -1084,32 +1199,24 @@ export function moveToActiveCall(
   entryId: string = '',
   group: string = '',
   broadcastMode?: boolean,
+  enforceGlobalConcurrency?: boolean,
 ): { keys: string[]; args: string[] } {
   const keys: string[] = [k.job(jobId)];
   const args: string[] = [timestamp.toString()];
   if (streamKey) {
     keys.push(streamKey);
     args.push(entryId, group, jobId);
+    // Appended optional args: broadcast flag, then the global concurrency
+    // gate (library 132; older libraries ignore it).
     if (broadcastMode) args.push('1');
+    else if (enforceGlobalConcurrency) args.push('0');
+    if (enforceGlobalConcurrency) args.push('1');
   }
   return { keys, args };
 }
 
 /** Parse a glidemq_moveToActive reply into a job hash or a status marker. */
-export function parseMoveToActiveResult(
-  result: GlideReturnType,
-):
-  | Record<string, string>
-  | 'REVOKED'
-  | 'PAUSED'
-  | 'EXPIRED'
-  | 'GROUP_FULL'
-  | 'GROUP_RATE_LIMITED'
-  | 'GROUP_TOKEN_LIMITED'
-  | 'GROUP_ORDERED'
-  | 'ERR:COST_EXCEEDS_CAPACITY'
-  | 'STALE'
-  | null {
+export function parseMoveToActiveResult(result: GlideReturnType): MoveToActiveResult {
   if (Array.isArray(result)) {
     if (result.length === 0) return null;
     const hash: Record<string, string> = Object.create(null);
@@ -1130,6 +1237,7 @@ export function parseMoveToActiveResult(
   if (str === 'GROUP_ORDERED') return 'GROUP_ORDERED';
   if (str === 'ERR:COST_EXCEEDS_CAPACITY') return 'ERR:COST_EXCEEDS_CAPACITY';
   if (str === 'STALE') return 'STALE';
+  if (str === 'GLOBAL_FULL') return 'GLOBAL_FULL';
   // Backward compatibility: older library returns cjson string
   const arr = JSON.parse(str) as string[];
   const hash: Record<string, string> = Object.create(null);
@@ -1220,20 +1328,54 @@ export async function deferActive(
   entryId: string,
   group: string = CONSUMER_GROUP,
   broadcastMode?: boolean,
-  opts?: { pausedRestore?: boolean; undoGroupClaim?: boolean },
+  opts?: { pausedRestore?: boolean; undoGroupClaim?: boolean; consumer?: string },
 ): Promise<void> {
-  await client.fcall(
-    'glidemq_deferActive',
-    [k.stream, k.job(jobId), k.listActive],
-    [
-      jobId,
-      entryId,
-      group,
-      broadcastMode ? '1' : '0',
-      opts?.pausedRestore ? '1' : '0',
-      opts?.undoGroupClaim ? '1' : '0',
-    ],
-  );
+  const args = [
+    jobId,
+    entryId,
+    group,
+    broadcastMode ? '1' : '0',
+    opts?.pausedRestore ? '1' : '0',
+    opts?.undoGroupClaim ? '1' : '0',
+  ];
+  // Broadcast pause: the hand-back mark is written only for a claim this
+  // consumer still owns (appended optional arg, library 132).
+  if (opts?.consumer) args.push(opts.consumer);
+  await client.fcall('glidemq_deferActive', [k.stream, k.job(jobId), k.listActive], args);
+}
+
+/**
+ * Re-take parked broadcast entries this consumer still owns
+ * (glidemq_recoverBroadcastClaims, library 132). Entries another consumer
+ * reclaimed meanwhile are skipped. Falls back to XCLAIM on an older library.
+ * Returns entries as XREADGROUP does: entryId to field pairs.
+ */
+export async function recoverBroadcastClaims(
+  client: Client,
+  k: QueueKeys,
+  group: string,
+  consumer: string,
+  entryIds: string[],
+): Promise<Record<string, [GlideString, GlideString][]>> {
+  let raw: unknown;
+  try {
+    raw = await client.fcall('glidemq_recoverBroadcastClaims', [k.stream], [group, consumer, ...entryIds]);
+  } catch (err) {
+    if (!isFunctionNotFound(err)) throw err;
+    return client.xclaim(k.stream, group, consumer, 0, entryIds);
+  }
+  const out: Record<string, [GlideString, GlideString][]> = Object.create(null);
+  if (!Array.isArray(raw)) return out;
+  for (const entry of raw) {
+    if (!Array.isArray(entry) || !Array.isArray(entry[1])) continue;
+    const fields = entry[1] as unknown[];
+    const pairs: [GlideString, GlideString][] = [];
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      pairs.push([String(fields[i]), String(fields[i + 1])]);
+    }
+    out[String(entry[0])] = pairs;
+  }
+  return out;
 }
 
 /**
@@ -1604,6 +1746,31 @@ export async function casSchedulerEntry(
 }
 
 /**
+ * Park a repeatAfterComplete entry (nextRun 0) while the job its previous mode
+ * fired is still running, in one step with the state check. Returns 'parked',
+ * 'finished' (the job is terminal or gone: fire normally) or 'changed' (the
+ * entry no longer matches `expected`). Libraries before 132 reply 'finished'.
+ */
+export async function schedulerAwaitInflight(
+  client: Client,
+  queueKeys: QueueKeys,
+  name: string,
+  expected: string,
+  jobId: string,
+): Promise<'parked' | 'finished' | 'changed'> {
+  const jobKey = `${queueKeys.id.slice(0, -2)}job:${jobId}`;
+  let result: unknown;
+  try {
+    result = await client.fcall('glidemq_schedulerAwaitInflight', [queueKeys.schedulers, jobKey], [name, expected]);
+  } catch (err) {
+    if (!isFunctionNotFound(err)) throw err;
+    return 'finished';
+  }
+  const code = Number(result);
+  return code === 1 ? 'parked' : code === 0 ? 'finished' : 'changed';
+}
+
+/**
  * Register a cross-queue child in its parent's deps set after the child was
  * added. A completion that reached the parent first is counted here, so the
  * parent is not released early. Falls back to a plain SADD when the loaded
@@ -1661,9 +1828,32 @@ export async function registerParent(
  * the actual count of active list-sourced jobs (LIFO or priority).
  * Returns the drift amount corrected (0 if no correction was needed).
  */
-export async function healListActive(client: Client, keys: QueueKeys): Promise<number> {
-  const result = await client.fcall('glidemq_healListActive', [keys.id], []);
+export async function healListActive(
+  client: Client,
+  keys: QueueKeys,
+  scan?: { maxIter?: number; count?: number },
+): Promise<number> {
+  // Optional SCAN bounds for a re-seed (pages per call, keys per page); the
+  // library defaults to 500 x 100. Appended args, ignored by older libraries.
+  const args = scan ? [String(scan.maxIter ?? 500), String(scan.count ?? 100)] : [];
+  const result = await client.fcall('glidemq_healListActive', [keys.id], args);
   return Number(result) || 0;
+}
+
+/**
+ * Count parked early child completions for parents whose registration came
+ * through a plain SADD (producer on a library before 126) and release the
+ * parents that are complete (glidemq_healEarlyDeps, library 132). Bounded to
+ * `max` parents per call. Returns the number released; 0 on an older library.
+ */
+export async function healEarlyDeps(client: Client, keys: QueueKeys, max = 100): Promise<number> {
+  try {
+    const result = await client.fcall('glidemq_healEarlyDeps', [keys.id], [max.toString()]);
+    return Number(result) || 0;
+  } catch (err) {
+    if (!isFunctionNotFound(err)) throw err;
+    return 0;
+  }
 }
 
 /**

@@ -10,6 +10,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Switching a scheduler to `repeatAfterComplete` could still overlap the old mode's running job**: the tick now records the fired job on the entry (`inflightJobId`) and parks the entry until that job finishes; only that job advances it.
+- **Cost-over-capacity failures inside `completeAndFetchNext` got no DLQ copy**: the reply carries a `__glidemq_failed_activations__` marker (ignored by old parsers) and the worker adds the copies.
+- **Global concurrency could briefly overshoot**: `moveToActive` enforces the cap atomically over the oldest pending claims. A claim beyond it returns `GLOBAL_FULL`; the worker holds the claim and retries with a short backoff (bounded by half the lock duration or stalled interval) so FIFO order is kept, and hands it back only after the bound. `completeAndFetchNext` does not claim past the cap either.
+- **Closed consumers stayed in the consumer group forever**: a graceful close removes its consumer when it has no pending entries, and stalled reclaim removes idle empty consumers in bounded batches.
+- **Broadcast stall detection was masked across subscriptions**: heartbeats and reclaim use a per-subscription `la` field (shared `lastActive` kept for old reclaimers), a message handed back by a closing or pausing worker is not counted as a stall, `glidemq_recoverBroadcastClaims` re-takes only entries the worker owns, and retry entries from pre-130 libraries are looked up before trimming.
+- **Rolling-upgrade gaps**: parked early cross-queue completions are indexed and healed every scheduler tick, and `healListActive` trusts the seeded `list-active-ids` set and, on a mismatch, re-seeds it from a SCAN that resumes across ticks (`meta.listActiveScanCursor`).
+- **Sandboxed processors could mutate a timed-out job during the abort grace window**: `updateProgress`, `updateData` and `moveToDelayed` reject after the abort signal; `log` and `discard` still work.
 - **Proxy `POST` routes could misread a consumed request body as a disconnect**: `trackDisconnect` counted `req` `close`, which Node emits once the JSON body is consumed while the socket is still open. It now relies on `res` `close` and a dead socket, so `jobs/wait` and other body-reading routes are not cut short.
 - **Proxy SSE failures after headers were silent**: errors on `/queues/:name/events`, `/jobs/:id/events`, `/jobs/:id/stream` and `/broadcast/:name/events` now reach `onError(err, queueName)` before the stream ends.
 - **Proxy opened a Valkey client per request** for `POST /flows` and `GET /usage/summary`; both use the shared command client.
@@ -20,8 +27,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Server function library version is `132`.** Workers and producers reload it on connect.
+- **`DeadLetterQueueOptions.maxRetries` is deprecated** (never read; removal in the next major).
+- **The `active` stream event is no longer written anywhere**; `worker.on('active')` is unchanged.
 - **Proxy bounds**: `POST /queues/:name/retry` retries at most `maxPageSize` per call (default 1000) and returns `{ retried }`; `count > maxPageSize` or `count = 0` returns 400. `POST /queues/:name/jobs/wait` accepts `waitTimeout` up to the new `ProxyOptions.maxWaitTimeout` (default 60000 ms), and a client disconnect aborts the wait and frees the blocking connection. `GET /queues/:name/metrics` returns the whole per-minute hash and is not paged.
-- **Server function library version is `131`.** Workers and producers reload it on connect.
 - **Broadcast `trimmed` event**: `Broadcast` emits `('trimmed', { trimmed, unread })` after a publish that trims, where `unread` counts messages dropped before some subscription had read them.
 
 ### Added
@@ -32,6 +41,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Performance
 
+- **Idle poll loops skip the pre-block list pop** when the previous `completeAndFetchNext` reported the lists empty (`__glidemq_lists_empty__` marker, honored for 100 ms).
 - **Failed jobs keep the fetch chain alive**: `glidemq_failAndFetchNext` fails the current job and fetches the next one in one call (1 round trip instead of about 4). Rate-limit requeues, batch and broadcast workers keep the previous path. On a library that lacks the function the worker falls back to `glidemq_fail` once per process.
 
 ---

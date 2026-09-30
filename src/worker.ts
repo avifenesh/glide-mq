@@ -44,9 +44,13 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
       }
     }
 
-    // Check priority list first (priority > LIFO > FIFO), then LIFO, before blocking on stream
+    // Check priority list first (priority > LIFO > FIFO), then LIFO, before blocking on stream.
+    // A chain call that just reported empty lists and stream (library 132) makes
+    // this pop redundant; the post-block pop still covers jobs added meanwhile.
     if (this.paused || this.closing || this.queuePaused) return;
-    if (await this.tryPopFromLists(fetchCount)) return;
+    const listsFresh = Date.now() - this.listsEmptyAt < BaseWorker.LISTS_EMPTY_FRESH_MS;
+    this.listsEmptyAt = 0;
+    if (!listsFresh && (await this.tryPopFromLists(fetchCount))) return;
     if (this.paused || this.closing || this.queuePaused) return;
 
     // XREADGROUP GROUP {group} {consumerId} COUNT {fetchCount} BLOCK {blockTimeout}

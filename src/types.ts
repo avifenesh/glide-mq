@@ -66,8 +66,9 @@ export interface DeadLetterQueueOptions {
   /** Queue name to use as the dead letter queue. */
   name: string;
   /**
-   * Not read. A job moves to the DLQ when it fails terminally, which is decided by
-   * the job's own `attempts` option.
+   * @deprecated Not read and scheduled for removal in the next major version. A job
+   * moves to the DLQ when it fails terminally, which is decided by the job's own
+   * `attempts` option; there is no separate DLQ retry count.
    */
   maxRetries?: number;
 }
@@ -108,7 +109,9 @@ export interface QueueOptions {
  * Options for sandboxed (file-path) processors running in worker threads or child processes.
  * When a job's abort signal fires (timeout or revocation), the abort is forwarded to the processor.
  * If it has not settled 5 seconds later, its worker thread is terminated (or its child process is
- * SIGKILLed) and replaced, so a hung processor cannot hold a sandbox slot.
+ * SIGKILLed) and replaced, so a hung processor cannot hold a sandbox slot. During that window the
+ * worker no longer owns the job: `job.updateProgress()`, `job.updateData()` and `job.moveToDelayed()`
+ * reject with `Job aborted`; `job.log()` still works.
  */
 export interface SandboxOptions {
   /** Use worker_threads (default: true). When false, uses child_process.fork. */
@@ -541,6 +544,8 @@ export interface SchedulerEntry {
   compression?: 'gzip';
   lastRun?: number;
   nextRun: number;
+  /** Id of the job the last tick fired. Only its completion advances a repeatAfterComplete entry. */
+  inflightJobId?: string;
 }
 
 /** A single per-minute metrics data point. */
