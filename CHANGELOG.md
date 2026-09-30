@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.16.0] - 2026-09-30
+
 ### Changed
 
 - **`@glidemq/speedkey` ^0.4.2**: the client is now a re-import of upstream valkey-glide main (security advisories closed, multiplexed-connection deadlock fixed) and `close()` detaches a connection with an in-flight blocking command within a few ms on both standalone and cluster clients (0.4.0 left a cluster `XREADGROUP` attached for the block duration). glide-mq keeps its graceful-close wait for the in-flight read: a claim delivered in the socket-teardown window would be lost with the rejected read. On localhost that window is now too small to hit (0 of 30 closes stranded an entry with or without the wait on 0.4.2; 30 of 30 without it on 0.3.0), on a network it is one round trip, and there is no typed `CLIENT UNBLOCK` to close it server-side.

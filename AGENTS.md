@@ -2,7 +2,7 @@
 
 - glide-mq: Message queue library for Node.js built on Valkey/Redis using valkey-glide native client
 - Language: TypeScript, Rust core (via NAPI bindings)
-- Status: v0.15.6 - High-performance MQ with AI-native primitives.
+- Status: v0.16.0 - High-performance MQ with AI-native primitives.
 - Client: @glidemq/speedkey (npm) - valkey-glide with direct NAPI bindings
 - Dashboard: @glidemq/dashboard (separate repo) - Express middleware
 - Repos: github.com/avifenesh/glide-mq, github.com/avifenesh/speedkey, github.com/avifenesh/glidemq-dashboard
