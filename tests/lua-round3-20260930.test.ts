@@ -607,3 +607,35 @@ describeEachMode('Lua round 3 2026-09-30', (CONNECTION) => {
     }
   });
 
+  // Review fix 2: several legacy-retry candidates in one trim share one range read.
+  it('trimBroadcast keeps every legacy-retry message trimmed in one call', async () => {
+    const Q = uniqueQueue('r3-bcast-legacy-many');
+    const k = buildKeys(Q);
+    const bcast = new Broadcast(Q, { connection: CONNECTION, maxMessages: 3 });
+    try {
+      const ids = [(await bcast.publish('evt', { n: 1 }))!, (await bcast.publish('evt', { n: 2 }))!];
+      await cleanupClient.xgroupCreate(k.stream, 'sub', '0', { mkStream: true }).catch(() => {});
+      const retries: Record<string, string> = {};
+      for (const id of ids) {
+        retries[id] = String(
+          await cleanupClient.xadd(k.stream, [
+            ['jobId', id],
+            ['name', 'evt'],
+            ['retryGroup', 'sub'],
+          ]),
+        );
+        await cleanupClient.hset(`${k.job(id)}:sub:sub`, { a: '1' });
+        await cleanupClient.hdel(k.job(id), ['bcastEntry']);
+      }
+      // 5 entries, cap 3: both originals are trimmed by this one publish.
+      await bcast.publish('evt', { n: 3 });
+      await waitFor(async () => (await cleanupClient.xlen(k.stream)) <= 3, 5000);
+      for (const id of ids) {
+        expect(await cleanupClient.exists([k.job(id)])).toBe(1);
+        expect(await cleanupClient.hget(k.job(id), 'bcastEntry')).toBe(retries[id]);
+      }
+    } finally {
+      await bcast.close();
+    }
+  });
+

@@ -3835,15 +3835,11 @@ local TRIM_KEEP_STATES = {
 -- A retry entry promoted by a library before 130 was not recorded in
 -- bcastEntry. When some subscription retried this message, look for its
 -- retry entry among the oldest stream entries (bounded) before deleting.
-local function findLegacyRetryEntry(streamKey, jobId, groups, jobKey)
-  local retried = false
-  for i = 1, #groups do
-    if (tonumber(redis.call('HGET', jobKey .. ':sub:' .. groups[i], 'a')) or 0) > 0 then
-      retried = true
-      break
-    end
-  end
-  if not retried then return nil end
+-- Retry entries among the oldest 1000 stream entries, indexed by job id. Read
+-- once per trim call (lazily, only when a candidate needs it), so the work is
+-- O(range) per call and not per candidate.
+local function legacyRetryIndex(streamKey)
+  local index = {}
   local entries = redis.call('XRANGE', streamKey, '-', '+', 'COUNT', 1000)
   for i = 1, #entries do
     local fields = entries[i][2]
@@ -3852,19 +3848,31 @@ local function findLegacyRetryEntry(streamKey, jobId, groups, jobKey)
       if fields[f] == 'jobId' then entryJobId = fields[f + 1] end
       if fields[f] == 'retryGroup' then isRetry = true end
     end
-    if isRetry and entryJobId == jobId then return entries[i][1] end
+    if isRetry and entryJobId and not index[entryJobId] then index[entryJobId] = entries[i][1] end
   end
-  return nil
+  return index
 end
 
-local function deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, jobId)
+local function findLegacyRetryEntry(jobId, groups, jobKey, legacyRetries)
+  local retried = false
+  for i = 1, #groups do
+    if (tonumber(redis.call('HGET', jobKey .. ':sub:' .. groups[i], 'a')) or 0) > 0 then
+      retried = true
+      break
+    end
+  end
+  if not retried then return nil end
+  return legacyRetries()[jobId]
+end
+
+local function deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, jobId, legacyRetries)
   local jobKey = prefix .. 'job:' .. jobId
   local vals = redis.call('HMGET', jobKey, 'state', 'bcastHeld', 'bcastEntry')
   if not vals[1] or TRIM_KEEP_STATES[vals[1]] then return end
   if (tonumber(vals[2]) or 0) > 0 then return end
   if vals[3] and #redis.call('XRANGE', streamKey, vals[3], vals[3]) > 0 then return end
   if not vals[3] then
-    local legacyRetry = findLegacyRetryEntry(streamKey, jobId, groups, jobKey)
+    local legacyRetry = findLegacyRetryEntry(jobId, groups, jobKey, legacyRetries)
     if legacyRetry then
       redis.call('HSET', jobKey, 'bcastEntry', legacyRetry)
       return
@@ -3959,8 +3967,13 @@ redis.register_function('glidemq_trimBroadcast', function(keys, args)
       end
     end
   end
+  local legacyIndex = nil
+  local function legacyRetries()
+    if not legacyIndex then legacyIndex = legacyRetryIndex(streamKey) end
+    return legacyIndex
+  end
   for i = 1, #candidates do
-    deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, candidates[i])
+    deleteTrimmedBroadcastJob(prefix, streamKey, keys, groups, candidates[i], legacyRetries)
   end
   return {trimmed, unread}
 end)
