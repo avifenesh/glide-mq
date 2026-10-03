@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`TestWorker` batch mode exceeded `concurrency`**: a slow partial batch followed by a full batch, or by a timed partial flush, started a second batch processor while the first was still running, so `concurrency: 1` could run two processors at once and `concurrency * batch.size` jobs could be exceeded. Like the production `Worker`, `concurrency: 1` now runs one batch at a time and higher concurrency keeps at most `concurrency * batch.size` jobs in flight; records that do not fit stay pending until a running batch settles.
 - **`TestWorker` rejects a queue name**: passing a string (the production `Worker` signature) instead of a `TestQueue` instance threw `Cannot read properties of undefined (reading 'add')` from inside the worker; it now throws a `GlideMQError` naming the expected argument.
 
 ---
