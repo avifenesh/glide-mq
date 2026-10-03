@@ -612,6 +612,14 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
     });
   }
 
+  /**
+   * Entries a batch.timeout refill read may still claim: the free slots of the
+   * batch, within the prefetch budget left by the jobs already in flight.
+   */
+  protected batchRefillCount(collected: number): number {
+    return Math.min(this.batchSize, this.prefetch - this.activeCount) - collected;
+  }
+
   protected async waitForSlot(): Promise<void> {
     if (this.prefetch - this.activeCount > 0) return;
 

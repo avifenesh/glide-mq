@@ -231,12 +231,15 @@ export class Worker<D = any, R = any> extends BaseWorker<D, R> {
         // claim another entry during that secondary read.
         await this.refreshMetaFlags();
         if (this.queuePaused || this.closing || !this.blockingClient) break;
+        // The first read was capped at prefetch - activeCount; a refill is held to the same budget.
+        const refillCount = this.batchRefillCount(collected.length);
+        if (refillCount <= 0) break;
 
         const blockMs = Math.min(remaining, this.blockTimeout);
         let moreResult: Awaited<ReturnType<Client['xreadgroup']>>;
         try {
           moreResult = await this.blockingClient.xreadgroup(CONSUMER_GROUP, this.consumerId, this.xreadStreams, {
-            count: this.batchSize - collected.length,
+            count: refillCount,
             block: blockMs,
           });
         } catch (err) {
