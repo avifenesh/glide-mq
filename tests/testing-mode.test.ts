@@ -2173,6 +2173,223 @@ describe('TestWorker failure paths (coverage)', () => {
   });
 });
 
+describe('TestWorker with a job removed or obliterated while active', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+  /** Holds every job open until `release(tag)` is called, keyed by the tag of the first job in the call. */
+  function gate() {
+    const waiters = new Map<string, () => void>();
+    const hold = (tag: string) => new Promise<void>((resolve) => waiters.set(tag, resolve));
+    return { hold, release: (tag: string) => waiters.get(tag)?.() };
+  }
+
+  /** Collects the 'completed' and 'failed' events of the worker and of the queue as `<type> <tag>`. */
+  function collect(w: TestWorker, q: TestQueue) {
+    const events = { worker: [] as string[], queue: [] as string[] };
+    for (const type of ['completed', 'failed'] as const) {
+      w.on(type, (job) => events.worker.push(`${type} ${job.data.tag}`));
+      q.on(type, (job) => events.queue.push(`${type} ${job.data.tag}`));
+    }
+    return events;
+  }
+
+  it.each([
+    ['completes', { removeOnComplete: true }, {}, 'completed a'],
+    ['fails', { removeOnFail: true }, { fail: true }, 'failed a'],
+  ])(
+    'a job that %s after the queue was obliterated only reaches its worker and leaves the job that reuses its id alone',
+    async (_label, opts, extra, workerEvent) => {
+      queue = new TestQueue('obliterate-inflight-terminal');
+      const { hold, release } = gate();
+      worker = new TestWorker(queue, async (job) => {
+        await hold(job.data.tag);
+        if (job.data.fail) throw new Error(`failed ${job.data.tag}`);
+        return job.data.tag;
+      });
+      const events = collect(worker, queue);
+
+      const a = await queue.add('job', { tag: 'a', ...extra }, opts);
+      await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+      await queue.obliterate({ force: true });
+      const b = await queue.add('job', { tag: 'b' });
+      // obliterate restarts the id counter, as the key wipe does in production
+      expect(b!.id).toBe(a!.id);
+
+      release('a');
+      await settle();
+      // like the worker after glidemq_completeAndFetchNext / glidemq_fail skipped the missing hash
+      expect(events.worker).toEqual([workerEvent]);
+      expect(events.queue).toEqual([]);
+      expect((await queue.getMetrics('completed')).data).toEqual([]);
+      expect((await queue.getMetrics('failed')).data).toEqual([]);
+      // b is neither deleted by the retention of a nor dequeued, and is dispatched next
+      expect(queue.jobs.get(b!.id)?.state).toBe('active');
+      expect(worker.getActiveCount()).toBe(1);
+
+      release('b');
+      expect(await b!.waitUntilFinished(5, 2000)).toBe('completed');
+      expect(events.worker).toEqual([workerEvent, 'completed b']);
+      expect(events.queue).toEqual(['completed b']);
+      expect(worker.getActiveCount()).toBe(0);
+    },
+  );
+
+  it('a retryable failure after the queue was obliterated does not park the job that reuses its id', async () => {
+    queue = new TestQueue('obliterate-inflight-retry');
+    const { hold, release } = gate();
+    worker = new TestWorker(queue, async (job) => {
+      await hold(job.data.tag);
+      if (job.data.fail) throw new Error(`failed ${job.data.tag}`);
+      return job.data.tag;
+    });
+    const events = collect(worker, queue);
+    queue.on('retrying', () => events.queue.push('retrying'));
+
+    const a = await queue.add('job', { tag: 'a', fail: true }, { attempts: 3, backoff: { type: 'fixed', delay: 0 } });
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await queue.obliterate({ force: true });
+    const b = await queue.add('job', { tag: 'b' });
+    expect(b!.id).toBe(a!.id);
+
+    release('a');
+    await settle();
+    // no retry is scheduled, so b stays dispatchable and is not dequeued by the retry of a
+    expect(events.worker).toEqual(['failed a']);
+    expect(events.queue).toEqual([]);
+    expect(queue.jobs.get(b!.id)?.state).toBe('active');
+    expect(worker.getActiveCount()).toBe(1);
+
+    release('b');
+    expect(await b!.waitUntilFinished(5, 2000)).toBe('completed');
+    expect(worker.getActiveCount()).toBe(0);
+  });
+
+  it.each([
+    ['returns results', (jobs: TestJob[]) => jobs.map((j) => j.data.tag), ['completed a1', 'completed a2']],
+    [
+      'throws a BatchError',
+      (jobs: TestJob[]) => {
+        throw new BatchError(jobs.map((j, i) => (i === 0 ? new Error('bad') : j.data.tag)));
+      },
+      ['failed a1', 'completed a2'],
+    ],
+    [
+      'throws',
+      () => {
+        throw new Error('boom');
+      },
+      ['failed a1', 'failed a2'],
+    ],
+  ])(
+    'a batch that %s after the queue was obliterated only reaches its worker',
+    async (_label, outcome, workerEvents) => {
+      queue = new TestQueue('obliterate-inflight-batch');
+      const { hold, release } = gate();
+      worker = new TestWorker(
+        queue,
+        async (jobs: TestJob[]) => {
+          await hold(jobs[0].data.tag);
+          return outcome(jobs);
+        },
+        { batch: { size: 2 } },
+      );
+      const events = collect(worker, queue);
+
+      const retention = { removeOnComplete: true, removeOnFail: true };
+      await queue.pause();
+      await queue.add('job', { tag: 'a1' }, retention);
+      await queue.add('job', { tag: 'a2' }, retention);
+      await queue.resume();
+      await waitFor(() => worker!.getActiveCount() === 2, 2000, 2);
+      await queue.obliterate({ force: true });
+      await queue.add('job', { tag: 'b1' });
+      await queue.add('job', { tag: 'b2' });
+
+      release('a1');
+      await settle();
+      expect(events.worker).toEqual(workerEvents);
+      expect(events.queue).toEqual([]);
+      expect((await queue.getMetrics('completed')).data).toEqual([]);
+      expect((await queue.getMetrics('failed')).data).toEqual([]);
+      expect([...queue.jobs.values()].map((r) => `${r.data.tag}:${r.state}`)).toEqual(['b1:active', 'b2:active']);
+      expect(worker.getActiveCount()).toBe(2);
+
+      release('b1');
+      await waitFor(() => worker!.getActiveCount() === 0, 2000, 2);
+      expect(events.worker.slice(workerEvents.length)).toHaveLength(2);
+      expect(events.queue).toHaveLength(2);
+      expect([...events.worker.slice(workerEvents.length), ...events.queue].every((e) => /b[12]$/.test(e))).toBe(true);
+    },
+  );
+
+  it('a job removed while active only reaches its worker', async () => {
+    queue = new TestQueue('removed-inflight');
+    const { hold, release } = gate();
+    worker = new TestWorker(queue, async (job) => {
+      await hold(job.data.tag);
+      return job.data.tag;
+    });
+    const events = collect(worker, queue);
+
+    const a = await queue.add('job', { tag: 'a' });
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await a!.remove();
+    release('a');
+    await settle();
+    expect(events.worker).toEqual(['completed a']);
+    expect(events.queue).toEqual([]);
+    expect((await queue.getMetrics('completed')).data).toEqual([]);
+    expect(await queue.getJob(a!.id)).toBeNull();
+  });
+
+  it('does not dispatch an obliterated record left in a partial batch', async () => {
+    queue = new TestQueue('obliterate-pending-batch');
+    const batches: string[][] = [];
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        batches.push(jobs.map((j) => j.data.tag));
+        return jobs.map((j) => j.data.tag);
+      },
+      { batch: { size: 2, timeout: 60_000 } },
+    );
+
+    await queue.add('job', { tag: 'a' });
+    // let the worker take a into its partial batch before the queue is wiped
+    await settle();
+    await queue.obliterate({ force: true });
+    await queue.add('job', { tag: 'b' });
+    await queue.add('job', { tag: 'c' });
+    await waitFor(() => batches.length > 0, 2000, 5);
+    expect(batches).toEqual([['b', 'c']]);
+  });
+
+  it('does not hand an obliterated partial-batch record back to the queue on close', async () => {
+    queue = new TestQueue('obliterate-pending-close');
+    worker = new TestWorker(queue, async (jobs: TestJob[]) => jobs.map((j) => j.data.tag), {
+      batch: { size: 3, timeout: 60_000 },
+    });
+
+    await queue.add('job', { tag: 'a' });
+    await settle();
+    await queue.obliterate({ force: true });
+    await queue.add('job', { tag: 'b' });
+    await settle();
+    await worker.close();
+    worker = undefined;
+    expect(queue.waitingQueue.map((r) => r.data.tag)).toEqual(['b']);
+  });
+});
+
 describe('TestJob.moveToDelayed parity', () => {
   let queue: TestQueue;
   let worker: TestWorker;
