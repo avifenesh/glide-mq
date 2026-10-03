@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Error classes from `glide-mq/testing`**: `GlideMQError`, `ConnectionError`, `UnrecoverableError`, `DelayedError`, `BatchError`, `WaitingChildrenError`, `SuspendError` and `GroupRateLimitError` (plus the `GroupRateLimitOptions` type) are re-exported, so a test can throw and match them without importing the main entry, which loads the native client. They are the same classes, so `instanceof` works across both entries.
+
 ---
 
 ## [0.17.0] - 2026-10-04
