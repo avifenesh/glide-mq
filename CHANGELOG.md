@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`WorkerInfo.concurrency`**: `queue.getWorkers()` (and `GET /queues/:name/workers` on the proxy) now reports each worker's configured `concurrency` option, in production and in `glide-mq/testing`. Optional: it is absent for a worker running a glide-mq version that predates the field. In batch mode it counts batches, so up to `concurrency * batch.size` jobs can be active at once. `TestWorker.concurrency` is now a public `readonly` property.
+
 ### Fixed
 
 - **`TestWorker` rejects a queue name**: passing a string (the production `Worker` signature) instead of a `TestQueue` instance threw `Cannot read properties of undefined (reading 'add')` from inside the worker; it now throws a `GlideMQError` naming the expected argument.
