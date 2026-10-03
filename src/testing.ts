@@ -2298,6 +2298,29 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     this.rateLimitTimer.unref?.();
   }
 
+  /**
+   * False once a record left the store while its job was in flight: removed, or
+   * obliterated and its id handed to a newer job. glidemq_completeAndFetchNext
+   * and glidemq_fail skip a missing hash (no state change, retention, metric,
+   * retry or queue event), so nothing may touch the job that owns the id now.
+   */
+  private isCurrent(record: TestJobRecord<D, R>): boolean {
+    return this.queue.jobs.get(record.id) === record;
+  }
+
+  /**
+   * A completion for a record that is gone. Only the worker's own 'completed'
+   * event is kept: BaseWorker emits it whatever the script did. Returns true
+   * when the completion was handled here.
+   */
+  private settleGoneCompletion(record: TestJobRecord<D, R>, job: TestJob<D, R>, result: R | undefined): boolean {
+    if (this.isCurrent(record)) return false;
+    job.returnvalue = result;
+    job.finishedOn = Date.now();
+    this.emit('completed', job, result);
+    return true;
+  }
+
   private processJob(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
     // Check TTL expiration before processing
     if (record.expireAt && Date.now() > record.expireAt) {
@@ -2348,6 +2371,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           this.handleFailure(record, job, err);
           return;
         }
+        if (this.settleGoneCompletion(record, job, result)) return;
         // Roundtrip returnvalue through serializer to match production behavior
         const s = this.queue.serializer;
         const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
@@ -2401,6 +2425,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       .catch((err: Error) => {
         // Handle suspend: the job is already marked suspended by TestJob.suspend()
         if (err instanceof SuspendError || err.name === 'SuspendError') {
+          if (!this.isCurrent(record)) return;
           this.queue.scheduleSuspendedTimeout(record);
           // State already set to 'suspended' by TestJob.suspend(). Nothing more to do.
           this.queue.emit('suspended', job, record.suspendReason);
@@ -2408,6 +2433,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         }
         // moveToDelayed: park without counting an attempt, promote at the timestamp.
         if (err instanceof DelayedError) {
+          if (!this.isCurrent(record)) return;
           this.queue.parkDelayed(record, Math.max(0, err.delayedUntil - Date.now()));
           return;
         }
@@ -2438,6 +2464,15 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
    */
   private handleFailure(record: TestJobRecord<D, R>, job: TestJob<D, R>, err: Error): void {
     const now = Date.now();
+    if (!this.isCurrent(record)) {
+      // glidemq_fail answers 'removed': no retry, metric, dead-letter copy or queue event, but
+      // the worker still emits 'failed'. A RateLimitError is not a failure and emits nothing.
+      if (!TestWorker.isRateLimitError(err)) {
+        job.failedReason = err.message;
+        this.emit('failed', job, err);
+      }
+      return;
+    }
     if (TestWorker.isRateLimitError(err)) {
       const delayMs = (err as { delayMs?: number }).delayMs || this.limiter?.duration || 1000;
       this.rateLimitUntil = now + delayMs;
@@ -2488,7 +2523,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private processAvailableBatch(): void {
     if (this.activeCount >= this.concurrency * this.batchSize) return;
 
-    this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+    this.pendingBatch = this.pendingBatch.filter((r) => this.isCurrent(r) && r.state === 'waiting');
     while (this.pendingBatch.length < this.batchSize) {
       const record = this.takeWaitingRecord();
       if (!record) break;
@@ -2540,7 +2575,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
   private flushBatch(): void {
     if (!this.running) return;
-    this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+    this.pendingBatch = this.pendingBatch.filter((r) => this.isCurrent(r) && r.state === 'waiting');
     if (!this.queue.isPaused() && !this.paused) {
       while (this.pendingBatch.length < this.batchSize) {
         const record = this.takeWaitingRecord();
@@ -2580,6 +2615,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           const job = jobs[i];
           if (this.settleMovedToFailed(record, job)) continue;
           const result = results[i];
+          if (this.settleGoneCompletion(record, job, result)) continue;
           const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
           record.state = 'completed';
           record.returnvalue = roundtripped;
@@ -2605,6 +2641,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
             if (result instanceof Error) {
               this.handleFailure(record, job, result);
             } else {
+              if (this.settleGoneCompletion(record, job, result as R)) continue;
               const s = this.queue.serializer;
               const roundtripped =
                 result !== undefined ? (s.deserialize(s.serialize(result as R)) as R) : (result as R);
@@ -2740,7 +2777,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       this.rateLimitTimer = null;
     }
     if (this.pendingBatch.length > 0) {
-      const handoff = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+      const handoff = this.pendingBatch.filter((r) => this.isCurrent(r) && r.state === 'waiting');
       this.pendingBatch = [];
       if (handoff.length > 0) this.queue.waitingQueue.unshift(...handoff);
     }
