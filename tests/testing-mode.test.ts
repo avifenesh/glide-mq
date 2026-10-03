@@ -12,6 +12,7 @@ import type { JobOptions } from '../src/types';
 import { BatchError } from '../src/errors';
 import { MAX_JOB_DATA_SIZE } from '../src/utils';
 import { waitFor } from './helpers/fixture';
+import { existsSync } from 'fs';
 
 const ECHO_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/echo.js');
 
@@ -456,6 +457,77 @@ describe('TestWorker', () => {
 
     expect(completed).toHaveLength(1);
     expect(completed[0].result).toEqual({ greeting: 'hello' });
+  });
+});
+
+describe('error classes exported by glide-mq/testing', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it.each([
+    'GlideMQError',
+    'ConnectionError',
+    'UnrecoverableError',
+    'DelayedError',
+    'BatchError',
+    'WaitingChildrenError',
+    'SuspendError',
+    'GroupRateLimitError',
+  ] as const)('%s is the class of the main entry', async (name) => {
+    const errors = await import('../src/errors');
+    const testing = await import('../src/testing');
+    expect(typeof testing[name]).toBe('function');
+    expect(testing[name]).toBe(errors[name]);
+  });
+
+  // The package exports the built files, so check those too. Skipped when dist is not built,
+  // like the other tests that load dist (npm run build).
+  it.skipIf(!existsSync(path.resolve(__dirname, '../dist/testing.js')))(
+    'the built testing entry exports the same classes as the built errors module',
+    () => {
+      const built = require('../dist/testing') as typeof import('../src/testing');
+      const builtErrors = require('../dist/errors') as typeof import('../src/errors');
+      for (const name of [
+        'GlideMQError',
+        'ConnectionError',
+        'UnrecoverableError',
+        'DelayedError',
+        'BatchError',
+        'WaitingChildrenError',
+        'SuspendError',
+        'GroupRateLimitError',
+      ] as const) {
+        expect(typeof built[name]).toBe('function');
+        expect(built[name]).toBe(builtErrors[name]);
+      }
+    },
+  );
+
+  it('keeps the subclasses instances of GlideMQError', async () => {
+    const testing = await import('../src/testing');
+    expect(new testing.UnrecoverableError('x')).toBeInstanceOf(testing.GlideMQError);
+    expect(new testing.SuspendError()).toBeInstanceOf(testing.GlideMQError);
+  });
+
+  it('UnrecoverableError from the testing entry fails the job without using the remaining attempts', async () => {
+    const { UnrecoverableError } = await import('../src/testing');
+    queue = new TestQueue('errors-unrecoverable');
+    let calls = 0;
+    worker = new TestWorker(queue, async () => {
+      calls++;
+      throw new UnrecoverableError('do not retry');
+    });
+
+    const job = await queue.add('job', {}, { attempts: 3, backoff: { type: 'fixed', delay: 0 } });
+    expect(await job!.waitUntilFinished(5, 2000)).toBe('failed');
+    expect(calls).toBe(1);
+    expect((await queue.getJob(job!.id))!.failedReason).toBe('do not retry');
   });
 });
 
