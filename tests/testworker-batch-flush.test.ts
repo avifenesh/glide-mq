@@ -213,3 +213,161 @@ describe('TestWorker pending batch flush', () => {
     expect((await queue.getJobCounts()).waiting).toBe(1);
   });
 });
+
+/**
+ * Batch processor whose calls block until released, recording how many
+ * processors and how many jobs are in flight at once.
+ */
+function gatedBatchProcessor() {
+  const gates: Array<() => void> = [];
+  let opened = false;
+  const state = { running: 0, maxRunning: 0, jobsInFlight: 0, maxJobsInFlight: 0, batchSizes: [] as number[] };
+  const processor = async (jobs: TestJob[]) => {
+    state.batchSizes.push(jobs.length);
+    state.running += 1;
+    state.jobsInFlight += jobs.length;
+    state.maxRunning = Math.max(state.maxRunning, state.running);
+    state.maxJobsInFlight = Math.max(state.maxJobsInFlight, state.jobsInFlight);
+    if (!opened) await new Promise<void>((resolve) => gates.push(resolve));
+    state.running -= 1;
+    state.jobsInFlight -= jobs.length;
+    return jobs.map(() => 'ok');
+  };
+  return {
+    processor,
+    state,
+    releaseOldest: () => gates.shift()?.(),
+    openAll: () => {
+      opened = true;
+      for (const resolve of gates.splice(0)) resolve();
+    },
+  };
+}
+
+const jobsOf = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `j${i}`, data: { i } }));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe('TestWorker batch concurrency limit', () => {
+  let queue: TestQueue;
+  let worker: TestWorker;
+  let gate: ReturnType<typeof gatedBatchProcessor>;
+
+  afterEach(async () => {
+    gate.openAll();
+    if (worker) await worker.close();
+    if (queue) await queue.close();
+  });
+
+  it('runs one batch at a time at concurrency 1 when a full batch follows a slow partial batch', async () => {
+    queue = new TestQueue('cov-batch-c1-partial-then-full');
+    gate = gatedBatchProcessor();
+    await queue.addBulk(jobsOf(2));
+    worker = new TestWorker(queue, gate.processor, { concurrency: 1, batch: { size: 5, timeout: 50 } });
+    await waitFor(() => gate.state.batchSizes.length === 1, 2000, 10);
+
+    await queue.addBulk(jobsOf(5));
+    await sleep(150);
+    expect(gate.state.maxRunning).toBe(1);
+    expect(gate.state.batchSizes).toEqual([2]);
+
+    gate.releaseOldest();
+    await waitFor(() => gate.state.batchSizes.length === 2, 2000, 10);
+    gate.openAll();
+    await waitFor(async () => (await queue.getJobCounts()).completed === 7, 2000, 20);
+    expect(gate.state.maxRunning).toBe(1);
+    expect(gate.state.batchSizes).toEqual([2, 5]);
+  });
+
+  it('runs one batch at a time at concurrency 1 when a timed flush follows a slow partial batch', async () => {
+    queue = new TestQueue('cov-batch-c1-partial-then-flush');
+    gate = gatedBatchProcessor();
+    await queue.addBulk(jobsOf(2));
+    worker = new TestWorker(queue, gate.processor, { concurrency: 1, batch: { size: 5, timeout: 50 } });
+    await waitFor(() => gate.state.batchSizes.length === 1, 2000, 10);
+
+    await queue.add('late', { i: 99 });
+    await sleep(150);
+    expect(gate.state.maxRunning).toBe(1);
+    expect(gate.state.batchSizes).toEqual([2]);
+
+    gate.openAll();
+    await waitFor(async () => (await queue.getJobCounts()).completed === 3, 2000, 20);
+    expect(gate.state.maxRunning).toBe(1);
+    expect(gate.state.batchSizes).toEqual([2, 1]);
+  });
+
+  it('holds a full batch that exceeds the remaining concurrency * batch.size budget', async () => {
+    queue = new TestQueue('cov-batch-budget-full');
+    gate = gatedBatchProcessor();
+    await queue.addBulk(jobsOf(5));
+    worker = new TestWorker(queue, gate.processor, { concurrency: 2, batch: { size: 5, timeout: 50 } });
+    await waitFor(() => gate.state.batchSizes.length === 1, 2000, 10);
+    await queue.addBulk(jobsOf(3));
+    await waitFor(() => gate.state.batchSizes.length === 2, 2000, 10);
+
+    // 8 of 10 job slots are in flight; a full batch of 5 does not fit.
+    await queue.addBulk(jobsOf(5));
+    await sleep(150);
+    expect(gate.state.batchSizes).toEqual([5, 3]);
+    expect(gate.state.maxJobsInFlight).toBe(8);
+
+    gate.releaseOldest();
+    await waitFor(() => gate.state.batchSizes.length === 3, 2000, 10);
+    gate.openAll();
+    await waitFor(async () => (await queue.getJobCounts()).completed === 13, 2000, 20);
+    expect(gate.state.batchSizes).toEqual([5, 3, 5]);
+    expect(gate.state.maxJobsInFlight).toBeLessThanOrEqual(10);
+  });
+
+  it('holds a timed partial flush that exceeds the remaining concurrency * batch.size budget', async () => {
+    queue = new TestQueue('cov-batch-budget-flush');
+    gate = gatedBatchProcessor();
+    await queue.addBulk(jobsOf(5));
+    worker = new TestWorker(queue, gate.processor, { concurrency: 2, batch: { size: 5, timeout: 50 } });
+    await waitFor(() => gate.state.batchSizes.length === 1, 2000, 10);
+    await queue.addBulk(jobsOf(3));
+    await waitFor(() => gate.state.batchSizes.length === 2, 2000, 10);
+
+    // 8 of 10 job slots are in flight; a timed flush of 3 does not fit.
+    await queue.addBulk(jobsOf(3));
+    await sleep(150);
+    expect(gate.state.batchSizes).toEqual([5, 3]);
+    expect(gate.state.maxJobsInFlight).toBe(8);
+
+    gate.releaseOldest();
+    await waitFor(() => gate.state.batchSizes.length === 3, 2000, 10);
+    gate.openAll();
+    await waitFor(async () => (await queue.getJobCounts()).completed === 11, 2000, 20);
+    expect(gate.state.batchSizes).toEqual([5, 3, 3]);
+    expect(gate.state.maxJobsInFlight).toBeLessThanOrEqual(10);
+  });
+
+  it('holds an immediate partial batch (no batch.timeout) that exceeds the remaining budget', async () => {
+    queue = new TestQueue('cov-batch-budget-immediate');
+    gate = gatedBatchProcessor();
+    worker = new TestWorker(queue, gate.processor, { concurrency: 2, batch: { size: 5 } });
+    // Without a timeout every wake-up starts what is waiting; pause/resume hands the worker n jobs at once.
+    const feed = async (n: number) => {
+      await queue.pause();
+      await queue.addBulk(jobsOf(n));
+      await queue.resume();
+    };
+    await feed(5);
+    await waitFor(() => gate.state.batchSizes.length === 1, 2000, 10);
+    await feed(3);
+    await waitFor(() => gate.state.batchSizes.length === 2, 2000, 10);
+
+    // 8 of 10 job slots are in flight; an immediate partial of 3 does not fit.
+    await feed(3);
+    await sleep(100);
+    expect(gate.state.batchSizes).toEqual([5, 3]);
+    expect(gate.state.maxJobsInFlight).toBe(8);
+
+    gate.releaseOldest();
+    await waitFor(() => gate.state.batchSizes.length === 3, 2000, 10);
+    gate.openAll();
+    await waitFor(async () => (await queue.getJobCounts()).completed === 11, 2000, 20);
+    expect(gate.state.batchSizes).toEqual([5, 3, 3]);
+    expect(gate.state.maxJobsInFlight).toBeLessThanOrEqual(10);
+  });
+});
