@@ -2428,6 +2428,26 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * Roundtrip a return value through the queue serializer, like BaseWorker does
+   * before it completes a job. A value the serializer rejects fails that job
+   * alone, whether or not its record is still in the store, and returns null.
+   */
+  private roundtripResult(
+    record: TestJobRecord<D, R>,
+    job: TestJob<D, R>,
+    result: R | undefined,
+  ): { value: R | undefined } | null {
+    const s = this.queue.serializer;
+    try {
+      return { value: result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result };
+    } catch (serializeErr) {
+      const message = serializeErr instanceof Error ? serializeErr.message : String(serializeErr);
+      this.handleFailure(record, job, new Error(`Serializer failed on return value: ${message}`));
+      return null;
+    }
+  }
+
+  /**
    * A completion for a record that is gone. Only the worker's own 'completed'
    * event is kept: BaseWorker emits it whatever the script did. Returns true
    * when the completion was handled here.
@@ -2490,10 +2510,11 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           this.handleFailure(record, job, err);
           return;
         }
-        if (this.settleGoneCompletion(record, job, result)) return;
         // Roundtrip returnvalue through serializer to match production behavior
-        const s = this.queue.serializer;
-        const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
+        const outcome = this.roundtripResult(record, job, result);
+        if (!outcome) return;
+        const roundtripped = outcome.value;
+        if (this.settleGoneCompletion(record, job, roundtripped)) return;
         record.state = 'completed';
         record.returnvalue = roundtripped;
         record.finishedOn = Date.now();
@@ -2583,18 +2604,21 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
    */
   private handleFailure(record: TestJobRecord<D, R>, job: TestJob<D, R>, err: Error): void {
     const now = Date.now();
+    const rateLimited = TestWorker.isRateLimitError(err);
+    const delayMs = (err as { delayMs?: number }).delayMs || this.limiter?.duration || 1000;
+    // BaseWorker pauses dispatch before failJob answers, so a RateLimitError holds the
+    // worker back even when its job was removed in the meantime.
+    if (rateLimited) this.rateLimitUntil = now + delayMs;
     if (!this.isCurrent(record)) {
       // glidemq_fail answers 'removed': no retry, metric, dead-letter copy or queue event, but
       // the worker still emits 'failed'. A RateLimitError is not a failure and emits nothing.
-      if (!TestWorker.isRateLimitError(err)) {
+      if (!rateLimited) {
         job.failedReason = err.message;
         this.emit('failed', job, err);
       }
       return;
     }
-    if (TestWorker.isRateLimitError(err)) {
-      const delayMs = (err as { delayMs?: number }).delayMs || this.limiter?.duration || 1000;
-      this.rateLimitUntil = now + delayMs;
+    if (rateLimited) {
       record.failedReason = 'rate limited';
       job.failedReason = 'rate limited';
       record.processedOn = now;
@@ -2756,14 +2780,14 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         if (results.length !== records.length) {
           throw new Error(`Batch processor returned ${results.length} results but batch had ${records.length} jobs`);
         }
-        const s = this.queue.serializer;
         for (let i = 0; i < records.length; i++) {
           const record = records[i];
           const job = jobs[i];
           if (this.settleMovedToFailed(record, job)) continue;
-          const result = results[i];
-          if (this.settleGoneCompletion(record, job, result)) continue;
-          const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
+          const outcome = this.roundtripResult(record, job, results[i]);
+          if (!outcome) continue;
+          const roundtripped = outcome.value;
+          if (this.settleGoneCompletion(record, job, roundtripped)) continue;
           record.state = 'completed';
           record.returnvalue = roundtripped;
           record.finishedOn = Date.now();
@@ -2788,10 +2812,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
             if (result instanceof Error) {
               this.handleFailure(record, job, result);
             } else {
-              if (this.settleGoneCompletion(record, job, result as R)) continue;
-              const s = this.queue.serializer;
-              const roundtripped =
-                result !== undefined ? (s.deserialize(s.serialize(result as R)) as R) : (result as R);
+              const outcome = this.roundtripResult(record, job, result as R);
+              if (!outcome) continue;
+              const roundtripped = outcome.value;
+              if (this.settleGoneCompletion(record, job, roundtripped)) continue;
               record.state = 'completed';
               record.returnvalue = roundtripped;
               record.finishedOn = Date.now();
