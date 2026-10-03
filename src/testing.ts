@@ -755,11 +755,12 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     id: string,
     now: number,
     delay: number,
+    dataSerializer: Serializer = this.serializer,
   ): TestJob<D, R> {
     const ttl = opts.ttl ?? 0;
     const priority = opts.priority ?? 0;
     // Roundtrip data through serializer to match production behavior
-    const roundtrippedData = this.serializer.deserialize(serializedData) as D;
+    const roundtrippedData = dataSerializer.deserialize(serializedData) as D;
     const record: TestJobRecord<D, R> = {
       id,
       name,
@@ -1284,12 +1285,12 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   /**
    * @internal Mirror BaseWorker.moveToDLQ: add the failure envelope to the TestQueue
    * registered under `dlqName` (created on first use) as a plain waiting job named
-   * like the failed one.
+   * like the failed one. The envelope is always plain JSON, as in production, so the
+   * serializer of the target queue neither alters nor rejects it.
    */
   addDeadLetter(dlqName: string, name: string, envelope: DeadLetterEnvelope): void {
     const target = TestQueue.registry.get(dlqName) ?? new TestQueue<any, any>(dlqName);
-    const serialized = target.serializer.serialize(JSON.parse(JSON.stringify(envelope)));
-    target.insertRecord(name, serialized, {}, target.generateJobId(), Date.now(), 0);
+    target.insertRecord(name, JSON.stringify(envelope), {}, target.generateJobId(), Date.now(), 0, JSON_SERIALIZER);
   }
 
   /** The TestQueue holding this queue's dead-letter jobs, or null when no DLQ name is configured or open. */
@@ -2594,7 +2595,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     job.finishedOn = now;
     this.queue.applyRetention(record, 'failed');
     this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
-    this.moveToDeadLetter(record, err);
+    this.moveToDeadLetter(record, job, err);
     this.emit('failed', job, err);
     this.queue.emit('failed', job, err);
     this.queue.onSchedulerJobFinished(record);
@@ -2602,18 +2603,20 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
   /**
    * Mirror BaseWorker.moveToDLQ: a terminal failure leaves a copy in the dead-letter
-   * queue, written before the `failed` events fire. `attemptsMade` is the count
-   * before the failing attempt, as in the worker, whose Job is loaded before the
-   * attempt is counted. A write error goes to the `error` event, not the job.
+   * queue, written before the `failed` events fire. `data` is the processor's
+   * `job.data`, which differs from the stored record when the processor replaced it.
+   * `attemptsMade` is the count before the failing attempt, as in the worker, whose
+   * Job is loaded before the attempt is counted. A write error goes to the `error`
+   * event, not the job.
    */
-  private moveToDeadLetter(record: TestJobRecord<D, R>, err: Error): void {
+  private moveToDeadLetter(record: TestJobRecord<D, R>, job: TestJob<D, R>, err: Error): void {
     const dlqName = this.deadLetterQueue?.name;
     if (!dlqName) return;
     try {
       this.queue.addDeadLetter(dlqName, record.name, {
         originalQueue: this.queue.name,
         originalJobId: record.id,
-        data: record.data,
+        data: job.data,
         failedReason: err.message,
         attemptsMade: record.attemptsMade - 1,
       });
