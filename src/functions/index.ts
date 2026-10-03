@@ -128,7 +128,11 @@ export const LIBRARY_NAME = 'glidemq';
 //   does not count as stalls, glidemq_recoverBroadcastClaims re-takes only owned entries, trimBroadcast
 //   looks up pre-130 retry entries; glidemq_healEarlyDeps releases parents registered by a plain SADD;
 //   healListActive re-seeds list-active-ids from a complete scan; no 'active' event is written anywhere.
-export const LIBRARY_VERSION = '132';
+// Version 133: token bucket tbRefill pulls a tbLastRefill ahead of the server clock back to server time
+//   when the bucket is full, and group setup (addJob, dedup, addFlow) seeds tbLastRefill
+//   from the server clock instead of the caller's, so a fast producer clock no longer drops the time
+//   since a consumption from the next refill.
+export const LIBRARY_VERSION = '133';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';

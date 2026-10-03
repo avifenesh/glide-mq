@@ -12,7 +12,8 @@ import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './he
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
-const { moveToActive } = require('../dist/functions/index') as typeof import('../src/functions/index');
+const { CONSUMER_GROUP, addJob, completeJob, moveToActive } =
+  require('../dist/functions/index') as typeof import('../src/functions/index');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 describeEachMode('token bucket idle-at-capacity refill', (CONNECTION) => {
@@ -83,5 +84,76 @@ describeEachMode('token bucket idle-at-capacity refill', (CONNECTION) => {
     expect(last).toBeLessThan(Date.now() + 5_000);
 
     await queue.close();
+  }, 15000);
+
+  // Group setup stamps tbLastRefill from the caller's clock. A producer whose
+  // clock runs ahead leaves a future tbLastRefill on a full bucket. tbRefill
+  // must pull it back to server time when a job consumes at capacity: if it
+  // survives the consumption, the next refill clamps it to "now" with zero
+  // elapsed time, and the time since the consumption never refills the bucket.
+  it('refills for the time since a consumption when a fast producer clock seeded the group', async () => {
+    const Q = uniqueQueue('tb-fast-clock');
+    const k = buildKeys(Q);
+    const group = 'fast-clock-group';
+    // Capacity 1 token, 10 tokens/s (one token per 100 ms), cost 1 token. Values are millitokens.
+    const add = (name: string, timestamp: number) =>
+      addJob(cleanupClient, k, name, '{}', '{}', timestamp, 0, 0, '', 0, group, 10, 0, 0, 1000, 10000, 1000);
+    await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true }).catch(() => {});
+    const activate = async (jobId: string) => {
+      const res = (await cleanupClient.xreadgroup(CONSUMER_GROUP, 'w1', { [k.stream]: '>' }, { count: 1 })) as any[];
+      const entryId = String(Object.keys(res[0].value)[0]);
+      const moved = await moveToActive(cleanupClient, k, jobId, Date.now(), k.stream, entryId, CONSUMER_GROUP);
+      return { entryId, moved };
+    };
+
+    const a = await add('a', Date.now() + 3_600_000);
+    const first = await activate(a);
+    expect(typeof first.moved).toBe('object');
+    await completeJob(cleanupClient, k, a, first.entryId, 'null', Date.now(), CONSUMER_GROUP);
+
+    // Idle for several refill intervals: the bucket is empty and nothing calls tbRefill.
+    await new Promise((r) => setTimeout(r, 500));
+
+    const b = await add('b', Date.now());
+    const second = await activate(b);
+    expect(second.moved).not.toBe('GROUP_TOKEN_LIMITED');
+    expect(typeof second.moved).toBe('object');
+  }, 15000);
+
+  // A future tbLastRefill already stored on a full bucket (written by an older
+  // library or a fast producer) is pulled back to server time by the next
+  // consumption instead of surviving until the bucket drains.
+  it('normalizes a stored future tbLastRefill when a job consumes a full bucket', async () => {
+    const Q = uniqueQueue('tb-future-stored');
+    const k = buildKeys(Q);
+    const group = 'future-stored-group';
+    const a = await addJob(
+      cleanupClient,
+      k,
+      'a',
+      '{}',
+      '{}',
+      Date.now(),
+      0,
+      0,
+      '',
+      0,
+      group,
+      10,
+      0,
+      0,
+      1000,
+      1000,
+      1000,
+    );
+    await cleanupClient.hset(k.group(group), { tbLastRefill: String(Date.now() + 3_600_000) });
+    await cleanupClient.xgroupCreate(k.stream, CONSUMER_GROUP, '0', { mkStream: true }).catch(() => {});
+    const res = (await cleanupClient.xreadgroup(CONSUMER_GROUP, 'w1', { [k.stream]: '>' }, { count: 1 })) as any[];
+    const entryId = String(Object.keys(res[0].value)[0]);
+
+    const moved = await moveToActive(cleanupClient, k, a, Date.now(), k.stream, entryId, CONSUMER_GROUP);
+    expect(typeof moved).toBe('object');
+    expect(Number(await cleanupClient.hget(k.group(group), 'tbTokens'))).toBe(0);
+    expect(Number(await cleanupClient.hget(k.group(group), 'tbLastRefill'))).toBeLessThan(Date.now() + 5_000);
   }, 15000);
 });
