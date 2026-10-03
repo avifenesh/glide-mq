@@ -1296,7 +1296,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   /** The TestQueue holding this queue's dead-letter jobs, or null when no DLQ name is configured or open. */
   private resolveDeadLetterQueue(): TestQueue<any, any> | null {
     const name = this.opts.deadLetterQueue?.name || this.deadLetterQueueName;
-    return (name && TestQueue.registry.get(name)) || null;
+    if (!name) return null;
+    return TestQueue.registry.get(name) ?? null;
   }
 
   /** The dead-letter record for `jobId` when it belongs to this queue, like Queue.isDeadLetterJobOwnedByQueue. */
