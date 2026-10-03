@@ -37,6 +37,8 @@ See CHANGELOG `[Unreleased]` for the full list. Highlights by area:
 ## Open Threads
 
 - **0.16.0 release**: tag `v0.16.0` on this PR's merge commit, then confirm the npm-cd run and the GitHub release.
+- **Community PRs #324 to #329** (jonathanong, 2026-10-03): #326 and #327 merged; #324 nit fixed on the branch (DLQ write failure without an `error` listener is a `GlideMQWarning`); review comments posted on #325 (budget and TPM charging for a removed job), #328 (claim capped at the free room, held jobs hidden from other workers) and #329 (`GroupRateLimitError` and `WaitingChildrenError` exported but unhandled by `TestWorker`).
+- **#332**: production batch `batch.timeout` refill over-claim fix (found reviewing #328). Behavior change for `prefetch < batch.size`, listed under Changed.
 - **Graceful-close wait**: stays. Removing it needs a server-side hand-back that runs before the blocked read is rejected; nothing in valkey-glide offers that today.
 - **Upstream follow-ups**: after #7244 merges, open the cluster detach PR from `fix/cluster-close-detach`; after a glide release, fix `available-commands.json` in valkey-glide-docs (JSON.MSET listed as unavailable for Node). A GlideBf upstream PR is assessed at about one day (module CI exists upstream) and not started.
 - **Owner actions**: rotate the npm token (speedkey `NPM_TOKEN` was taken from the rig's `~/.npmrc`) before it expires; a GPG signing key for Verified commits on upstream PRs; `~/.npmrc` `allow-scripts` is rejected by npm 11.19 (do not edit `~/.npmrc` from a session).
