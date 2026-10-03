@@ -37,6 +37,20 @@ import type {
 } from './types';
 import { JSON_SERIALIZER } from './types';
 import { GlideMQError, UnrecoverableError, BatchError, SuspendError, DelayedError } from './errors';
+
+// The same classes `glide-mq` exports, so a test can throw and match them without importing the
+// main entry, which loads the native client.
+export {
+  GlideMQError,
+  ConnectionError,
+  UnrecoverableError,
+  DelayedError,
+  BatchError,
+  WaitingChildrenError,
+  SuspendError,
+  GroupRateLimitError,
+} from './errors';
+export type { GroupRateLimitOptions } from './errors';
 import {
   MAX_JOB_DATA_SIZE,
   MAX_JOB_PRIORITY,
