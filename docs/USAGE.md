@@ -517,7 +517,7 @@ const worker = new Worker(
 Options:
 
 - `batch.size` - maximum number of jobs to collect before invoking the processor (1-1000).
-- `batch.timeout` - maximum time in ms to wait for additional jobs after a partial batch is received. When omitted, processes whatever is available immediately.
+- `batch.timeout` - maximum time in ms to wait for additional jobs after a partial batch is received. When omitted, processes whatever is available immediately. The wait never claims past the worker's budget: a batch holds at most `min(batch.size, prefetch - jobs in flight)` jobs, so at most `concurrency * batch.size` jobs run at once, and a `prefetch` below `batch.size` caps every batch at `prefetch`.
 
 **Partial failures** - throw `BatchError` to report per-job outcomes:
 
