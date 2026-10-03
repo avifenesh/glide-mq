@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Error classes from `glide-mq/testing`**: `GlideMQError`, `ConnectionError`, `UnrecoverableError`, `DelayedError`, `BatchError`, `WaitingChildrenError`, `SuspendError` and `GroupRateLimitError` (plus the `GroupRateLimitOptions` type) are re-exported, so a test can throw and match them without importing the main entry, which loads the native client. They are the same classes, so `instanceof` works across both entries.
+
 ### Fixed
 
 - **`TestWorker` rejects a queue name**: passing a string (the production `Worker` signature) instead of a `TestQueue` instance threw `Cannot read properties of undefined (reading 'add')` from inside the worker; it now throws a `GlideMQError` naming the expected argument.
