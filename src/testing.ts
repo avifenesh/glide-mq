@@ -2555,9 +2555,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private flushBatch(): void {
     if (!this.running) return;
     this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
-    const room = this.batchRoom();
-    if (room > 0 && !this.queue.isPaused() && !this.paused) {
-      while (this.pendingBatch.length < this.batchSize) {
+    if (!this.queue.isPaused() && !this.paused) {
+      while (this.pendingBatch.length < this.batchSize && this.batchRoom() > 0) {
         const record = this.takeWaitingRecord();
         if (!record) break;
         this.pendingBatch.push(record);
@@ -2565,7 +2564,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
     const take = Math.min(this.pendingBatch.length, this.batchSize);
     if (take === 0) return;
-    if (take > room) {
+    if (take > this.batchRoom()) {
       // Over the in-flight budget: keep the records and retry. A settling batch also
       // calls processAvailable(), but that is skipped while the queue is paused.
       this.scheduleBatchFlush();
