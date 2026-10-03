@@ -2485,8 +2485,18 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
   // ---- Batch processing ----
 
+  /**
+   * Jobs this worker may start now. Mirrors the production gates: at most
+   * `concurrency * batch.size` jobs in flight (the prefetch budget), and at
+   * concurrency 1 the poll loop awaits each batch, so one batch at a time.
+   */
+  private batchRoom(): number {
+    if (this.concurrency === 1) return this.activeCount === 0 ? this.batchSize : 0;
+    return this.concurrency * this.batchSize - this.activeCount;
+  }
+
   private processAvailableBatch(): void {
-    if (this.activeCount >= this.concurrency * this.batchSize) return;
+    if (this.batchRoom() <= 0) return;
 
     this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
     while (this.pendingBatch.length < this.batchSize) {
@@ -2504,6 +2514,9 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
 
     if (this.pendingBatch.length >= this.batchSize) {
+      // A full batch over the remaining budget stays in pendingBatch until a running
+      // batch settles and executeBatch(...).finally() calls processAvailable() again.
+      if (this.batchSize > this.batchRoom()) return;
       this.clearBatchTimer();
       this.executeBatch(this.pendingBatch.splice(0, this.batchSize));
       if (this.pendingBatch.length > 0) this.scheduleBatchFlush();
@@ -2516,6 +2529,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       return;
     }
 
+    if (this.pendingBatch.length > this.batchRoom()) return;
     this.executeBatch(this.pendingBatch.splice(0, this.pendingBatch.length));
   }
 
@@ -2542,14 +2556,17 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     if (!this.running) return;
     this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
     if (!this.queue.isPaused() && !this.paused) {
-      while (this.pendingBatch.length < this.batchSize) {
+      while (this.pendingBatch.length < this.batchSize && this.batchRoom() > 0) {
         const record = this.takeWaitingRecord();
         if (!record) break;
         this.pendingBatch.push(record);
       }
     }
-    if (this.pendingBatch.length === 0) return;
-    this.executeBatch(this.pendingBatch.splice(0, this.batchSize));
+    const take = Math.min(this.pendingBatch.length, this.batchSize);
+    if (take === 0) return;
+    // Over the in-flight budget: keep the records; a running batch's finally() retries.
+    if (take > this.batchRoom()) return;
+    this.executeBatch(this.pendingBatch.splice(0, take));
     if (this.pendingBatch.length > 0) this.scheduleBatchFlush();
   }
 
@@ -2632,9 +2649,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       })
       .finally(() => {
         this.activeCount -= records.length;
-        if (this.running && !this.queue.isPaused()) {
-          this.processAvailable();
-        }
+        if (!this.running) return;
+        if (!this.queue.isPaused()) this.processAvailable();
+        // Records held for budget still flush on timeout while paused, when processAvailable() does nothing.
+        this.scheduleBatchFlush();
       });
   }
 
