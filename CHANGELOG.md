@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Token bucket refilled from a future `tbLastRefill`**: group setup stamped `tbLastRefill` from the producer's `Date.now()`, so a producer whose clock ran ahead left a full bucket with a future refill stamp. `tbRefill` returned early at capacity without touching it, and the first consumption then refilled with zero elapsed time, so the time since that consumption never counted and the bucket stayed empty longer than `1/refillRate`. Group setup now seeds `tbLastRefill` from the server clock, and `tbRefill` pulls any stamp that differs from server time back to it while the bucket is full. Server function library version is now `133`; workers and producers reload it on connect.
 - **`TestWorker` rejects a queue name**: passing a string (the production `Worker` signature) instead of a `TestQueue` instance threw `Cannot read properties of undefined (reading 'add')` from inside the worker; it now throws a `GlideMQError` naming the expected argument.
 
 ---

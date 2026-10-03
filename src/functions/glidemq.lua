@@ -179,9 +179,12 @@ local function tbRefill(groupHashKey, g, now)
   local refillNow = redisNowMs()
   if tbTokens >= tbCapacity then
     -- Sitting at capacity must not accumulate idle time as later refill credit.
-    -- Keep the refill timeline entirely in Redis server-clock domain.
+    -- Keep the refill timeline entirely in Redis server-clock domain. A stamp ahead of
+    -- the server clock (a fast caller clock wrote it) is pulled back too: left in place
+    -- across a consumption, the next refill would clamp it to now with zero elapsed
+    -- time and drop everything since the consumption.
     local tbLastRefill = tonumber(g.tbLastRefill) or 0
-    if refillNow > tbLastRefill then
+    if refillNow ~= tbLastRefill then
       redis.call('HSET', groupHashKey, 'tbLastRefill', tostring(refillNow))
       g.tbLastRefill = tostring(refillNow)
     end
@@ -991,7 +994,7 @@ end
 -- Upsert the group config an ordered job carries (concurrency, sliding-window
 -- rate limit, token bucket). The current values are read in one HMGET.
 local function upsertGroupConfig(prefix, orderingKey, orderingSeq, groupConcurrency, groupRateMax, groupRateDuration,
-    tbCapacity, tbRefillRate, timestamp)
+    tbCapacity, tbRefillRate)
   if groupConcurrency < 1 then groupConcurrency = 1 end
   local groupHashKey = groupHashKey(prefix, orderingKey)
   local cur = redis.call('HMGET', groupHashKey,
@@ -1027,7 +1030,7 @@ local function upsertGroupConfig(prefix, orderingKey, orderingSeq, groupConcurre
     if curTbCap == 0 then
       redis.call('HSET', groupHashKey,
         'tbTokens', tostring(tbCapacity),
-        'tbLastRefill', tostring(timestamp),
+        'tbLastRefill', tostring(redisNowMs()),
         'tbRefillRemainder', '0')
     end
   elseif curTbCap > 0 then
@@ -1095,7 +1098,7 @@ redis.register_function('glidemq_addJob', function(keys, args)
   end
   if useGroupConcurrency then
     upsertGroupConfig(prefix, orderingKey, orderingSeq, groupConcurrency, groupRateMax, groupRateDuration,
-      tbCapacity, tbRefillRate, timestamp)
+      tbCapacity, tbRefillRate)
   end
   local hashFields = {
     'id', jobIdStr,
@@ -2594,7 +2597,7 @@ redis.register_function('glidemq_dedup', function(keys, args)
   end
   if useGroupConcurrency then
     upsertGroupConfig(prefix, orderingKey, orderingSeq, groupConcurrency, groupRateMax, groupRateDuration,
-      tbCapacity, tbRefillRate, timestamp)
+      tbCapacity, tbRefillRate)
   end
   local hashFields = {
     'id', jobIdStr,
@@ -3528,7 +3531,7 @@ redis.register_function('glidemq_addFlow', function(keys, args)
     if parentTbCapacity > 0 then
       redis.call('HSET', groupHashKey, 'tbCapacity', tostring(parentTbCapacity), 'tbRefillRate', tostring(parentTbRefillRate))
       redis.call('HSETNX', groupHashKey, 'tbTokens', tostring(parentTbCapacity))
-      redis.call('HSETNX', groupHashKey, 'tbLastRefill', tostring(timestamp))
+      redis.call('HSETNX', groupHashKey, 'tbLastRefill', tostring(redisNowMs()))
       redis.call('HSETNX', groupHashKey, 'tbRefillRemainder', '0')
     end
   end
@@ -3636,7 +3639,7 @@ redis.register_function('glidemq_addFlow', function(keys, args)
       if childTbCapacity > 0 then
         redis.call('HSET', childGroupHashKey, 'tbCapacity', tostring(childTbCapacity), 'tbRefillRate', tostring(childTbRefillRate))
         redis.call('HSETNX', childGroupHashKey, 'tbTokens', tostring(childTbCapacity))
-        redis.call('HSETNX', childGroupHashKey, 'tbLastRefill', tostring(timestamp))
+        redis.call('HSETNX', childGroupHashKey, 'tbLastRefill', tostring(redisNowMs()))
         redis.call('HSETNX', childGroupHashKey, 'tbRefillRemainder', '0')
       end
     end
