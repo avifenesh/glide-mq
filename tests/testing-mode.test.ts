@@ -4,7 +4,7 @@
  *
  * Run: npx vitest run tests/testing-mode.test.ts
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import path from 'path';
 import { TestQueue, TestWorker, TestJob } from '../src/testing';
 import type { TestQueueOptions } from '../src/testing';
@@ -3255,29 +3255,71 @@ describe('TestWorker dead-letter queue parity', () => {
   });
 
   it('reports a DLQ write failure on the worker error event without changing the job outcome', async () => {
-    const failingSerializer = {
-      serialize: () => {
-        throw new Error('dlq down');
-      },
-      deserialize: (raw: string) => JSON.parse(raw),
+    // A BigInt survives this serializer but not the plain-JSON envelope, which production also cannot write.
+    const bigintSerializer = {
+      serialize: (value: unknown) =>
+        JSON.stringify(value, (_key, v) => (typeof v === 'bigint' ? { big: String(v) } : v)),
+      deserialize: (raw: string) =>
+        JSON.parse(raw, (_key, v) => (v && typeof v === 'object' && 'big' in v ? BigInt(v.big) : v)),
     };
-    openQueue('dlq-error-dlq', { serializer: failingSerializer });
-    const queue = openQueue('dlq-error');
+    openQueue('dlq-error-dlq');
+    const queue = openQueue('dlq-error', { serializer: bigintSerializer });
     const worker = startWorker(queue, alwaysFail, 'dlq-error-dlq');
     const failures: string[] = [];
     worker.on('failed', (_job, err: Error) => failures.push(err.message));
 
     // No error listener: the failure is swallowed instead of throwing from the failure path.
-    const first = await queue.add('a', {}, { attempts: 1 });
+    const first = await queue.add('a', { n: BigInt(1) }, { attempts: 1 });
     expect(await first!.waitUntilFinished(5, 2000)).toBe('failed');
 
     const errors: string[] = [];
     worker.on('error', (err: Error) => errors.push(err.message));
-    const second = await queue.add('b', {}, { attempts: 1 });
+    const second = await queue.add('b', { n: BigInt(2) }, { attempts: 1 });
     expect(await second!.waitUntilFinished(5, 2000)).toBe('failed');
-    expect(errors).toEqual(['dlq down']);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/BigInt/);
     expect(failures).toEqual(['boom', 'boom']);
     expect(await queue.getDeadLetterJobs()).toEqual([]);
+  });
+
+  it('writes the envelope as plain JSON without using the serializer of the DLQ queue', async () => {
+    const unusable = {
+      serialize: () => {
+        throw new Error('the DLQ queue serializer must not be used');
+      },
+      deserialize: () => {
+        throw new Error('the DLQ queue serializer must not be used');
+      },
+    };
+    const dlq = openQueue('dlq-serializer-dlq', { serializer: unusable });
+    const queue = openQueue('dlq-serializer');
+    const worker = startWorker(queue, alwaysFail, 'dlq-serializer-dlq');
+    const errors: Error[] = [];
+    worker.on('error', (err: Error) => errors.push(err));
+
+    const job = await queue.add('x', { v: 1 }, { attempts: 1 });
+    expect(await job!.waitUntilFinished(5, 2000)).toBe('failed');
+    expect(errors).toEqual([]);
+    expect((await dlq.getJobCounts()).waiting).toBe(1);
+    const [entry] = await queue.getDeadLetterJobs();
+    expect(entry.data).toMatchObject({ originalQueue: 'dlq-serializer', originalJobId: job!.id, data: { v: 1 } });
+  });
+
+  it('copies the data the processor holds when it replaced job.data before failing', async () => {
+    openQueue('dlq-data-dlq');
+    const queue = openQueue('dlq-data');
+    startWorker(
+      queue,
+      async (job) => {
+        job.data = { value: 2 };
+        throw new Error('boom');
+      },
+      'dlq-data-dlq',
+    );
+    const job = await queue.add('x', { value: 1 }, { attempts: 1 });
+    expect(await job!.waitUntilFinished(5, 2000)).toBe('failed');
+    const [entry] = await queue.getDeadLetterJobs();
+    expect(entry.data).toMatchObject({ originalJobId: job!.id, data: { value: 2 } });
   });
 
   describe('reading and managing DLQ jobs', () => {
@@ -3399,6 +3441,40 @@ describe('TestWorker dead-letter queue parity', () => {
       expect(replayed!.data).toEqual({ to: 'b' });
       expect(replayed!.opts.attempts).toBeUndefined();
       expect(replayed!.opts.priority).toBeUndefined();
+    });
+
+    it('replayDeadLetterJob replays an entry without an original job id or data as a null payload', async () => {
+      openQueue('dlq-replay-bare-dlq');
+      const queue = openQueue('dlq-replay-bare', { deadLetterQueue: { name: 'dlq-replay-bare-dlq' } });
+      queue.addDeadLetter('dlq-replay-bare-dlq', 'send', {
+        originalQueue: 'dlq-replay-bare',
+        originalJobId: '',
+        data: undefined,
+        failedReason: 'boom',
+        attemptsMade: 0,
+      });
+      const [dlqJob] = await queue.getDeadLetterJobs();
+
+      const replayed = await queue.replayDeadLetterJob(dlqJob.id);
+      expect(replayed!.name).toBe('send');
+      expect(replayed!.data).toBeNull();
+      expect(await queue.getDeadLetterJobs()).toEqual([]);
+    });
+
+    it('replayDeadLetterJob throws and keeps the DLQ entry when the add is skipped', async () => {
+      openQueue('dlq-replay-skip-dlq');
+      const queue = openQueue('dlq-replay-skip');
+      startWorker(queue, alwaysFail, 'dlq-replay-skip-dlq');
+      await failJobs(queue, 1);
+      const [dlqJob] = await queue.getDeadLetterJobs();
+
+      // The replay drops jobId, delay, deduplication and parent, so only a skipped add exercises this guard.
+      const add = vi.spyOn(queue, 'add').mockResolvedValueOnce(null);
+      await expect(queue.replayDeadLetterJob(dlqJob.id)).rejects.toThrow(
+        'DLQ replay was skipped due to duplicate or deduplicated job constraints',
+      );
+      add.mockRestore();
+      expect(await queue.getDeadLetterJob(dlqJob.id)).not.toBeNull();
     });
   });
 });
