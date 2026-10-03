@@ -23,6 +23,7 @@ import type {
   MetricsOptions,
   MetricsDataPoint,
   GetJobsOptions,
+  DeadLetterQueueOptions,
   Processor,
   WorkerInfo,
   SchedulerEntry,
@@ -555,6 +556,20 @@ export interface TestQueueOptions {
   dedup?: boolean;
   /** Custom serializer for job data and return values. When provided, values are roundtripped through serialize/deserialize to match production behavior. */
   serializer?: Serializer;
+  /**
+   * Names the TestQueue that `getDeadLetterJobs()` and the other dead-letter methods read, like
+   * QueueOptions.deadLetterQueue. It routes nothing: a TestWorker `deadLetterQueue` option does the copying.
+   */
+  deadLetterQueue?: DeadLetterQueueOptions;
+}
+
+/** Shape of the job data a worker writes into the dead-letter queue, like BaseWorker.moveToDLQ. */
+interface DeadLetterEnvelope {
+  originalQueue: string;
+  originalJobId: string;
+  data: unknown;
+  failedReason: string;
+  attemptsMade: number;
 }
 
 /** Budget state stored in-memory for testing mode. */
@@ -579,7 +594,7 @@ interface TestBudgetState {
  * Known limitations vs real Queue (see docs/TESTING.md):
  * - Ordering keys / concurrency groups are accepted but not enforced
  * - No global concurrency or queue-wide rate limit (use the TestWorker limiter option)
- * - No DAG / parent-child flows, no dead-letter queue
+ * - No DAG / parent-child flows
  * - No sandbox ESM processors
  */
 export class TestQueue<D = any, R = any> extends EventEmitter {
@@ -593,6 +608,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private idCounter = 0;
   private paused = false;
   private opts: TestQueueOptions;
+  /** @internal DLQ name recorded by a worker, like the deadLetterQueueName meta field. */
+  deadLetterQueueName: string | undefined;
   /** @internal */ readonly serializer: Serializer;
   /** @internal */ private indexConfig: JobIndexOptions | null = null;
 
@@ -1262,6 +1279,97 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       this.schedulers.set(name, JSON.parse(JSON.stringify(entry)));
     }
     this.ensureSchedulerLoop();
+  }
+
+  /**
+   * @internal Mirror BaseWorker.moveToDLQ: add the failure envelope to the TestQueue
+   * registered under `dlqName` (created on first use) as a plain waiting job named
+   * like the failed one.
+   */
+  addDeadLetter(dlqName: string, name: string, envelope: DeadLetterEnvelope): void {
+    const target = TestQueue.registry.get(dlqName) ?? new TestQueue<any, any>(dlqName);
+    const serialized = target.serializer.serialize(JSON.parse(JSON.stringify(envelope)));
+    target.insertRecord(name, serialized, {}, target.generateJobId(), Date.now(), 0);
+  }
+
+  /** The TestQueue holding this queue's dead-letter jobs, or null when no DLQ name is configured or open. */
+  private resolveDeadLetterQueue(): TestQueue<any, any> | null {
+    const name = this.opts.deadLetterQueue?.name || this.deadLetterQueueName;
+    return (name && TestQueue.registry.get(name)) || null;
+  }
+
+  /** The dead-letter record for `jobId` when it belongs to this queue, like Queue.isDeadLetterJobOwnedByQueue. */
+  private findDeadLetterRecord(jobId: string): TestJobRecord<any, any> | null {
+    const record = this.resolveDeadLetterQueue()?.jobs.get(jobId);
+    return record && (record.data as DeadLetterEnvelope | undefined)?.originalQueue === this.name ? record : null;
+  }
+
+  /**
+   * List this queue's dead-letter jobs, like Queue.getDeadLetterJobs(). Reads the
+   * jobs still waiting or active in the DLQ (the entries production keeps in the
+   * DLQ stream), oldest first, and pages after dropping other queues' jobs.
+   * The job data is the envelope `{ originalQueue, originalJobId, data, failedReason, attemptsMade }`.
+   */
+  async getDeadLetterJobs(start = 0, end = -1, opts?: GetJobsOptions): Promise<TestJob<D, R>[]> {
+    const dlq = this.resolveDeadLetterQueue();
+    if (!dlq) return [];
+    const owned = [...dlq.jobs.values()].filter(
+      (r) =>
+        (r.state === 'waiting' || r.state === 'active') &&
+        (r.data as DeadLetterEnvelope | undefined)?.originalQueue === this.name,
+    );
+    return owned.slice(start, end >= 0 ? end + 1 : undefined).map((r) => this.toDeadLetterJob(r, opts));
+  }
+
+  /** Retrieve one of this queue's dead-letter jobs in any state, like Queue.getDeadLetterJob(). */
+  async getDeadLetterJob(jobId: string, opts?: GetJobsOptions): Promise<TestJob<D, R> | null> {
+    const record = this.findDeadLetterRecord(jobId);
+    return record ? this.toDeadLetterJob(record, opts) : null;
+  }
+
+  /** Remove one of this queue's dead-letter jobs. Returns false when it does not exist, like Queue.removeDeadLetterJob(). */
+  async removeDeadLetterJob(jobId: string): Promise<boolean> {
+    if (!this.findDeadLetterRecord(jobId)) return false;
+    this.resolveDeadLetterQueue()?.removeJob(jobId);
+    return true;
+  }
+
+  /**
+   * Add a dead-letter job back to this queue, like Queue.replayDeadLetterJob(). The
+   * original job's data and options are reused when it still exists (minus `jobId`,
+   * `delay`, `deduplication` and `parent`); otherwise the envelope data is replayed
+   * with default options. Returns null when the dead-letter job does not exist.
+   */
+  async replayDeadLetterJob(jobId: string): Promise<TestJob<D, R> | null> {
+    const dlqJob = await this.getDeadLetterJob(jobId);
+    if (!dlqJob) return null;
+    const envelope = dlqJob.data as unknown as DeadLetterEnvelope;
+    let replayData: unknown = envelope.data;
+    let replayOpts: JobOptions | undefined;
+    const original = envelope.originalJobId ? this.jobs.get(envelope.originalJobId) : undefined;
+    if (original) {
+      replayData = original.data;
+      replayOpts = { ...original.opts };
+      delete replayOpts.jobId;
+      delete replayOpts.delay;
+      delete replayOpts.deduplication;
+      delete replayOpts.parent;
+    }
+    const replayed = await this.add(dlqJob.name, (replayData ?? null) as D, replayOpts);
+    if (!replayed) {
+      throw new GlideMQError('DLQ replay was skipped due to duplicate or deduplicated job constraints');
+    }
+    await this.removeDeadLetterJob(jobId);
+    return replayed;
+  }
+
+  private toDeadLetterJob(record: TestJobRecord<any, any>, opts?: GetJobsOptions): TestJob<D, R> {
+    const job = new TestJob<D, R>(record);
+    if (opts?.excludeData) {
+      job.data = undefined as unknown as D;
+      job.returnvalue = undefined;
+    }
+    return job;
   }
 
   /** List active workers attached to this queue. */
@@ -2106,6 +2214,11 @@ export interface TestWorkerOptions {
   };
   /** Custom backoff strategies keyed by `backoff.type`, same as WorkerOptions.backoffStrategies. */
   backoffStrategies?: Record<string, (attemptsMade: number, err: Error) => number>;
+  /**
+   * Copy every job that fails terminally into the TestQueue registered under this name, like
+   * WorkerOptions.deadLetterQueue. A TestQueue is created for the name when none is open yet.
+   */
+  deadLetterQueue?: DeadLetterQueueOptions;
 }
 
 /** In-memory test double for Worker. Processes jobs from a TestQueue without Valkey. */
@@ -2130,6 +2243,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private readonly tokenLimiter: TestWorkerOptions['tokenLimiter'];
   private readonly limiter: TestWorkerOptions['limiter'];
   private readonly backoffStrategies: TestWorkerOptions['backoffStrategies'];
+  private readonly deadLetterQueue: TestWorkerOptions['deadLetterQueue'];
   private tpmLocalCounter = 0;
   private tpmWindowStart = 0;
   private rateLimitUntil = 0;
@@ -2195,6 +2309,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     this.tokenLimiter = opts?.tokenLimiter;
     this.limiter = opts?.limiter;
     this.backoffStrategies = opts?.backoffStrategies;
+    this.deadLetterQueue = opts?.deadLetterQueue;
+    if (this.deadLetterQueue?.name) queue.deadLetterQueueName = this.deadLetterQueue.name;
     this.id = `test-worker-${++TestWorker.idCounter}`;
     this.startedAt = Date.now();
 
@@ -2478,9 +2594,32 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     job.finishedOn = now;
     this.queue.applyRetention(record, 'failed');
     this.queue.recordMetric('failed', record.processedOn, record.finishedOn);
+    this.moveToDeadLetter(record, err);
     this.emit('failed', job, err);
     this.queue.emit('failed', job, err);
     this.queue.onSchedulerJobFinished(record);
+  }
+
+  /**
+   * Mirror BaseWorker.moveToDLQ: a terminal failure leaves a copy in the dead-letter
+   * queue, written before the `failed` events fire. `attemptsMade` is the count
+   * before the failing attempt, as in the worker, whose Job is loaded before the
+   * attempt is counted. A write error goes to the `error` event, not the job.
+   */
+  private moveToDeadLetter(record: TestJobRecord<D, R>, err: Error): void {
+    const dlqName = this.deadLetterQueue?.name;
+    if (!dlqName) return;
+    try {
+      this.queue.addDeadLetter(dlqName, record.name, {
+        originalQueue: this.queue.name,
+        originalJobId: record.id,
+        data: record.data,
+        failedReason: err.message,
+        attemptsMade: record.attemptsMade - 1,
+      });
+    } catch (dlqErr) {
+      if (this.listenerCount('error') > 0) this.emit('error', dlqErr);
+    }
   }
 
   // ---- Batch processing ----
