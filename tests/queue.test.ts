@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GlideClient } from '@glidemq/speedkey';
+import { Batch, GlideClient } from '@glidemq/speedkey';
 import { Queue } from '../src/queue';
 import { LIBRARY_VERSION } from '../src/functions/index';
 import { MAX_JOB_DATA_SIZE } from '../src/utils';
@@ -506,6 +506,33 @@ describe('Queue', () => {
     });
   });
 
+  describe('getWorkers', () => {
+    it('reports the concurrency of each heartbeat and leaves it undefined when it is missing or not a number', async () => {
+      const key = (id: string) => `glide:{test-queue}:w:${id}`;
+      const beat = (startedAt: number, extra: Record<string, unknown>) =>
+        JSON.stringify({ addr: 'host', pid: 1, startedAt, activeJobs: 2, ...extra });
+      const client = makeMockClient({
+        scan: vi.fn().mockResolvedValue(['0', [key('wide'), key('legacy'), key('garbled')]]),
+        exec: vi
+          .fn()
+          .mockResolvedValue([beat(3000, { concurrency: 4 }), beat(2000, {}), beat(1000, { concurrency: '4' })]),
+      });
+      vi.mocked(GlideClient.createClient).mockResolvedValue(client as any);
+      vi.mocked(Batch).mockImplementationOnce(function () {
+        return { get: vi.fn().mockReturnThis() } as any;
+      });
+      const queue = new Queue('test-queue', connOpts);
+
+      const workers = await queue.getWorkers();
+
+      expect(workers.map((w) => [w.id, w.concurrency, w.activeJobs])).toEqual([
+        ['garbled', undefined, 2],
+        ['legacy', undefined, 2],
+        ['wide', 4, 2],
+      ]);
+    });
+  });
+
   describe('close', () => {
     it('should close the client connection', async () => {
       mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION).mockResolvedValueOnce('1');
@@ -582,7 +609,7 @@ describe('Queue', () => {
     it('add enforces byte length not character count', async () => {
       mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION);
       const queue = new Queue('test-queue', connOpts);
-      const multiByteChar = '\u4e16'; // 3 bytes in UTF-8
+      const multiByteChar = '世'; // 3 bytes in UTF-8
       const count = Math.ceil(MAX_JOB_DATA_SIZE / 3) + 1;
       const oversized = { data: multiByteChar.repeat(count) };
       await expect(queue.add('test', oversized)).rejects.toThrow('Job data exceeds maximum size');
