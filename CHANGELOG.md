@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - **`WorkerInfo.concurrency`**: `queue.getWorkers()` (and `GET /queues/:name/workers` on the proxy) now reports each worker's configured `concurrency` option, in production and in `glide-mq/testing`. Optional: it is absent for a worker running a glide-mq version that predates the field. In batch mode it counts batches, so up to `concurrency * batch.size` jobs can be active at once. `TestWorker.concurrency` is now a public `readonly` property.
+- **Dead-letter queue in `glide-mq/testing`**: `TestWorker` takes the `deadLetterQueue` option and copies every terminally failed job into the `TestQueue` of that name with the production envelope (`originalQueue`, `originalJobId`, `data`, `failedReason`, `attemptsMade`). `TestQueue` gets `getDeadLetterJobs`, `getDeadLetterJob`, `removeDeadLetterJob` and `replayDeadLetterJob`, scoped to the owning queue like `Queue`, and a `deadLetterQueue` option to name the dead-letter queue it reads.
 
 ### Changed
 
