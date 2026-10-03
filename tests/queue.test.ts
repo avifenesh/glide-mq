@@ -609,7 +609,7 @@ describe('Queue', () => {
     it('add enforces byte length not character count', async () => {
       mockClient.fcall.mockResolvedValueOnce(LIBRARY_VERSION);
       const queue = new Queue('test-queue', connOpts);
-      const multiByteChar = '世'; // 3 bytes in UTF-8
+      const multiByteChar = '\u4e16'; // 3 bytes in UTF-8
       const count = Math.ceil(MAX_JOB_DATA_SIZE / 3) + 1;
       const oversized = { data: multiByteChar.repeat(count) };
       await expect(queue.add('test', oversized)).rejects.toThrow('Job data exceeds maximum size');
