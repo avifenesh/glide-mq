@@ -2711,12 +2711,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
     const take = Math.min(this.pendingBatch.length, this.batchSize);
     if (take === 0) return;
-    if (take > this.batchRoom()) {
-      // Over the in-flight budget: keep the records and retry. A settling batch also
-      // calls processAvailable(), but that is skipped while the queue is paused.
-      this.scheduleBatchFlush();
-      return;
-    }
+    // Over the in-flight budget: keep the records; a running batch's finally() retries.
+    if (take > this.batchRoom()) return;
     this.executeBatch(this.pendingBatch.splice(0, take));
     if (this.pendingBatch.length > 0) this.scheduleBatchFlush();
   }
@@ -2800,9 +2796,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       })
       .finally(() => {
         this.activeCount -= records.length;
-        if (this.running && !this.queue.isPaused()) {
-          this.processAvailable();
-        }
+        if (!this.running) return;
+        if (!this.queue.isPaused()) this.processAvailable();
+        // Records held for budget still flush on timeout while paused, when processAvailable() does nothing.
+        this.scheduleBatchFlush();
       });
   }
 

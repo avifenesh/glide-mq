@@ -4,7 +4,7 @@
  *
  * Run: npx vitest run tests/testworker-batch-flush.test.ts
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TestQueue, TestWorker, TestJob } from '../src/testing';
 import { waitFor } from './helpers/fixture';
 
@@ -369,5 +369,47 @@ describe('TestWorker batch concurrency limit', () => {
     await waitFor(async () => (await queue.getJobCounts()).completed === 11, 2000, 20);
     expect(gate.state.batchSizes).toEqual([5, 3, 3]);
     expect(gate.state.maxJobsInFlight).toBeLessThanOrEqual(10);
+  });
+
+  it.each([3, 5])('flushes %i held jobs after a running batch settles while the queue is paused', async (held) => {
+    queue = new TestQueue(`cov-batch-budget-paused-${held}`);
+    gate = gatedBatchProcessor();
+    await queue.addBulk(jobsOf(5));
+    worker = new TestWorker(queue, gate.processor, { concurrency: 2, batch: { size: 5, timeout: 50 } });
+    await waitFor(() => gate.state.batchSizes.length === 1, 2000, 10);
+    await queue.addBulk(jobsOf(3));
+    await waitFor(() => gate.state.batchSizes.length === 2, 2000, 10);
+    await queue.addBulk(jobsOf(held));
+    await sleep(150);
+    expect(gate.state.batchSizes).toEqual([5, 3]);
+
+    // processAvailable() does nothing while paused; the reserved jobs still flush on timeout.
+    await queue.pause();
+    gate.releaseOldest();
+    await waitFor(() => gate.state.batchSizes.length === 3, 2000, 10);
+    gate.openAll();
+    await waitFor(async () => (await queue.getJobCounts()).completed === 8 + held, 2000, 20);
+    expect(gate.state.batchSizes).toEqual([5, 3, held]);
+  });
+
+  it('does not re-arm a held flush, so fake timers never loop', async () => {
+    vi.useFakeTimers();
+    try {
+      queue = new TestQueue('cov-batch-budget-fake-timers');
+      gate = gatedBatchProcessor();
+      worker = new TestWorker(queue, gate.processor, { concurrency: 2, batch: { size: 5, timeout: 50 } });
+      await queue.addBulk(jobsOf(5));
+      await vi.advanceTimersByTimeAsync(0);
+      await queue.addBulk(jobsOf(3));
+      await vi.advanceTimersByTimeAsync(60);
+      await queue.addBulk(jobsOf(3));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(gate.state.batchSizes).toEqual([5, 3]);
+      // runAllTimers aborts after 10000 timers if the held flush keeps re-arming itself.
+      expect(() => vi.runAllTimers()).not.toThrow();
+      expect(gate.state.batchSizes).toEqual([5, 3]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
