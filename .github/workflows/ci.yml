@@ -74,6 +74,7 @@ jobs:
           tests/worker-saturation.test.ts
           tests/worker.test.ts
           tests/library-source.test.ts
+          tests/proxy-log-unit.test.ts
           tests/lua-instrument.test.ts
           tests/workflows.test.ts
 
