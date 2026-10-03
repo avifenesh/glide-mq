@@ -8,6 +8,7 @@ glide-mq ships a built-in in-memory backend so you can unit-test job processors 
 - [API Surface](#api-surface)
 - [Searching Jobs](#searching-jobs)
 - [Retry Behaviour in Tests](#retry-behaviour-in-tests)
+- [Dead-Letter Queues in Tests](#dead-letter-queues-in-tests)
 - [Delayed, Prioritized and Rate-Limited Jobs](#delayed-prioritized-and-rate-limited-jobs)
 - [Custom Job IDs in Tests](#custom-job-ids-in-tests)
 - [Batch Testing](#batch-testing)
@@ -120,6 +121,7 @@ describe('email processor', () => {
 | `getJobLogs(id, start?, end?)`          | Read the lines a processor appended with `job.log()`                                                                                 |
 | `getSuspendedJobs(start?, end?, opts?)` | List suspended jobs ordered by their timeout deadline                                                                                |
 | `revoke(jobId)`                         | Fail a waiting / delayed / prioritized job with reason `revoked`, flag any other existing job; returns the same strings as `Queue`   |
+| `getDeadLetterJobs(...)`                | List this queue's dead-letter jobs; `getDeadLetterJob`, `removeDeadLetterJob` and `replayDeadLetterJob` work on one entry            |
 | `retryJobs(opts?)`                      | Move failed jobs back to waiting                                                                                                     |
 | `drain(delayed?)`                       | Remove waiting jobs; pass `true` to also remove delayed and prioritized jobs                                                         |
 | `obliterate(opts?)`                     | Wipe jobs, schedulers, dedup entries, budgets and metrics; refuses while jobs are active unless `{ force: true }`                    |
@@ -159,7 +161,7 @@ describe('email processor', () => {
 | `close()`                    | Stop the worker                                                                                                  |
 | `TestWorker.RateLimitError`  | Throw from a processor to requeue the job after the limiter window; `TestWorker.isRateLimitError(err)` checks it |
 
-Options: `concurrency`, `batch`, `limiter` (`{ max, duration }`, same semantics as `WorkerOptions.limiter`), `tokenLimiter`, `backoffStrategies`.
+Options: `concurrency`, `batch`, `limiter` (`{ max, duration }`, same semantics as `WorkerOptions.limiter`), `tokenLimiter`, `backoffStrategies`, `deadLetterQueue`.
 
 The queue also emits `added`, `removed`, `promoted`, `delay-changed`, `priority-changed`, `revoked`, `retrying`, `completed`, `failed`, `suspended`, `resumed` and `drained`, mirroring the production event stream.
 
@@ -205,6 +207,37 @@ await queue.add('flaky', {}, { attempts: 3, backoff: { type: 'fixed', delay: 0 }
 await new Promise((r) => worker.once('completed', r));
 const done = await queue.searchJobs({ state: 'completed', name: 'flaky' });
 expect(done[0]?.attemptsMade).toBe(2);
+```
+
+---
+
+## Dead-Letter Queues in Tests
+
+Pass the `deadLetterQueue` option to a `TestWorker` and every job that fails terminally is copied into the `TestQueue` registered under that name, like the `Worker` option of the same name. The copy is a plain job with the failed job's name, added before the `failed` events fire. Its data is the envelope `{ originalQueue, originalJobId, data, failedReason, attemptsMade }`, where `data` goes through a JSON round trip and `attemptsMade` is the count from before the failing attempt (0 for a job with `attempts: 1`), as the production worker writes it. Retried attempts, completed jobs and jobs that fail without a worker running them (`revoke()`, an expired `ttl`, a suspend timeout) get no copy, as in production.
+
+The queue reads its entries back with `getDeadLetterJobs(start?, end?, opts?)`, `getDeadLetterJob(id, opts?)`, `removeDeadLetterJob(id)` and `replayDeadLetterJob(id)`. They only see entries whose `originalQueue` is this queue, so several queues can share one dead-letter queue. `getDeadLetterJobs()` lists the entries that are still `waiting` or `active`; `getDeadLetterJob()` finds one in any state. `replayDeadLetterJob()` re-adds the original job with its data and options (minus `jobId`, `delay`, `deduplication` and `parent`) when it still exists, otherwise the envelope data with default options, then removes the entry.
+
+The dead-letter queue is looked up by name among the open `TestQueue` instances. Create it before the failure when you want to inspect it or consume it with another `TestWorker`; when none is open, the worker creates one on first use and you can read it through `queue.getDeadLetterJobs()`. The name comes from the `deadLetterQueue` option of the `TestQueue`, or else from the last `TestWorker` created with the option. Closing the dead-letter `TestQueue` discards its jobs, and a second `TestQueue` with the same name replaces the first in the lookup.
+
+```typescript
+const queue = new TestQueue('emails');
+const dlq = new TestQueue('emails-dlq');
+const worker = new TestWorker(
+  queue,
+  async () => {
+    throw new Error('smtp down');
+  },
+  { deadLetterQueue: { name: 'emails-dlq' } },
+);
+
+const job = await queue.add('send', { to: 'a@example.com' }, { attempts: 2, backoff: { type: 'fixed', delay: 0 } });
+await job!.waitUntilFinished(10, 2000);
+
+const [dead] = await queue.getDeadLetterJobs();
+expect(dead.data).toMatchObject({ originalQueue: 'emails', originalJobId: job!.id, failedReason: 'smtp down' });
+expect((await dlq.getJobCounts()).waiting).toBe(1);
+
+await queue.replayDeadLetterJob(dead.id); // re-adds the original job and drops the entry
 ```
 
 ---
@@ -445,7 +478,6 @@ Behaviour that testing mode does not mirror. Everything else in this document fo
 - **Ordering keys and concurrency groups are not enforced.** `ordering` options are validated and stored, but jobs sharing a key run concurrently and in dispatch order. `job.rateLimitGroup()` and `queue.rateLimitGroup()` do not exist on the test classes.
 - **No global concurrency or queue-wide rate limit.** `setGlobalConcurrency`, `setGlobalRateLimit`, `removeGlobalRateLimit` and `getGlobalRateLimit` are not available; use the `TestWorker` `concurrency` and `limiter` options instead.
 - **No flows or DAGs.** There is no `FlowProducer` counterpart; `job.getChildrenValues()`, `job.getParents()` and `job.moveToWaitingChildren()` are not available. `getFlowUsage()` and flow budgets work through `opts.parent.id` and `setBudget()`.
-- **No dead-letter queue.** The `deadLetterQueue` worker option and `getDeadLetterJobs` / `getDeadLetterJob` / `removeDeadLetterJob` / `replayDeadLetterJob` are not available.
 - **No abort support.** `worker.abortJob()` and `job.abortSignal` are not available; `close()` waits for nothing and lets running processors finish on their own.
 - **Sandbox processors are CJS only.** A file path processor must be a `.js` (CommonJS) module; `.mjs` throws.
 - **`isPaused()` is synchronous** on `TestQueue`; the real `Queue.isPaused()` returns a promise. `await` works on both.

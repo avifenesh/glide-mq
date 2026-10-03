@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Dead-letter queue in `glide-mq/testing`**: `TestWorker` takes the `deadLetterQueue` option and copies every terminally failed job into the `TestQueue` of that name with the production envelope (`originalQueue`, `originalJobId`, `data`, `failedReason`, `attemptsMade`). `TestQueue` gets `getDeadLetterJobs`, `getDeadLetterJob`, `removeDeadLetterJob` and `replayDeadLetterJob`, scoped to the owning queue like `Queue`, and a `deadLetterQueue` option to name the dead-letter queue it reads.
+
 ### Fixed
 
 - **`TestWorker` rejects a queue name**: passing a string (the production `Worker` signature) instead of a `TestQueue` instance threw `Cannot read properties of undefined (reading 'add')` from inside the worker; it now throws a `GlideMQError` naming the expected argument.
