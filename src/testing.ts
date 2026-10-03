@@ -1386,6 +1386,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
         startedAt: w.startedAt,
         age: now - w.startedAt,
         activeJobs: w.getActiveCount(),
+        concurrency: w.concurrency,
       });
     }
     result.sort((a, b) => a.startedAt - b.startedAt);
@@ -2230,7 +2231,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   readonly startedAt: number;
   private queue: TestQueue<D, R>;
   private processor: Processor<D, R>;
-  private concurrency: number;
+  readonly concurrency: number;
   private activeCount = 0;
   private running = true;
   private paused = false;

@@ -607,6 +607,12 @@ export interface WorkerInfo {
   startedAt: number;
   age: number;
   activeJobs: number;
+  /**
+   * The worker's configured `concurrency` option. In batch mode it counts batches, so up to
+   * `concurrency * batch.size` jobs can be active at once. Absent for a worker that registered with a
+   * glide-mq version that predates this field.
+   */
+  concurrency?: number;
 }
 
 /**

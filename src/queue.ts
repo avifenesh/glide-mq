@@ -1464,6 +1464,7 @@ export class Queue<D = any, R = any> extends EventEmitter {
             startedAt: data.startedAt,
             age: Math.max(0, now - data.startedAt),
             activeJobs: typeof data.activeJobs === 'number' ? data.activeJobs : 0,
+            concurrency: typeof data.concurrency === 'number' ? data.concurrency : undefined,
           });
         } catch {
           // Malformed JSON - skip entry
