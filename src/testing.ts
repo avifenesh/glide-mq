@@ -2608,7 +2608,9 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
    * `job.data`, which differs from the stored record when the processor replaced it.
    * `attemptsMade` is the count before the failing attempt, as in the worker, whose
    * Job is loaded before the attempt is counted. A write error goes to the `error`
-   * event, not the job.
+   * event, not the job. Without an `error` listener the production worker would
+   * throw an unhandled error; here it becomes a process warning, so the job outcome
+   * stays intact and the failure is still visible.
    */
   private moveToDeadLetter(record: TestJobRecord<D, R>, job: TestJob<D, R>, err: Error): void {
     const dlqName = this.deadLetterQueue?.name;
@@ -2623,6 +2625,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       });
     } catch (dlqErr) {
       if (this.listenerCount('error') > 0) this.emit('error', dlqErr);
+      else process.emitWarning(`TestWorker dead-letter write failed: ${(dlqErr as Error).message}`, 'GlideMQWarning');
     }
   }
 

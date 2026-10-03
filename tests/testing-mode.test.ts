@@ -3268,9 +3268,17 @@ describe('TestWorker dead-letter queue parity', () => {
     const failures: string[] = [];
     worker.on('failed', (_job, err: Error) => failures.push(err.message));
 
-    // No error listener: the failure is swallowed instead of throwing from the failure path.
-    const first = await queue.add('a', { n: BigInt(1) }, { attempts: 1 });
-    expect(await first!.waitUntilFinished(5, 2000)).toBe('failed');
+    // No error listener: the failure becomes a process warning instead of throwing from the failure path.
+    const warn = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    try {
+      const first = await queue.add('a', { n: BigInt(1) }, { attempts: 1 });
+      expect(await first!.waitUntilFinished(5, 2000)).toBe('failed');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toMatch(/dead-letter write failed: .*BigInt/);
+      expect(warn.mock.calls[0][1]).toBe('GlideMQWarning');
+    } finally {
+      warn.mockRestore();
+    }
 
     const errors: string[] = [];
     worker.on('error', (err: Error) => errors.push(err.message));
