@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **`TestWorker` rejects a queue name**: passing a string (the production `Worker` signature) instead of a `TestQueue` instance threw `Cannot read properties of undefined (reading 'add')` from inside the worker; it now throws a `GlideMQError` naming the expected argument.
+- **`TestWorker` with a job removed or obliterated while active**: a job still being processed when its record left the store (`obliterate({ force: true })`, `remove()`) could delete, dequeue or park the job that reuses its id once the id counter restarts, and wrote metrics and queue events for a job that no longer exists. Like `glidemq_completeAndFetchNext` and `glidemq_fail` on a missing hash, it now changes nothing in the queue; only the worker's own `completed` / `failed` event is still emitted, as `BaseWorker` does. Records left in a worker's partial batch are matched by identity too, so an obliterated one is no longer dispatched or handed back on close.
 
 ---
 
