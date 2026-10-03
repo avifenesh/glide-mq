@@ -707,6 +707,19 @@ describe('TestQueue.getWorkers', () => {
     expect(typeof workers[0].activeJobs).toBe('number');
   });
 
+  it('reports the TestWorker concurrency, defaulting to 1', async () => {
+    queue = new TestQueue('gw-concurrency');
+    const wide = new TestWorker(queue, async () => 'ok', { concurrency: 4 });
+    const narrow = new TestWorker(queue, async () => 'ok');
+
+    const workers = await queue.getWorkers();
+    expect(workers.find((w) => w.id === wide.id)!.concurrency).toBe(4);
+    expect(workers.find((w) => w.id === narrow.id)!.concurrency).toBe(1);
+
+    await wide.close();
+    await narrow.close();
+  });
+
   it('worker removed after close', async () => {
     queue = new TestQueue('gw-close');
     worker = new TestWorker(queue, async () => 'ok');

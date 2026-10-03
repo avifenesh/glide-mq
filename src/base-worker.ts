@@ -2589,6 +2589,7 @@ export abstract class BaseWorker<D = any, R = any> extends EventEmitter {
         pid: process.pid,
         startedAt: this.startedAt,
         activeJobs: this.activeCount,
+        concurrency: this.concurrency,
       });
       const workerKey = this.queueKeys.worker(this.consumerId);
       await this.commandClient.set(workerKey, payload, {

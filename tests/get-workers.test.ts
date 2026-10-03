@@ -8,6 +8,7 @@ import { it, expect, beforeAll, afterAll } from 'vitest';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
+const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
 
 import { describeEachMode, createCleanupClient, flushQueue, waitFor } from './helpers/fixture';
 
@@ -21,7 +22,7 @@ describeEachMode('Queue.getWorkers()', (CONNECTION) => {
 
   afterAll(async () => {
     if (!cleanupClient) return;
-    const suffixes = ['', '-multi', '-close', '-meta', '-hb', '-active'];
+    const suffixes = ['', '-multi', '-close', '-meta', '-hb', '-active', '-concurrency', '-legacy'];
     for (const s of suffixes) {
       await flushQueue(cleanupClient, Q + s);
     }
@@ -192,6 +193,39 @@ describeEachMode('Queue.getWorkers()', (CONNECTION) => {
     expect(info.activeJobs).toBeGreaterThanOrEqual(0);
 
     await worker.close();
+    await queue.close();
+  }, 15000);
+
+  it('reports the configured concurrency, defaulting to 1', async () => {
+    const qName = Q + '-concurrency';
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const wide = new Worker(qName, async () => 'ok', { connection: CONNECTION, blockTimeout: 1000, concurrency: 4 });
+    const narrow = new Worker(qName, async () => 'ok', { connection: CONNECTION, blockTimeout: 1000 });
+    await wide.waitUntilReady();
+    await narrow.waitUntilReady();
+
+    await waitFor(async () => (await queue.getWorkers()).length === 2);
+
+    const workers = await queue.getWorkers();
+    expect(workers.map((w) => w.concurrency).sort()).toEqual([1, 4]);
+
+    await wide.close();
+    await narrow.close();
+    await queue.close();
+  }, 15000);
+
+  it('leaves concurrency undefined for a heartbeat written before the field existed', async () => {
+    const qName = Q + '-legacy';
+    const queue = new Queue(qName, { connection: CONNECTION });
+    const key = buildKeys(qName).worker('legacy-worker');
+    await cleanupClient.set(key, JSON.stringify({ addr: 'old-host', pid: 1234, startedAt: Date.now(), activeJobs: 2 }));
+
+    const workers = await queue.getWorkers();
+    expect(workers).toHaveLength(1);
+    expect(workers[0]).toMatchObject({ id: 'legacy-worker', addr: 'old-host', pid: 1234, activeJobs: 2 });
+    expect(workers[0].concurrency).toBeUndefined();
+
+    await cleanupClient.del([key]);
     await queue.close();
   }, 15000);
 });

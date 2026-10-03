@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`WorkerInfo.concurrency`**: `queue.getWorkers()` (and `GET /queues/:name/workers` on the proxy) now reports each worker's configured `concurrency` option, in production and in `glide-mq/testing`. Optional: it is absent for a worker running a glide-mq version that predates the field. In batch mode it counts batches, so up to `concurrency * batch.size` jobs can be active at once. `TestWorker.concurrency` is now a public `readonly` property.
+
 ### Fixed
 
 - **Token bucket refilled from a future `tbLastRefill`**: group setup stamped `tbLastRefill` from the producer's `Date.now()`, so a producer whose clock ran ahead left a full bucket with a future refill stamp. `tbRefill` returned early at capacity without touching it, and the first consumption then refilled with zero elapsed time, so the time since that consumption never counted and the bucket stayed empty longer than `1/refillRate`. Group setup now seeds `tbLastRefill` from the server clock, and `tbRefill` pulls any stamp that differs from server time back to it while the bucket is full. Server function library version is now `133`; workers and producers reload it on connect.
