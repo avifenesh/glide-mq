@@ -7,11 +7,12 @@
  *
  * Run: npx vitest run tests/tb-idle-refill.test.ts
  */
-import { afterAll, beforeAll, expect, it } from 'vitest';
+import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './helpers/fixture';
 
 const { Queue } = require('../dist/queue') as typeof import('../src/queue');
 const { Worker } = require('../dist/worker') as typeof import('../src/worker');
+const { FlowProducer } = require('../dist/flow-producer') as typeof import('../src/flow-producer');
 const { CONSUMER_GROUP, addJob, completeJob, moveToActive } =
   require('../dist/functions/index') as typeof import('../src/functions/index');
 const { buildKeys } = require('../dist/utils') as typeof import('../src/utils');
@@ -155,5 +156,44 @@ describeEachMode('token bucket idle-at-capacity refill', (CONNECTION) => {
     expect(typeof moved).toBe('object');
     expect(Number(await cleanupClient.hget(k.group(group), 'tbTokens'))).toBe(0);
     expect(Number(await cleanupClient.hget(k.group(group), 'tbLastRefill'))).toBeLessThan(Date.now() + 5_000);
+  }, 15000);
+
+  // addFlow seeds each token-bucket group it creates. A fast producer clock must
+  // not become the group's tbLastRefill, for the parent group or a child group.
+  it('seeds tbLastRefill from the server clock when addFlow creates token bucket groups', async () => {
+    const parentQueue = uniqueQueue('tb-flow-parent');
+    const childQueue = uniqueQueue('tb-flow-child');
+    const bucket = { capacity: 2, refillRate: 1 };
+    const flow = new FlowProducer({ connection: CONNECTION });
+    const realNow = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(realNow + 3_600_000);
+    try {
+      await flow.add({
+        name: 'parent',
+        queueName: parentQueue,
+        data: {},
+        opts: { ordering: { key: 'flow-parent-group', tokenBucket: bucket } },
+        children: [
+          {
+            name: 'child',
+            queueName: childQueue,
+            data: {},
+            opts: { ordering: { key: 'flow-child-group', tokenBucket: bucket } },
+          },
+        ],
+      });
+    } finally {
+      clock.mockRestore();
+      await flow.close();
+    }
+
+    for (const [queueName, group] of [
+      [parentQueue, 'flow-parent-group'],
+      [childQueue, 'flow-child-group'],
+    ] as const) {
+      const last = Number(await cleanupClient.hget(buildKeys(queueName).group(group), 'tbLastRefill'));
+      expect(last).toBeGreaterThanOrEqual(realNow);
+      expect(last).toBeLessThan(Date.now() + 5_000);
+    }
   }, 15000);
 });
