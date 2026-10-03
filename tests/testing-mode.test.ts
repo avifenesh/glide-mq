@@ -2366,6 +2366,219 @@ describe('TestWorker with a job removed or obliterated while active', () => {
     expect(await queue.getJob(a!.id)).toBeNull();
   });
 
+  describe('return value the serializer rejects', () => {
+    const circular = () => {
+      const value: Record<string, unknown> = {};
+      value.self = value;
+      return value;
+    };
+
+    it.each([
+      ['a job removed while active', true],
+      ['a job still in the store', false],
+    ])('fails %s with the worker message instead of completing it', async (_label, remove) => {
+      queue = new TestQueue('serialize-inflight');
+      const { hold, release } = gate();
+      worker = new TestWorker(queue, async (job) => {
+        await hold(job.data.tag);
+        return circular();
+      });
+      const events = collect(worker, queue);
+      const reasons: string[] = [];
+      worker.on('failed', (job) => reasons.push(job.failedReason ?? ''));
+
+      const a = await queue.add('job', { tag: 'a' });
+      await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+      if (remove) await a!.remove();
+      release('a');
+      await settle();
+      expect(events.worker).toEqual(['failed a']);
+      expect(reasons).toHaveLength(1);
+      expect(reasons[0]).toMatch(/^Serializer failed on return value: .*circular/i);
+      // a removed job leaves no queue event, a live one fails terminally
+      expect(events.queue).toEqual(remove ? [] : ['failed a']);
+      expect(worker.getActiveCount()).toBe(0);
+    });
+
+    it('reports a serializer that throws something other than an Error', async () => {
+      const serializer = {
+        serialize: (value: unknown) => {
+          if (value && (value as { bad?: boolean }).bad) throw 'refused';
+          return JSON.stringify(value);
+        },
+        deserialize: (raw: string) => JSON.parse(raw),
+      };
+      queue = new TestQueue('serialize-inflight-string', { serializer });
+      const { hold, release } = gate();
+      worker = new TestWorker(queue, async (job) => {
+        await hold(job.data.tag);
+        return { bad: true };
+      });
+      const reasons: string[] = [];
+      worker.on('failed', (job) => reasons.push(job.failedReason ?? ''));
+
+      const a = await queue.add('job', { tag: 'a' });
+      await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+      await a!.remove();
+      release('a');
+      await settle();
+      expect(reasons).toEqual(['Serializer failed on return value: refused']);
+    });
+
+    it.each([
+      ['returns results', (jobs: TestJob[]) => jobs.map((j) => (j.data.tag === 'a1' ? circular() : j.data.tag))],
+      [
+        'throws a BatchError',
+        (jobs: TestJob[]) => {
+          throw new BatchError(jobs.map((j) => (j.data.tag === 'a1' ? circular() : j.data.tag)));
+        },
+      ],
+    ])('a batch that %s fails only the removed job whose value cannot be serialized', async (_label, outcome) => {
+      queue = new TestQueue('serialize-inflight-batch');
+      const { hold, release } = gate();
+      worker = new TestWorker(
+        queue,
+        async (jobs: TestJob[]) => {
+          await hold(jobs[0].data.tag);
+          return outcome(jobs);
+        },
+        { batch: { size: 2 } },
+      );
+      const events = collect(worker, queue);
+
+      await queue.pause();
+      await queue.add('job', { tag: 'a1' });
+      await queue.add('job', { tag: 'a2' });
+      await queue.resume();
+      await waitFor(() => worker!.getActiveCount() === 2, 2000, 2);
+      const [a1] = await queue.getJobs('active');
+      await a1.remove();
+      release('a1');
+      await settle();
+      // a1 is gone and cannot be serialized: worker-local failure only. a2 still completes.
+      expect(events.worker.sort()).toEqual(['completed a2', 'failed a1']);
+      expect(events.queue).toEqual(['completed a2']);
+    });
+  });
+
+  it('keeps the worker paused for a RateLimitError thrown after the job was removed', async () => {
+    queue = new TestQueue('removed-inflight-ratelimit');
+    const { hold, release } = gate();
+    worker = new TestWorker(queue, async (job) => {
+      if (job.data.limit) {
+        await hold(job.data.tag);
+        const err = new TestWorker.RateLimitError();
+        err.delayMs = 300;
+        throw err;
+      }
+      return job.data.tag;
+    });
+    const events = collect(worker, queue);
+
+    const a = await queue.add('job', { tag: 'a', limit: true });
+    const b = await queue.add('job', { tag: 'b' });
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await a!.remove();
+    release('a');
+    await settle();
+    // like BaseWorker, the pause outlives the removed job: b is not dispatched inside the window
+    expect(queue.jobs.get(b!.id)?.state).toBe('waiting');
+    expect(worker.getActiveCount()).toBe(0);
+    expect(events.worker).toEqual([]);
+
+    expect(await b!.waitUntilFinished(5, 3000)).toBe('completed');
+    expect(events.worker).toEqual(['completed b']);
+  });
+
+  describe('a job dropped while active that then pauses itself', () => {
+    const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    const drops: Array<[string, (q: TestQueue, job: TestJob) => Promise<unknown>]> = [
+      ['removed', (_q, job) => job.remove()],
+      ['obliterated', (q) => q.obliterate({ force: true })],
+    ];
+
+    it.each(drops)('is not suspended again when it was %s', async (_label, drop) => {
+      queue = new TestQueue('suspend-inflight');
+      const { hold, release } = gate();
+      worker = new TestWorker(queue, async (job) => {
+        await hold(job.data.tag);
+        await job.suspend({ reason: 'wait', timeout: 30 });
+      });
+      const suspended: string[] = [];
+      queue.on('suspended', (job) => suspended.push(job.data.tag));
+
+      const a = await queue.add('job', { tag: 'a' });
+      await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+      await drop(queue, a!);
+      release('a');
+      await wait(80);
+      // no suspension was recorded for a job the store no longer holds
+      expect(suspended).toEqual([]);
+      expect(queue.jobs.size).toBe(0);
+      expect(worker.getActiveCount()).toBe(0);
+    });
+
+    it('does not park a record of an obliterated queue over the job that reuses its id', async () => {
+      queue = new TestQueue('delayed-inflight');
+      const { hold, release } = gate();
+      let runs = 0;
+      worker = new TestWorker(queue, async (job) => {
+        if (job.data.tag === 'b') return job.data.tag;
+        runs++;
+        await hold(job.data.tag);
+        await job.moveToDelayed(Date.now() + 20);
+      });
+
+      const a = await queue.add('job', { tag: 'a' });
+      await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+      await queue.obliterate({ force: true });
+      const b = await queue.add('job', { tag: 'b' }, { delay: 100 });
+      expect(b!.id).toBe(a!.id);
+
+      release('a');
+      // b keeps its own promotion timer and is not dropped from the dispatch order by a's late park
+      expect(await b!.waitUntilFinished(5, 3000)).toBe('completed');
+      expect(runs).toBe(1);
+      expect(queue.jobs.get(b!.id)?.data).toEqual({ tag: 'b' });
+    });
+  });
+
+  describe('a processor that returns no value', () => {
+    it('completes the job with an undefined return value', async () => {
+      queue = new TestQueue('undefined-result');
+      worker = new TestWorker(queue, async () => {});
+
+      const a = await queue.add('job', { tag: 'a' });
+      expect(await a!.waitUntilFinished(5, 3000)).toBe('completed');
+      expect(queue.jobs.get(a!.id)?.returnvalue).toBeUndefined();
+    });
+
+    it.each([
+      ['returns results', (jobs: TestJob[]) => jobs.map((j) => (j.data.tag === 'u1' ? undefined : j.data.tag))],
+      [
+        'throws a BatchError',
+        (jobs: TestJob[]) => {
+          throw new BatchError(jobs.map((j) => (j.data.tag === 'u1' ? undefined : j.data.tag)));
+        },
+      ],
+    ])('a batch that %s keeps an undefined entry undefined', async (_label, outcome) => {
+      queue = new TestQueue('undefined-result-batch');
+      worker = new TestWorker(queue, async (jobs: TestJob[]) => outcome(jobs), { batch: { size: 2 } });
+
+      await queue.pause();
+      const u1 = await queue.add('job', { tag: 'u1' });
+      const u2 = await queue.add('job', { tag: 'u2' });
+      await queue.resume();
+      await waitFor(
+        () => queue.jobs.get(u1!.id)?.state === 'completed' && queue.jobs.get(u2!.id)?.state === 'completed',
+        2000,
+        2,
+      );
+      expect(queue.jobs.get(u1!.id)?.returnvalue).toBeUndefined();
+      expect(queue.jobs.get(u2!.id)?.returnvalue).toBe('u2');
+    });
+  });
+
   it('does not dispatch an obliterated record left in a partial batch', async () => {
     queue = new TestQueue('obliterate-pending-batch');
     const batches: string[][] = [];
