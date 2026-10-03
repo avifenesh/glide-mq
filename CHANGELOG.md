@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.17.0] - 2026-10-04
+
 ### Added
 
 - **`WorkerInfo.concurrency`**: `queue.getWorkers()` (and `GET /queues/:name/workers` on the proxy) now reports each worker's configured `concurrency` option, in production and in `glide-mq/testing`. Optional: it is absent for a worker running a glide-mq version that predates the field. In batch mode it counts batches, so up to `concurrency * batch.size` jobs can be active at once. `TestWorker.concurrency` is now a public `readonly` property.
@@ -18,6 +22,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Behavior change: `prefetch` below `batch.size` now caps batches that wait on `batch.timeout`.** A worker with `prefetch: 2`, `batch: { size: 5, timeout }` kept reading during the timeout window and handed out batches of 5; it now hands out batches of at most 2, the same as without a timeout. This matches the documented `prefetch` contract (it only lowers the claim size). To keep batches of 5, raise `prefetch` to at least `batch.size` or leave it unset.
 
 ### Fixed
+
+- **Default proxy logs could contain forged error lines**: request-derived error messages or stacks were passed to `console.error` as a raw `Error`. Default logging now sanitizes error name, message and stack fields, including control characters and Unicode line separators. Custom `onError(err, queueName)` callbacks still receive the original Error.
+- **Dependency security maintenance**: refresh compatible lockfile entries for brace-expansion and advisories found by npm audit.
 
 - **Batch workers exceeded `concurrency * batch.size` with `batch.timeout`**: the first read of a poll was capped at the free in-flight budget, but the refill reads during the timeout window topped the batch up to `batch.size` regardless. A `Worker` or `BroadcastWorker` with `concurrency: 2`, `batch: { size: 5, timeout }` and 8 jobs in flight could start a batch of 5 and run 13 jobs at once. Refill reads now stay within `min(batch.size, prefetch - activeJobs)`. Global concurrency was not affected: activation already enforces it.
 - **Token bucket refilled from a future `tbLastRefill`**: group setup stamped `tbLastRefill` from the producer's `Date.now()`, so a producer whose clock ran ahead left a full bucket with a future refill stamp. `tbRefill` returned early at capacity without touching it, and the first consumption then refilled with zero elapsed time, so the time since that consumption never counted and the bucket stayed empty longer than `1/refillRate`. Group setup now seeds `tbLastRefill` from the server clock, and `tbRefill` pulls any stamp that differs from server time back to it while the bucket is full. Server function library version is now `133`; workers and producers reload it on connect.

@@ -736,7 +736,14 @@ export function createRoutes(
   const errorHandler =
     opts.onError ??
     ((err: Error, queueName: string) => {
-      console.error('[glide-mq proxy] queue error:', { queue: sanitizeForLog(queueName) }, err);
+      console.error('[glide-mq proxy] queue error:', {
+        queue: sanitizeForLog(queueName),
+        error: {
+          name: sanitizeForLog(err.name, Infinity),
+          message: sanitizeForLog(err.message, Infinity),
+          stack: sanitizeForLog(err.stack ?? '', Infinity),
+        },
+      });
     });
   let draining = false;
   let closed = false;

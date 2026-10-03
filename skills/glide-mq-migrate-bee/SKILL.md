@@ -7,7 +7,7 @@ description: >-
 license: Apache-2.0
 metadata:
   author: glide-mq
-  version: "0.16.0"
+  version: "0.17.0"
   tags: bee-queue, migration, glide-mq, valkey, redis, job-queue
   sources: docs/USAGE.md
 ---
