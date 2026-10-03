@@ -7,10 +7,15 @@ import type { ProxyOptions } from '../src/proxy';
 
 afterEach(() => vi.restoreAllMocks());
 
-async function requestFailure(name: string, onError?: ProxyOptions['onError']) {
+async function requestFailure(
+  name: string,
+  onError?: ProxyOptions['onError'],
+  configureError?: (error: Error) => void,
+) {
   let error: Error | undefined;
   vi.spyOn(Queue.prototype, 'add').mockImplementation(async (jobName) => {
     error = new Error(`Backend rejected ${jobName}`);
+    configureError?.(error);
     throw error;
   });
   const proxy = createProxyServer({ client: {} as any, onError });
@@ -64,5 +69,16 @@ describe('proxy default error logging', () => {
     const { error } = await requestFailure('custom\njob', onError);
     expect(onError).toHaveBeenCalledExactlyOnceWith(error, 'reports');
     expect(error!.message).toBe('Backend rejected custom\njob');
+  });
+
+  it('logs a normal backend error that has no stack trace', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { response, body } = await requestFailure('stackless-job', undefined, (error) => {
+      error.stack = undefined;
+    });
+    expect(response.status).toBe(500);
+    expect(body).toEqual({ error: 'Internal server error' });
+    expect(log).toHaveBeenCalledOnce();
+    expect(format(...log.mock.calls[0])).toContain('Backend rejected stackless-job');
   });
 });
