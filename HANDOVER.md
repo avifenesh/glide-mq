@@ -2,6 +2,8 @@
 
 ## Current State
 
+- **Testing skill reference**: delayed adds and `moveToDelayed` are documented consistently as timer-backed in-memory behavior. The testing backend does not reproduce Valkey persistence or crash recovery.
+
 - **0.15.6 released 2026-09-30** (#310): the patch release of the 2026-09-29 audit series (#295 to #309, about 90 verified findings, one PR per lane, failing-first tests, self-review comment, revuto verdict, green CI).
 - **0.16 series, merged since 0.15.6**: #311 Bun and Deno support (smoke scripts, docs, CI job), #312 cron-parser syntax parity, #313 testing-mode parity round 2, #314 vitest excludes `.claude/**` worktrees, #315 proxy round 2 (bounded retry and wait, shared client, SSE errors to `onError`, POST disconnect fix), #316 backlog round 4 (batch budgets, rate-limit attempts, budget pause re-check, `updateFlowBudget`, `glidemq_failAndFetchNext`, Broadcast `trimmed` event; library 131), #317 npm-cd polls the registry after publish, #318 Lua round 3 (scheduler in-flight tracking, atomic global concurrency, consumer cleanup, per-subscription broadcast stalls, upgrade healing; library 132), #319 `@glidemq/speedkey` ^0.4.0 and `SearchQueryOptions.scorer` removed.
 - **Server function library**: `LIBRARY_VERSION` is `133`. Every function keeps existing KEYS/ARGS layouts; new inputs are optional trailing args, new reply markers go before the parent marker and are parsed with a fallback for the old shape, and new functions have a TS fallback on "function not found" so rolling upgrades work in both directions.
