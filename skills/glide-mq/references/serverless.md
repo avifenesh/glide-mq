@@ -204,7 +204,7 @@ const worker = new TestWorker(queue, async (jobs) => {
 ### Key Testing Behaviors
 
 - Processing is synchronous-ish - check state right after `await queue.add()`.
-- Delayed jobs become waiting immediately (delay not honored in test mode).
+- Jobs added with `delay` remain delayed until their timer promotes them.
 - `moveToDelayed` parks the job in delayed until the timestamp, then it runs again.
 - Custom jobId returns `null` on duplicate (mirrors production).
 - All three dedup modes (`simple`, `throttle`, `debounce`) work.
@@ -220,4 +220,4 @@ const worker = new TestWorker(queue, async (jobs) => {
 - Proxy `queues` option is an allowlist - unlisted names get 403, and the same allowlist applies to `/usage/summary?queues=...` and `/broadcast/:name`.
 - Queue-wide/broadcast SSE proxy routes require `connection`, not only `client`.
 - TestQueue `isPaused()` is synchronous (real Queue returns Promise).
-- Test mode does not honor `delay` or `moveToDelayed`.
+- Test mode honors `delay` and `moveToDelayed` using in-memory timers. It does not reproduce Valkey persistence or crash recovery.

@@ -36,6 +36,8 @@ See CHANGELOG `[Unreleased]` for the full list. Highlights by area:
 
 ## Open Threads
 
+- **Extension skills sync**: the serverless testing reference now consistently describes delayed adds and `moveToDelayed` as timer-backed in-memory behavior. Sync `agent-sh/glidemq` to the merged documentation commit before releasing plugin 1.1.1.
+
 - **0.17.0 release**: tag `v0.17.0` after the security maintenance PR passes review and CI and merges, then confirm npm-cd and the registry version. The library version stays at the value already merged on main.
 - **Community PRs #324 to #329** (jonathanong, 2026-10-03): #326 and #327 merged; #324 nit fixed on the branch (DLQ write failure without an `error` listener is a `GlideMQWarning`); review comments posted on #325 (budget and TPM charging for a removed job), #328 (claim capped at the free room, held jobs hidden from other workers) and #329 (`GroupRateLimitError` and `WaitingChildrenError` exported but unhandled by `TestWorker`).
 - **#332**: production batch `batch.timeout` refill over-claim fix (found reviewing #328). Behavior change for `prefetch < batch.size`, listed under Changed.
