@@ -2279,6 +2279,7 @@ redis.register_function('glidemq_reclaimStalled', function(keys, args)
         -- entry ID. Otherwise it stays there for the next reclaim cycle.
         redis.call('HSET', jobKey, 'state', 'active')
         if redispatch then
+          redis.call('HSET', subKey, 'la', tostring(timestamp))
           redispatched[#redispatched + 1] = jobId
           redispatched[#redispatched + 1] = entryId
         end
