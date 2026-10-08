@@ -751,7 +751,6 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
         cleanup();
         reject(new Error(`Jobs did not finish within ${timeout}ms: pending ${[...pending].join(', ')}`));
       }, timeout);
-      timer.unref?.();
       this.waitRejectors.add(rejectOnClose);
       this.waitSweepers.add(sweep);
       // Listeners first, then the current state: a job may settle across an await.
