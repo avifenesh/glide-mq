@@ -2437,6 +2437,42 @@ describe('TestWorker with a job removed or obliterated while active', () => {
     expect((worker as unknown as { tpmLocalCounter: number }).tpmLocalCounter).toBe(40);
   });
 
+  it.each([
+    ['only totalTokens', { totalTokens: 3 }, 3, 0],
+    ['only totalCost', { totalCost: 0.25 }, 0, 0.25],
+    ['only token categories', { tokens: { input: 4 } }, 4, 0],
+    ['only cost categories', { costs: { usd: 0.1 } }, 0, 0],
+    ['an empty usage', {}, 0, 0],
+  ])('charges a removed job with %s without requiring the other usage fields', async (_label, usage, tokens, cost) => {
+    queue = new TestQueue('removed-inflight-partial-usage');
+    queue.setBudget('flow-p', { maxTotalTokens: 100, onExceeded: 'fail' });
+    const { hold, release } = gate();
+    worker = new TestWorker(
+      queue,
+      async (job) => {
+        job.usage = usage as TestJob['usage'];
+        await hold(job.data.tag);
+        return 'x';
+      },
+      { tokenLimiter: { maxTokens: 1000, duration: 60_000 } },
+    );
+
+    await queue.pause();
+    const a = await queue.add('job', { tag: 'a' });
+    queue.jobs.get(a!.id)!.budgetKey = 'flow-p';
+    await queue.resume();
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await a!.remove();
+    release('a');
+    await settle();
+    const budget = queue.budgets.get('flow-p')!;
+    expect(budget.usedTokens).toBe(tokens);
+    expect(budget.usedCost).toBe(cost);
+    expect((worker as unknown as { tpmLocalCounter: number }).tpmLocalCounter).toBe(
+      (usage as { totalTokens?: number }).totalTokens ?? 0,
+    );
+  });
+
   describe('return value the serializer rejects', () => {
     const circular = () => {
       const value: Record<string, unknown> = {};
