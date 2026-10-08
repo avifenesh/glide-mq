@@ -3677,7 +3677,7 @@ describe('TestQueue.waitForJobs', () => {
   it('validates the timeout', async () => {
     queue = new TestQueue('wfj-validate');
     const job = await queue.add('j', {});
-    for (const timeout of [0, -1, Number.NaN, Infinity]) {
+    for (const timeout of [0, -1, Number.NaN, Infinity, 2_147_483_648]) {
       await expect(queue.waitForJobs([job], { timeout })).rejects.toThrow('timeout must be a positive finite number');
     }
   });

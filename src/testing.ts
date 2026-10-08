@@ -704,8 +704,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     opts?: { timeout?: number },
   ): Promise<void> {
     const timeout = opts?.timeout ?? 30000;
-    if (!Number.isFinite(timeout) || timeout <= 0) {
-      throw new Error('timeout must be a positive finite number');
+    if (!Number.isFinite(timeout) || timeout <= 0 || timeout > MAX_TIMEOUT_DELAY_MS) {
+      throw new Error(`timeout must be a positive finite number no greater than ${MAX_TIMEOUT_DELAY_MS}`);
     }
     const pending = new Set<string>();
     for (const job of jobs) if (job) pending.add(job.id);
