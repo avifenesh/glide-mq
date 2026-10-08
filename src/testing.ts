@@ -2701,14 +2701,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private flushBatch(): void {
     if (!this.running) return;
     this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
-    const cap = Math.min(this.batchSize, this.batchRoom());
-    if (!this.queue.isPaused() && !this.paused) {
-      while (this.pendingBatch.length < cap) {
-        const record = this.takeWaitingRecord();
-        if (!record) break;
-        this.pendingBatch.push(record);
-      }
-    }
+    // Claiming happens in processAvailableBatch (capped at the free budget); a partial batch
+    // held for batch.timeout never exceeds that budget, because only this worker starts jobs.
     if (this.pendingBatch.length === 0) return;
     this.executeBatch(this.pendingBatch.splice(0));
   }
