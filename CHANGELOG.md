@@ -10,8 +10,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`TestQueue.waitForJobs()`** waits for a batch of jobs, ignores deduplicated adds and tracks terminal completion even when retention removes records. `moveToDelayed()` emits `delay-changed` in testing mode.
+
 - **Error classes from `glide-mq/testing`**: `GlideMQError`, `ConnectionError`, `UnrecoverableError`, `DelayedError`, `BatchError`, `WaitingChildrenError`, `SuspendError` and `GroupRateLimitError` (plus the `GroupRateLimitOptions` type) are re-exported, so a test can throw and match them without importing the main entry, which loads the native client. They are the same classes, so `instanceof` works across both entries.
 - **Flows in `glide-mq/testing`**: `TestFlowProducer` (`add` with `budget`, `addBulk`, `addDAG`) builds parent-child flows over the open `TestQueue` instances, with children in any queue. A parent starts in `waiting-children` and moves to `waiting` when its last child completes. `TestJob` gets `getChildrenValues()`, `getParents()` and `moveToWaitingChildren()`, and `chain`, `group`, `chord` and `dag` are exported with the production signatures and no connection. Failed and removed child semantics are not mirrored yet.
+
+### Fixed
+
+- Testing mode preserves queue state and replacement jobs when an active job outlives its record, including late waiting-children requests.
+- A testing-mode batch never claims beyond its available concurrency budget.
+- Job waiters keep Node alive until completion or timeout.
+- Broadcast reclaim refreshes the new claim's heartbeat before redispatch, preventing repeated reclaim before activation.
 
 ---
 
