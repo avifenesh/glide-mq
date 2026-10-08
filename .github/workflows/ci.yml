@@ -70,6 +70,7 @@ jobs:
           tests/recovery.test.ts
           tests/shutdown.test.ts
           tests/telemetry.test.ts
+          tests/testing-wait-process.test.ts
           tests/testing-mode.test.ts
           tests/testing-flows.test.ts
           tests/testing-workflows.test.ts
@@ -155,6 +156,7 @@ jobs:
           --exclude 'tests/recovery.test.ts'
           --exclude 'tests/shutdown.test.ts'
           --exclude 'tests/telemetry.test.ts'
+          --exclude 'tests/testing-wait-process.test.ts'
           --exclude 'tests/testing-mode.test.ts'
           --exclude 'tests/worker-saturation.test.ts'
           --exclude 'tests/worker.test.ts'
@@ -208,6 +210,7 @@ jobs:
           --exclude 'tests/recovery.test.ts'
           --exclude 'tests/shutdown.test.ts'
           --exclude 'tests/telemetry.test.ts'
+          --exclude 'tests/testing-wait-process.test.ts'
           --exclude 'tests/testing-mode.test.ts'
           --exclude 'tests/worker-saturation.test.ts'
           --exclude 'tests/worker.test.ts'

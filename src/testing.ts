@@ -1763,7 +1763,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   /**
    * Aggregate AI usage metadata across a flow (parent + children).
-   * Walks all jobs whose parent matches parentJobId and sums token counts, cost, and model usage.
+   * Walks the parent and its direct dependencies across queues, summing tokens, cost, and model usage.
    */
   async getFlowUsage(parentJobId: string): Promise<{
     tokens: Record<string, number>;
@@ -2816,6 +2816,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         }
         // The processor swallowed the error of moveToWaitingChildren(): the request still stands.
         if (record.movedToWaitingChildren) {
+          if (!this.isCurrent(record)) return;
           record.movedToWaitingChildren = undefined;
           this.queue.parkWaitingChildren(record);
           return;
@@ -2850,6 +2851,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         }
         // moveToWaitingChildren: park until the children complete, without counting an attempt.
         if (err instanceof WaitingChildrenError || record.movedToWaitingChildren) {
+          if (!this.isCurrent(record)) return;
           record.movedToWaitingChildren = undefined;
           this.queue.parkWaitingChildren(record);
           return;

@@ -14,6 +14,41 @@ import { waitFor } from './helpers/fixture';
 let queues: TestQueue[] = [];
 let workers: TestWorker[] = [];
 
+describe('removed flow jobs with reused ids', () => {
+  it.each([false, true])('preserves replacement dispatch when the old request is swallowed=%s', async (swallow) => {
+    const queue = open(`flow-reused-${swallow}`);
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const active = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const ran: string[] = [];
+    const worker = new TestWorker(queue, async (job: any) => {
+      ran.push(job.data.tag);
+      if (job.data.tag === 'old') {
+        started();
+        await gate;
+        if (swallow) await job.moveToWaitingChildren().catch(() => {});
+        else await job.moveToWaitingChildren();
+      }
+      return 'done';
+    });
+    workers.push(worker);
+    const old = await queue.add('job', { tag: 'old' });
+    await active;
+    await queue.obliterate({ force: true });
+    const replacement = await queue.add('job', { tag: 'replacement' });
+    expect(replacement!.id).toBe(old!.id);
+    release();
+    await queue.waitForJobs([replacement], { timeout: 2000 });
+    expect(ran).toEqual(['old', 'replacement']);
+    expect(await replacement!.getState()).toBe('completed');
+  });
+});
+
 function open(name: string, opts?: ConstructorParameters<typeof TestQueue>[1]): TestQueue {
   const queue = new TestQueue(name, opts);
   queues.push(queue);
