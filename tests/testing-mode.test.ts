@@ -3510,7 +3510,8 @@ describe('TestQueue.waitForJobs', () => {
     if (queue) await queue.close();
   });
 
-  const listenerCount = (q: TestQueue) => q.listenerCount('completed') + q.listenerCount('failed');
+  const listenerCount = (q: TestQueue) =>
+    ['completed', 'failed', 'revoked', 'removed', 'drained'].reduce((n, e) => n + q.listenerCount(e), 0);
 
   it('resolves once every addBulk job completes and ignores null entries', async () => {
     queue = new TestQueue('wfj-bulk');
@@ -3584,10 +3585,42 @@ describe('TestQueue.waitForJobs', () => {
       await new Promise((r) => setTimeout(r, 50));
       return 'ok';
     });
-    const [good] = await queue.addBulk([{ name: 'j', data: {} }]);
     await queue.add('j', { bad: true });
+    const [good] = await queue.addBulk([{ name: 'j', data: {} }]);
     await queue.waitForJobs([good], { timeout: 2000 });
     expect(await good.getState()).toBe('completed');
+  });
+
+  it('rejects when a pending job is revoked, but not when an active job is only flagged', async () => {
+    queue = new TestQueue('wfj-revoke');
+    const delayed = await queue.add('j', {}, { delay: 60_000 });
+    const waiting = queue.waitForJobs([delayed], { timeout: 5000 });
+    await queue.revoke(delayed!.id);
+    await expect(waiting).rejects.toThrow('revoked');
+    expect(listenerCount(queue)).toBe(0);
+
+    let release!: () => void;
+    worker = new TestWorker(queue, () => new Promise((r) => (release = () => r('ok'))));
+    const active = await queue.add('j', {});
+    await waitFor(async () => (await active!.getState()) === 'active', 2000, 2);
+    const flagged = queue.waitForJobs([active], { timeout: 2000 });
+    expect(await queue.revoke(active!.id)).toBe('flagged');
+    release();
+    await flagged;
+  });
+
+  it('treats a pending job removed later (remove or drain) as settled', async () => {
+    queue = new TestQueue('wfj-removed-later');
+    const [a, b, c] = await queue.addBulk([
+      { name: 'j', data: {}, opts: { delay: 60_000 } },
+      { name: 'j', data: {}, opts: { delay: 60_000 } },
+      { name: 'j', data: {}, opts: { delay: 60_000 } },
+    ]);
+    const waiting = queue.waitForJobs([a, b, c], { timeout: 5000 });
+    await a.remove();
+    await queue.drain(true);
+    await waiting;
+    expect(listenerCount(queue)).toBe(0);
   });
 
   it('rejects for a job that already failed', async () => {

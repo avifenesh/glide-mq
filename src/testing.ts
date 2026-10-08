@@ -715,6 +715,9 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
         this.waitRejectors.delete(rejectOnClose);
         this.off('completed', onCompleted);
         this.off('failed', onFailed);
+        this.off('revoked', onRevoked);
+        this.off('removed', sweep);
+        this.off('drained', sweep);
       };
       const rejectOnClose = (err: Error) => {
         cleanup();
@@ -731,6 +734,17 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
         cleanup();
         reject(err);
       };
+      // revoke() fails a not-yet-active job without a `failed` event; an active job is only flagged.
+      const onRevoked = (id: string) => {
+        if (pending.has(id) && this.jobs.get(id)?.state === 'failed') {
+          cleanup();
+          reject(new Error('revoked'));
+        }
+      };
+      // remove(), drain() and friends delete records without a completed/failed event.
+      const sweep = () => {
+        for (const id of [...pending]) if (!this.jobs.has(id)) settle(id);
+      };
       const timer = setTimeout(() => {
         cleanup();
         reject(new Error(`Jobs did not finish within ${timeout}ms: pending ${[...pending].join(', ')}`));
@@ -740,14 +754,18 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       // Listeners first, then the current state: a job may settle across an await.
       this.on('completed', onCompleted);
       this.on('failed', onFailed);
+      this.on('revoked', onRevoked);
+      this.on('removed', sweep);
+      this.on('drained', sweep);
       for (const id of [...pending]) {
         const record = this.jobs.get(id);
-        if (!record || record.state === 'completed') settle(id);
-        else if (record.state === 'failed') {
+        if (record?.state === 'completed') settle(id);
+        else if (record?.state === 'failed') {
           onFailed(new TestJob<D, R>(record), new Error(record.failedReason as string));
           return;
         }
       }
+      sweep();
     });
   }
 
