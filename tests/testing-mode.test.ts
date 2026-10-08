@@ -3499,3 +3499,162 @@ describe('TestWorker dead-letter queue parity', () => {
     });
   });
 });
+
+describe('TestQueue.waitForJobs', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  const listenerCount = (q: TestQueue) => q.listenerCount('completed') + q.listenerCount('failed');
+
+  it('resolves once every addBulk job completes and ignores null entries', async () => {
+    queue = new TestQueue('wfj-bulk');
+    worker = new TestWorker(queue, async (job: any) => job.data.n);
+    const jobs = await queue.addBulk([1, 2, 3].map((n) => ({ name: 'j', data: { n } })));
+    await queue.waitForJobs([...jobs, null, undefined], { timeout: 2000 });
+    expect((await queue.getJobCounts()).completed).toBe(3);
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('ignores deduplicated add() results', async () => {
+    queue = new TestQueue('wfj-dedup');
+    worker = new TestWorker(queue, async () => 'ok');
+    const opts = { deduplication: { id: 'same' } };
+    const first = await queue.add('j', {}, opts);
+    const second = await queue.add('j', {}, opts);
+    expect(second).toBeNull();
+    await queue.waitForJobs([first, second], { timeout: 2000 });
+    expect(await first!.getState()).toBe('completed');
+  });
+
+  it('resolves immediately when there is nothing to wait for', async () => {
+    queue = new TestQueue('wfj-empty');
+    await queue.waitForJobs([]);
+    await queue.waitForJobs([null]);
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('treats a removeOnComplete job as settled', async () => {
+    queue = new TestQueue('wfj-roc');
+    worker = new TestWorker(queue, async () => 'ok');
+    const jobs = await queue.addBulk([
+      { name: 'j', data: {}, opts: { removeOnComplete: true } },
+      { name: 'j', data: {} },
+    ]);
+    await queue.waitForJobs(jobs, { timeout: 2000 });
+    expect(await jobs[0].getState()).toBe('unknown');
+    expect(await jobs[1].getState()).toBe('completed');
+  });
+
+  it('treats a job whose record is already gone as settled', async () => {
+    queue = new TestQueue('wfj-gone');
+    const job = await queue.add('j', {});
+    queue.removeJob(job!.id);
+    await queue.waitForJobs([job], { timeout: 50 });
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('resolves for jobs that already completed', async () => {
+    queue = new TestQueue('wfj-already');
+    worker = new TestWorker(queue, async () => 'ok');
+    const jobs = await queue.addBulk([{ name: 'j', data: {} }]);
+    await waitFor(async () => (await jobs[0].getState()) === 'completed', 2000, 2);
+    await queue.waitForJobs(jobs, { timeout: 50 });
+  });
+
+  it('rejects with the failed reason of a terminal failure, also with removeOnFail', async () => {
+    queue = new TestQueue('wfj-fail');
+    worker = new TestWorker(queue, async () => {
+      throw new Error('boom');
+    });
+    const jobs = await queue.addBulk([{ name: 'j', data: {}, opts: { removeOnFail: true } }]);
+    await expect(queue.waitForJobs(jobs, { timeout: 2000 })).rejects.toThrow('boom');
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('ignores the failure of a job it is not waiting on', async () => {
+    queue = new TestQueue('wfj-unrelated');
+    worker = new TestWorker(queue, async (job: any) => {
+      if (job.data.bad) throw new Error('unrelated');
+      await new Promise((r) => setTimeout(r, 50));
+      return 'ok';
+    });
+    const [good] = await queue.addBulk([{ name: 'j', data: {} }]);
+    await queue.add('j', { bad: true });
+    await queue.waitForJobs([good], { timeout: 2000 });
+    expect(await good.getState()).toBe('completed');
+  });
+
+  it('rejects for a job that already failed', async () => {
+    queue = new TestQueue('wfj-already-failed');
+    worker = new TestWorker(queue, async () => {
+      throw new Error('early');
+    });
+    const jobs = await queue.addBulk([{ name: 'j', data: {} }]);
+    await waitFor(async () => (await jobs[0].getState()) === 'failed', 2000, 2);
+    await expect(queue.waitForJobs(jobs, { timeout: 50 })).rejects.toThrow('early');
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('ignores a failed attempt that will retry and resolves after the retry succeeds', async () => {
+    queue = new TestQueue('wfj-retry');
+    let calls = 0;
+    worker = new TestWorker(queue, async () => {
+      if (++calls === 1) throw new Error('transient');
+      return 'ok';
+    });
+    const jobs = await queue.addBulk([
+      { name: 'j', data: {}, opts: { attempts: 2, backoff: { type: 'fixed', delay: 20 } } },
+    ]);
+    await queue.waitForJobs(jobs, { timeout: 2000 });
+    expect(calls).toBe(2);
+    expect(await jobs[0].getState()).toBe('completed');
+  });
+
+  it('times out naming the pending ids and cleans up', async () => {
+    queue = new TestQueue('wfj-timeout');
+    worker = new TestWorker(queue, async (job: any) => {
+      if (job.data.hang) await new Promise(() => {});
+      return 'ok';
+    });
+    const jobs = await queue.addBulk([
+      { name: 'j', data: { hang: true } },
+      { name: 'j', data: {} },
+    ]);
+    await expect(queue.waitForJobs(jobs, { timeout: 100 })).rejects.toThrow(
+      `Jobs did not finish within 100ms: pending ${jobs[0].id}`,
+    );
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('validates the timeout', async () => {
+    queue = new TestQueue('wfj-validate');
+    const job = await queue.add('j', {});
+    for (const timeout of [0, -1, Number.NaN, Infinity]) {
+      await expect(queue.waitForJobs([job], { timeout })).rejects.toThrow('timeout must be a positive finite number');
+    }
+  });
+
+  it('rejects pending waiters when the queue closes', async () => {
+    queue = new TestQueue('wfj-close');
+    const job = await queue.add('j', {});
+    const waiting = queue.waitForJobs([job], { timeout: 5000 });
+    await queue.close();
+    await expect(waiting).rejects.toThrow('Queue is closing');
+  });
+
+  it('leaves workers running so more jobs can be added and waited on', async () => {
+    queue = new TestQueue('wfj-reuse');
+    worker = new TestWorker(queue, async () => 'ok');
+    await queue.waitForJobs(await queue.addBulk([{ name: 'j', data: {} }]), { timeout: 2000 });
+    expect(worker.isRunning()).toBe(true);
+    expect(queue.isPaused()).toBe(false);
+    await queue.waitForJobs([await queue.add('j', {})], { timeout: 2000 });
+    expect((await queue.getJobCounts()).completed).toBe(2);
+  });
+});

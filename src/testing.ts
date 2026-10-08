@@ -690,6 +690,67 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     return this.waitForJobResult(job.id, waitTimeout);
   }
 
+  /**
+   * Resolve once every given job has settled, without pausing, draining or closing
+   * anything. Accepts the result of addBulk() or several add() calls; null entries
+   * (deduplicated or duplicate-id adds) are ignored. A job whose record is gone
+   * (removeOnComplete / removeOnFail) counts as settled. Rejects with the first
+   * terminal failure (a failed attempt that will retry does not count), on timeout
+   * (naming the pending ids), or when the queue closes.
+   */
+  async waitForJobs(
+    jobs: ReadonlyArray<{ id: string } | null | undefined>,
+    opts?: { timeout?: number },
+  ): Promise<void> {
+    const timeout = opts?.timeout ?? 30000;
+    if (!Number.isFinite(timeout) || timeout <= 0) {
+      throw new Error('timeout must be a positive finite number');
+    }
+    const pending = new Set<string>();
+    for (const job of jobs) if (job) pending.add(job.id);
+    if (pending.size === 0) return;
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.waitRejectors.delete(rejectOnClose);
+        this.off('completed', onCompleted);
+        this.off('failed', onFailed);
+      };
+      const rejectOnClose = (err: Error) => {
+        cleanup();
+        reject(err);
+      };
+      const settle = (id: string) => {
+        if (!pending.delete(id) || pending.size > 0) return;
+        cleanup();
+        resolve();
+      };
+      const onCompleted = (job: TestJob<D, R>) => settle(job.id);
+      const onFailed = (job: TestJob<D, R>, err: Error) => {
+        if (!pending.has(job.id)) return;
+        cleanup();
+        reject(err);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Jobs did not finish within ${timeout}ms: pending ${[...pending].join(', ')}`));
+      }, timeout);
+      timer.unref?.();
+      this.waitRejectors.add(rejectOnClose);
+      // Listeners first, then the current state: a job may settle across an await.
+      this.on('completed', onCompleted);
+      this.on('failed', onFailed);
+      for (const id of [...pending]) {
+        const record = this.jobs.get(id);
+        if (!record || record.state === 'completed') settle(id);
+        else if (record.state === 'failed') {
+          onFailed(new TestJob<D, R>(record), new Error(record.failedReason as string));
+          return;
+        }
+      }
+    });
+  }
+
   private waitForJobResult(jobId: string, timeoutMs: number): Promise<R> {
     return new Promise<R>((resolve, reject) => {
       const cleanup = () => {

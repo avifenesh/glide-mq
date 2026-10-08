@@ -108,26 +108,27 @@ describe('email processor', () => {
 
 ### TestQueue
 
-| Method                                  | Description                                                                                                                          |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `add(name, data, opts?)`                | Enqueue a job; `delay` parks it in `delayed`, `priority` parks it in `prioritized`, otherwise a worker picks it up immediately       |
-| `addBulk(jobs)`                         | Enqueue multiple jobs                                                                                                                |
-| `addAndWait(name, data, opts?)`         | Add a job and resolve with its return value, or reject with the failed reason; `waitTimeout` (default 30 s) bounds the wait          |
-| `getJob(id)`                            | Retrieve a job by ID                                                                                                                 |
-| `getJobs(state, start?, end?)`          | List jobs by state. `waiting` follows the worker dispatch order, `delayed` follows the scheduled order and includes prioritized jobs |
-| `getJobCounts()`                        | Returns `{ waiting, active, delayed, completed, failed }`; `delayed` counts prioritized jobs too, like production                    |
-| `getJobCountByTypes()` / `count()`      | Alias for `getJobCounts()`; `count()` is the FIFO stream length (waiting and active FIFO jobs)                                       |
-| `searchJobs(opts)`                      | Filter jobs by state, name, and/or data fields                                                                                       |
-| `getJobLogs(id, start?, end?)`          | Read the lines a processor appended with `job.log()`                                                                                 |
-| `getSuspendedJobs(start?, end?, opts?)` | List suspended jobs ordered by their timeout deadline                                                                                |
-| `revoke(jobId)`                         | Fail a waiting / delayed / prioritized job with reason `revoked`, flag any other existing job; returns the same strings as `Queue`   |
-| `getDeadLetterJobs(...)`                | List this queue's dead-letter jobs; `getDeadLetterJob`, `removeDeadLetterJob` and `replayDeadLetterJob` work on one entry            |
-| `retryJobs(opts?)`                      | Move failed jobs back to waiting                                                                                                     |
-| `drain(delayed?)`                       | Remove waiting jobs; pass `true` to also remove delayed and prioritized jobs                                                         |
-| `obliterate(opts?)`                     | Wipe jobs, schedulers, dedup entries, budgets and metrics; refuses while jobs are active unless `{ force: true }`                    |
-| `pause()` / `resume()`                  | Pause / resume the queue                                                                                                             |
-| `isPaused()`                            | Check pause state (synchronous, returns `boolean` - note: real `Queue.isPaused()` is async)                                          |
-| `close()`                               | Close the queue, clear every timer and reject pending `addAndWait` calls                                                             |
+| Method                                  | Description                                                                                                                                                                                                              |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `add(name, data, opts?)`                | Enqueue a job; `delay` parks it in `delayed`, `priority` parks it in `prioritized`, otherwise a worker picks it up immediately                                                                                           |
+| `addBulk(jobs)`                         | Enqueue multiple jobs                                                                                                                                                                                                    |
+| `addAndWait(name, data, opts?)`         | Add a job and resolve with its return value, or reject with the failed reason; `waitTimeout` (default 30 s) bounds the wait                                                                                              |
+| `waitForJobs(jobs, opts?)`              | Resolve once every job from `addBulk()` / `add()` has settled (`null` entries ignored, a removed record counts as settled); rejects with the first terminal failure or on `timeout` (default 30 s); workers keep running |
+| `getJob(id)`                            | Retrieve a job by ID                                                                                                                                                                                                     |
+| `getJobs(state, start?, end?)`          | List jobs by state. `waiting` follows the worker dispatch order, `delayed` follows the scheduled order and includes prioritized jobs                                                                                     |
+| `getJobCounts()`                        | Returns `{ waiting, active, delayed, completed, failed }`; `delayed` counts prioritized jobs too, like production                                                                                                        |
+| `getJobCountByTypes()` / `count()`      | Alias for `getJobCounts()`; `count()` is the FIFO stream length (waiting and active FIFO jobs)                                                                                                                           |
+| `searchJobs(opts)`                      | Filter jobs by state, name, and/or data fields                                                                                                                                                                           |
+| `getJobLogs(id, start?, end?)`          | Read the lines a processor appended with `job.log()`                                                                                                                                                                     |
+| `getSuspendedJobs(start?, end?, opts?)` | List suspended jobs ordered by their timeout deadline                                                                                                                                                                    |
+| `revoke(jobId)`                         | Fail a waiting / delayed / prioritized job with reason `revoked`, flag any other existing job; returns the same strings as `Queue`                                                                                       |
+| `getDeadLetterJobs(...)`                | List this queue's dead-letter jobs; `getDeadLetterJob`, `removeDeadLetterJob` and `replayDeadLetterJob` work on one entry                                                                                                |
+| `retryJobs(opts?)`                      | Move failed jobs back to waiting                                                                                                                                                                                         |
+| `drain(delayed?)`                       | Remove waiting jobs; pass `true` to also remove delayed and prioritized jobs                                                                                                                                             |
+| `obliterate(opts?)`                     | Wipe jobs, schedulers, dedup entries, budgets and metrics; refuses while jobs are active unless `{ force: true }`                                                                                                        |
+| `pause()` / `resume()`                  | Pause / resume the queue                                                                                                                                                                                                 |
+| `isPaused()`                            | Check pause state (synchronous, returns `boolean` - note: real `Queue.isPaused()` is async)                                                                                                                              |
+| `close()`                               | Close the queue, clear every timer and reject pending `addAndWait` and `waitForJobs` calls                                                                                                                               |
 
 ### TestJob
 
