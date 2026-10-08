@@ -14,6 +14,73 @@ import { waitFor } from './helpers/fixture';
 let queues: TestQueue[] = [];
 let workers: TestWorker[] = [];
 
+describe('flow requests belong to one activation', () => {
+  it.each(['waiting-then-failure', 'failure-then-waiting'])('clears stale flags for %s', async (order) => {
+    const queue = open(`flow-request-${order}`);
+    let calls = 0;
+    const worker = new TestWorker(queue, async (job: any) => {
+      if (++calls === 1) {
+        if (order === 'waiting-then-failure') {
+          await job.moveToWaitingChildren().catch(() => {});
+          await job.moveToFailed(new Error('first activation'));
+        } else {
+          await job.moveToFailed(new Error('first activation'));
+          await job.moveToWaitingChildren();
+        }
+      }
+      return 'done';
+    });
+    workers.push(worker);
+    const job = await queue.add('work', {}, { attempts: 2 });
+    await queue.waitForJobs([job], { timeout: 2000 });
+    expect(calls).toBe(2);
+    expect(await job!.getState()).toBe('completed');
+  });
+
+  it('clears a swallowed waiting request on resume', async () => {
+    const queue = open('flow-request-resume');
+    let calls = 0;
+    const worker = new TestWorker(queue, async (job: any) => {
+      if (++calls === 1) {
+        await job.moveToWaitingChildren().catch(() => {});
+        await job.suspend({ waitFor: ['resume'] });
+      }
+      return 'done';
+    });
+    workers.push(worker);
+    const job = await queue.add('work', {});
+    await waitFor(async () => (await job!.getState()) === 'suspended', 2000, 2);
+    await queue.signal(job!.id, 'resume');
+    await queue.waitForJobs([job], { timeout: 2000 });
+    expect(calls).toBe(2);
+  });
+
+  it('clears an old failure request on batch activation', async () => {
+    const queue = open('flow-request-batch');
+    let requested!: () => void;
+    const request = new Promise<void>((resolve) => {
+      requested = resolve;
+    });
+    const first = new TestWorker(queue, async (job: any) => {
+      await job.moveToFailed(new Error('old activation'));
+      await first.close();
+      try {
+        await job.moveToWaitingChildren();
+      } finally {
+        requested();
+      }
+    });
+    workers.push(first);
+    const job = await queue.add('work', {});
+    await request;
+    await waitFor(async () => (await job!.getState()) === 'waiting', 2000, 2);
+    const batch = new TestWorker(queue, async (jobs: TestJob[]) => jobs.map(() => 'done'), { batch: { size: 1 } });
+    workers.push(batch);
+    await queue.waitForJobs([job], { timeout: 2000 });
+    expect(await job!.getState()).toBe('completed');
+  });
+});
+
 describe('removed flow jobs with reused ids', () => {
   it.each([false, true])('preserves replacement dispatch when the old request is swallowed=%s', async (swallow) => {
     const queue = open(`flow-reused-${swallow}`);

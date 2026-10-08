@@ -22,6 +22,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Testing mode preserves queue state and replacement jobs when an active job outlives its record, including late waiting-children requests.
 - A testing-mode batch never claims beyond its available concurrency budget.
 - Job waiters keep Node alive until completion or timeout.
+- Testing-mode control requests are cleared for each activation, so retries, resumes and batch workers do not consume stale requests.
 - Broadcast reclaim refreshes the new claim's heartbeat before redispatch, preventing repeated reclaim before activation.
 
 ---

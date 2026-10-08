@@ -2629,6 +2629,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       if (!record) break;
 
       record.state = 'active';
+      record.movedToWaitingChildren = undefined;
+      record.movedToFailed = undefined;
       record.processedOn = Date.now();
       this.activeCount++;
       this.isDrained = false;
@@ -3057,6 +3059,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     // Mark all as active
     for (const record of records) {
       record.state = 'active';
+      record.movedToWaitingChildren = undefined;
+      record.movedToFailed = undefined;
       record.processedOn = Date.now();
     }
     this.activeCount += records.length;
