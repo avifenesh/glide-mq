@@ -264,6 +264,61 @@ describe('TestFlowProducer.add', () => {
     expect((await q.getJobCounts()).waiting).toBe(1);
   });
 
+  it('generates ids that skip the custom ids of the same flow', async () => {
+    open('flow-reserved');
+    const node = await new TestFlowProducer().add({
+      name: 'p',
+      queueName: 'flow-reserved',
+      data: {},
+      children: [{ name: 'c', queueName: 'flow-reserved', data: {}, opts: { jobId: '1' } }],
+    });
+    expect([node.job.id, node.children![0].job.id]).toEqual(['2', '1']);
+    expect(Object.keys(await node.job.getChildrenValues())).toEqual([]);
+    const bulk = await new TestFlowProducer().addBulk([
+      { name: 'a', queueName: 'flow-reserved', data: {} },
+      { name: 'b', queueName: 'flow-reserved', data: {}, opts: { jobId: '4' } },
+      { name: 'c', queueName: 'flow-reserved', data: {} },
+    ]);
+    expect(bulk.map((n) => n.job.id)).toEqual(['3', '4', '5']);
+  });
+
+  it('wires a leaf child to its parent before its added event', async () => {
+    const q = open('flow-added');
+    const seen: { parentId?: string; deps: number }[] = [];
+    q.on('added', (job: TestJob) => {
+      const parent = job.parentId ? q.jobs.get(job.parentId) : undefined;
+      seen.push({ parentId: job.parentId, deps: parent?.deps?.size ?? 0 });
+    });
+    const node = await new TestFlowProducer().add({
+      name: 'p',
+      queueName: 'flow-added',
+      data: {},
+      children: [{ name: 'c', queueName: 'flow-added', data: {} }],
+    });
+    expect(seen).toEqual([
+      { parentId: undefined, deps: 0 },
+      { parentId: node.job.id, deps: 1 },
+    ]);
+    const dynamic = await q.add('d', {}, { parent: { queue: 'flow-added', id: node.job.id } });
+    expect(seen[2]).toEqual({ parentId: node.job.id, deps: 2 });
+    expect(await dynamic!.getParents()).toEqual([{ queue: 'flow-added', id: node.job.id }]);
+  });
+
+  it('keeps the flow prefix for children added later with opts.parent', async () => {
+    const q = open('flow-late-prefix');
+    const node = await new TestFlowProducer({ prefix: 'pfx' }).add({
+      name: 'p',
+      queueName: 'flow-late-prefix',
+      data: {},
+      children: [{ name: 'c', queueName: 'flow-late-prefix', data: {} }],
+    });
+    await q.add('d', {}, { parent: { queue: 'flow-late-prefix', id: node.job.id } });
+    expect([...q.jobs.get(node.job.id)!.deps!.keys()]).toEqual([
+      `pfx:{flow-late-prefix}:${node.children![0].job.id}`,
+      'pfx:{flow-late-prefix}:3',
+    ]);
+  });
+
   it('allows the same custom id in different queues', async () => {
     open('flow-dup-a');
     open('flow-dup-b');

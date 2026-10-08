@@ -198,12 +198,22 @@ export interface TestJobRecord<D = any, R = any> {
   /** @internal Primary parent, like the parentId / parentQueue job hash fields. */
   parentId?: string;
   parentQueue?: string;
+  /** @internal Prefix of the deps members of this job, set by the flow producer that created it. */
+  depsPrefix?: string;
   /** @internal Every parent of a DAG job, like the parents SET. Empty or absent for a single-parent job. */
   parents?: { queue: string; id: string }[];
   /** @internal Children this job waits for, keyed by the deps SET member `prefix:{queue}:id`. */
   deps?: Map<string, { queue: string; id: string }>;
   /** @internal Deps members whose child has completed. */
   depsDone?: Set<string>;
+}
+
+/** @internal How TestFlowProducer creates a flow job, see TestQueue.addFlowJob. */
+export interface FlowJobInit {
+  wait: boolean;
+  prefix: string;
+  reserved?: Set<string>;
+  parents?: { queue: string; id: string }[];
 }
 
 /**
@@ -707,30 +717,46 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   /**
    * @internal Create a flow job synchronously, so a whole flow is wired before any worker
-   * sees it. `waitForChildren` creates it in waiting-children, like a flow parent.
+   * sees it. A job with `parents` carries them, and is in their deps, before its `added`
+   * event. `wait` creates it in waiting-children, like a flow parent; `reserved` holds the
+   * custom ids of the same flow, which generated ids must skip.
    */
-  addFlowJob(name: string, data: D, opts: JobOptions, waitForChildren: boolean): TestJob<D, R> {
-    const id = opts.jobId ? opts.jobId : this.generateJobId();
-    const serializedData = this.serializer.serialize(data);
-    const delay = waitForChildren ? 0 : (opts.delay ?? 0);
-    return this.insertRecord(name, serializedData, opts, id, Date.now(), delay, this.serializer, waitForChildren);
+  addFlowJob(name: string, data: D, opts: JobOptions, flow: FlowJobInit): TestJob<D, R> {
+    const id = opts.jobId ? opts.jobId : this.generateJobId(flow.reserved);
+    const init: Partial<TestJobRecord<D, R>> = {
+      ...this.linkToParents(id, flow.parents ?? []),
+      depsPrefix: flow.prefix,
+    };
+    if (flow.wait) init.state = 'waiting-children';
+    const delay = flow.wait ? 0 : (opts.delay ?? 0);
+    return this.insertRecord(name, this.serializer.serialize(data), opts, id, Date.now(), delay, this.serializer, init);
   }
 
-  /** @internal Record `parent` as a parent of `child` and register `child` in the parent's deps. */
-  attachParent(child: TestJobRecord<D, R>, parent: { queue: string; id: string }, prefix = 'glide'): void {
+  /** @internal Record fields of a new child with `parents`, after registering it in each parent's deps. */
+  private linkToParents(childId: string, parents: { queue: string; id: string }[]): Partial<TestJobRecord<D, R>> {
+    for (const parent of parents) TestQueue.lookup(parent.queue)?.registerDependency(parent.id, this.name, childId);
+    if (parents.length === 0) return {};
+    const links: Partial<TestJobRecord<D, R>> = { parentId: parents[0].id, parentQueue: parents[0].queue };
+    if (parents.length > 1) links.parents = parents.map((parent) => ({ ...parent }));
+    return links;
+  }
+
+  /** @internal Make `parent` a parent of an existing job and register the job in the parent's deps. */
+  attachParent(child: TestJobRecord<D, R>, parent: { queue: string; id: string }): void {
     if (child.parentId === undefined) {
       child.parentId = parent.id;
       child.parentQueue = parent.queue;
     } else {
       (child.parents ??= [{ queue: child.parentQueue!, id: child.parentId }]).push(parent);
     }
-    TestQueue.lookup(parent.queue)?.registerDependency(parent.id, this.name, child.id, prefix);
+    TestQueue.lookup(parent.queue)?.registerDependency(parent.id, this.name, child.id);
   }
 
   /** @internal Add a child to the deps of the job `parentId` of this queue; a missing parent is ignored. */
-  registerDependency(parentId: string, childQueue: string, childId: string, prefix: string): void {
+  registerDependency(parentId: string, childQueue: string, childId: string): void {
     const parent = this.jobs.get(parentId);
     if (!parent) return;
+    const prefix = parent.depsPrefix ?? 'glide';
     (parent.deps ??= new Map()).set(`${prefix}:{${childQueue}}:${childId}`, { queue: childQueue, id: childId });
   }
 
@@ -800,13 +826,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     if (dedup) {
       this.dedupEntries.set(dedup.id, { jobId: id, timestamp: now });
     }
-    const job = this.insertRecord(name, serializedData, opts ?? {}, id, now, opts?.delay ?? 0);
-    if (opts?.parent) {
-      this.attachParent(this.jobs.get(id)!, opts.parent);
-      job.parentId = opts.parent.id;
-      job.parentQueue = opts.parent.queue;
-    }
-    return job;
+    const links = opts?.parent ? this.linkToParents(id, [opts.parent]) : undefined;
+    return this.insertRecord(name, serializedData, opts ?? {}, id, now, opts?.delay ?? 0, this.serializer, links);
   }
 
   /**
@@ -877,10 +898,10 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     });
   }
 
-  private generateJobId(): string {
+  private generateJobId(reserved?: Set<string>): string {
     let id = String(++this.idCounter);
     let retries = 0;
-    while (this.jobs.has(id)) {
+    while (this.jobs.has(id) || reserved?.has(id)) {
       if (++retries >= 1000) throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
       id = String(++this.idCounter);
     }
@@ -899,7 +920,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     now: number,
     delay: number,
     dataSerializer: Serializer = this.serializer,
-    parked = false,
+    init: Partial<TestJobRecord<D, R>> = {},
   ): TestJob<D, R> {
     const ttl = opts.ttl ?? 0;
     const priority = opts.priority ?? 0;
@@ -921,11 +942,11 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       fallbackIndex: 0,
       serializer: this.serializer,
       queue: this,
+      ...init,
     };
     this.jobs.set(id, record);
-    if (parked) {
+    if (record.state === 'waiting-children') {
       // A flow parent is created in waiting-children and queued once its children complete.
-      record.state = 'waiting-children';
     } else if (delay > 0) {
       // glidemq_addJob parks the job in the scheduled ZSet until timestamp + delay.
       this.parkDelayed(record, delay);
