@@ -11,6 +11,7 @@ import type { TestJob } from './testing';
 
 function closable<T extends object>(value: T): ClosableWorkflow<T> {
   const handle = value as ClosableWorkflow<T>;
+  // Test helpers own no connections; callers control the shared queues and workers.
   handle.close = async () => {};
   return handle;
 }
