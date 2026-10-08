@@ -71,6 +71,8 @@ jobs:
           tests/shutdown.test.ts
           tests/telemetry.test.ts
           tests/testing-mode.test.ts
+          tests/testing-flows.test.ts
+          tests/testing-workflows.test.ts
           tests/worker-saturation.test.ts
           tests/worker.test.ts
           tests/library-source.test.ts
