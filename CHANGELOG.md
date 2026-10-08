@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Flows in `glide-mq/testing`**: `TestFlowProducer` (`add` with `budget`, `addBulk`, `addDAG`) builds parent-child flows over the open `TestQueue` instances, with children in any queue. A parent starts in `waiting-children` and moves to `waiting` when its last child completes. `TestJob` gets `getChildrenValues()`, `getParents()` and `moveToWaitingChildren()`, and `chain`, `group`, `chord` and `dag` are exported with the production signatures and no connection. Failed and removed child semantics are not mirrored yet.
+
 ---
 
 ## [0.17.0] - 2026-10-04
