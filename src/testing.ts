@@ -2643,10 +2643,14 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   }
 
   private processAvailableBatch(): void {
-    if (this.batchRoom() <= 0) return;
+    const room = this.batchRoom();
+    if (room <= 0) return;
 
+    // Claim only what can start now (production: min(prefetch - active, batch.size)),
+    // so records beyond the budget stay waiting for other workers.
+    const cap = Math.min(this.batchSize, room);
     this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
-    while (this.pendingBatch.length < this.batchSize) {
+    while (this.pendingBatch.length < cap) {
       const record = this.takeWaitingRecord();
       if (!record) break;
       this.pendingBatch.push(record);
@@ -2660,14 +2664,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       return;
     }
 
-    if (this.pendingBatch.length >= this.batchSize) {
-      // A full batch over the remaining budget stays in pendingBatch until a running
-      // batch settles and executeBatch(...).finally() calls processAvailable() again.
-      if (this.batchSize > this.batchRoom()) return;
+    if (this.pendingBatch.length >= cap) {
       this.clearBatchTimer();
-      this.executeBatch(this.pendingBatch.splice(0, this.batchSize));
-      if (this.pendingBatch.length > 0) this.scheduleBatchFlush();
-      else if (this.queue.waitingQueue.length > 0) queueMicrotask(() => this.processAvailable());
+      this.executeBatch(this.pendingBatch.splice(0));
+      if (this.queue.waitingQueue.length > 0) queueMicrotask(() => this.processAvailable());
       return;
     }
 
@@ -2676,7 +2676,6 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       return;
     }
 
-    if (this.pendingBatch.length > this.batchRoom()) return;
     this.executeBatch(this.pendingBatch.splice(0, this.pendingBatch.length));
   }
 
@@ -2702,19 +2701,16 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private flushBatch(): void {
     if (!this.running) return;
     this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+    const cap = Math.min(this.batchSize, this.batchRoom());
     if (!this.queue.isPaused() && !this.paused) {
-      while (this.pendingBatch.length < this.batchSize && this.batchRoom() > 0) {
+      while (this.pendingBatch.length < cap) {
         const record = this.takeWaitingRecord();
         if (!record) break;
         this.pendingBatch.push(record);
       }
     }
-    const take = Math.min(this.pendingBatch.length, this.batchSize);
-    if (take === 0) return;
-    // Over the in-flight budget: keep the records; a running batch's finally() retries.
-    if (take > this.batchRoom()) return;
-    this.executeBatch(this.pendingBatch.splice(0, take));
-    if (this.pendingBatch.length > 0) this.scheduleBatchFlush();
+    if (this.pendingBatch.length === 0) return;
+    this.executeBatch(this.pendingBatch.splice(0));
   }
 
   private executeBatch(records: TestJobRecord<D, R>[]): void {
