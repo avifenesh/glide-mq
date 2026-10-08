@@ -940,6 +940,16 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   }
 
   /**
+   * @internal Park an active record like glidemq_moveActiveToDelayed (moveToDelayed,
+   * budget pause): parkDelayed plus the `delay-changed` event with the delay in ms.
+   * Retry backoff and rate-limit parking stay silent, as in production.
+   */
+  parkActiveDelayed(record: TestJobRecord<D, R>, delayMs: number): void {
+    this.parkDelayed(record, delayMs);
+    this.emit('delay-changed', record.id, delayMs);
+  }
+
+  /**
    * @internal Release a delayed record now. Job.promote() sends it to waiting;
    * changeDelay(0) keeps a priority job parked as prioritized.
    */
@@ -2504,7 +2514,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         this.emit('budget-exceeded', job, record.id);
         if (budget?.onExceeded === 'pause') {
           // Like moveActiveToDelayed(now + 24h): parked until the budget is raised and the job promoted.
-          this.queue.parkDelayed(record, 86_400_000);
+          this.queue.parkActiveDelayed(record, 86_400_000);
           this.activeCount--;
           if (this.running && !this.queue.isPaused()) {
             this.processAvailable();
@@ -2588,7 +2598,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         }
         // moveToDelayed: park without counting an attempt, promote at the timestamp.
         if (err instanceof DelayedError) {
-          this.queue.parkDelayed(record, Math.max(0, err.delayedUntil - Date.now()));
+          this.queue.parkActiveDelayed(record, Math.max(0, err.delayedUntil - Date.now()));
           return;
         }
 

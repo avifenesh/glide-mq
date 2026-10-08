@@ -164,7 +164,7 @@ describe('email processor', () => {
 
 Options: `concurrency`, `batch`, `limiter` (`{ max, duration }`, same semantics as `WorkerOptions.limiter`), `tokenLimiter`, `backoffStrategies`, `deadLetterQueue`.
 
-The queue also emits `added`, `removed`, `promoted`, `delay-changed`, `priority-changed`, `revoked`, `retrying`, `completed`, `failed`, `suspended`, `resumed` and `drained`, mirroring the production event stream.
+The queue also emits `added`, `removed`, `promoted`, `delay-changed` (also when a job is parked by `job.moveToDelayed()` or a budget `pause`, args `(jobId, delayMs)`), `priority-changed`, `revoked`, `retrying`, `completed`, `failed`, `suspended`, `resumed` and `drained`, mirroring the production event stream.
 
 ---
 

@@ -3658,3 +3658,62 @@ describe('TestQueue.waitForJobs', () => {
     expect((await queue.getJobCounts()).completed).toBe(2);
   });
 });
+
+describe('TestQueue delay-changed from moveActiveToDelayed', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it('moveToDelayed emits delay-changed with the job id and the delay in ms', async () => {
+    queue = new TestQueue('dc-move');
+    const changed: [string, number][] = [];
+    queue.on('delay-changed', (id: string, delay: number) => changed.push([id, delay]));
+    worker = new TestWorker(queue, async (job: any) => {
+      if (!job.data.step) await job.moveToDelayed(Date.now() + 30_000, 'next');
+      return 'ok';
+    });
+    const job = await queue.add('steps', {});
+    await waitFor(() => changed.length === 1, 2000, 2);
+    expect(changed[0][0]).toBe(job!.id);
+    expect(changed[0][1]).toBeGreaterThan(29_000);
+    expect(changed[0][1]).toBeLessThanOrEqual(30_000);
+    expect(await job!.getState()).toBe('delayed');
+  });
+
+  it('a budget pause emits delay-changed with 24h', async () => {
+    queue = new TestQueue('dc-budget');
+    queue.setBudget('flow', { maxTotalTokens: 1, onExceeded: 'pause' });
+    queue.budgets.get('flow')!.exceeded = true;
+    await queue.pause();
+    const changed: [string, number][] = [];
+    queue.on('delay-changed', (id: string, delay: number) => changed.push([id, delay]));
+    const job = await queue.add('capped', {});
+    queue.jobs.get(job!.id)!.budgetKey = 'flow';
+    worker = new TestWorker(queue, async () => 'never');
+    await queue.resume();
+    await waitFor(() => changed.length === 1, 2000, 2);
+    expect(changed).toEqual([[job!.id, 86_400_000]]);
+  });
+
+  it('retry backoff and an initial delay do not emit delay-changed', async () => {
+    queue = new TestQueue('dc-silent');
+    const changed: string[] = [];
+    queue.on('delay-changed', (id: string) => changed.push(id));
+    let calls = 0;
+    worker = new TestWorker(queue, async () => {
+      if (++calls === 1) throw new Error('retry me');
+      return 'ok';
+    });
+    const jobs = await queue.addBulk([
+      { name: 'a', data: {}, opts: { attempts: 2, backoff: { type: 'fixed', delay: 10 } } },
+      { name: 'b', data: {}, opts: { delay: 10 } },
+    ]);
+    await queue.waitForJobs(jobs, { timeout: 2000 });
+    expect(changed).toEqual([]);
+  });
+});
