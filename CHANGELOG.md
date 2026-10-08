@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-08
+
 ### Added
 
 - **`TestQueue.waitForJobs()`** waits for a batch of jobs, ignores deduplicated adds and tracks terminal completion even when retention removes records. `moveToDelayed()` emits `delay-changed` in testing mode.
