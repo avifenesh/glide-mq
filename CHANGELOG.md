@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-08
+
+### Added
+
+- **`TestQueue.waitForJobs()`** waits for a batch of jobs, ignores deduplicated adds and tracks terminal completion even when retention removes records. `moveToDelayed()` emits `delay-changed` in testing mode.
+
+- **Error classes from `glide-mq/testing`**: `GlideMQError`, `ConnectionError`, `UnrecoverableError`, `DelayedError`, `BatchError`, `WaitingChildrenError`, `SuspendError` and `GroupRateLimitError` (plus the `GroupRateLimitOptions` type) are re-exported, so a test can throw and match them without importing the main entry, which loads the native client. They are the same classes, so `instanceof` works across both entries.
+- **Flows in `glide-mq/testing`**: `TestFlowProducer` (`add` with `budget`, `addBulk`, `addDAG`) builds parent-child flows over the open `TestQueue` instances, with children in any queue. A parent starts in `waiting-children` and moves to `waiting` when its last child completes. `TestJob` gets `getChildrenValues()`, `getParents()` and `moveToWaitingChildren()`, and `chain`, `group`, `chord` and `dag` are exported with the production signatures and no connection. Failed and removed child semantics are not mirrored yet.
+
+### Fixed
+
+- Testing mode preserves queue state and replacement jobs when an active job outlives its record, including late waiting-children requests.
+- A testing-mode batch never claims beyond its available concurrency budget.
+- Job waiters keep Node alive until completion or timeout.
+- Testing-mode control requests are cleared for each activation, so retries, resumes and batch workers do not consume stale requests.
+- Broadcast reclaim refreshes the new claim's heartbeat before redispatch, preventing repeated reclaim before activation.
+
 ---
 
 ## [0.17.0] - 2026-10-04
@@ -30,6 +47,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Token bucket refilled from a future `tbLastRefill`**: group setup stamped `tbLastRefill` from the producer's `Date.now()`, so a producer whose clock ran ahead left a full bucket with a future refill stamp. `tbRefill` returned early at capacity without touching it, and the first consumption then refilled with zero elapsed time, so the time since that consumption never counted and the bucket stayed empty longer than `1/refillRate`. Group setup now seeds `tbLastRefill` from the server clock, and `tbRefill` pulls any stamp that differs from server time back to it while the bucket is full. Server function library version is now `133`; workers and producers reload it on connect.
 - **`TestWorker` batch mode exceeded `concurrency`**: a slow partial batch followed by a full batch, or by a timed partial flush, started a second batch processor while the first was still running, so `concurrency: 1` could run two processors at once and `concurrency * batch.size` jobs could be exceeded. Like the production `Worker`, `concurrency: 1` now runs one batch at a time and higher concurrency keeps at most `concurrency * batch.size` jobs in flight; a batch claims only `min(batch.size, concurrency * batch.size - inFlight)` records and leaves the rest waiting for other workers, as the production `Worker` does.
 - **`TestWorker` rejects a queue name**: passing a string (the production `Worker` signature) instead of a `TestQueue` instance threw `Cannot read properties of undefined (reading 'add')` from inside the worker; it now throws a `GlideMQError` naming the expected argument.
+- **`TestWorker` with a job removed or obliterated while active**: a job still being processed when its record left the store (`obliterate({ force: true })`, `remove()`) could delete, dequeue or park the job that reuses its id once the id counter restarts, and wrote metrics and queue events for a job that no longer exists. Like `glidemq_completeAndFetchNext` and `glidemq_fail` on a missing hash, it now changes nothing in the queue; only the worker's own `completed` / `failed` event is still emitted, as `BaseWorker` does. Records left in a worker's partial batch are matched by identity too, so an obliterated one is no longer dispatched or handed back on close.
 
 ---
 

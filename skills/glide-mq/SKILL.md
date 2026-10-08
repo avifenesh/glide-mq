@@ -8,7 +8,7 @@ description: >-
 license: Apache-2.0
 metadata:
   author: glide-mq
-  version: '0.17.0'
+  version: '0.18.0'
   tags: glide-mq, message-queue, valkey, redis, job-queue, worker, streams, ai-native, llm, vector-search
   sources: docs/USAGE.md, docs/ADVANCED.md, docs/WORKFLOWS.md, docs/BROADCAST.md, docs/SERVERLESS.md, docs/TESTING.md, docs/OBSERVABILITY.md
 ---

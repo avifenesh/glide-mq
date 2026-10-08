@@ -14,6 +14,7 @@ glide-mq ships a built-in in-memory backend so you can unit-test job processors 
 - [Batch Testing](#batch-testing)
 - [Deduplication Testing](#deduplication-testing)
 - [Step Jobs in Tests](#step-jobs-in-tests)
+- [Flows and Workflows in Tests](#flows-and-workflows-in-tests)
 - [AI Primitives in Tests](#ai-primitives-in-tests)
 - [Tips](#tips)
 - [Known Limitations](#known-limitations)
@@ -108,26 +109,27 @@ describe('email processor', () => {
 
 ### TestQueue
 
-| Method                                  | Description                                                                                                                          |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `add(name, data, opts?)`                | Enqueue a job; `delay` parks it in `delayed`, `priority` parks it in `prioritized`, otherwise a worker picks it up immediately       |
-| `addBulk(jobs)`                         | Enqueue multiple jobs                                                                                                                |
-| `addAndWait(name, data, opts?)`         | Add a job and resolve with its return value, or reject with the failed reason; `waitTimeout` (default 30 s) bounds the wait          |
-| `getJob(id)`                            | Retrieve a job by ID                                                                                                                 |
-| `getJobs(state, start?, end?)`          | List jobs by state. `waiting` follows the worker dispatch order, `delayed` follows the scheduled order and includes prioritized jobs |
-| `getJobCounts()`                        | Returns `{ waiting, active, delayed, completed, failed }`; `delayed` counts prioritized jobs too, like production                    |
-| `getJobCountByTypes()` / `count()`      | Alias for `getJobCounts()`; `count()` is the FIFO stream length (waiting and active FIFO jobs)                                       |
-| `searchJobs(opts)`                      | Filter jobs by state, name, and/or data fields                                                                                       |
-| `getJobLogs(id, start?, end?)`          | Read the lines a processor appended with `job.log()`                                                                                 |
-| `getSuspendedJobs(start?, end?, opts?)` | List suspended jobs ordered by their timeout deadline                                                                                |
-| `revoke(jobId)`                         | Fail a waiting / delayed / prioritized job with reason `revoked`, flag any other existing job; returns the same strings as `Queue`   |
-| `getDeadLetterJobs(...)`                | List this queue's dead-letter jobs; `getDeadLetterJob`, `removeDeadLetterJob` and `replayDeadLetterJob` work on one entry            |
-| `retryJobs(opts?)`                      | Move failed jobs back to waiting                                                                                                     |
-| `drain(delayed?)`                       | Remove waiting jobs; pass `true` to also remove delayed and prioritized jobs                                                         |
-| `obliterate(opts?)`                     | Wipe jobs, schedulers, dedup entries, budgets and metrics; refuses while jobs are active unless `{ force: true }`                    |
-| `pause()` / `resume()`                  | Pause / resume the queue                                                                                                             |
-| `isPaused()`                            | Check pause state (synchronous, returns `boolean` - note: real `Queue.isPaused()` is async)                                          |
-| `close()`                               | Close the queue, clear every timer and reject pending `addAndWait` calls                                                             |
+| Method                                  | Description                                                                                                                                                                                                              |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `add(name, data, opts?)`                | Enqueue a job; `delay` parks it in `delayed`, `priority` parks it in `prioritized`, otherwise a worker picks it up immediately                                                                                           |
+| `addBulk(jobs)`                         | Enqueue multiple jobs                                                                                                                                                                                                    |
+| `addAndWait(name, data, opts?)`         | Add a job and resolve with its return value, or reject with the failed reason; `waitTimeout` (default 30 s) bounds the wait                                                                                              |
+| `waitForJobs(jobs, opts?)`              | Resolve once every job from `addBulk()` / `add()` has settled (`null` entries ignored, a removed record counts as settled); rejects with the first terminal failure or on `timeout` (default 30 s); workers keep running |
+| `getJob(id)`                            | Retrieve a job by ID                                                                                                                                                                                                     |
+| `getJobs(state, start?, end?)`          | List jobs by state. `waiting` follows the worker dispatch order, `delayed` follows the scheduled order and includes prioritized jobs                                                                                     |
+| `getJobCounts()`                        | Returns `{ waiting, active, delayed, completed, failed }`; `delayed` counts prioritized jobs too, like production                                                                                                        |
+| `getJobCountByTypes()` / `count()`      | Alias for `getJobCounts()`; `count()` is the FIFO stream length (waiting and active FIFO jobs)                                                                                                                           |
+| `searchJobs(opts)`                      | Filter jobs by state, name, and/or data fields                                                                                                                                                                           |
+| `getJobLogs(id, start?, end?)`          | Read the lines a processor appended with `job.log()`                                                                                                                                                                     |
+| `getSuspendedJobs(start?, end?, opts?)` | List suspended jobs ordered by their timeout deadline                                                                                                                                                                    |
+| `revoke(jobId)`                         | Fail a waiting / delayed / prioritized job with reason `revoked`, flag any other existing job; returns the same strings as `Queue`                                                                                       |
+| `getDeadLetterJobs(...)`                | List this queue's dead-letter jobs; `getDeadLetterJob`, `removeDeadLetterJob` and `replayDeadLetterJob` work on one entry                                                                                                |
+| `retryJobs(opts?)`                      | Move failed jobs back to waiting                                                                                                                                                                                         |
+| `drain(delayed?)`                       | Remove waiting jobs; pass `true` to also remove delayed and prioritized jobs                                                                                                                                             |
+| `obliterate(opts?)`                     | Wipe jobs, schedulers, dedup entries, budgets and metrics; refuses while jobs are active unless `{ force: true }`                                                                                                        |
+| `pause()` / `resume()`                  | Pause / resume the queue                                                                                                                                                                                                 |
+| `isPaused()`                            | Check pause state (synchronous, returns `boolean` - note: real `Queue.isPaused()` is async)                                                                                                                              |
+| `close()`                               | Close the queue, clear every timer and reject pending `addAndWait` and `waitForJobs` calls                                                                                                                               |
 
 ### TestJob
 
@@ -142,6 +144,9 @@ describe('email processor', () => {
 | `retry()`                                | Move a failed job back to waiting (attempts reset, TTL re-armed); throws `Cannot retry: not_failed`                                                               |
 | `remove()`                               | Remove the job; the queue emits `removed`                                                                                                                         |
 | `moveToFailed(err)`                      | From inside the processor: fail the active job instead of completing it, then the attempts / backoff rules apply                                                  |
+| `getChildrenValues()`                    | Return values of the completed children, keyed `prefix:{queue}:id` like `Job.getChildrenValues()`; a child that is not completed, or was removed, is absent       |
+| `getParents()`                           | `[{ queue, id }]` for each parent, `[]` without one                                                                                                               |
+| `moveToWaitingChildren()`                | From inside the processor: park the job in `waiting-children` until its children complete, then run the processor again; throws outside an active worker          |
 | `log(message)`                           | Append a log line readable through `queue.getJobLogs()`                                                                                                           |
 | `updateData(data)` / `updateProgress(p)` | Persist to the stored job                                                                                                                                         |
 
@@ -163,7 +168,7 @@ describe('email processor', () => {
 
 Options: `concurrency`, `batch`, `limiter` (`{ max, duration }`, same semantics as `WorkerOptions.limiter`), `tokenLimiter`, `backoffStrategies`, `deadLetterQueue`.
 
-The queue also emits `added`, `removed`, `promoted`, `delay-changed`, `priority-changed`, `revoked`, `retrying`, `completed`, `failed`, `suspended`, `resumed` and `drained`, mirroring the production event stream.
+The queue also emits `added`, `removed`, `promoted`, `delay-changed` (also when a job is parked by `job.moveToDelayed()` or a budget `pause`, args `(jobId, delayMs)`), `priority-changed`, `revoked`, `retrying`, `completed`, `failed`, `suspended`, `resumed` and `drained`, mirroring the production event stream.
 
 ---
 
@@ -317,7 +322,7 @@ expect(completed).toHaveLength(3);
 To test `BatchError` handling (partial failures), throw a `BatchError` from the processor with a map of failed indices:
 
 ```typescript
-import { BatchError } from 'glide-mq';
+import { BatchError } from 'glide-mq/testing';
 
 const worker = new TestWorker(
   queue,
@@ -396,6 +401,39 @@ const job = await queue.add('flow', {});
 
 ---
 
+## Flows and Workflows in Tests
+
+`TestFlowProducer` builds parent-child flows over the open `TestQueue` instances, looked up by name, so children may live in other queues. A queue must exist before a flow names it. `chain`, `group`, `chord` and `dag` have the signatures of the production helpers, are built on `TestFlowProducer`, and need no connection (the `connection` argument is accepted and ignored).
+
+```typescript
+import { TestQueue, TestWorker, TestFlowProducer, chord } from 'glide-mq/testing';
+
+const parents = new TestQueue('report');
+const children = new TestQueue('fetch');
+new TestWorker(children, async (job) => job.data.url.length);
+new TestWorker(parents, async (job) => Object.values(await job.getChildrenValues()));
+
+const flow = new TestFlowProducer();
+const node = await flow.add({
+  name: 'build',
+  queueName: 'report',
+  data: {},
+  children: [{ name: 'get', queueName: 'fetch', data: { url: 'https://example.com' } }],
+});
+// node.job.getState() is 'waiting-children' until the child completes, then the parent runs.
+
+// Same shape as the production helper; the callback receives the group results.
+await chord('report', [{ name: 'a', data: {} }], { name: 'summarize', data: {} });
+```
+
+- `add(flow, { budget })` and `addBulk(flows)` return the production `JobNode` shape, `{ job, children }`. A parent is created in `waiting-children` (a `delay` on it is ignored) and moves to `waiting` when its last child completes. `job.getState()` reports `waiting-children`; `getJobCounts()` does not count it, like production.
+- `budget` is shared by every job of the flow, keyed by the root job id on the root queue (`queue.getFlowBudget(rootId)`).
+- `getChildrenValues()` keys children `glide:{queue}:id` (the `prefix` option of `TestFlowProducer`, `chain`, `group`, `chord` and `dag` replaces `glide`).
+- Children added from a processor with `queue.add(name, data, { parent: { queue, id } })` count as children of that parent. After adding them, call `job.updateData()` to advance a step, then `job.moveToWaitingChildren()`; the processor runs again from the top once they complete.
+- `TestFlowProducer.addDAG()` exists because `dag()` needs it: nodes with `deps` wait in `waiting-children` for all of them, and a node with several dependents lists each one in `getParents()`.
+
+---
+
 ## AI Primitives in Tests
 
 All AI-native primitives have full testing mode parity - no Valkey needed.
@@ -451,6 +489,7 @@ Call job.suspend() inside the processor, then queue.signal() from outside. Use g
 ## Tips
 
 - **No connection config needed.** `TestQueue` takes only a name — no `connection` option.
+- **Error classes come from `glide-mq/testing` too.** `UnrecoverableError`, `BatchError`, `SuspendError`, `DelayedError`, `GlideMQError` and the other error classes of `glide-mq` are re-exported, so a test that only uses `TestQueue` and `TestWorker` does not have to import the main entry (which loads the native client). They are the same classes, so `instanceof` works across both entries.
 - **Options are validated like production.** `TestQueue.add()` runs the same checks as `Queue.add()` (priority <= 2048, payload size, `ttl`, `lockDuration`, `cost`, `jobId`, ordering key, `lifo` with ordering) and throws the same errors. `job.updateData()` and `job.updateProgress()` persist to the stored job, so `queue.getJob()` sees the new values.
 - **Processing is synchronous-ish.** `TestWorker` processes jobs immediately when they are added via `queue.add()`. In most tests you can check state right after the `await queue.add(...)` call.
 - **Dispatch order matches the worker.** Jobs with `priority > 0` run first (lower number = higher priority, FIFO within a priority), then `lifo` jobs (newest first), then plain FIFO jobs. A `lifo` job with a priority is dispatched as LIFO, like production. `queue.getJobs('waiting')` lists jobs in that same order.
@@ -477,7 +516,9 @@ Behaviour that testing mode does not mirror. Everything else in this document fo
 
 - **Ordering keys and concurrency groups are not enforced.** `ordering` options are validated and stored, but jobs sharing a key run concurrently and in dispatch order. `job.rateLimitGroup()` and `queue.rateLimitGroup()` do not exist on the test classes.
 - **No global concurrency or queue-wide rate limit.** `setGlobalConcurrency`, `setGlobalRateLimit`, `removeGlobalRateLimit` and `getGlobalRateLimit` are not available; use the `TestWorker` `concurrency` and `limiter` options instead.
-- **No flows or DAGs.** There is no `FlowProducer` counterpart; `job.getChildrenValues()`, `job.getParents()` and `job.moveToWaitingChildren()` are not available. `getFlowUsage()` and flow budgets work through `opts.parent.id` and `setBudget()`.
+- **Group rate limiting is not handled.** `GroupRateLimitError` is exported, but `TestWorker` treats it as an ordinary failure. `WaitingChildrenError` parks single jobs in waiting-children; batch workers treat it as a failure.
+- **Flows stop at the happy path.** A failed or removed child does not fail, release or re-count its parent: the parent stays in `waiting-children`, and removing a parent or child does not clean up the other side. `TestFlowProducer` takes only the `prefix` option and has `add`, `addBulk`, `addDAG` and `close`.
+- **Batch workers do not check or charge budgets.** A `TestWorker` in `batch` mode skips the pre-dispatch budget check and the post-completion usage charge, for flow budgets too; only single-job workers enforce them.
 - **No abort support.** `worker.abortJob()` and `job.abortSignal` are not available; `close()` waits for nothing and lets running processors finish on their own.
 - **Sandbox processors are CJS only.** A file path processor must be a `.js` (CommonJS) module; `.mjs` throws.
 - **`isPaused()` is synchronous** on `TestQueue`; the real `Queue.isPaused()` returns a promise. `await` works on both.

@@ -12,6 +12,7 @@ import type { JobOptions } from '../src/types';
 import { BatchError } from '../src/errors';
 import { MAX_JOB_DATA_SIZE } from '../src/utils';
 import { waitFor } from './helpers/fixture';
+import { existsSync } from 'fs';
 
 const ECHO_PROCESSOR = path.resolve(__dirname, 'fixtures/processors/echo.js');
 
@@ -456,6 +457,77 @@ describe('TestWorker', () => {
 
     expect(completed).toHaveLength(1);
     expect(completed[0].result).toEqual({ greeting: 'hello' });
+  });
+});
+
+describe('error classes exported by glide-mq/testing', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it.each([
+    'GlideMQError',
+    'ConnectionError',
+    'UnrecoverableError',
+    'DelayedError',
+    'BatchError',
+    'WaitingChildrenError',
+    'SuspendError',
+    'GroupRateLimitError',
+  ] as const)('%s is the class of the main entry', async (name) => {
+    const errors = await import('../src/errors');
+    const testing = await import('../src/testing');
+    expect(typeof testing[name]).toBe('function');
+    expect(testing[name]).toBe(errors[name]);
+  });
+
+  // The package exports the built files, so check those too. Skipped when dist is not built,
+  // like the other tests that load dist (npm run build).
+  it.skipIf(!existsSync(path.resolve(__dirname, '../dist/testing.js')))(
+    'the built testing entry exports the same classes as the built errors module',
+    () => {
+      const built = require('../dist/testing') as typeof import('../src/testing');
+      const builtErrors = require('../dist/errors') as typeof import('../src/errors');
+      for (const name of [
+        'GlideMQError',
+        'ConnectionError',
+        'UnrecoverableError',
+        'DelayedError',
+        'BatchError',
+        'WaitingChildrenError',
+        'SuspendError',
+        'GroupRateLimitError',
+      ] as const) {
+        expect(typeof built[name]).toBe('function');
+        expect(built[name]).toBe(builtErrors[name]);
+      }
+    },
+  );
+
+  it('keeps the subclasses instances of GlideMQError', async () => {
+    const testing = await import('../src/testing');
+    expect(new testing.UnrecoverableError('x')).toBeInstanceOf(testing.GlideMQError);
+    expect(new testing.SuspendError()).toBeInstanceOf(testing.GlideMQError);
+  });
+
+  it('UnrecoverableError from the testing entry fails the job without using the remaining attempts', async () => {
+    const { UnrecoverableError } = await import('../src/testing');
+    queue = new TestQueue('errors-unrecoverable');
+    let calls = 0;
+    worker = new TestWorker(queue, async () => {
+      calls++;
+      throw new UnrecoverableError('do not retry');
+    });
+
+    const job = await queue.add('job', {}, { attempts: 3, backoff: { type: 'fixed', delay: 0 } });
+    expect(await job!.waitUntilFinished(5, 2000)).toBe('failed');
+    expect(calls).toBe(1);
+    expect((await queue.getJob(job!.id))!.failedReason).toBe('do not retry');
   });
 });
 
@@ -2188,6 +2260,543 @@ describe('TestWorker failure paths (coverage)', () => {
   });
 });
 
+describe('TestWorker with a job removed or obliterated while active', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+  /** Holds every job open until `release(tag)` is called, keyed by the tag of the first job in the call. */
+  function gate() {
+    const waiters = new Map<string, () => void>();
+    const hold = (tag: string) => new Promise<void>((resolve) => waiters.set(tag, resolve));
+    return { hold, release: (tag: string) => waiters.get(tag)?.() };
+  }
+
+  /** Collects the 'completed' and 'failed' events of the worker and of the queue as `<type> <tag>`. */
+  function collect(w: TestWorker, q: TestQueue) {
+    const events = { worker: [] as string[], queue: [] as string[] };
+    for (const type of ['completed', 'failed'] as const) {
+      w.on(type, (job) => events.worker.push(`${type} ${job.data.tag}`));
+      q.on(type, (job) => events.queue.push(`${type} ${job.data.tag}`));
+    }
+    return events;
+  }
+
+  it.each([
+    ['completes', { removeOnComplete: true }, {}, 'completed a'],
+    ['fails', { removeOnFail: true }, { fail: true }, 'failed a'],
+  ])(
+    'a job that %s after the queue was obliterated only reaches its worker and leaves the job that reuses its id alone',
+    async (_label, opts, extra, workerEvent) => {
+      queue = new TestQueue('obliterate-inflight-terminal');
+      const { hold, release } = gate();
+      worker = new TestWorker(queue, async (job) => {
+        await hold(job.data.tag);
+        if (job.data.fail) throw new Error(`failed ${job.data.tag}`);
+        return job.data.tag;
+      });
+      const events = collect(worker, queue);
+
+      const a = await queue.add('job', { tag: 'a', ...extra }, opts);
+      await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+      await queue.obliterate({ force: true });
+      const b = await queue.add('job', { tag: 'b' });
+      // obliterate restarts the id counter, as the key wipe does in production
+      expect(b!.id).toBe(a!.id);
+
+      release('a');
+      await settle();
+      // like the worker after glidemq_completeAndFetchNext / glidemq_fail skipped the missing hash
+      expect(events.worker).toEqual([workerEvent]);
+      expect(events.queue).toEqual([]);
+      expect((await queue.getMetrics('completed')).data).toEqual([]);
+      expect((await queue.getMetrics('failed')).data).toEqual([]);
+      // b is neither deleted by the retention of a nor dequeued, and is dispatched next
+      expect(queue.jobs.get(b!.id)?.state).toBe('active');
+      expect(worker.getActiveCount()).toBe(1);
+
+      release('b');
+      expect(await b!.waitUntilFinished(5, 2000)).toBe('completed');
+      expect(events.worker).toEqual([workerEvent, 'completed b']);
+      expect(events.queue).toEqual(['completed b']);
+      expect(worker.getActiveCount()).toBe(0);
+    },
+  );
+
+  it('a retryable failure after the queue was obliterated does not park the job that reuses its id', async () => {
+    queue = new TestQueue('obliterate-inflight-retry');
+    const { hold, release } = gate();
+    worker = new TestWorker(queue, async (job) => {
+      await hold(job.data.tag);
+      if (job.data.fail) throw new Error(`failed ${job.data.tag}`);
+      return job.data.tag;
+    });
+    const events = collect(worker, queue);
+    queue.on('retrying', () => events.queue.push('retrying'));
+
+    const a = await queue.add('job', { tag: 'a', fail: true }, { attempts: 3, backoff: { type: 'fixed', delay: 0 } });
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await queue.obliterate({ force: true });
+    const b = await queue.add('job', { tag: 'b' });
+    expect(b!.id).toBe(a!.id);
+
+    release('a');
+    await settle();
+    // no retry is scheduled, so b stays dispatchable and is not dequeued by the retry of a
+    expect(events.worker).toEqual(['failed a']);
+    expect(events.queue).toEqual([]);
+    expect(queue.jobs.get(b!.id)?.state).toBe('active');
+    expect(worker.getActiveCount()).toBe(1);
+
+    release('b');
+    expect(await b!.waitUntilFinished(5, 2000)).toBe('completed');
+    expect(worker.getActiveCount()).toBe(0);
+  });
+
+  it.each([
+    ['returns results', (jobs: TestJob[]) => jobs.map((j) => j.data.tag), ['completed a1', 'completed a2']],
+    [
+      'throws a BatchError',
+      (jobs: TestJob[]) => {
+        throw new BatchError(jobs.map((j, i) => (i === 0 ? new Error('bad') : j.data.tag)));
+      },
+      ['failed a1', 'completed a2'],
+    ],
+    [
+      'throws',
+      () => {
+        throw new Error('boom');
+      },
+      ['failed a1', 'failed a2'],
+    ],
+  ])(
+    'a batch that %s after the queue was obliterated only reaches its worker',
+    async (_label, outcome, workerEvents) => {
+      queue = new TestQueue('obliterate-inflight-batch');
+      const { hold, release } = gate();
+      worker = new TestWorker(
+        queue,
+        async (jobs: TestJob[]) => {
+          await hold(jobs[0].data.tag);
+          return outcome(jobs);
+        },
+        { batch: { size: 2 } },
+      );
+      const events = collect(worker, queue);
+
+      const retention = { removeOnComplete: true, removeOnFail: true };
+      await queue.pause();
+      await queue.add('job', { tag: 'a1' }, retention);
+      await queue.add('job', { tag: 'a2' }, retention);
+      await queue.resume();
+      await waitFor(() => worker!.getActiveCount() === 2, 2000, 2);
+      await queue.obliterate({ force: true });
+      await queue.add('job', { tag: 'b1' });
+      await queue.add('job', { tag: 'b2' });
+
+      release('a1');
+      await settle();
+      expect(events.worker).toEqual(workerEvents);
+      expect(events.queue).toEqual([]);
+      expect((await queue.getMetrics('completed')).data).toEqual([]);
+      expect((await queue.getMetrics('failed')).data).toEqual([]);
+      expect([...queue.jobs.values()].map((r) => `${r.data.tag}:${r.state}`)).toEqual(['b1:active', 'b2:active']);
+      expect(worker.getActiveCount()).toBe(2);
+
+      release('b1');
+      await waitFor(() => worker!.getActiveCount() === 0, 2000, 2);
+      expect(events.worker.slice(workerEvents.length)).toHaveLength(2);
+      expect(events.queue).toHaveLength(2);
+      expect([...events.worker.slice(workerEvents.length), ...events.queue].every((e) => /b[12]$/.test(e))).toBe(true);
+    },
+  );
+
+  it('a job removed while active only reaches its worker', async () => {
+    queue = new TestQueue('removed-inflight');
+    const { hold, release } = gate();
+    worker = new TestWorker(queue, async (job) => {
+      await hold(job.data.tag);
+      return job.data.tag;
+    });
+    const events = collect(worker, queue);
+
+    const a = await queue.add('job', { tag: 'a' });
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await a!.remove();
+    release('a');
+    await settle();
+    expect(events.worker).toEqual(['completed a']);
+    expect(events.queue).toEqual([]);
+    expect((await queue.getMetrics('completed')).data).toEqual([]);
+    expect(await queue.getJob(a!.id)).toBeNull();
+  });
+
+  it('a job removed while active still charges its usage to the flow budget', async () => {
+    queue = new TestQueue('removed-inflight-budget');
+    queue.setBudget('flow-r', { maxTotalTokens: 100, onExceeded: 'fail' });
+    const { hold, release } = gate();
+    worker = new TestWorker(queue, async (job) => {
+      await job.reportUsage({ tokens: { input: 7 }, costs: { usd: 0.5 }, totalTokens: 7, totalCost: 0.5 });
+      await hold(job.data.tag);
+      return 'x';
+    });
+    const exceeded: string[] = [];
+    worker.on('budget-exceeded', (_job, id) => exceeded.push(String(id)));
+
+    await queue.pause();
+    const a = await queue.add('job', { tag: 'a' });
+    queue.jobs.get(a!.id)!.budgetKey = 'flow-r';
+    await queue.resume();
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await a!.remove();
+    release('a');
+    await settle();
+    const budget = queue.budgets.get('flow-r')!;
+    expect(budget.usedTokens).toBe(7);
+    expect(budget.usedCost).toBe(0.5);
+    expect(exceeded).toEqual([]);
+  });
+
+  it('a removed job whose usage exceeds the budget emits budget-exceeded on its worker', async () => {
+    queue = new TestQueue('removed-inflight-budget-exceeded');
+    queue.setBudget('flow-e', { maxTotalTokens: 5, onExceeded: 'fail' });
+    const { hold, release } = gate();
+    worker = new TestWorker(queue, async (job) => {
+      await job.reportUsage({ tokens: { input: 9 }, totalTokens: 9 });
+      await hold(job.data.tag);
+      return 'x';
+    });
+    const exceeded: string[] = [];
+    worker.on('budget-exceeded', (_job, id) => exceeded.push(String(id)));
+
+    await queue.pause();
+    const a = await queue.add('job', { tag: 'a' });
+    queue.jobs.get(a!.id)!.budgetKey = 'flow-e';
+    await queue.resume();
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await a!.remove();
+    release('a');
+    await settle();
+    expect(exceeded).toEqual([a!.id]);
+    expect(queue.budgets.get('flow-e')!.exceeded).toBe(true);
+  });
+
+  it('a job removed while active still counts toward the worker TPM window', async () => {
+    queue = new TestQueue('removed-inflight-tpm');
+    const { hold, release } = gate();
+    worker = new TestWorker(
+      queue,
+      async (job) => {
+        await job.reportTokens(40);
+        await hold(job.data.tag);
+        return 'x';
+      },
+      { tokenLimiter: { maxTokens: 1000, duration: 60_000 } },
+    );
+
+    const a = await queue.add('job', { tag: 'a' });
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await a!.remove();
+    release('a');
+    await settle();
+    expect((worker as unknown as { tpmLocalCounter: number }).tpmLocalCounter).toBe(40);
+  });
+
+  it.each([
+    ['only totalTokens', { totalTokens: 3 }, 3, 0],
+    ['only totalCost', { totalCost: 0.25 }, 0, 0.25],
+    ['only token categories', { tokens: { input: 4 } }, 4, 0],
+    ['only cost categories', { costs: { usd: 0.1 } }, 0, 0],
+    ['an empty usage', {}, 0, 0],
+  ])('charges a removed job with %s without requiring the other usage fields', async (_label, usage, tokens, cost) => {
+    queue = new TestQueue('removed-inflight-partial-usage');
+    queue.setBudget('flow-p', { maxTotalTokens: 100, onExceeded: 'fail' });
+    const { hold, release } = gate();
+    worker = new TestWorker(
+      queue,
+      async (job) => {
+        job.usage = usage as TestJob['usage'];
+        await hold(job.data.tag);
+        return 'x';
+      },
+      { tokenLimiter: { maxTokens: 1000, duration: 60_000 } },
+    );
+
+    await queue.pause();
+    const a = await queue.add('job', { tag: 'a' });
+    queue.jobs.get(a!.id)!.budgetKey = 'flow-p';
+    await queue.resume();
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await a!.remove();
+    release('a');
+    await settle();
+    const budget = queue.budgets.get('flow-p')!;
+    expect(budget.usedTokens).toBe(tokens);
+    expect(budget.usedCost).toBe(cost);
+    expect((worker as unknown as { tpmLocalCounter: number }).tpmLocalCounter).toBe(
+      (usage as { totalTokens?: number }).totalTokens ?? 0,
+    );
+  });
+
+  describe('return value the serializer rejects', () => {
+    const circular = () => {
+      const value: Record<string, unknown> = {};
+      value.self = value;
+      return value;
+    };
+
+    it.each([
+      ['a job removed while active', true],
+      ['a job still in the store', false],
+    ])('fails %s with the worker message instead of completing it', async (_label, remove) => {
+      queue = new TestQueue('serialize-inflight');
+      const { hold, release } = gate();
+      worker = new TestWorker(queue, async (job) => {
+        await hold(job.data.tag);
+        return circular();
+      });
+      const events = collect(worker, queue);
+      const reasons: string[] = [];
+      worker.on('failed', (job) => reasons.push(job.failedReason ?? ''));
+
+      const a = await queue.add('job', { tag: 'a' });
+      await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+      if (remove) await a!.remove();
+      release('a');
+      await settle();
+      expect(events.worker).toEqual(['failed a']);
+      expect(reasons).toHaveLength(1);
+      expect(reasons[0]).toMatch(/^Serializer failed on return value: .*circular/i);
+      // a removed job leaves no queue event, a live one fails terminally
+      expect(events.queue).toEqual(remove ? [] : ['failed a']);
+      expect(worker.getActiveCount()).toBe(0);
+    });
+
+    it('reports a serializer that throws something other than an Error', async () => {
+      const serializer = {
+        serialize: (value: unknown) => {
+          if (value && (value as { bad?: boolean }).bad) throw 'refused';
+          return JSON.stringify(value);
+        },
+        deserialize: (raw: string) => JSON.parse(raw),
+      };
+      queue = new TestQueue('serialize-inflight-string', { serializer });
+      const { hold, release } = gate();
+      worker = new TestWorker(queue, async (job) => {
+        await hold(job.data.tag);
+        return { bad: true };
+      });
+      const reasons: string[] = [];
+      worker.on('failed', (job) => reasons.push(job.failedReason ?? ''));
+
+      const a = await queue.add('job', { tag: 'a' });
+      await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+      await a!.remove();
+      release('a');
+      await settle();
+      expect(reasons).toEqual(['Serializer failed on return value: refused']);
+    });
+
+    it.each([
+      ['returns results', (jobs: TestJob[]) => jobs.map((j) => (j.data.tag === 'a1' ? circular() : j.data.tag))],
+      [
+        'throws a BatchError',
+        (jobs: TestJob[]) => {
+          throw new BatchError(jobs.map((j) => (j.data.tag === 'a1' ? circular() : j.data.tag)));
+        },
+      ],
+    ])('a batch that %s fails only the removed job whose value cannot be serialized', async (_label, outcome) => {
+      queue = new TestQueue('serialize-inflight-batch');
+      const { hold, release } = gate();
+      worker = new TestWorker(
+        queue,
+        async (jobs: TestJob[]) => {
+          await hold(jobs[0].data.tag);
+          return outcome(jobs);
+        },
+        { batch: { size: 2 } },
+      );
+      const events = collect(worker, queue);
+
+      await queue.pause();
+      await queue.add('job', { tag: 'a1' });
+      await queue.add('job', { tag: 'a2' });
+      await queue.resume();
+      await waitFor(() => worker!.getActiveCount() === 2, 2000, 2);
+      const [a1] = await queue.getJobs('active');
+      await a1.remove();
+      release('a1');
+      await settle();
+      // a1 is gone and cannot be serialized: worker-local failure only. a2 still completes.
+      expect(events.worker.sort()).toEqual(['completed a2', 'failed a1']);
+      expect(events.queue).toEqual(['completed a2']);
+    });
+  });
+
+  it('keeps the worker paused for a RateLimitError thrown after the job was removed', async () => {
+    queue = new TestQueue('removed-inflight-ratelimit');
+    const { hold, release } = gate();
+    worker = new TestWorker(queue, async (job) => {
+      if (job.data.limit) {
+        await hold(job.data.tag);
+        const err = new TestWorker.RateLimitError();
+        err.delayMs = 300;
+        throw err;
+      }
+      return job.data.tag;
+    });
+    const events = collect(worker, queue);
+
+    const a = await queue.add('job', { tag: 'a', limit: true });
+    const b = await queue.add('job', { tag: 'b' });
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await a!.remove();
+    release('a');
+    await settle();
+    // like BaseWorker, the pause outlives the removed job: b is not dispatched inside the window
+    expect(queue.jobs.get(b!.id)?.state).toBe('waiting');
+    expect(worker.getActiveCount()).toBe(0);
+    expect(events.worker).toEqual([]);
+
+    expect(await b!.waitUntilFinished(5, 3000)).toBe('completed');
+    expect(events.worker).toEqual(['completed b']);
+  });
+
+  describe('a job dropped while active that then pauses itself', () => {
+    const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    const drops: Array<[string, (q: TestQueue, job: TestJob) => Promise<unknown>]> = [
+      ['removed', (_q, job) => job.remove()],
+      ['obliterated', (q) => q.obliterate({ force: true })],
+    ];
+
+    it.each(drops)('is not suspended again when it was %s', async (_label, drop) => {
+      queue = new TestQueue('suspend-inflight');
+      const { hold, release } = gate();
+      worker = new TestWorker(queue, async (job) => {
+        await hold(job.data.tag);
+        await job.suspend({ reason: 'wait', timeout: 30 });
+      });
+      const suspended: string[] = [];
+      queue.on('suspended', (job) => suspended.push(job.data.tag));
+
+      const a = await queue.add('job', { tag: 'a' });
+      await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+      await drop(queue, a!);
+      release('a');
+      await wait(80);
+      // no suspension was recorded for a job the store no longer holds
+      expect(suspended).toEqual([]);
+      expect(queue.jobs.size).toBe(0);
+      expect(worker.getActiveCount()).toBe(0);
+    });
+
+    it('does not park a record of an obliterated queue over the job that reuses its id', async () => {
+      queue = new TestQueue('delayed-inflight');
+      const { hold, release } = gate();
+      let runs = 0;
+      worker = new TestWorker(queue, async (job) => {
+        if (job.data.tag === 'b') return job.data.tag;
+        runs++;
+        await hold(job.data.tag);
+        await job.moveToDelayed(Date.now() + 20);
+      });
+
+      const a = await queue.add('job', { tag: 'a' });
+      await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+      await queue.obliterate({ force: true });
+      const b = await queue.add('job', { tag: 'b' }, { delay: 100 });
+      expect(b!.id).toBe(a!.id);
+
+      release('a');
+      // b keeps its own promotion timer and is not dropped from the dispatch order by a's late park
+      expect(await b!.waitUntilFinished(5, 3000)).toBe('completed');
+      expect(runs).toBe(1);
+      expect(queue.jobs.get(b!.id)?.data).toEqual({ tag: 'b' });
+    });
+  });
+
+  describe('a processor that returns no value', () => {
+    it('completes the job with an undefined return value', async () => {
+      queue = new TestQueue('undefined-result');
+      worker = new TestWorker(queue, async () => {});
+
+      const a = await queue.add('job', { tag: 'a' });
+      expect(await a!.waitUntilFinished(5, 3000)).toBe('completed');
+      expect(queue.jobs.get(a!.id)?.returnvalue).toBeUndefined();
+    });
+
+    it.each([
+      ['returns results', (jobs: TestJob[]) => jobs.map((j) => (j.data.tag === 'u1' ? undefined : j.data.tag))],
+      [
+        'throws a BatchError',
+        (jobs: TestJob[]) => {
+          throw new BatchError(jobs.map((j) => (j.data.tag === 'u1' ? undefined : j.data.tag)));
+        },
+      ],
+    ])('a batch that %s keeps an undefined entry undefined', async (_label, outcome) => {
+      queue = new TestQueue('undefined-result-batch');
+      worker = new TestWorker(queue, async (jobs: TestJob[]) => outcome(jobs), { batch: { size: 2 } });
+
+      await queue.pause();
+      const u1 = await queue.add('job', { tag: 'u1' });
+      const u2 = await queue.add('job', { tag: 'u2' });
+      await queue.resume();
+      await waitFor(
+        () => queue.jobs.get(u1!.id)?.state === 'completed' && queue.jobs.get(u2!.id)?.state === 'completed',
+        2000,
+        2,
+      );
+      expect(queue.jobs.get(u1!.id)?.returnvalue).toBeUndefined();
+      expect(queue.jobs.get(u2!.id)?.returnvalue).toBe('u2');
+    });
+  });
+
+  it('does not dispatch an obliterated record left in a partial batch', async () => {
+    queue = new TestQueue('obliterate-pending-batch');
+    const batches: string[][] = [];
+    worker = new TestWorker(
+      queue,
+      async (jobs: TestJob[]) => {
+        batches.push(jobs.map((j) => j.data.tag));
+        return jobs.map((j) => j.data.tag);
+      },
+      { batch: { size: 2, timeout: 60_000 } },
+    );
+
+    await queue.add('job', { tag: 'a' });
+    // let the worker take a into its partial batch before the queue is wiped
+    await settle();
+    await queue.obliterate({ force: true });
+    await queue.add('job', { tag: 'b' });
+    await queue.add('job', { tag: 'c' });
+    await waitFor(() => batches.length > 0, 2000, 5);
+    expect(batches).toEqual([['b', 'c']]);
+  });
+
+  it('does not hand an obliterated partial-batch record back to the queue on close', async () => {
+    queue = new TestQueue('obliterate-pending-close');
+    worker = new TestWorker(queue, async (jobs: TestJob[]) => jobs.map((j) => j.data.tag), {
+      batch: { size: 3, timeout: 60_000 },
+    });
+
+    await queue.add('job', { tag: 'a' });
+    await settle();
+    await queue.obliterate({ force: true });
+    await queue.add('job', { tag: 'b' });
+    await settle();
+    await worker.close();
+    worker = undefined;
+    expect(queue.waitingQueue.map((r) => r.data.tag)).toEqual(['b']);
+  });
+});
+
 describe('TestJob.moveToDelayed parity', () => {
   let queue: TestQueue;
   let worker: TestWorker;
@@ -3497,5 +4106,265 @@ describe('TestWorker dead-letter queue parity', () => {
       add.mockRestore();
       expect(await queue.getDeadLetterJob(dlqJob.id)).not.toBeNull();
     });
+  });
+});
+
+describe('TestQueue.waitForJobs', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  const listenerCount = (q: TestQueue) =>
+    ['completed', 'failed', 'revoked', 'removed', 'drained'].reduce((n, e) => n + q.listenerCount(e), 0);
+
+  it('resolves once every addBulk job completes and ignores null entries', async () => {
+    queue = new TestQueue('wfj-bulk');
+    worker = new TestWorker(queue, async (job: any) => job.data.n);
+    const jobs = await queue.addBulk([1, 2, 3].map((n) => ({ name: 'j', data: { n } })));
+    await queue.waitForJobs([...jobs, null, undefined], { timeout: 2000 });
+    expect((await queue.getJobCounts()).completed).toBe(3);
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('ignores deduplicated add() results', async () => {
+    queue = new TestQueue('wfj-dedup');
+    worker = new TestWorker(queue, async () => 'ok');
+    const opts = { deduplication: { id: 'same' } };
+    const first = await queue.add('j', {}, opts);
+    const second = await queue.add('j', {}, opts);
+    expect(second).toBeNull();
+    await queue.waitForJobs([first, second], { timeout: 2000 });
+    expect(await first!.getState()).toBe('completed');
+  });
+
+  it('resolves immediately when there is nothing to wait for', async () => {
+    queue = new TestQueue('wfj-empty');
+    await queue.waitForJobs([]);
+    await queue.waitForJobs([null]);
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('treats a removeOnComplete job as settled', async () => {
+    queue = new TestQueue('wfj-roc');
+    worker = new TestWorker(queue, async () => 'ok');
+    const jobs = await queue.addBulk([
+      { name: 'j', data: {}, opts: { removeOnComplete: true } },
+      { name: 'j', data: {} },
+    ]);
+    await queue.waitForJobs(jobs, { timeout: 2000 });
+    expect(await jobs[0].getState()).toBe('unknown');
+    expect(await jobs[1].getState()).toBe('completed');
+  });
+
+  it('treats a job whose record is already gone as settled', async () => {
+    queue = new TestQueue('wfj-gone');
+    const job = await queue.add('j', {});
+    queue.removeJob(job!.id);
+    await queue.waitForJobs([job], { timeout: 50 });
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('resolves for jobs that already completed', async () => {
+    queue = new TestQueue('wfj-already');
+    worker = new TestWorker(queue, async () => 'ok');
+    const jobs = await queue.addBulk([{ name: 'j', data: {} }]);
+    await waitFor(async () => (await jobs[0].getState()) === 'completed', 2000, 2);
+    await queue.waitForJobs(jobs, { timeout: 50 });
+  });
+
+  it('rejects with the failed reason of a terminal failure, also with removeOnFail', async () => {
+    queue = new TestQueue('wfj-fail');
+    worker = new TestWorker(queue, async () => {
+      throw new Error('boom');
+    });
+    const jobs = await queue.addBulk([{ name: 'j', data: {}, opts: { removeOnFail: true } }]);
+    await expect(queue.waitForJobs(jobs, { timeout: 2000 })).rejects.toThrow('boom');
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('ignores the failure of a job it is not waiting on', async () => {
+    queue = new TestQueue('wfj-unrelated');
+    worker = new TestWorker(queue, async (job: any) => {
+      if (job.data.bad) throw new Error('unrelated');
+      await new Promise((r) => setTimeout(r, 50));
+      return 'ok';
+    });
+    await queue.add('j', { bad: true });
+    const [good] = await queue.addBulk([{ name: 'j', data: {} }]);
+    await queue.waitForJobs([good], { timeout: 2000 });
+    expect(await good.getState()).toBe('completed');
+  });
+
+  it('rejects when a pending job is revoked, but not when an active job is only flagged', async () => {
+    queue = new TestQueue('wfj-revoke');
+    const delayed = await queue.add('j', {}, { delay: 60_000 });
+    const waiting = queue.waitForJobs([delayed], { timeout: 5000 });
+    await queue.revoke(delayed!.id);
+    await expect(waiting).rejects.toThrow('revoked');
+    expect(listenerCount(queue)).toBe(0);
+
+    let release!: () => void;
+    worker = new TestWorker(queue, () => new Promise((r) => (release = () => r('ok'))));
+    const active = await queue.add('j', {});
+    await waitFor(async () => (await active!.getState()) === 'active', 2000, 2);
+    const flagged = queue.waitForJobs([active], { timeout: 2000 });
+    expect(await queue.revoke(active!.id)).toBe('flagged');
+    release();
+    await flagged;
+  });
+
+  it('treats a pending job removed later (remove or drain) as settled', async () => {
+    queue = new TestQueue('wfj-removed-later');
+    const [a, b, c] = await queue.addBulk([
+      { name: 'j', data: {}, opts: { delay: 60_000 } },
+      { name: 'j', data: {}, opts: { delay: 60_000 } },
+      { name: 'j', data: {}, opts: { delay: 60_000 } },
+    ]);
+    const waiting = queue.waitForJobs([a, b, c], { timeout: 5000 });
+    await a.remove();
+    await queue.drain(true);
+    await waiting;
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('treats pending jobs as settled when the queue is obliterated', async () => {
+    queue = new TestQueue('wfj-obliterate');
+    const job = await queue.add('j', {}, { delay: 60_000 });
+    const waiting = queue.waitForJobs([job], { timeout: 5000 });
+    await queue.obliterate();
+    await waiting;
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('rejects for a job that already failed', async () => {
+    queue = new TestQueue('wfj-already-failed');
+    worker = new TestWorker(queue, async () => {
+      throw new Error('early');
+    });
+    const jobs = await queue.addBulk([{ name: 'j', data: {} }]);
+    await waitFor(async () => (await jobs[0].getState()) === 'failed', 2000, 2);
+    await expect(queue.waitForJobs(jobs, { timeout: 50 })).rejects.toThrow('early');
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('ignores a failed attempt that will retry and resolves after the retry succeeds', async () => {
+    queue = new TestQueue('wfj-retry');
+    let calls = 0;
+    worker = new TestWorker(queue, async () => {
+      if (++calls === 1) throw new Error('transient');
+      return 'ok';
+    });
+    const jobs = await queue.addBulk([
+      { name: 'j', data: {}, opts: { attempts: 2, backoff: { type: 'fixed', delay: 20 } } },
+    ]);
+    await queue.waitForJobs(jobs, { timeout: 2000 });
+    expect(calls).toBe(2);
+    expect(await jobs[0].getState()).toBe('completed');
+  });
+
+  it('times out naming the pending ids and cleans up', async () => {
+    queue = new TestQueue('wfj-timeout');
+    worker = new TestWorker(queue, async (job: any) => {
+      if (job.data.hang) await new Promise(() => {});
+      return 'ok';
+    });
+    const jobs = await queue.addBulk([
+      { name: 'j', data: { hang: true } },
+      { name: 'j', data: {} },
+    ]);
+    await expect(queue.waitForJobs(jobs, { timeout: 100 })).rejects.toThrow(
+      `Jobs did not finish within 100ms: pending ${jobs[0].id}`,
+    );
+    expect(listenerCount(queue)).toBe(0);
+  });
+
+  it('validates the timeout', async () => {
+    queue = new TestQueue('wfj-validate');
+    const job = await queue.add('j', {});
+    for (const timeout of [0, -1, Number.NaN, Infinity, 2_147_483_648]) {
+      await expect(queue.waitForJobs([job], { timeout })).rejects.toThrow('timeout must be a positive finite number');
+    }
+  });
+
+  it('rejects pending waiters when the queue closes', async () => {
+    queue = new TestQueue('wfj-close');
+    const job = await queue.add('j', {});
+    const waiting = queue.waitForJobs([job], { timeout: 5000 });
+    await queue.close();
+    await expect(waiting).rejects.toThrow('Queue is closing');
+  });
+
+  it('leaves workers running so more jobs can be added and waited on', async () => {
+    queue = new TestQueue('wfj-reuse');
+    worker = new TestWorker(queue, async () => 'ok');
+    await queue.waitForJobs(await queue.addBulk([{ name: 'j', data: {} }]), { timeout: 2000 });
+    expect(worker.isRunning()).toBe(true);
+    expect(queue.isPaused()).toBe(false);
+    await queue.waitForJobs([await queue.add('j', {})], { timeout: 2000 });
+    expect((await queue.getJobCounts()).completed).toBe(2);
+  });
+});
+
+describe('TestQueue delay-changed from moveActiveToDelayed', () => {
+  let queue: TestQueue;
+  let worker: TestWorker | undefined;
+
+  afterEach(async () => {
+    if (worker) await worker.close();
+    worker = undefined;
+    if (queue) await queue.close();
+  });
+
+  it('moveToDelayed emits delay-changed with the job id and the delay in ms', async () => {
+    queue = new TestQueue('dc-move');
+    const changed: [string, number][] = [];
+    queue.on('delay-changed', (id: string, delay: number) => changed.push([id, delay]));
+    worker = new TestWorker(queue, async (job: any) => {
+      if (!job.data.step) await job.moveToDelayed(Date.now() + 30_000, 'next');
+      return 'ok';
+    });
+    const job = await queue.add('steps', {});
+    await waitFor(() => changed.length === 1, 2000, 2);
+    expect(changed[0][0]).toBe(job!.id);
+    expect(changed[0][1]).toBeGreaterThan(29_000);
+    expect(changed[0][1]).toBeLessThanOrEqual(30_000);
+    expect(await job!.getState()).toBe('delayed');
+  });
+
+  it('a budget pause emits delay-changed with 24h', async () => {
+    queue = new TestQueue('dc-budget');
+    queue.setBudget('flow', { maxTotalTokens: 1, onExceeded: 'pause' });
+    queue.budgets.get('flow')!.exceeded = true;
+    await queue.pause();
+    const changed: [string, number][] = [];
+    queue.on('delay-changed', (id: string, delay: number) => changed.push([id, delay]));
+    const job = await queue.add('capped', {});
+    queue.jobs.get(job!.id)!.budgetKey = 'flow';
+    worker = new TestWorker(queue, async () => 'never');
+    await queue.resume();
+    await waitFor(() => changed.length === 1, 2000, 2);
+    expect(changed).toEqual([[job!.id, 86_400_000]]);
+  });
+
+  it('retry backoff and an initial delay do not emit delay-changed', async () => {
+    queue = new TestQueue('dc-silent');
+    const changed: string[] = [];
+    queue.on('delay-changed', (id: string) => changed.push(id));
+    let calls = 0;
+    worker = new TestWorker(queue, async () => {
+      if (++calls === 1) throw new Error('retry me');
+      return 'ok';
+    });
+    const jobs = await queue.addBulk([
+      { name: 'a', data: {}, opts: { attempts: 2, backoff: { type: 'fixed', delay: 10 } } },
+      { name: 'b', data: {}, opts: { delay: 10 } },
+    ]);
+    await queue.waitForJobs(jobs, { timeout: 2000 });
+    expect(changed).toEqual([]);
   });
 });

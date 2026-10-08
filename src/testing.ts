@@ -36,7 +36,14 @@ import type {
   VectorSearchOptions,
 } from './types';
 import { JSON_SERIALIZER } from './types';
-import { GlideMQError, UnrecoverableError, BatchError, SuspendError, DelayedError } from './errors';
+import {
+  GlideMQError,
+  UnrecoverableError,
+  BatchError,
+  SuspendError,
+  DelayedError,
+  WaitingChildrenError,
+} from './errors';
 import {
   MAX_JOB_DATA_SIZE,
   MAX_JOB_PRIORITY,
@@ -59,6 +66,20 @@ import {
   validateJobOptions,
   validateJobPriority,
 } from './utils';
+
+// The same classes `glide-mq` exports, so a test can throw and match them without importing the
+// main entry, which loads the native client.
+export {
+  GlideMQError,
+  ConnectionError,
+  UnrecoverableError,
+  DelayedError,
+  BatchError,
+  WaitingChildrenError,
+  SuspendError,
+  GroupRateLimitError,
+} from './errors';
+export type { GroupRateLimitOptions } from './errors';
 
 const MAX_TIMEOUT_DELAY_MS = 2_147_483_647;
 const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
@@ -142,7 +163,7 @@ export interface TestJobRecord<D = any, R = any> {
   name: string;
   data: D;
   opts: JobOptions;
-  state: 'waiting' | 'prioritized' | 'active' | 'completed' | 'failed' | 'delayed' | 'suspended';
+  state: 'waiting' | 'prioritized' | 'active' | 'completed' | 'failed' | 'delayed' | 'suspended' | 'waiting-children';
   attemptsMade: number;
   returnvalue: R | undefined;
   failedReason: string | undefined;
@@ -188,6 +209,27 @@ export interface TestJobRecord<D = any, R = any> {
   revoked?: boolean;
   /** @internal Error passed to job.moveToFailed() while active, consumed by the worker. */
   movedToFailed?: Error;
+  /** @internal Set by job.moveToWaitingChildren() while active, consumed by the worker even if the processor swallows the error. */
+  movedToWaitingChildren?: boolean;
+  /** @internal Primary parent, like the parentId / parentQueue job hash fields. */
+  parentId?: string;
+  parentQueue?: string;
+  /** @internal Prefix of the deps members of this job, set by the flow producer that created it. */
+  depsPrefix?: string;
+  /** @internal Every parent of a DAG job, like the parents SET. Empty or absent for a single-parent job. */
+  parents?: { queue: string; id: string }[];
+  /** @internal Children this job waits for, keyed by the deps SET member `prefix:{queue}:id`. */
+  deps?: Map<string, { queue: string; id: string }>;
+  /** @internal Deps members whose child has completed. */
+  depsDone?: Set<string>;
+}
+
+/** @internal How TestFlowProducer creates a flow job, see TestQueue.addFlowJob. */
+export interface FlowJobInit {
+  wait: boolean;
+  prefix: string;
+  reserved?: Set<string>;
+  parents?: { queue: string; id: string }[];
 }
 
 /**
@@ -213,6 +255,8 @@ export class TestJob<D = any, R = any> {
   signals: SignalEntry[] = [];
   budgetKey?: string;
   schedulerName?: string;
+  parentId?: string;
+  parentQueue?: string;
   /** @internal */ private _record: TestJobRecord<D, R>;
 
   constructor(record: TestJobRecord<D, R>) {
@@ -234,6 +278,8 @@ export class TestJob<D = any, R = any> {
     this.budgetKey = record.budgetKey;
     this.usage = record.usage;
     this.schedulerName = record.schedulerName;
+    this.parentId = record.parentId;
+    this.parentQueue = record.parentQueue;
   }
 
   get currentFallback(): { model: string; provider?: string; metadata?: Record<string, unknown> } | undefined {
@@ -484,6 +530,41 @@ export class TestJob<D = any, R = any> {
   }
 
   /**
+   * Pause an active job until the children registered under it complete, like
+   * Job.moveToWaitingChildren. Must be called from inside a TestWorker processor.
+   * Always throws: the worker parks the job in `waiting-children` and, once every
+   * child has completed, runs the processor again from the top.
+   */
+  async moveToWaitingChildren(): Promise<never> {
+    if (this._record.state !== 'active') {
+      throw new Error('moveToWaitingChildren() can only be used while the job is active in a Worker');
+    }
+    this._record.movedToWaitingChildren = true;
+    throw new WaitingChildrenError();
+  }
+
+  /**
+   * Return values of the completed children, keyed by `prefix:{queue}:id` like
+   * Job.getChildrenValues. A child that is not completed, or was removed, is absent.
+   */
+  async getChildrenValues(): Promise<Record<string, R>> {
+    const result: Record<string, R> = Object.create(null);
+    for (const [member, ref] of this._record.deps ?? []) {
+      const child = TestQueue.lookup(ref.queue)?.jobs.get(ref.id);
+      if (child?.state === 'completed') result[member] = (child.returnvalue ?? null) as R;
+    }
+    return result;
+  }
+
+  /** Parent references of this job, like Job.getParents. Empty when the job has no parent. */
+  async getParents(): Promise<Array<{ queue: string; id: string }>> {
+    const record = this._record;
+    if (record.parents && record.parents.length > 0) return record.parents.map((p) => ({ ...p }));
+    if (record.parentId && record.parentQueue) return [{ queue: record.parentQueue, id: record.parentId }];
+    return [];
+  }
+
+  /**
    * Suspend this job. Marks the record as suspended and throws SuspendError.
    */
   async suspend(opts?: SuspendOptions): Promise<never> {
@@ -594,7 +675,7 @@ interface TestBudgetState {
  * Known limitations vs real Queue (see docs/TESTING.md):
  * - Ordering keys / concurrency groups are accepted but not enforced
  * - No global concurrency or queue-wide rate limit (use the TestWorker limiter option)
- * - No DAG / parent-child flows
+ * - Flows cover the parent-child tree and DAG paths only: no failed / removed child semantics
  * - No sandbox ESM processors
  */
 export class TestQueue<D = any, R = any> extends EventEmitter {
@@ -627,6 +708,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private suspendedTimeoutTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private promotionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private waitRejectors: Set<(err: Error) => void> = new Set();
+  private waitSweepers: Set<() => void> = new Set();
 
   constructor(name: string, opts?: TestQueueOptions) {
     super();
@@ -634,6 +716,101 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     this.opts = opts ?? {};
     this.serializer = this.opts.serializer ?? JSON_SERIALIZER;
     TestQueue.registry.set(name, this);
+  }
+
+  /** @internal The open TestQueue registered under `name`, used to reach flow parents and children across queues. */
+  static lookup(name: string): TestQueue<any, any> | undefined {
+    return TestQueue.registry.get(name);
+  }
+
+  /**
+   * @internal Validate a flow job before anything is written, so a bad flow adds no job:
+   * options, payload size and a taken custom id ('Duplicate job ID in flow').
+   */
+  checkFlowJob(data: D, opts: JobOptions): void {
+    validateJobOptions(opts);
+    validateJobDataSize(this.serializer.serialize(data));
+    if (opts.jobId && this.jobs.has(opts.jobId)) throw new Error('Duplicate job ID in flow');
+  }
+
+  /**
+   * @internal Create a flow job synchronously, so a whole flow is wired before any worker
+   * sees it. A job with `parents` carries them, and is in their deps, before its `added`
+   * event. `wait` creates it in waiting-children, like a flow parent; `reserved` holds the
+   * custom ids of the same flow, which generated ids must skip.
+   */
+  addFlowJob(name: string, data: D, opts: JobOptions, flow: FlowJobInit): TestJob<D, R> {
+    const id = opts.jobId ? opts.jobId : this.generateJobId(flow.reserved);
+    const init: Partial<TestJobRecord<D, R>> = {
+      ...this.linkToParents(id, flow.parents ?? []),
+      depsPrefix: flow.prefix,
+    };
+    if (flow.wait) init.state = 'waiting-children';
+    const delay = flow.wait ? 0 : (opts.delay ?? 0);
+    return this.insertRecord(name, this.serializer.serialize(data), opts, id, Date.now(), delay, this.serializer, init);
+  }
+
+  /** @internal Record fields of a new child with `parents`, after registering it in each parent's deps. */
+  private linkToParents(childId: string, parents: { queue: string; id: string }[]): Partial<TestJobRecord<D, R>> {
+    for (const parent of parents) TestQueue.lookup(parent.queue)?.registerDependency(parent.id, this.name, childId);
+    if (parents.length === 0) return {};
+    const links: Partial<TestJobRecord<D, R>> = { parentId: parents[0].id, parentQueue: parents[0].queue };
+    if (parents.length > 1) links.parents = parents.map((parent) => ({ ...parent }));
+    return links;
+  }
+
+  /** @internal Make `parent` the parent of an existing job without one, and register the job in the parent's deps. */
+  attachParent(child: TestJobRecord<D, R>, parent: { queue: string; id: string }): void {
+    child.parentId = parent.id;
+    child.parentQueue = parent.queue;
+    TestQueue.lookup(parent.queue)?.registerDependency(parent.id, this.name, child.id);
+  }
+
+  /** @internal Add a child to the deps of the job `parentId` of this queue; a missing parent is ignored. */
+  registerDependency(parentId: string, childQueue: string, childId: string): void {
+    const parent = this.jobs.get(parentId);
+    if (!parent) return;
+    const prefix = parent.depsPrefix ?? 'glide';
+    (parent.deps ??= new Map()).set(`${prefix}:{${childQueue}}:${childId}`, { queue: childQueue, id: childId });
+  }
+
+  /** @internal Children of `record` that have not completed yet. */
+  pendingDependencies(record: TestJobRecord<D, R>): number {
+    return (record.deps?.size ?? 0) - (record.depsDone?.size ?? 0);
+  }
+
+  /**
+   * @internal A job finished: count it as done in every parent, and move a parent that
+   * waits for children and has none left to 'waiting', like completeParentDependency.
+   */
+  settleParents(record: TestJobRecord<D, R>): void {
+    const parents = record.parents?.length
+      ? record.parents
+      : record.parentId && record.parentQueue
+        ? [{ queue: record.parentQueue, id: record.parentId }]
+        : [];
+    for (const ref of parents) {
+      const queue = TestQueue.lookup(ref.queue);
+      const parent = queue?.jobs.get(ref.id);
+      if (!queue || !parent) continue;
+      for (const [member, dep] of parent.deps ?? []) {
+        if (dep.queue === this.name && dep.id === record.id) (parent.depsDone ??= new Set()).add(member);
+      }
+      if (parent.state === 'waiting-children' && queue.pendingDependencies(parent) <= 0) queue.enqueueWaiting(parent);
+    }
+  }
+
+  /**
+   * @internal The worker caught moveToWaitingChildren(): park the job in waiting-children,
+   * or straight back in waiting when no child is left to wait for.
+   */
+  parkWaitingChildren(record: TestJobRecord<D, R>): void {
+    if (this.pendingDependencies(record) <= 0) {
+      this.enqueueWaiting(record);
+      return;
+    }
+    record.state = 'waiting-children';
+    this.emit('waiting-children', new TestJob<D, R>(record));
   }
 
   /** Add a single job. Returns null if deduplicated or duplicate custom ID. */
@@ -663,7 +840,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     if (dedup) {
       this.dedupEntries.set(dedup.id, { jobId: id, timestamp: now });
     }
-    return this.insertRecord(name, serializedData, opts ?? {}, id, now, opts?.delay ?? 0);
+    const links = opts?.parent ? this.linkToParents(id, [opts.parent]) : undefined;
+    return this.insertRecord(name, serializedData, opts ?? {}, id, now, opts?.delay ?? 0, this.serializer, links);
   }
 
   /**
@@ -688,6 +866,86 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       );
     }
     return this.waitForJobResult(job.id, waitTimeout);
+  }
+
+  /**
+   * Resolve once every given job has settled, without pausing, draining or closing
+   * anything. Accepts the result of addBulk() or several add() calls; null entries
+   * (deduplicated or duplicate-id adds) are ignored. A job whose record is gone
+   * (removeOnComplete / removeOnFail) counts as settled. Rejects with the first
+   * terminal failure (a failed attempt that will retry does not count), on timeout
+   * (naming the pending ids), or when the queue closes.
+   */
+  async waitForJobs(
+    jobs: ReadonlyArray<{ id: string } | null | undefined>,
+    opts?: { timeout?: number },
+  ): Promise<void> {
+    const timeout = opts?.timeout ?? 30000;
+    if (!Number.isFinite(timeout) || timeout <= 0 || timeout > MAX_TIMEOUT_DELAY_MS) {
+      throw new Error(`timeout must be a positive finite number no greater than ${MAX_TIMEOUT_DELAY_MS}`);
+    }
+    const pending = new Set<string>();
+    for (const job of jobs) if (job) pending.add(job.id);
+    if (pending.size === 0) return;
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.waitRejectors.delete(rejectOnClose);
+        this.waitSweepers.delete(sweep);
+        this.off('completed', onCompleted);
+        this.off('failed', onFailed);
+        this.off('revoked', onRevoked);
+        this.off('removed', sweep);
+        this.off('drained', sweep);
+      };
+      const rejectOnClose = (err: Error) => {
+        cleanup();
+        reject(err);
+      };
+      const settle = (id: string) => {
+        if (!pending.delete(id) || pending.size > 0) return;
+        cleanup();
+        resolve();
+      };
+      const onCompleted = (job: TestJob<D, R>) => settle(job.id);
+      const onFailed = (job: TestJob<D, R>, err: Error) => {
+        if (!pending.has(job.id)) return;
+        cleanup();
+        reject(err);
+      };
+      // revoke() fails a not-yet-active job without a `failed` event; an active job is only flagged.
+      const onRevoked = (id: string) => {
+        if (pending.has(id) && this.jobs.get(id)?.state === 'failed') {
+          cleanup();
+          reject(new Error('revoked'));
+        }
+      };
+      // remove(), drain() and obliterate() delete records without a completed/failed event.
+      const sweep = () => {
+        for (const id of [...pending]) if (!this.jobs.has(id)) settle(id);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Jobs did not finish within ${timeout}ms: pending ${[...pending].join(', ')}`));
+      }, timeout);
+      this.waitRejectors.add(rejectOnClose);
+      this.waitSweepers.add(sweep);
+      // Listeners first, then the current state: a job may settle across an await.
+      this.on('completed', onCompleted);
+      this.on('failed', onFailed);
+      this.on('revoked', onRevoked);
+      this.on('removed', sweep);
+      this.on('drained', sweep);
+      for (const id of [...pending]) {
+        const record = this.jobs.get(id);
+        if (record?.state === 'completed') settle(id);
+        else if (record?.state === 'failed') {
+          onFailed(new TestJob<D, R>(record), new Error(record.failedReason as string));
+          return;
+        }
+      }
+      sweep();
+    });
   }
 
   private waitForJobResult(jobId: string, timeoutMs: number): Promise<R> {
@@ -734,10 +992,10 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     });
   }
 
-  private generateJobId(): string {
+  private generateJobId(reserved?: Set<string>): string {
     let id = String(++this.idCounter);
     let retries = 0;
-    while (this.jobs.has(id)) {
+    while (this.jobs.has(id) || reserved?.has(id)) {
       if (++retries >= 1000) throw new Error('Failed to generate job ID: too many collisions with custom job IDs');
       id = String(++this.idCounter);
     }
@@ -756,6 +1014,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     now: number,
     delay: number,
     dataSerializer: Serializer = this.serializer,
+    init: Partial<TestJobRecord<D, R>> = {},
   ): TestJob<D, R> {
     const ttl = opts.ttl ?? 0;
     const priority = opts.priority ?? 0;
@@ -777,9 +1036,12 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       fallbackIndex: 0,
       serializer: this.serializer,
       queue: this,
+      ...init,
     };
     this.jobs.set(id, record);
-    if (delay > 0) {
+    if (record.state === 'waiting-children') {
+      // A flow parent is created in waiting-children and queued once its children complete.
+    } else if (delay > 0) {
       // glidemq_addJob parks the job in the scheduled ZSet until timestamp + delay.
       this.parkDelayed(record, delay);
     } else if (priority > 0) {
@@ -876,6 +1138,16 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     this.dequeueRecord(record);
     record.state = 'delayed';
     this.schedulePromotion(record, delayMs);
+  }
+
+  /**
+   * @internal Park an active record like glidemq_moveActiveToDelayed (moveToDelayed,
+   * budget pause): parkDelayed plus the `delay-changed` event with the delay in ms.
+   * Retry backoff and rate-limit parking stay silent, as in production.
+   */
+  parkActiveDelayed(record: TestJobRecord<D, R>, delayMs: number): void {
+    this.parkDelayed(record, delayMs);
+    this.emit('delay-changed', record.id, delayMs);
   }
 
   /**
@@ -1085,6 +1357,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     for (const timer of this.promotionTimers.values()) clearTimeout(timer);
     this.promotionTimers.clear();
     this.jobs.clear();
+    for (const sweep of [...this.waitSweepers]) sweep();
     this.dedupEntries.clear();
     this.waitingQueue.length = 0;
     this.schedulers.clear();
@@ -1490,7 +1763,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
 
   /**
    * Aggregate AI usage metadata across a flow (parent + children).
-   * Walks all jobs whose parent matches parentJobId and sums token counts, cost, and model usage.
+   * Walks the parent and its direct dependencies across queues, summing tokens, cost, and model usage.
    */
   async getFlowUsage(parentJobId: string): Promise<{
     tokens: Record<string, number>;
@@ -1541,11 +1814,9 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     // Include parent
     mergeUsage(parentJob.usage);
 
-    // Walk all jobs looking for children (testing mode has no deps set, scan by parentId)
-    for (const [, record] of this.jobs) {
-      if (record.opts?.parent?.id === parentJobId) {
-        mergeUsage(record.usage);
-      }
+    // Walk the parent's deps, like production: direct children in any queue, from a flow or opts.parent
+    for (const ref of parentJob.deps?.values() ?? []) {
+      mergeUsage(TestQueue.lookup(ref.queue)?.jobs.get(ref.id)?.usage);
     }
 
     return agg;
@@ -2358,6 +2629,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       if (!record) break;
 
       record.state = 'active';
+      record.movedToWaitingChildren = undefined;
+      record.movedToFailed = undefined;
       record.processedOn = Date.now();
       this.activeCount++;
       this.isDrained = false;
@@ -2417,6 +2690,82 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     this.rateLimitTimer.unref?.();
   }
 
+  /**
+   * False once a record left the store while its job was in flight: removed, or
+   * obliterated and its id handed to a newer job. glidemq_completeAndFetchNext
+   * and glidemq_fail skip a missing hash (no state change, retention, metric,
+   * retry or queue event), so nothing may touch the job that owns the id now.
+   */
+  private isCurrent(record: TestJobRecord<D, R>): boolean {
+    return this.queue.jobs.get(record.id) === record;
+  }
+
+  /**
+   * Roundtrip a return value through the queue serializer, like BaseWorker does
+   * before it completes a job. A value the serializer rejects fails that job
+   * alone, whether or not its record is still in the store, and returns null.
+   */
+  private roundtripResult(
+    record: TestJobRecord<D, R>,
+    job: TestJob<D, R>,
+    result: R | undefined,
+  ): { value: R | undefined } | null {
+    const s = this.queue.serializer;
+    try {
+      return { value: result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result };
+    } catch (serializeErr) {
+      const message = serializeErr instanceof Error ? serializeErr.message : String(serializeErr);
+      this.handleFailure(record, job, new Error(`Serializer failed on return value: ${message}`));
+      return null;
+    }
+  }
+
+  /**
+   * A completion for a record that is gone. Only worker-local effects are kept:
+   * the 'completed' event, the budget charge and the TPM window. Returns true
+   * when the completion was handled here.
+   */
+  private settleGoneCompletion(record: TestJobRecord<D, R>, job: TestJob<D, R>, result: R | undefined): boolean {
+    if (this.isCurrent(record)) return false;
+    job.returnvalue = result;
+    job.finishedOn = Date.now();
+    this.emit('completed', job, result);
+    // BaseWorker still charges the budget and the TPM window after the 'completed' event.
+    this.chargeCompletedUsage(record, job);
+    return true;
+  }
+
+  /** Post-completion TPM tracking and flow budget charge, as BaseWorker does after 'completed'. */
+  private chargeCompletedUsage(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
+    if (this.tokenLimiter) {
+      const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
+      this.incrementLocalTpm(tpmTokens);
+    }
+
+    if (record.budgetKey && job.usage) {
+      const usageTokens = job.usage.tokens ?? {};
+      const usageCosts = job.usage.costs ?? {};
+      const rawTotal = job.usage.totalTokens ?? 0;
+      const totalCost = job.usage.totalCost ?? 0;
+
+      if (rawTotal > 0 || Object.keys(usageTokens).length > 0 || Object.keys(usageCosts).length > 0 || totalCost > 0) {
+        const budgetState = this.queue.budgets.get(record.budgetKey);
+        const weights = budgetState?.tokenWeights ?? {};
+        const weightedTotal = computeWeightedTotal(usageTokens, weights, rawTotal);
+        const budgetResult = this.queue.recordBudgetUsage(
+          record.budgetKey,
+          usageTokens,
+          usageCosts,
+          weightedTotal,
+          totalCost,
+        );
+        if (budgetResult === 'exceeded') {
+          this.emit('budget-exceeded', job, record.id);
+        }
+      }
+    }
+  }
+
   private processJob(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
     // Check TTL expiration before processing
     if (record.expireAt && Date.now() > record.expireAt) {
@@ -2443,7 +2792,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         this.emit('budget-exceeded', job, record.id);
         if (budget?.onExceeded === 'pause') {
           // Like moveActiveToDelayed(now + 24h): parked until the budget is raised and the job promoted.
-          this.queue.parkDelayed(record, 86_400_000);
+          this.queue.parkActiveDelayed(record, 86_400_000);
           this.activeCount--;
           if (this.running && !this.queue.isPaused()) {
             this.processAvailable();
@@ -2467,67 +2816,52 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           this.handleFailure(record, job, err);
           return;
         }
+        // The processor swallowed the error of moveToWaitingChildren(): the request still stands.
+        if (record.movedToWaitingChildren) {
+          if (!this.isCurrent(record)) return;
+          record.movedToWaitingChildren = undefined;
+          this.queue.parkWaitingChildren(record);
+          return;
+        }
         // Roundtrip returnvalue through serializer to match production behavior
-        const s = this.queue.serializer;
-        const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
+        const outcome = this.roundtripResult(record, job, result);
+        if (!outcome) return;
+        const roundtripped = outcome.value;
+        if (this.settleGoneCompletion(record, job, roundtripped)) return;
         record.state = 'completed';
         record.returnvalue = roundtripped;
         record.finishedOn = Date.now();
         job.returnvalue = roundtripped;
         job.finishedOn = record.finishedOn;
+        this.queue.settleParents(record);
         this.queue.applyRetention(record, 'completed');
         this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
         this.emit('completed', job, roundtripped);
         this.queue.emit('completed', job, roundtripped);
         this.queue.onSchedulerJobFinished(record);
 
-        // Post-completion TPM tracking
-        if (this.tokenLimiter) {
-          const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
-          this.incrementLocalTpm(tpmTokens);
-        }
-
-        // Post-completion budget check
-        if (record.budgetKey && job.usage) {
-          const usageTokens = job.usage.tokens ?? {};
-          const usageCosts = job.usage.costs ?? {};
-          const rawTotal = job.usage.totalTokens ?? 0;
-          const totalCost = job.usage.totalCost ?? 0;
-
-          if (
-            rawTotal > 0 ||
-            Object.keys(usageTokens).length > 0 ||
-            Object.keys(usageCosts).length > 0 ||
-            totalCost > 0
-          ) {
-            const budgetState = this.queue.budgets.get(record.budgetKey);
-            const weights = budgetState?.tokenWeights ?? {};
-            const weightedTotal = computeWeightedTotal(usageTokens, weights, rawTotal);
-
-            const budgetResult = this.queue.recordBudgetUsage(
-              record.budgetKey,
-              usageTokens,
-              usageCosts,
-              weightedTotal,
-              totalCost,
-            );
-            if (budgetResult === 'exceeded') {
-              this.emit('budget-exceeded', job, record.id);
-            }
-          }
-        }
+        this.chargeCompletedUsage(record, job);
       })
       .catch((err: Error) => {
         // Handle suspend: the job is already marked suspended by TestJob.suspend()
         if (err instanceof SuspendError || err.name === 'SuspendError') {
+          if (!this.isCurrent(record)) return;
           this.queue.scheduleSuspendedTimeout(record);
           // State already set to 'suspended' by TestJob.suspend(). Nothing more to do.
           this.queue.emit('suspended', job, record.suspendReason);
           return;
         }
+        // moveToWaitingChildren: park until the children complete, without counting an attempt.
+        if (err instanceof WaitingChildrenError || record.movedToWaitingChildren) {
+          if (!this.isCurrent(record)) return;
+          record.movedToWaitingChildren = undefined;
+          this.queue.parkWaitingChildren(record);
+          return;
+        }
         // moveToDelayed: park without counting an attempt, promote at the timestamp.
         if (err instanceof DelayedError) {
-          this.queue.parkDelayed(record, Math.max(0, err.delayedUntil - Date.now()));
+          if (!this.isCurrent(record)) return;
+          this.queue.parkActiveDelayed(record, Math.max(0, err.delayedUntil - Date.now()));
           return;
         }
 
@@ -2557,9 +2891,21 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
    */
   private handleFailure(record: TestJobRecord<D, R>, job: TestJob<D, R>, err: Error): void {
     const now = Date.now();
-    if (TestWorker.isRateLimitError(err)) {
-      const delayMs = (err as { delayMs?: number }).delayMs || this.limiter?.duration || 1000;
-      this.rateLimitUntil = now + delayMs;
+    const rateLimited = TestWorker.isRateLimitError(err);
+    const delayMs = (err as { delayMs?: number }).delayMs || this.limiter?.duration || 1000;
+    // BaseWorker pauses dispatch before failJob answers, so a RateLimitError holds the
+    // worker back even when its job was removed in the meantime.
+    if (rateLimited) this.rateLimitUntil = now + delayMs;
+    if (!this.isCurrent(record)) {
+      // glidemq_fail answers 'removed': no retry, metric, dead-letter copy or queue event, but
+      // the worker still emits 'failed'. A RateLimitError is not a failure and emits nothing.
+      if (!rateLimited) {
+        job.failedReason = err.message;
+        this.emit('failed', job, err);
+      }
+      return;
+    }
+    if (rateLimited) {
       record.failedReason = 'rate limited';
       job.failedReason = 'rate limited';
       record.processedOn = now;
@@ -2649,7 +2995,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     // Claim only what can start now (production: min(prefetch - active, batch.size)),
     // so records beyond the budget stay waiting for other workers.
     const cap = Math.min(this.batchSize, room);
-    this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+    this.pendingBatch = this.pendingBatch.filter((r) => this.isCurrent(r) && r.state === 'waiting');
     while (this.pendingBatch.length < cap) {
       const record = this.takeWaitingRecord();
       if (!record) break;
@@ -2700,7 +3046,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
   private flushBatch(): void {
     if (!this.running) return;
-    this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+    this.pendingBatch = this.pendingBatch.filter((r) => this.isCurrent(r) && r.state === 'waiting');
     // Claiming happens in processAvailableBatch (capped at the free budget); a partial batch
     // held for batch.timeout never exceeds that budget, because only this worker starts jobs.
     if (this.pendingBatch.length === 0) return;
@@ -2713,6 +3059,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     // Mark all as active
     for (const record of records) {
       record.state = 'active';
+      record.movedToWaitingChildren = undefined;
+      record.movedToFailed = undefined;
       record.processedOn = Date.now();
     }
     this.activeCount += records.length;
@@ -2728,18 +3076,20 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         if (results.length !== records.length) {
           throw new Error(`Batch processor returned ${results.length} results but batch had ${records.length} jobs`);
         }
-        const s = this.queue.serializer;
         for (let i = 0; i < records.length; i++) {
           const record = records[i];
           const job = jobs[i];
           if (this.settleMovedToFailed(record, job)) continue;
-          const result = results[i];
-          const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
+          const outcome = this.roundtripResult(record, job, results[i]);
+          if (!outcome) continue;
+          const roundtripped = outcome.value;
+          if (this.settleGoneCompletion(record, job, roundtripped)) continue;
           record.state = 'completed';
           record.returnvalue = roundtripped;
           record.finishedOn = Date.now();
           job.returnvalue = roundtripped;
           job.finishedOn = record.finishedOn;
+          this.queue.settleParents(record);
           this.queue.applyRetention(record, 'completed');
           this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
           this.emit('completed', job, roundtripped);
@@ -2759,14 +3109,16 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
             if (result instanceof Error) {
               this.handleFailure(record, job, result);
             } else {
-              const s = this.queue.serializer;
-              const roundtripped =
-                result !== undefined ? (s.deserialize(s.serialize(result as R)) as R) : (result as R);
+              const outcome = this.roundtripResult(record, job, result as R);
+              if (!outcome) continue;
+              const roundtripped = outcome.value;
+              if (this.settleGoneCompletion(record, job, roundtripped)) continue;
               record.state = 'completed';
               record.returnvalue = roundtripped;
               record.finishedOn = Date.now();
               job.returnvalue = roundtripped;
               job.finishedOn = record.finishedOn;
+              this.queue.settleParents(record);
               this.queue.applyRetention(record, 'completed');
               this.queue.recordMetric('completed', record.processedOn, record.finishedOn);
               this.emit('completed', job, roundtripped);
@@ -2895,7 +3247,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       this.rateLimitTimer = null;
     }
     if (this.pendingBatch.length > 0) {
-      const handoff = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+      const handoff = this.pendingBatch.filter((r) => this.isCurrent(r) && r.state === 'waiting');
       this.pendingBatch = [];
       if (handoff.length > 0) this.queue.waitingQueue.unshift(...handoff);
     }
@@ -2921,3 +3273,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     }
   };
 }
+
+export { TestFlowProducer } from './testing-flow';
+export type { TestJobNode, TestFlowProducerOptions } from './testing-flow';
+export { chain, group, chord, dag } from './testing-workflows';

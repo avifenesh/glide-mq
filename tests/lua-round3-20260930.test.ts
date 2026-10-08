@@ -1,7 +1,7 @@
 /**
  * Server-function and worker gap regressions, round 3 (2026-09-30).
  *
- * Run: flock /tmp/gmq-test.lock npx vitest run tests/lua-round3-20260930.test.ts
+ * Run: flock /home/avifenesh/projects/glide-mq/.scratch/gmq-test.lock npx vitest run tests/lua-round3-20260930.test.ts
  */
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { createCleanupClient, describeEachMode, flushQueue, waitFor } from './helpers/fixture';
@@ -344,11 +344,17 @@ describeEachMode('Lua round 3 2026-09-30', (CONNECTION) => {
       // Reclaim redispatches it without a stall count or stalled event.
       await cleanupClient.hset(k.job(id), { lastActive: '1' });
       await new Promise((r) => setTimeout(r, 20));
-      const result = await reclaimStalledWithIds(cleanupClient, k, 'w2', 10, 1, Date.now(), 'sub', true, 30_000, true);
+      const reclaimedAt = Date.now();
+      const result = await reclaimStalledWithIds(cleanupClient, k, 'w2', 10, 1, reclaimedAt, 'sub', true, 30_000, true);
       expect(result.redispatch).toEqual([{ jobId: id, entryId }]);
       expect(result.stalledIds).toEqual([]);
       expect(await cleanupClient.hget(subKey, 's')).toBeNull();
       expect(await cleanupClient.hget(subKey, 'hb')).toBeNull();
+      expect(await cleanupClient.hget(subKey, 'la')).toBe(String(reclaimedAt));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const again = await reclaimStalledWithIds(cleanupClient, k, 'w2', 10, 1, Date.now(), 'sub', true, 30_000, true);
+      expect(again.stalledIds).toEqual([]);
+      expect(await cleanupClient.hget(subKey, 's')).toBeNull();
 
       // w1 resumes: the entry now belongs to w2, so w1 must not re-take it.
       expect(await recoverBroadcastClaims(cleanupClient, k, 'sub', 'w1', [entryId])).toEqual({});
