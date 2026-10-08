@@ -63,7 +63,7 @@ export class TestFlowProducer {
     const reserved = new Map<string, Set<string>>();
     for (const node of dag.nodes) this.checkJob(node.queueName, node.data, node.opts, reserved);
     const dependents = new Map<string, DAGNode[]>(dag.nodes.map((node) => [node.name, []]));
-    for (const node of dag.nodes) for (const dep of node.deps ?? []) dependents.get(dep)!.push(node);
+    for (const node of dag.nodes) for (const dep of new Set(node.deps)) dependents.get(dep)!.push(node);
     const jobs = new Map<string, TestJob>();
     // Dependents first, so each job is created with its parents and appears in their deps.
     for (const node of [...topoSort(dag.nodes)].reverse()) {

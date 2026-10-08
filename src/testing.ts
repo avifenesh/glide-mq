@@ -195,6 +195,8 @@ export interface TestJobRecord<D = any, R = any> {
   revoked?: boolean;
   /** @internal Error passed to job.moveToFailed() while active, consumed by the worker. */
   movedToFailed?: Error;
+  /** @internal Set by job.moveToWaitingChildren() while active, consumed by the worker even if the processor swallows the error. */
+  movedToWaitingChildren?: boolean;
   /** @internal Primary parent, like the parentId / parentQueue job hash fields. */
   parentId?: string;
   parentQueue?: string;
@@ -523,6 +525,7 @@ export class TestJob<D = any, R = any> {
     if (this._record.state !== 'active') {
       throw new Error('moveToWaitingChildren() can only be used while the job is active in a Worker');
     }
+    this._record.movedToWaitingChildren = true;
     throw new WaitingChildrenError();
   }
 
@@ -741,14 +744,10 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     return links;
   }
 
-  /** @internal Make `parent` a parent of an existing job and register the job in the parent's deps. */
+  /** @internal Make `parent` the parent of an existing job without one, and register the job in the parent's deps. */
   attachParent(child: TestJobRecord<D, R>, parent: { queue: string; id: string }): void {
-    if (child.parentId === undefined) {
-      child.parentId = parent.id;
-      child.parentQueue = parent.queue;
-    } else {
-      (child.parents ??= [{ queue: child.parentQueue!, id: child.parentId }]).push(parent);
-    }
+    child.parentId = parent.id;
+    child.parentQueue = parent.queue;
     TestQueue.lookup(parent.queue)?.registerDependency(parent.id, this.name, child.id);
   }
 
@@ -2633,6 +2632,12 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           this.handleFailure(record, job, err);
           return;
         }
+        // The processor swallowed the error of moveToWaitingChildren(): the request still stands.
+        if (record.movedToWaitingChildren) {
+          record.movedToWaitingChildren = undefined;
+          this.queue.parkWaitingChildren(record);
+          return;
+        }
         // Roundtrip returnvalue through serializer to match production behavior
         const s = this.queue.serializer;
         const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
@@ -2693,7 +2698,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           return;
         }
         // moveToWaitingChildren: park until the children complete, without counting an attempt.
-        if (err instanceof WaitingChildrenError) {
+        if (err instanceof WaitingChildrenError || record.movedToWaitingChildren) {
+          record.movedToWaitingChildren = undefined;
           this.queue.parkWaitingChildren(record);
           return;
         }

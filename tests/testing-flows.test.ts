@@ -8,7 +8,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { TestQueue, TestWorker, TestFlowProducer, TestJob } from '../src/testing';
 import type { FlowJob } from '../src/types';
 import { MAX_JOB_DATA_SIZE } from '../src/utils';
-import { BatchError } from '../src/errors';
+import { BatchError, WaitingChildrenError } from '../src/errors';
 import { waitFor } from './helpers/fixture';
 
 let queues: TestQueue[] = [];
@@ -578,6 +578,17 @@ describe('TestFlowProducer.addDAG', () => {
     expect((await q.getJob(jobs.get('join')!.id))!.returnvalue).toEqual(['left', 'right']);
   });
 
+  it('lists a parent once when a node repeats a dependency', async () => {
+    open('dag-repeat');
+    const jobs = await new TestFlowProducer().addDAG({
+      nodes: [
+        { name: 'leaf', queueName: 'dag-repeat', data: {} },
+        { name: 'top', queueName: 'dag-repeat', data: {}, deps: ['leaf', 'leaf'] },
+      ],
+    });
+    expect(await jobs.get('leaf')!.getParents()).toEqual([{ queue: 'dag-repeat', id: jobs.get('top')!.id }]);
+  });
+
   it('rejects a cycle, an unknown dependency and a duplicate node', async () => {
     const q = open('dag-invalid');
     const producer = new TestFlowProducer();
@@ -646,6 +657,50 @@ describe('dynamic children and moveToWaitingChildren', () => {
     work(q, async (job) => {
       runs.push(runs.length);
       if (runs.length === 1) await job.moveToWaitingChildren();
+      return 'ok';
+    });
+    const job = await q.add('p', {});
+    await waitFor(async () => (await job!.getState()) === 'completed', 2000, 2);
+    expect(runs).toHaveLength(2);
+  });
+
+  it.each([
+    ['returns normally', async () => 'swallowed'],
+    [
+      'throws another error',
+      async () => {
+        throw new Error('other');
+      },
+    ],
+  ])('still parks the job when the processor swallows the error and %s', async (_label, after) => {
+    const q = open(`dyn-swallow-${_label.replace(/\W/g, '')}`);
+    const spawned: string[] = [];
+    work(
+      q,
+      async (job) => {
+        if (job.name === 'child') return 'c';
+        if (job.data.step === 'collect') return 'resumed';
+        await q.add('child', {}, { parent: { queue: q.name, id: job.id } });
+        spawned.push(job.id);
+        await job.updateData({ step: 'collect' });
+        await job.moveToWaitingChildren().catch(() => {});
+        return after();
+      },
+      2,
+    );
+    const parent = await q.add('p', {});
+    await waitFor(async () => (await parent!.getState()) === 'completed', 2000, 2);
+    expect((await q.getJob(parent!.id))!.returnvalue).toBe('resumed');
+    expect((await q.getJob(parent!.id))!.attemptsMade).toBe(0);
+    expect(spawned).toEqual([parent!.id]);
+  });
+
+  it('parks a job whose processor throws WaitingChildrenError itself', async () => {
+    const q = open('dyn-manual');
+    const runs: number[] = [];
+    work(q, async () => {
+      runs.push(runs.length);
+      if (runs.length === 1) throw new WaitingChildrenError();
       return 'ok';
     });
     const job = await q.add('p', {});
@@ -736,6 +791,8 @@ describe('dynamic children and moveToWaitingChildren', () => {
     });
     await waitFor(async () => (await node.job.getState()) === 'completed', 2000, 2);
     expect((await q.getFlowUsage(node.job.id)).totalTokens).toBe(12);
+    const lone = await q.add('lone', {});
+    expect((await q.getFlowUsage(lone!.id)).jobCount).toBe(0);
   });
 
   it('reads getFlowUsage from the deps: children in other queues count, grandchildren do not', async () => {

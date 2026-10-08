@@ -34,6 +34,7 @@ See CHANGELOG `[Unreleased]` for the full list. Highlights by area:
 - **Proxy**: SSE cleanup on early disconnect, one shared command client, bounded requests, generic 5xx bodies, flow node limit.
 - **Sandbox**: hung or aborted jobs free their pool slot (5s grace, then terminate); no host crash on a dead child.
 - **Testing mode**: validation, ordering, retention, retries with backoff, dedup modes and `moveToDelayed` match production.
+- **Testing-mode flows** (#331 steps 1 and 2): `TestFlowProducer` (`add` with `budget`, `addBulk`, `addDAG`), `TestJob.getChildrenValues/getParents/moveToWaitingChildren`, and `chain/group/chord/dag` from `glide-mq/testing`, all over the `TestQueue` registry with no connection. Parents start in `waiting-children` (`src/testing-flow.ts`, `src/testing-workflows.ts`; deps live on the record in `src/testing.ts`). Still missing: failed and removed child semantics (step 3), the rest of `addDAG` parity (step 4), and budget checks in batch workers.
 - **Broadcast** (#309, merged): stalled messages are re-run per subscription with per-subscription stall counts; trimmed messages have their job data deleted; `priority`/`lifo` are rejected.
 
 ## Open Threads
