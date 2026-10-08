@@ -402,4 +402,33 @@ describe('TestWorker batch concurrency limit', () => {
       await peer.close();
     }
   });
+
+  it('does not claim more jobs when a running batch settles while the queue is paused', async () => {
+    queue = new TestQueue('cov-batch-settle-paused');
+    gate = gatedBatchProcessor();
+    await queue.addBulk(jobsOf(5));
+    worker = new TestWorker(queue, gate.processor, { concurrency: 1, batch: { size: 5, timeout: 50 } });
+    await waitFor(() => gate.state.batchSizes.length === 1, 2000, 10);
+    await queue.addBulk(jobsOf(2));
+    await queue.pause();
+    gate.openAll();
+    await waitFor(async () => (await queue.getJobCounts()).completed === 5, 2000, 20);
+    await sleep(100);
+    expect(gate.state.batchSizes).toEqual([5]);
+    expect((await queue.getJobCounts()).waiting).toBe(2);
+  });
+
+  it('does not claim more jobs when a running batch settles after close()', async () => {
+    queue = new TestQueue('cov-batch-settle-closed');
+    gate = gatedBatchProcessor();
+    await queue.addBulk(jobsOf(5));
+    worker = new TestWorker(queue, gate.processor, { concurrency: 1, batch: { size: 5, timeout: 50 } });
+    await waitFor(() => gate.state.batchSizes.length === 1, 2000, 10);
+    await queue.addBulk(jobsOf(2));
+    const closing = worker.close();
+    gate.openAll();
+    await closing;
+    await sleep(100);
+    expect(gate.state.batchSizes).toEqual([5]);
+  });
 });
