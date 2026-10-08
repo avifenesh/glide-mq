@@ -2509,6 +2509,82 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     this.rateLimitTimer.unref?.();
   }
 
+  /**
+   * False once a record left the store while its job was in flight: removed, or
+   * obliterated and its id handed to a newer job. glidemq_completeAndFetchNext
+   * and glidemq_fail skip a missing hash (no state change, retention, metric,
+   * retry or queue event), so nothing may touch the job that owns the id now.
+   */
+  private isCurrent(record: TestJobRecord<D, R>): boolean {
+    return this.queue.jobs.get(record.id) === record;
+  }
+
+  /**
+   * Roundtrip a return value through the queue serializer, like BaseWorker does
+   * before it completes a job. A value the serializer rejects fails that job
+   * alone, whether or not its record is still in the store, and returns null.
+   */
+  private roundtripResult(
+    record: TestJobRecord<D, R>,
+    job: TestJob<D, R>,
+    result: R | undefined,
+  ): { value: R | undefined } | null {
+    const s = this.queue.serializer;
+    try {
+      return { value: result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result };
+    } catch (serializeErr) {
+      const message = serializeErr instanceof Error ? serializeErr.message : String(serializeErr);
+      this.handleFailure(record, job, new Error(`Serializer failed on return value: ${message}`));
+      return null;
+    }
+  }
+
+  /**
+   * A completion for a record that is gone. Only worker-local effects are kept:
+   * the 'completed' event, the budget charge and the TPM window. Returns true
+   * when the completion was handled here.
+   */
+  private settleGoneCompletion(record: TestJobRecord<D, R>, job: TestJob<D, R>, result: R | undefined): boolean {
+    if (this.isCurrent(record)) return false;
+    job.returnvalue = result;
+    job.finishedOn = Date.now();
+    this.emit('completed', job, result);
+    // BaseWorker still charges the budget and the TPM window after the 'completed' event.
+    this.chargeCompletedUsage(record, job);
+    return true;
+  }
+
+  /** Post-completion TPM tracking and flow budget charge, as BaseWorker does after 'completed'. */
+  private chargeCompletedUsage(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
+    if (this.tokenLimiter) {
+      const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
+      this.incrementLocalTpm(tpmTokens);
+    }
+
+    if (record.budgetKey && job.usage) {
+      const usageTokens = job.usage.tokens ?? {};
+      const usageCosts = job.usage.costs ?? {};
+      const rawTotal = job.usage.totalTokens ?? 0;
+      const totalCost = job.usage.totalCost ?? 0;
+
+      if (rawTotal > 0 || Object.keys(usageTokens).length > 0 || Object.keys(usageCosts).length > 0 || totalCost > 0) {
+        const budgetState = this.queue.budgets.get(record.budgetKey);
+        const weights = budgetState?.tokenWeights ?? {};
+        const weightedTotal = computeWeightedTotal(usageTokens, weights, rawTotal);
+        const budgetResult = this.queue.recordBudgetUsage(
+          record.budgetKey,
+          usageTokens,
+          usageCosts,
+          weightedTotal,
+          totalCost,
+        );
+        if (budgetResult === 'exceeded') {
+          this.emit('budget-exceeded', job, record.id);
+        }
+      }
+    }
+  }
+
   private processJob(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
     // Check TTL expiration before processing
     if (record.expireAt && Date.now() > record.expireAt) {
@@ -2560,8 +2636,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
           return;
         }
         // Roundtrip returnvalue through serializer to match production behavior
-        const s = this.queue.serializer;
-        const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
+        const outcome = this.roundtripResult(record, job, result);
+        if (!outcome) return;
+        const roundtripped = outcome.value;
+        if (this.settleGoneCompletion(record, job, roundtripped)) return;
         record.state = 'completed';
         record.returnvalue = roundtripped;
         record.finishedOn = Date.now();
@@ -2573,45 +2651,12 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         this.queue.emit('completed', job, roundtripped);
         this.queue.onSchedulerJobFinished(record);
 
-        // Post-completion TPM tracking
-        if (this.tokenLimiter) {
-          const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
-          this.incrementLocalTpm(tpmTokens);
-        }
-
-        // Post-completion budget check
-        if (record.budgetKey && job.usage) {
-          const usageTokens = job.usage.tokens ?? {};
-          const usageCosts = job.usage.costs ?? {};
-          const rawTotal = job.usage.totalTokens ?? 0;
-          const totalCost = job.usage.totalCost ?? 0;
-
-          if (
-            rawTotal > 0 ||
-            Object.keys(usageTokens).length > 0 ||
-            Object.keys(usageCosts).length > 0 ||
-            totalCost > 0
-          ) {
-            const budgetState = this.queue.budgets.get(record.budgetKey);
-            const weights = budgetState?.tokenWeights ?? {};
-            const weightedTotal = computeWeightedTotal(usageTokens, weights, rawTotal);
-
-            const budgetResult = this.queue.recordBudgetUsage(
-              record.budgetKey,
-              usageTokens,
-              usageCosts,
-              weightedTotal,
-              totalCost,
-            );
-            if (budgetResult === 'exceeded') {
-              this.emit('budget-exceeded', job, record.id);
-            }
-          }
-        }
+        this.chargeCompletedUsage(record, job);
       })
       .catch((err: Error) => {
         // Handle suspend: the job is already marked suspended by TestJob.suspend()
         if (err instanceof SuspendError || err.name === 'SuspendError') {
+          if (!this.isCurrent(record)) return;
           this.queue.scheduleSuspendedTimeout(record);
           // State already set to 'suspended' by TestJob.suspend(). Nothing more to do.
           this.queue.emit('suspended', job, record.suspendReason);
@@ -2619,6 +2664,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         }
         // moveToDelayed: park without counting an attempt, promote at the timestamp.
         if (err instanceof DelayedError) {
+          if (!this.isCurrent(record)) return;
           this.queue.parkActiveDelayed(record, Math.max(0, err.delayedUntil - Date.now()));
           return;
         }
@@ -2649,9 +2695,21 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
    */
   private handleFailure(record: TestJobRecord<D, R>, job: TestJob<D, R>, err: Error): void {
     const now = Date.now();
-    if (TestWorker.isRateLimitError(err)) {
-      const delayMs = (err as { delayMs?: number }).delayMs || this.limiter?.duration || 1000;
-      this.rateLimitUntil = now + delayMs;
+    const rateLimited = TestWorker.isRateLimitError(err);
+    const delayMs = (err as { delayMs?: number }).delayMs || this.limiter?.duration || 1000;
+    // BaseWorker pauses dispatch before failJob answers, so a RateLimitError holds the
+    // worker back even when its job was removed in the meantime.
+    if (rateLimited) this.rateLimitUntil = now + delayMs;
+    if (!this.isCurrent(record)) {
+      // glidemq_fail answers 'removed': no retry, metric, dead-letter copy or queue event, but
+      // the worker still emits 'failed'. A RateLimitError is not a failure and emits nothing.
+      if (!rateLimited) {
+        job.failedReason = err.message;
+        this.emit('failed', job, err);
+      }
+      return;
+    }
+    if (rateLimited) {
       record.failedReason = 'rate limited';
       job.failedReason = 'rate limited';
       record.processedOn = now;
@@ -2741,7 +2799,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     // Claim only what can start now (production: min(prefetch - active, batch.size)),
     // so records beyond the budget stay waiting for other workers.
     const cap = Math.min(this.batchSize, room);
-    this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+    this.pendingBatch = this.pendingBatch.filter((r) => this.isCurrent(r) && r.state === 'waiting');
     while (this.pendingBatch.length < cap) {
       const record = this.takeWaitingRecord();
       if (!record) break;
@@ -2792,7 +2850,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
   private flushBatch(): void {
     if (!this.running) return;
-    this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+    this.pendingBatch = this.pendingBatch.filter((r) => this.isCurrent(r) && r.state === 'waiting');
     // Claiming happens in processAvailableBatch (capped at the free budget); a partial batch
     // held for batch.timeout never exceeds that budget, because only this worker starts jobs.
     if (this.pendingBatch.length === 0) return;
@@ -2820,13 +2878,14 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         if (results.length !== records.length) {
           throw new Error(`Batch processor returned ${results.length} results but batch had ${records.length} jobs`);
         }
-        const s = this.queue.serializer;
         for (let i = 0; i < records.length; i++) {
           const record = records[i];
           const job = jobs[i];
           if (this.settleMovedToFailed(record, job)) continue;
-          const result = results[i];
-          const roundtripped = result !== undefined ? (s.deserialize(s.serialize(result)) as R) : result;
+          const outcome = this.roundtripResult(record, job, results[i]);
+          if (!outcome) continue;
+          const roundtripped = outcome.value;
+          if (this.settleGoneCompletion(record, job, roundtripped)) continue;
           record.state = 'completed';
           record.returnvalue = roundtripped;
           record.finishedOn = Date.now();
@@ -2851,9 +2910,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
             if (result instanceof Error) {
               this.handleFailure(record, job, result);
             } else {
-              const s = this.queue.serializer;
-              const roundtripped =
-                result !== undefined ? (s.deserialize(s.serialize(result as R)) as R) : (result as R);
+              const outcome = this.roundtripResult(record, job, result as R);
+              if (!outcome) continue;
+              const roundtripped = outcome.value;
+              if (this.settleGoneCompletion(record, job, roundtripped)) continue;
               record.state = 'completed';
               record.returnvalue = roundtripped;
               record.finishedOn = Date.now();
@@ -2987,7 +3047,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       this.rateLimitTimer = null;
     }
     if (this.pendingBatch.length > 0) {
-      const handoff = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
+      const handoff = this.pendingBatch.filter((r) => this.isCurrent(r) && r.state === 'waiting');
       this.pendingBatch = [];
       if (handoff.length > 0) this.queue.waitingQueue.unshift(...handoff);
     }
