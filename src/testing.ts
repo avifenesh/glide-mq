@@ -2632,11 +2632,25 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
   // ---- Batch processing ----
 
-  private processAvailableBatch(): void {
-    if (this.activeCount >= this.concurrency * this.batchSize) return;
+  /**
+   * Jobs this worker may start now. Mirrors the production gates: at most
+   * `concurrency * batch.size` jobs in flight (the prefetch budget), and at
+   * concurrency 1 the poll loop awaits each batch, so one batch at a time.
+   */
+  private batchRoom(): number {
+    if (this.concurrency === 1) return this.activeCount === 0 ? this.batchSize : 0;
+    return this.concurrency * this.batchSize - this.activeCount;
+  }
 
+  private processAvailableBatch(): void {
+    const room = this.batchRoom();
+    if (room <= 0) return;
+
+    // Claim only what can start now (production: min(prefetch - active, batch.size)),
+    // so records beyond the budget stay waiting for other workers.
+    const cap = Math.min(this.batchSize, room);
     this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
-    while (this.pendingBatch.length < this.batchSize) {
+    while (this.pendingBatch.length < cap) {
       const record = this.takeWaitingRecord();
       if (!record) break;
       this.pendingBatch.push(record);
@@ -2650,11 +2664,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       return;
     }
 
-    if (this.pendingBatch.length >= this.batchSize) {
+    if (this.pendingBatch.length >= cap) {
       this.clearBatchTimer();
-      this.executeBatch(this.pendingBatch.splice(0, this.batchSize));
-      if (this.pendingBatch.length > 0) this.scheduleBatchFlush();
-      else if (this.queue.waitingQueue.length > 0) queueMicrotask(() => this.processAvailable());
+      this.executeBatch(this.pendingBatch.splice(0));
+      if (this.queue.waitingQueue.length > 0) queueMicrotask(() => this.processAvailable());
       return;
     }
 
@@ -2688,16 +2701,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   private flushBatch(): void {
     if (!this.running) return;
     this.pendingBatch = this.pendingBatch.filter((r) => this.queue.jobs.has(r.id) && r.state === 'waiting');
-    if (!this.queue.isPaused() && !this.paused) {
-      while (this.pendingBatch.length < this.batchSize) {
-        const record = this.takeWaitingRecord();
-        if (!record) break;
-        this.pendingBatch.push(record);
-      }
-    }
+    // Claiming happens in processAvailableBatch (capped at the free budget); a partial batch
+    // held for batch.timeout never exceeds that budget, because only this worker starts jobs.
     if (this.pendingBatch.length === 0) return;
-    this.executeBatch(this.pendingBatch.splice(0, this.batchSize));
-    if (this.pendingBatch.length > 0) this.scheduleBatchFlush();
+    this.executeBatch(this.pendingBatch.splice(0));
   }
 
   private executeBatch(records: TestJobRecord<D, R>[]): void {
@@ -2779,9 +2786,10 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       })
       .finally(() => {
         this.activeCount -= records.length;
-        if (this.running && !this.queue.isPaused()) {
-          this.processAvailable();
-        }
+        if (!this.running) return;
+        if (!this.queue.isPaused()) this.processAvailable();
+        // Records held for budget still flush on timeout while paused, when processAvailable() does nothing.
+        this.scheduleBatchFlush();
       });
   }
 
