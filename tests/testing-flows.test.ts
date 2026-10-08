@@ -26,7 +26,6 @@ function work(queue: TestQueue, processor: (job: TestJob) => Promise<any>, concu
   return worker;
 }
 
-
 afterEach(async () => {
   for (const worker of workers) await worker.close();
   for (const queue of queues) await queue.close();
