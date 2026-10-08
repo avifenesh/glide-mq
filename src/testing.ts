@@ -1688,11 +1688,9 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     // Include parent
     mergeUsage(parentJob.usage);
 
-    // Walk all jobs looking for children: those added with opts.parent and those wired by a flow
-    for (const [, record] of this.jobs) {
-      if (record.opts?.parent?.id === parentJobId || record.parentId === parentJobId) {
-        mergeUsage(record.usage);
-      }
+    // Walk the parent's deps, like production: direct children in any queue, from a flow or opts.parent
+    for (const ref of parentJob.deps?.values() ?? []) {
+      mergeUsage(TestQueue.lookup(ref.queue)?.jobs.get(ref.id)?.usage);
     }
 
     return agg;

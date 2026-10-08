@@ -682,6 +682,37 @@ describe('dynamic children and moveToWaitingChildren', () => {
     await waitFor(async () => (await node.job.getState()) === 'completed', 2000, 2);
     expect((await q.getFlowUsage(node.job.id)).totalTokens).toBe(12);
   });
+
+  it('reads getFlowUsage from the deps: children in other queues count, grandchildren do not', async () => {
+    const rootQ = open('usage-root');
+    const childQ = open('usage-child');
+    const node = await new TestFlowProducer().add({
+      name: 'p',
+      queueName: 'usage-root',
+      data: {},
+      children: [
+        {
+          name: 'direct',
+          queueName: 'usage-child',
+          data: {},
+          children: [{ name: 'grand', queueName: 'usage-child', data: {} }],
+        },
+        { name: 'gone', queueName: 'usage-child', data: {}, opts: { removeOnComplete: true } },
+      ],
+    });
+    const spend = (tokens: number) => async (job: TestJob) => {
+      await job.reportUsage({ totalTokens: tokens, tokens: { input: tokens } });
+      return 'ok';
+    };
+    work(rootQ, spend(1));
+    work(childQ, async (job) => spend(job.name === 'grand' ? 100 : 10)(job));
+    await waitFor(async () => (await node.job.getState()) === 'completed', 2000, 2);
+    const usage = await rootQ.getFlowUsage(node.job.id);
+    expect(usage.totalTokens).toBe(1 + 10);
+    expect(usage.jobCount).toBe(2);
+    await childQ.close();
+    expect((await rootQ.getFlowUsage(node.job.id)).totalTokens).toBe(1);
+  });
 });
 
 describe('parents released by other completion paths', () => {
