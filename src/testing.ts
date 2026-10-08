@@ -2475,12 +2475,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
       const rawTotal = job.usage.totalTokens ?? 0;
       const totalCost = job.usage.totalCost ?? 0;
 
-      if (
-        rawTotal > 0 ||
-        Object.keys(usageTokens).length > 0 ||
-        Object.keys(usageCosts).length > 0 ||
-        totalCost > 0
-      ) {
+      if (rawTotal > 0 || Object.keys(usageTokens).length > 0 || Object.keys(usageCosts).length > 0 || totalCost > 0) {
         const budgetState = this.queue.budgets.get(record.budgetKey);
         const weights = budgetState?.tokenWeights ?? {};
         const weightedTotal = computeWeightedTotal(usageTokens, weights, rawTotal);
