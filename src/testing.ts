@@ -2448,8 +2448,8 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
   }
 
   /**
-   * A completion for a record that is gone. Only the worker's own 'completed'
-   * event is kept: BaseWorker emits it whatever the script did. Returns true
+   * A completion for a record that is gone. Only worker-local effects are kept:
+   * the 'completed' event, the budget charge and the TPM window. Returns true
    * when the completion was handled here.
    */
   private settleGoneCompletion(record: TestJobRecord<D, R>, job: TestJob<D, R>, result: R | undefined): boolean {
@@ -2457,7 +2457,45 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
     job.returnvalue = result;
     job.finishedOn = Date.now();
     this.emit('completed', job, result);
+    // BaseWorker still charges the budget and the TPM window after the 'completed' event.
+    this.chargeCompletedUsage(record, job);
     return true;
+  }
+
+  /** Post-completion TPM tracking and flow budget charge, as BaseWorker does after 'completed'. */
+  private chargeCompletedUsage(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
+    if (this.tokenLimiter) {
+      const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
+      this.incrementLocalTpm(tpmTokens);
+    }
+
+    if (record.budgetKey && job.usage) {
+      const usageTokens = job.usage.tokens ?? {};
+      const usageCosts = job.usage.costs ?? {};
+      const rawTotal = job.usage.totalTokens ?? 0;
+      const totalCost = job.usage.totalCost ?? 0;
+
+      if (
+        rawTotal > 0 ||
+        Object.keys(usageTokens).length > 0 ||
+        Object.keys(usageCosts).length > 0 ||
+        totalCost > 0
+      ) {
+        const budgetState = this.queue.budgets.get(record.budgetKey);
+        const weights = budgetState?.tokenWeights ?? {};
+        const weightedTotal = computeWeightedTotal(usageTokens, weights, rawTotal);
+        const budgetResult = this.queue.recordBudgetUsage(
+          record.budgetKey,
+          usageTokens,
+          usageCosts,
+          weightedTotal,
+          totalCost,
+        );
+        if (budgetResult === 'exceeded') {
+          this.emit('budget-exceeded', job, record.id);
+        }
+      }
+    }
   }
 
   private processJob(record: TestJobRecord<D, R>, job: TestJob<D, R>): void {
@@ -2526,41 +2564,7 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
         this.queue.emit('completed', job, roundtripped);
         this.queue.onSchedulerJobFinished(record);
 
-        // Post-completion TPM tracking
-        if (this.tokenLimiter) {
-          const tpmTokens = Math.max(job.usage?.totalTokens ?? 0, job.tpmTokens ?? 0);
-          this.incrementLocalTpm(tpmTokens);
-        }
-
-        // Post-completion budget check
-        if (record.budgetKey && job.usage) {
-          const usageTokens = job.usage.tokens ?? {};
-          const usageCosts = job.usage.costs ?? {};
-          const rawTotal = job.usage.totalTokens ?? 0;
-          const totalCost = job.usage.totalCost ?? 0;
-
-          if (
-            rawTotal > 0 ||
-            Object.keys(usageTokens).length > 0 ||
-            Object.keys(usageCosts).length > 0 ||
-            totalCost > 0
-          ) {
-            const budgetState = this.queue.budgets.get(record.budgetKey);
-            const weights = budgetState?.tokenWeights ?? {};
-            const weightedTotal = computeWeightedTotal(usageTokens, weights, rawTotal);
-
-            const budgetResult = this.queue.recordBudgetUsage(
-              record.budgetKey,
-              usageTokens,
-              usageCosts,
-              weightedTotal,
-              totalCost,
-            );
-            if (budgetResult === 'exceeded') {
-              this.emit('budget-exceeded', job, record.id);
-            }
-          }
-        }
+        this.chargeCompletedUsage(record, job);
       })
       .catch((err: Error) => {
         // Handle suspend: the job is already marked suspended by TestJob.suspend()

@@ -2366,6 +2366,77 @@ describe('TestWorker with a job removed or obliterated while active', () => {
     expect(await queue.getJob(a!.id)).toBeNull();
   });
 
+  it('a job removed while active still charges its usage to the flow budget', async () => {
+    queue = new TestQueue('removed-inflight-budget');
+    queue.setBudget('flow-r', { maxTotalTokens: 100, onExceeded: 'fail' });
+    const { hold, release } = gate();
+    worker = new TestWorker(queue, async (job) => {
+      await job.reportUsage({ tokens: { input: 7 }, costs: { usd: 0.5 }, totalTokens: 7, totalCost: 0.5 });
+      await hold(job.data.tag);
+      return 'x';
+    });
+    const exceeded: string[] = [];
+    worker.on('budget-exceeded', (_job, id) => exceeded.push(String(id)));
+
+    await queue.pause();
+    const a = await queue.add('job', { tag: 'a' });
+    queue.jobs.get(a!.id)!.budgetKey = 'flow-r';
+    await queue.resume();
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await a!.remove();
+    release('a');
+    await settle();
+    const budget = queue.budgets.get('flow-r')!;
+    expect(budget.usedTokens).toBe(7);
+    expect(budget.usedCost).toBe(0.5);
+    expect(exceeded).toEqual([]);
+  });
+
+  it('a removed job whose usage exceeds the budget emits budget-exceeded on its worker', async () => {
+    queue = new TestQueue('removed-inflight-budget-exceeded');
+    queue.setBudget('flow-e', { maxTotalTokens: 5, onExceeded: 'fail' });
+    const { hold, release } = gate();
+    worker = new TestWorker(queue, async (job) => {
+      await job.reportUsage({ tokens: { input: 9 }, totalTokens: 9 });
+      await hold(job.data.tag);
+      return 'x';
+    });
+    const exceeded: string[] = [];
+    worker.on('budget-exceeded', (_job, id) => exceeded.push(String(id)));
+
+    await queue.pause();
+    const a = await queue.add('job', { tag: 'a' });
+    queue.jobs.get(a!.id)!.budgetKey = 'flow-e';
+    await queue.resume();
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await a!.remove();
+    release('a');
+    await settle();
+    expect(exceeded).toEqual([a!.id]);
+    expect(queue.budgets.get('flow-e')!.exceeded).toBe(true);
+  });
+
+  it('a job removed while active still counts toward the worker TPM window', async () => {
+    queue = new TestQueue('removed-inflight-tpm');
+    const { hold, release } = gate();
+    worker = new TestWorker(
+      queue,
+      async (job) => {
+        await job.reportTokens(40);
+        await hold(job.data.tag);
+        return 'x';
+      },
+      { tokenLimiter: { maxTokens: 1000, duration: 60_000 } },
+    );
+
+    const a = await queue.add('job', { tag: 'a' });
+    await waitFor(() => worker!.getActiveCount() === 1, 2000, 2);
+    await a!.remove();
+    release('a');
+    await settle();
+    expect((worker as unknown as { tpmLocalCounter: number }).tpmLocalCounter).toBe(40);
+  });
+
   describe('return value the serializer rejects', () => {
     const circular = () => {
       const value: Record<string, unknown> = {};
