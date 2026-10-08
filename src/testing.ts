@@ -3071,3 +3071,4 @@ export class TestWorker<D = any, R = any> extends EventEmitter {
 
 export { TestFlowProducer } from './testing-flow';
 export type { TestJobNode, TestFlowProducerOptions } from './testing-flow';
+export { chain, group, chord, dag } from './testing-workflows';
