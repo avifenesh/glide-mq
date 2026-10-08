@@ -627,6 +627,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
   private suspendedTimeoutTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private promotionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private waitRejectors: Set<(err: Error) => void> = new Set();
+  private waitSweepers: Set<() => void> = new Set();
 
   constructor(name: string, opts?: TestQueueOptions) {
     super();
@@ -713,6 +714,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       const cleanup = () => {
         clearTimeout(timer);
         this.waitRejectors.delete(rejectOnClose);
+        this.waitSweepers.delete(sweep);
         this.off('completed', onCompleted);
         this.off('failed', onFailed);
         this.off('revoked', onRevoked);
@@ -741,7 +743,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
           reject(new Error('revoked'));
         }
       };
-      // remove(), drain() and friends delete records without a completed/failed event.
+      // remove(), drain() and obliterate() delete records without a completed/failed event.
       const sweep = () => {
         for (const id of [...pending]) if (!this.jobs.has(id)) settle(id);
       };
@@ -751,6 +753,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       }, timeout);
       timer.unref?.();
       this.waitRejectors.add(rejectOnClose);
+      this.waitSweepers.add(sweep);
       // Listeners first, then the current state: a job may settle across an await.
       this.on('completed', onCompleted);
       this.on('failed', onFailed);
@@ -1174,6 +1177,7 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
     for (const timer of this.promotionTimers.values()) clearTimeout(timer);
     this.promotionTimers.clear();
     this.jobs.clear();
+    for (const sweep of [...this.waitSweepers]) sweep();
     this.dedupEntries.clear();
     this.waitingQueue.length = 0;
     this.schedulers.clear();

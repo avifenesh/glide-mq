@@ -3623,6 +3623,15 @@ describe('TestQueue.waitForJobs', () => {
     expect(listenerCount(queue)).toBe(0);
   });
 
+  it('treats pending jobs as settled when the queue is obliterated', async () => {
+    queue = new TestQueue('wfj-obliterate');
+    const job = await queue.add('j', {}, { delay: 60_000 });
+    const waiting = queue.waitForJobs([job], { timeout: 5000 });
+    await queue.obliterate();
+    await waiting;
+    expect(listenerCount(queue)).toBe(0);
+  });
+
   it('rejects for a job that already failed', async () => {
     queue = new TestQueue('wfj-already-failed');
     worker = new TestWorker(queue, async () => {
