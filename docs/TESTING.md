@@ -479,6 +479,7 @@ Behaviour that testing mode does not mirror. Everything else in this document fo
 - **Ordering keys and concurrency groups are not enforced.** `ordering` options are validated and stored, but jobs sharing a key run concurrently and in dispatch order. `job.rateLimitGroup()` and `queue.rateLimitGroup()` do not exist on the test classes.
 - **No global concurrency or queue-wide rate limit.** `setGlobalConcurrency`, `setGlobalRateLimit`, `removeGlobalRateLimit` and `getGlobalRateLimit` are not available; use the `TestWorker` `concurrency` and `limiter` options instead.
 - **No flows or DAGs.** There is no `FlowProducer` counterpart; `job.getChildrenValues()`, `job.getParents()` and `job.moveToWaitingChildren()` are not available. `getFlowUsage()` and flow budgets work through `opts.parent.id` and `setBudget()`.
+- **`GroupRateLimitError` and `WaitingChildrenError` are exported but not handled.** Production treats them as control flow (reschedule and rate-limit the group, park the job in waiting-children). `TestWorker` treats both as ordinary failures, so the job is retried or failed per its `attempts`.
 - **No abort support.** `worker.abortJob()` and `job.abortSignal` are not available; `close()` waits for nothing and lets running processors finish on their own.
 - **Sandbox processors are CJS only.** A file path processor must be a `.js` (CommonJS) module; `.mjs` throws.
 - **`isPaused()` is synchronous** on `TestQueue`; the real `Queue.isPaused()` returns a promise. `await` works on both.
