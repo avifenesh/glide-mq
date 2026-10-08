@@ -318,7 +318,7 @@ expect(completed).toHaveLength(3);
 To test `BatchError` handling (partial failures), throw a `BatchError` from the processor with a map of failed indices:
 
 ```typescript
-import { BatchError } from 'glide-mq';
+import { BatchError } from 'glide-mq/testing';
 
 const worker = new TestWorker(
   queue,
@@ -452,6 +452,7 @@ Call job.suspend() inside the processor, then queue.signal() from outside. Use g
 ## Tips
 
 - **No connection config needed.** `TestQueue` takes only a name — no `connection` option.
+- **Error classes come from `glide-mq/testing` too.** `UnrecoverableError`, `BatchError`, `SuspendError`, `DelayedError`, `GlideMQError` and the other error classes of `glide-mq` are re-exported, so a test that only uses `TestQueue` and `TestWorker` does not have to import the main entry (which loads the native client). They are the same classes, so `instanceof` works across both entries.
 - **Options are validated like production.** `TestQueue.add()` runs the same checks as `Queue.add()` (priority <= 2048, payload size, `ttl`, `lockDuration`, `cost`, `jobId`, ordering key, `lifo` with ordering) and throws the same errors. `job.updateData()` and `job.updateProgress()` persist to the stored job, so `queue.getJob()` sees the new values.
 - **Processing is synchronous-ish.** `TestWorker` processes jobs immediately when they are added via `queue.add()`. In most tests you can check state right after the `await queue.add(...)` call.
 - **Dispatch order matches the worker.** Jobs with `priority > 0` run first (lower number = higher priority, FIFO within a priority), then `lifo` jobs (newest first), then plain FIFO jobs. A `lifo` job with a priority is dispatched as LIFO, like production. `queue.getJobs('waiting')` lists jobs in that same order.
@@ -479,6 +480,7 @@ Behaviour that testing mode does not mirror. Everything else in this document fo
 - **Ordering keys and concurrency groups are not enforced.** `ordering` options are validated and stored, but jobs sharing a key run concurrently and in dispatch order. `job.rateLimitGroup()` and `queue.rateLimitGroup()` do not exist on the test classes.
 - **No global concurrency or queue-wide rate limit.** `setGlobalConcurrency`, `setGlobalRateLimit`, `removeGlobalRateLimit` and `getGlobalRateLimit` are not available; use the `TestWorker` `concurrency` and `limiter` options instead.
 - **No flows or DAGs.** There is no `FlowProducer` counterpart; `job.getChildrenValues()`, `job.getParents()` and `job.moveToWaitingChildren()` are not available. `getFlowUsage()` and flow budgets work through `opts.parent.id` and `setBudget()`.
+- **`GroupRateLimitError` and `WaitingChildrenError` are exported but not handled.** Production treats them as control flow (reschedule and rate-limit the group, park the job in waiting-children). `TestWorker` treats both as ordinary failures, so the job is retried or failed per its `attempts`.
 - **No abort support.** `worker.abortJob()` and `job.abortSignal` are not available; `close()` waits for nothing and lets running processors finish on their own.
 - **Sandbox processors are CJS only.** A file path processor must be a `.js` (CommonJS) module; `.mjs` throws.
 - **`isPaused()` is synchronous** on `TestQueue`; the real `Queue.isPaused()` returns a promise. `await` works on both.

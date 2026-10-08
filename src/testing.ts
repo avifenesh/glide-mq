@@ -60,6 +60,20 @@ import {
   validateJobPriority,
 } from './utils';
 
+// The same classes `glide-mq` exports, so a test can throw and match them without importing the
+// main entry, which loads the native client.
+export {
+  GlideMQError,
+  ConnectionError,
+  UnrecoverableError,
+  DelayedError,
+  BatchError,
+  WaitingChildrenError,
+  SuspendError,
+  GroupRateLimitError,
+} from './errors';
+export type { GroupRateLimitOptions } from './errors';
+
 const MAX_TIMEOUT_DELAY_MS = 2_147_483_647;
 const DEFAULT_USAGE_WINDOW_MS = 60 * 60 * 1000;
 
