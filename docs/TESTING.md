@@ -14,6 +14,7 @@ glide-mq ships a built-in in-memory backend so you can unit-test job processors 
 - [Batch Testing](#batch-testing)
 - [Deduplication Testing](#deduplication-testing)
 - [Step Jobs in Tests](#step-jobs-in-tests)
+- [Flows and Workflows in Tests](#flows-and-workflows-in-tests)
 - [AI Primitives in Tests](#ai-primitives-in-tests)
 - [Tips](#tips)
 - [Known Limitations](#known-limitations)
@@ -143,6 +144,9 @@ describe('email processor', () => {
 | `retry()`                                | Move a failed job back to waiting (attempts reset, TTL re-armed); throws `Cannot retry: not_failed`                                                               |
 | `remove()`                               | Remove the job; the queue emits `removed`                                                                                                                         |
 | `moveToFailed(err)`                      | From inside the processor: fail the active job instead of completing it, then the attempts / backoff rules apply                                                  |
+| `getChildrenValues()`                    | Return values of the completed children, keyed `prefix:{queue}:id` like `Job.getChildrenValues()`; a child that is not completed, or was removed, is absent       |
+| `getParents()`                           | `[{ queue, id }]` for each parent, `[]` without one                                                                                                               |
+| `moveToWaitingChildren()`                | From inside the processor: park the job in `waiting-children` until its children complete, then run the processor again; throws outside an active worker          |
 | `log(message)`                           | Append a log line readable through `queue.getJobLogs()`                                                                                                           |
 | `updateData(data)` / `updateProgress(p)` | Persist to the stored job                                                                                                                                         |
 
@@ -397,6 +401,39 @@ const job = await queue.add('flow', {});
 
 ---
 
+## Flows and Workflows in Tests
+
+`TestFlowProducer` builds parent-child flows over the open `TestQueue` instances, looked up by name, so children may live in other queues. A queue must exist before a flow names it. `chain`, `group`, `chord` and `dag` have the signatures of the production helpers, are built on `TestFlowProducer`, and need no connection (the `connection` argument is accepted and ignored).
+
+```typescript
+import { TestQueue, TestWorker, TestFlowProducer, chord } from 'glide-mq/testing';
+
+const parents = new TestQueue('report');
+const children = new TestQueue('fetch');
+new TestWorker(children, async (job) => job.data.url.length);
+new TestWorker(parents, async (job) => Object.values(await job.getChildrenValues()));
+
+const flow = new TestFlowProducer();
+const node = await flow.add({
+  name: 'build',
+  queueName: 'report',
+  data: {},
+  children: [{ name: 'get', queueName: 'fetch', data: { url: 'https://example.com' } }],
+});
+// node.job.getState() is 'waiting-children' until the child completes, then the parent runs.
+
+// Same shape as the production helper; the callback receives the group results.
+await chord('report', [{ name: 'a', data: {} }], { name: 'summarize', data: {} });
+```
+
+- `add(flow, { budget })` and `addBulk(flows)` return the production `JobNode` shape, `{ job, children }`. A parent is created in `waiting-children` (a `delay` on it is ignored) and moves to `waiting` when its last child completes. `job.getState()` reports `waiting-children`; `getJobCounts()` does not count it, like production.
+- `budget` is shared by every job of the flow, keyed by the root job id on the root queue (`queue.getFlowBudget(rootId)`).
+- `getChildrenValues()` keys children `glide:{queue}:id` (the `prefix` option of `TestFlowProducer`, `chain`, `group`, `chord` and `dag` replaces `glide`).
+- Children added from a processor with `queue.add(name, data, { parent: { queue, id } })` count as children of that parent. After adding them, call `job.updateData()` to advance a step, then `job.moveToWaitingChildren()`; the processor runs again from the top once they complete.
+- `TestFlowProducer.addDAG()` exists because `dag()` needs it: nodes with `deps` wait in `waiting-children` for all of them, and a node with several dependents lists each one in `getParents()`.
+
+---
+
 ## AI Primitives in Tests
 
 All AI-native primitives have full testing mode parity - no Valkey needed.
@@ -479,8 +516,9 @@ Behaviour that testing mode does not mirror. Everything else in this document fo
 
 - **Ordering keys and concurrency groups are not enforced.** `ordering` options are validated and stored, but jobs sharing a key run concurrently and in dispatch order. `job.rateLimitGroup()` and `queue.rateLimitGroup()` do not exist on the test classes.
 - **No global concurrency or queue-wide rate limit.** `setGlobalConcurrency`, `setGlobalRateLimit`, `removeGlobalRateLimit` and `getGlobalRateLimit` are not available; use the `TestWorker` `concurrency` and `limiter` options instead.
-- **No flows or DAGs.** There is no `FlowProducer` counterpart; `job.getChildrenValues()`, `job.getParents()` and `job.moveToWaitingChildren()` are not available. `getFlowUsage()` and flow budgets work through `opts.parent.id` and `setBudget()`.
-- **`GroupRateLimitError` and `WaitingChildrenError` are exported but not handled.** Production treats them as control flow (reschedule and rate-limit the group, park the job in waiting-children). `TestWorker` treats both as ordinary failures, so the job is retried or failed per its `attempts`.
+- **Group rate limiting is not handled.** `GroupRateLimitError` is exported, but `TestWorker` treats it as an ordinary failure. `WaitingChildrenError` parks single jobs in waiting-children; batch workers treat it as a failure.
+- **Flows stop at the happy path.** A failed or removed child does not fail, release or re-count its parent: the parent stays in `waiting-children`, and removing a parent or child does not clean up the other side. `TestFlowProducer` takes only the `prefix` option and has `add`, `addBulk`, `addDAG` and `close`.
+- **Batch workers do not check or charge budgets.** A `TestWorker` in `batch` mode skips the pre-dispatch budget check and the post-completion usage charge, for flow budgets too; only single-job workers enforce them.
 - **No abort support.** `worker.abortJob()` and `job.abortSignal` are not available; `close()` waits for nothing and lets running processors finish on their own.
 - **Sandbox processors are CJS only.** A file path processor must be a `.js` (CommonJS) module; `.mjs` throws.
 - **`isPaused()` is synchronous** on `TestQueue`; the real `Queue.isPaused()` returns a promise. `await` works on both.

@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - **Error classes from `glide-mq/testing`**: `GlideMQError`, `ConnectionError`, `UnrecoverableError`, `DelayedError`, `BatchError`, `WaitingChildrenError`, `SuspendError` and `GroupRateLimitError` (plus the `GroupRateLimitOptions` type) are re-exported, so a test can throw and match them without importing the main entry, which loads the native client. They are the same classes, so `instanceof` works across both entries.
+- **Flows in `glide-mq/testing`**: `TestFlowProducer` (`add` with `budget`, `addBulk`, `addDAG`) builds parent-child flows over the open `TestQueue` instances, with children in any queue. A parent starts in `waiting-children` and moves to `waiting` when its last child completes. `TestJob` gets `getChildrenValues()`, `getParents()` and `moveToWaitingChildren()`, and `chain`, `group`, `chord` and `dag` are exported with the production signatures and no connection. Failed and removed child semantics are not mirrored yet.
 
 ---
 
