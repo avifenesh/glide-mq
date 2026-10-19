@@ -74,7 +74,7 @@ added --> stream (ready) --> PEL (active) --> completed (ZSet)
 
 ### LIFO Mode
 
-Jobs with `lifo: true` are placed onto a dedicated Valkey LIST key `glide:{queueName}:lifo` via RPUSH, and consumed via RPOP. When the worker's `moveToActive` function checks for the next job, priority jobs promoted into the `glide:{queueName}:priority` list are checked first, then the LIFO list, then the FIFO stream. A `list-active` counter in the queue metadata hash enforces global concurrency across both the LIFO list and the main stream.
+Jobs with `lifo: true` are placed onto a dedicated Valkey LIST key `glide:{queueName}:lifo` via RPUSH, and consumed via RPOP. When a worker fetches its next job, it pops the `glide:{queueName}:priority` list first, then the LIFO list (`glidemq_popListsReserve`), and only then reads the FIFO stream; `moveToActive` activates a job already fetched. A `list-active` counter in the queue metadata hash enforces global concurrency across both the LIFO list and the main stream.
 
 States map to Valkey structures:
 
