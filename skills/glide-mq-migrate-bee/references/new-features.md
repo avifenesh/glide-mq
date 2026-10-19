@@ -89,7 +89,7 @@ await queue.add('task', data, {
 
 // Throttle - reject duplicates within a time window
 await queue.add('task', data, {
-  deduplication: { id: 'user-123', ttl: 60000 },
+  deduplication: { id: 'user-123', mode: 'throttle', ttl: 60000 },
 });
 ```
 

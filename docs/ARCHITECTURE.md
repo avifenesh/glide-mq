@@ -431,7 +431,7 @@ interface JobOptions {
   lockDuration?: number;
   removeOnComplete?: boolean | number | { age: number; count: number };
   removeOnFail?: boolean | number | { age: number; count: number };
-  deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
+  deduplication?: DeduplicationOptions; // ttl is accepted only with mode: 'throttle'
   parent?: { queue: string; id: string };
   parents?: Array<{ queue: string; id: string }>;
   ttl?: number;
