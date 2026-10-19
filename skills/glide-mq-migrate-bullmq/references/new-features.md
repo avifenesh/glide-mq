@@ -434,7 +434,7 @@ await queue.add('job', data, {
   deduplication: { id: 'my-dedup-key', mode: 'throttle', ttl: 60_000 },
 });
 
-// debounce: replace a still-delayed job. The window is the job's own `delay`, not `ttl`.
+// debounce: replace the job while it is still delayed (or prioritized); ttl does not apply.
 await queue.add('job', data, {
   delay: 5_000,
   deduplication: { id: 'my-dedup-key', mode: 'debounce' },

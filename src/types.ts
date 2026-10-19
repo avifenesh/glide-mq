@@ -217,7 +217,7 @@ export interface BroadcastWorkerOptions extends WorkerOptions {
  * Deduplication options. `ttl` only applies to `mode: 'throttle'`, so only that
  * variant accepts it. `simple` (the default when `mode` is omitted) skips while the
  * job holding the id has not finished. `debounce` replaces a job that is still
- * `delayed` or `prioritized`; its window is the job's own `delay`.
+ * `delayed` or `prioritized`, by state rather than a time window.
  */
 export type DeduplicationOptions =
   | { id: string; mode?: 'simple' | 'debounce'; ttl?: never }
