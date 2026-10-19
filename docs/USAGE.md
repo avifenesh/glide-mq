@@ -73,7 +73,7 @@ Processing order: **priority > LIFO > FIFO**. Priority jobs are always consumed 
 
 #### Priority timing
 
-A job with `priority > 0` is not available at add time. It waits in the scheduled ZSet until the next scheduler promotion tick (`promotionInterval`, default 5000 ms), which moves it to the priority list. Idle workers stay in their blocking read (`blockTimeout`, default 5000 ms) meanwhile, so a prioritized job can wait up to about one `promotionInterval` plus one `blockTimeout` before it starts. Lower `promotionInterval` (and `blockTimeout`) on the worker to tighten this bound.
+A job with `priority > 0` and no `delay` is not available at add time. It waits in the scheduled ZSet until the next scheduler promotion tick (`promotionInterval`, default 5000 ms), which moves it to the priority list. Idle workers stay in their blocking read (`blockTimeout`, default 5000 ms) meanwhile, so a prioritized job can wait up to about one `promotionInterval` plus one `blockTimeout` before it starts. Lower `promotionInterval` (and `blockTimeout`) on the worker to tighten this bound. A priority job with a `delay` is promoted on the first tick after the delay elapses, so the same bound applies from its due time. A job that also sets `lifo: true` is promoted onto the LIFO list instead and gets no priority ranking.
 
 Ranked order holds only among jobs promoted in the same tick. The priority list is FIFO across ticks, so a high-priority job promoted in a later tick runs after a lower-priority job from an earlier tick that is still in the list.
 

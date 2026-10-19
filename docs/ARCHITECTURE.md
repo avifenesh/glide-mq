@@ -81,7 +81,7 @@ States map to Valkey structures:
 - **waiting**: In stream, not yet claimed by consumer group
 - **active**: In PEL (Pending Entries List) - claimed via XREADGROUP
 - **delayed**: In scheduled ZSet with future timestamp as score
-- **prioritized**: In scheduled ZSet with priority-encoded score (waits for a scheduler promotion tick, then moves to the priority list)
+- **prioritized**: In scheduled ZSet with priority-encoded score (waits for a scheduler promotion tick once due, then moves to the priority list, or to the LIFO list if the job sets `lifo`)
 - **completed**: In completed ZSet + job hash updated
 - **failed**: In failed ZSet + job hash updated
 - **waiting-children**: Parent job waiting, deps:{id} set tracks remaining children
@@ -94,8 +94,8 @@ Score format: `(priority * 2^42) + timestamp_ms`
 - Priority 0 means no priority: the job goes to the stream when due, and workers take any waiting priority > 0 job first
 - Within same priority, delayed jobs sort by due timestamp; non-delayed jobs share one score, so they sort by job id as a string
 - Priority must be an integer from 0 to 2048; anything else throws at enqueue
-- Non-delayed priority jobs get score with timestamp = 0, so they are due as soon as they are added, but `addJob` only writes them to the scheduled ZSet. They reach the priority list on the next scheduler promotion tick (`promotionInterval`, default 5000 ms), not at add time
-- A tick (`glidemq_promote`) promotes priorities in ascending order and LPUSHes each job onto the priority list, which workers RPOP. Ranked order therefore holds only among jobs promoted in the same tick. The list is FIFO across ticks: a high-priority job promoted in a later tick runs after a lower-priority job from an earlier tick that is still in the list
+- Non-delayed priority jobs get score with timestamp = 0, so they are due as soon as they are added, but `addJob` only writes them to the scheduled ZSet. They reach the priority list on the next scheduler promotion tick (`promotionInterval`, default 5000 ms), not at add time. A delayed priority job is promoted on the first tick after it is due
+- A tick (`glidemq_promote`) promotes priorities in ascending order and LPUSHes each job onto the priority list, which workers RPOP. Ranked order therefore holds only among jobs promoted in the same tick. The list is FIFO across ticks: a high-priority job promoted in a later tick runs after a lower-priority job from an earlier tick that is still in the list. A job that also sets `lifo` is RPUSHed onto the LIFO list instead and gets no priority ranking
 - A tick promotes at most 1000 jobs; the rest wait for the next tick
 - Idle workers sit in `XREADGROUP BLOCK` (`blockTimeout`, default 5000 ms) and check the priority list only after it returns, so a promoted job can wait up to one tick plus one blocking read before it starts
 
