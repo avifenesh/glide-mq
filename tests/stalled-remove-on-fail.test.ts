@@ -223,6 +223,37 @@ describeEachMode('Terminal stalled failure honors removeOnFail', (CONNECTION) =>
     }
   }, 20_000);
 
+  it('floors a fractional count on processor completion and failure', async () => {
+    const Q = uniqueQueue('srof-fraction');
+    const k = buildKeys(Q);
+    const queue = new Queue(Q, { connection: CONNECTION });
+    const finished: string[] = [];
+    const errors: Error[] = [];
+    const worker = new Worker(
+      Q,
+      async (job: any) => {
+        if (job.data.fail) throw new Error('boom');
+        return 'ok';
+      },
+      { connection: CONNECTION, ...workerOpts },
+    );
+    worker.on('error', (err: Error) => errors.push(err));
+    worker.on('completed', (job: any) => finished.push(job.id));
+    worker.on('failed', (job: any) => finished.push(job.id));
+    try {
+      for (const fail of [false, false, true, true]) {
+        await queue.add('j', { fail }, { removeOnComplete: 1.5, removeOnFail: 1.5 });
+      }
+      await waitFor(() => finished.length === 4, 10_000, 20);
+      expect(errors).toEqual([]);
+      expect(await cleanupClient.zcard(k.completed)).toBe(1);
+      expect(await cleanupClient.zcard(k.failed)).toBe(1);
+    } finally {
+      await worker.close();
+      await queue.close();
+    }
+  }, 20_000);
+
   it('releases the ordering slot so the next job in the group runs', async () => {
     const Q = uniqueQueue('srof-order');
     const queue = new Queue(Q, { connection: CONNECTION });

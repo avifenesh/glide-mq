@@ -430,11 +430,12 @@ function encodeRetention(opt?: boolean | number | { age: number; count: number }
   if (opt === true) {
     return RETENTION_TRUE;
   }
+  // The Lua side passes the count to ZRANGE, which rejects a fractional index.
   if (typeof opt === 'number') {
-    return { mode: 'count', count: opt, age: 0 };
+    return { mode: 'count', count: Math.floor(opt), age: 0 };
   }
   if (opt && typeof opt === 'object') {
-    return { mode: 'age_count', count: opt.count ?? 0, age: opt.age ?? 0 };
+    return { mode: 'age_count', count: Math.floor(opt.count ?? 0), age: opt.age ?? 0 };
   }
   return RETENTION_NONE;
 }
