@@ -952,6 +952,8 @@ end
 -- removeAge use the encodeRetention encoding in src/functions/index.ts. With
 -- 'true' the caller skipped the failed-set entry, so only the hash is deleted.
 local function applyFailRetention(failedKey, prefix, jobKey, removeMode, removeCount, removeAge, timestamp)
+  -- JobOptions allows a fractional count; ZRANGE rejects a fractional index.
+  removeCount = math.floor(removeCount)
   if removeMode == 'true' then
     redis.call('UNLINK', jobKey)
   elseif removeMode == 'count' and removeCount > 0 then

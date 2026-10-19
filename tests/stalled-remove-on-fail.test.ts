@@ -128,6 +128,8 @@ describeEachMode('Terminal stalled failure honors removeOnFail', (CONNECTION) =>
     ['age and count', { age: 3600, count: 1 }],
     // No count limit: the older failure goes only because it is past the age.
     ['age', { age: 60, count: 0 }],
+    // A fractional count is floored, not passed to ZRANGE.
+    ['fractional count', 1.5],
   ] as const)(
     'keeps only the newest failed jobs with removeOnFail as %s',
     async (_label, removeOnFail) => {
