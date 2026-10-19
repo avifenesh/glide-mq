@@ -53,8 +53,11 @@ describeEachMode('Terminal stalled failure honors removeOnFail', (CONNECTION) =>
       { connection: CONNECTION, concurrency, ...workerOpts },
     );
     worker.on('error', () => {});
-    await waitFor(() => claimed.length >= count, 10_000, 20);
-    await worker.close(true);
+    try {
+      await waitFor(() => claimed.length >= count, 10_000, 20);
+    } finally {
+      await worker.close(true);
+    }
     return claimed;
   }
 
@@ -314,6 +317,9 @@ describeEachMode('Terminal stalled failure honors removeOnFail', (CONNECTION) =>
       await waitFor(() => received.length === 1, 10_000, 20);
       expect(received).toEqual([{ n: 1 }]);
     } finally {
+      // close() is idempotent; these run on every path.
+      await a.close(true).catch(() => {});
+      await bIdle.close().catch(() => {});
       await b?.close();
       await broadcast.close();
     }
