@@ -123,6 +123,8 @@ describeEachMode('Terminal stalled failure honors removeOnFail', (CONNECTION) =>
   it.each([
     ['count', 1],
     ['age and count', { age: 3600, count: 1 }],
+    // No count limit: the older failure goes only because it is past the age.
+    ['age', { age: 60, count: 0 }],
   ] as const)(
     'keeps only the newest failed jobs with removeOnFail as %s',
     async (_label, removeOnFail) => {
@@ -137,8 +139,9 @@ describeEachMode('Terminal stalled failure honors removeOnFail', (CONNECTION) =>
 
         const newer = await queue.add('b', { v: 2 }, { removeOnFail });
         await crashAfterClaim(Q, 1);
-        // A later timestamp, so the newer failure ranks after the older one.
-        expect(await reclaimStalled(cleanupClient, k, 'reclaimer', 0, 0, Date.now() + 180_000)).toBe(1);
+        // 180s after the first failure: it ranks after it and the first is
+        // past a 60s age.
+        expect(await reclaimStalled(cleanupClient, k, 'reclaimer', 0, 0, Date.now() + 300_000)).toBe(1);
 
         await expectRemoved(Q, older!.id);
         expect(await cleanupClient.zrange(k.failed, { start: 0, end: -1 })).toEqual([newer!.id]);
