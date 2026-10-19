@@ -71,6 +71,12 @@ await queue.add('urgent-report', data, { lifo: true });
 
 Processing order: **priority > LIFO > FIFO**. Priority jobs are always consumed first, then LIFO, then the normal FIFO stream. `lifo` cannot be combined with `ordering` keys — they are mutually exclusive.
 
+#### Priority timing
+
+A job with `priority > 0` is not available at add time. It waits in the scheduled ZSet until the next scheduler promotion tick (`promotionInterval`, default 5000 ms), which moves it to the priority list. Idle workers stay in their blocking read (`blockTimeout`, default 5000 ms) meanwhile, so a prioritized job can wait up to about one `promotionInterval` plus one `blockTimeout` before it starts. Lower `promotionInterval` (and `blockTimeout`) on the worker to tighten this bound.
+
+Ranked order holds only among jobs promoted in the same tick. The priority list is FIFO across ticks, so a high-priority job promoted in a later tick runs after a lower-priority job from an earlier tick that is still in the list.
+
 #### Job TTL
 
 `ttl` (milliseconds) sets a time-to-live on a job. If the job is not processed within this window, it is automatically failed as `'expired'`.

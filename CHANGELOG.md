@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- Prioritized jobs wait for the next scheduler promotion tick (`promotionInterval`) before workers can fetch them, and ranked order holds only among jobs promoted in the same tick. Corrected the architecture and usage docs, which said they promote immediately and in order.
+
 ## [0.18.0] - 2026-10-08
 
 ### Added

@@ -291,7 +291,7 @@ await queue.add('render', { frame: 102 }, { lifo: true });
 
 ### Ordering precedence
 
-Workers check sources in this order: **priority > LIFO > FIFO**. Priority jobs (those with `priority > 0`) are always fetched first. Among non-priority jobs, LIFO jobs are fetched before FIFO jobs sitting in the stream.
+Workers check sources in this order: **priority > LIFO > FIFO**. Priority jobs (those with `priority > 0`) are always fetched first, once the scheduler has promoted them (see [Priority timing](USAGE.md#priority-timing)). Among non-priority jobs, LIFO jobs are fetched before FIFO jobs sitting in the stream.
 
 ### Constraints
 
