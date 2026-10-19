@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **Terminal stalled failure ignored `removeOnFail`**: a job that stalled past `maxStalledCount` (stream or priority/LIFO list job) moved to the failed set and kept its hash and data whatever `removeOnFail` said. It now applies the same retention as a processor failure (`true`, count, `{ age, count }`), still emitting `failed`, recording metrics, advancing a `repeatAfterComplete` scheduler and releasing its ordering/group slot. Broadcast messages keep their hash for the other subscriptions, as before. `LIBRARY_VERSION` 135.
+- **Fractional `removeOnFail` count errored**: a count such as `removeOnFail: 1.5` reached `ZRANGE` as a fractional index and the failure call errored. The count is now floored.
 
 ## [0.18.0] - 2026-10-08
 
