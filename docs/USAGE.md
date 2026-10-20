@@ -71,6 +71,12 @@ await queue.add('urgent-report', data, { lifo: true });
 
 Processing order: **priority > LIFO > FIFO**. Priority jobs are always consumed first, then LIFO, then the normal FIFO stream. `lifo` cannot be combined with `ordering` keys — they are mutually exclusive.
 
+#### Priority timing
+
+A job with `priority > 0` and no `delay` is not available at add time. It waits in the scheduled ZSet until the next scheduler promotion tick (`promotionInterval`, default 5000 ms), which moves it to the priority list. A tick promotes at most 1000 jobs, so with more due jobs ranked ahead of it, a job can take several ticks. Idle workers stay in their blocking read (`blockTimeout`, default 5000 ms) meanwhile and check the priority list after it returns empty, so on an otherwise idle queue a prioritized job can wait about one `promotionInterval` plus one `blockTimeout` before it starts. Lower `promotionInterval` (and `blockTimeout`) on the worker to shorten this. It is not a hard bound: if stream jobs wake the blocking read, the worker runs them first, and the priority job starts no later than when the first of them completes (the completion call fetches the priority list next; a worker with a free slot can pick it up sooner). A batch worker instead finishes the whole batch, including any `batch.timeout` wait, and picks up the priority job on its next poll. A priority job with a `delay` is promoted on the first tick after the delay elapses, so the same bound applies from its due time. A job that also sets `lifo: true` is promoted onto the LIFO list instead and gets no priority ranking.
+
+Ranked order holds only among jobs promoted in the same tick. The priority list is FIFO across ticks, so a high-priority job promoted in a later tick runs after a lower-priority job from an earlier tick that is still in the list.
+
 #### Job TTL
 
 `ttl` (milliseconds) sets a time-to-live on a job. If the job is not processed within this window, it is automatically failed as `'expired'`.
