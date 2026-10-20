@@ -7,6 +7,11 @@ const { findViolations } = require('../scripts/check-priority-docs.cjs') as {
 describe('priority documentation lint', () => {
   it.each([
     'Priority: 0 is highest priority.',
+    'Priority: 0 (the default) is the highest, and values above 2048 throw.',
+    'Priority: a lower number runs first.',
+    'Priority and delayed jobs take precedence over LIFO.',
+    'Strict reverse ordering is only guaranteed with `concurrency: 1`.',
+    'Reset with: `DEL glide:{queueName}:list-active`.',
     'Non-delayed priority jobs use timestamp 0 so they promote immediately.',
     'Priority jobs are always consumed first.',
     'Priority 0 runs after prioritized jobs.',
@@ -20,9 +25,22 @@ describe('priority documentation lint', () => {
     expect(findViolations(text)).toHaveLength(1);
   });
 
+  it('rejects both errors in the former public skill wording', () => {
+    expect(
+      findViolations(
+        'Priority: a lower number runs first, 0 (the default) is the highest, and values above 2048 throw.',
+      ),
+    ).toHaveLength(2);
+  });
+
   it.each([
     'Non-delayed priority jobs do not promote immediately; scheduler promotion is required.',
     'Priority 0 means no priority and does not always run after prioritized jobs.',
+    'Priority: 0 (the default) means no priority; 1 is the highest positive priority.',
+    'Lower numbers order promotion within a pass, not global execution.',
+    'Already-promoted non-LIFO priority-list retrieval has preference; delay has no independent precedence.',
+    'Even concurrency: 1 does not guarantee global reverse start or completion order.',
+    'List claims recover automatically; do not routinely delete the counter because it includes live reservations.',
   ])('permits correct negated guidance: %s', (text) => {
     expect(findViolations(text)).toEqual([]);
   });

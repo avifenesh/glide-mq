@@ -252,7 +252,7 @@ await queue.replayDeadLetterJob(dead.id); // re-adds the original job and drops 
 Delayed and priority jobs follow the `glidemq_addJob` / `glidemq_promote` state machine:
 
 - `delay` parks the job in `delayed` until the timestamp passes, then it moves to `waiting` and the queue emits `promoted`. `job.promote()` releases it early, `job.changeDelay(ms)` reschedules it.
-- `priority > 0` without a delay parks the job in `prioritized`. It is counted under `delayed` by `getJobCounts()` and listed by `getJobs('delayed')`, exactly like the scheduled ZSet in production. An attached worker promotes it to `waiting` on its next pass (also while the queue is paused) and dispatches it before LIFO and FIFO jobs.
+- `priority > 0` without a delay parks the job in `prioritized`. It is counted under `delayed` by `getJobCounts()` and listed by `getJobs('delayed')`, exactly like the scheduled ZSet in production. An attached worker promotes it to `waiting` on its next pass (also while the queue is paused). Eligible promoted non-LIFO priority jobs are selected before LIFO and FIFO work; `lifo: true` takes precedence over numeric priority and routes the job to LIFO selection instead. This source preference does not guarantee global start or completion order in production.
 - `debounce` deduplication replaces a tracked job that is still `delayed` or `prioritized`.
 
 Timers are real, so keep delays small in unit tests.

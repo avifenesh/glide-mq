@@ -371,15 +371,15 @@ await queue.upsertJobScheduler(
 
 ## LIFO mode
 
-Last-in-first-out processing - newest jobs are processed first:
+Last-in-first-out retrieval - the newest entry already available in the same LIFO list is popped first:
 
 ```ts
 await queue.add('urgent', data, { lifo: true });
 ```
 
-Priority and delayed jobs take precedence over LIFO. Cannot be combined with ordering keys.
+Workers check the already-promoted non-LIFO priority list before LIFO and the stream. This is a retrieval preference, not a global start or completion guarantee; promotion timing, blocking reads, admission gates and other workers can change execution order. Delayed jobs have no independent precedence: promotion routes to LIFO if flagged, otherwise to the positive-priority list, otherwise to the stream. LIFO cannot be combined with ordering keys.
 
-Note: LIFO + `globalConcurrency` has a crash limitation. If a worker is killed hard (SIGKILL, OOM) while processing a LIFO job, the `list-active` counter is not decremented. Reset with: `DEL glide:{queueName}:list-active`.
+List-backed crash recovery is automatic, not a permanent slot leak. Healthy workers run `glidemq_reclaimStalledListJobs` to re-queue or fail stale LIFO/priority claims under `maxStalledCount` and release their `list-active` reservations. Claims are indexed in `list-active-ids`; `glidemq_healListActive` corrects drift every 10th promotion tick. Until the index is seeded, or when older-library claims make it incomplete, reclaim falls back to a SCAN capped at 1000 steps per call from cursor 0, so a very large keyspace can leave jobs beyond that bound unrecovered in the fallback. Healing uses resumable scans capped at 500 pages per call and may take several ticks. Neither reclaim path runs while paused. Do not routinely delete the counter, which includes live reservations. See [Worker crash behavior](../../../docs/DURABILITY.md#worker-crash-behavior).
 
 ---
 

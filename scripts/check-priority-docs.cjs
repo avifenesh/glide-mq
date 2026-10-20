@@ -3,7 +3,17 @@ const path = require('node:path');
 
 // Guard recurring incorrect claims, not every aspect of scheduling semantics.
 const rules = [
-  [/\b0\s+(?:is|=)\s+(?:the\s+)?highest\b/i, '0 means no priority in glide-mq'],
+  [/\b0(?:\s+\(the default\))?\s+(?:is|=)\s+(?:the\s+)?highest\b/i, '0 means no priority in glide-mq'],
+  [/\ba lower number runs first\b/i, 'numeric priority does not guarantee execution order'],
+  [
+    /\bPriority and delayed jobs take precedence over LIFO\b/i,
+    'only promoted non-LIFO priority-list retrieval has preference; delay has none',
+  ],
+  [
+    /\bstrict reverse ordering is only guaranteed with\b/i,
+    'single-worker concurrency does not guarantee global reverse execution order',
+  ],
+  [/\bDEL\s+glide:\{queueName\}:list-active\b/i, 'do not recommend deleting live list reservations'],
   [
     /\bnon-delayed priority jobs\b(?:\s+promote immediately\b|[^.\n]*\bso they promote immediately\b)/i,
     'priority jobs require scheduler promotion',

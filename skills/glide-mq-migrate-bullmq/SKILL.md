@@ -377,7 +377,7 @@ TypeScript catches most leftovers at compile time: `defaultJobOptions`, `setting
 | Import of `QueueScheduler` fails | glide-mq has no QueueScheduler | Remove it; the Worker promotes delayed jobs |
 | Repeatable job never repeats | `opts.repeat` on `queue.add()` | `queue.upsertJobScheduler()` |
 | `waitUntilFinished` times out or returns a state instead of a result | New `(pollMs, timeoutMs)` signature | Pass numbers; use `addAndWait()` for the return value |
-| Job stuck in `active` | Worker crashed mid-job | Stall detection recovers stream jobs; for LIFO/priority jobs, `DEL glide:{queueName}:list-active` |
+| Job stuck in `active` | Worker crashed mid-job | Healthy workers reclaim stream and list-backed claims automatically; list recovery releases reservations and counter healing runs every 10th promotion tick. Recovery waits while paused and bounded scan fallback can delay or miss claims in very large keyspaces. Do not routinely delete the counter; see [recovery caveats](references/new-features.md#lifo-mode) |
 | `retries-exhausted` listener never fires | No such event | Listen to `'failed'` and check `attemptsMade >= opts.attempts` |
 | `FlowProducer.add` throws `The "string" argument must be of type string ... Received undefined` | A FlowJob without `data` | Pass `data` on every node (use `{}` if empty) |
 | `queue.add()` returned `null` | A job with that `jobId` already exists | Expected: duplicates are skipped |

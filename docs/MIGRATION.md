@@ -765,16 +765,9 @@ const job = await queue.add('job', data, { jobId: 'my-deterministic-id' });
 // job is null if a job with that ID already exists
 ```
 
-**LIFO support** - Last-in-first-out ordering is supported via `lifo: true` option. Jobs are processed in reverse-chronological order (newest first). Priority and delayed jobs take precedence over LIFO. Cannot be combined with ordering keys (per-key sequencing).
+**LIFO support** - The `lifo: true` option uses reverse retrieval order among entries already available in the same LIFO list. Workers check the already-promoted non-LIFO priority list before LIFO and the stream; this is a retrieval preference, not a start or completion guarantee. Delayed jobs have no independent precedence: when promoted, they go to LIFO if flagged, otherwise to the positive-priority list, otherwise to the stream. LIFO cannot be combined with ordering keys (per-key sequencing).
 
-> **LIFO + `globalConcurrency` — crash limitation:** When `globalConcurrency` is set on a queue, LIFO and priority-list jobs are tracked via a `{queue}:list-active` counter in Valkey. If a worker process is killed hard (SIGKILL, OOM) while processing a list-backed job, the counter is not decremented. This permanently reduces effective global concurrency by one slot until it is manually reset:
->
-> ```
-> # Reset stuck list-active counter
-> valkey-cli DEL glide:{queueName}:list-active
-> ```
->
-> Stream-backed (FIFO) jobs are self-healing via stream PEL and `glidemq_reclaimStalled`. LIFO/priority jobs lack this self-healing because they have no PEL entry. A future enhancement will integrate `list-active` with stall detection.
+> **List-backed crash recovery:** LIFO and priority-list claims have no stream PEL entry. Healthy workers automatically recover stale claims with `glidemq_reclaimStalledListJobs`, re-queueing or failing them according to `maxStalledCount` and releasing their `list-active` reservation. The `list-active-ids` set tracks these claims; every 10th promotion tick also runs `glidemq_healListActive` to correct counter drift. Recovery is bounded, not instantaneous: until the ID set is seeded, or if older-library claims make it incomplete, reclaim falls back to a SCAN capped at 1000 steps per call starting at cursor 0, so jobs beyond that bound can remain unrecovered in a very large keyspace. Counter healing re-seeds with a resumable scan capped at 500 pages per call and can take several ticks. Neither reclaim path runs while the queue is paused. Do not routinely delete the counter: it accounts for live reservations. See [Worker crash behavior](DURABILITY.md#worker-crash-behavior) for the full recovery caveats.
 
 **`job.promote()` is now implemented** - call `job.promote()` to move a delayed job to waiting immediately. Throws if the job is not in the delayed state (#11).
 

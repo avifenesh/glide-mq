@@ -63,7 +63,7 @@ await queue.addBulk([
 
 #### LIFO mode
 
-Add `lifo: true` so the newest jobs are processed first. LIFO jobs are stored in a dedicated Valkey LIST (RPUSH/RPOP) separate from the default FIFO stream.
+Add `lifo: true` to retrieve the newest entry already available in the same LIFO list first. LIFO jobs are stored in a dedicated Valkey LIST (RPUSH/RPOP) separate from the default FIFO stream. This does not guarantee global start or completion order, even with worker `concurrency: 1`; promotion timing, blocking stream reads, admission gates and other workers can change execution order.
 
 ```typescript
 await queue.add('urgent-report', data, { lifo: true });

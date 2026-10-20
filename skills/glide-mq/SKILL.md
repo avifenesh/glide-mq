@@ -163,7 +163,7 @@ await worker.run();
 - Requires Node.js 20+ and Valkey 7.0+ (or Redis 7.0+).
 - Connections are `{ addresses: [{ host, port }] }`, not `{ host, port }`; TLS is `useTLS: true`, passwords go in `credentials`, and cluster needs `clusterMode: true`. The BullMQ shape fails at connect time with a `ConnectionError`.
 - Delivery is at least once, so processors should be idempotent.
-- Priority: a lower number runs first, 0 (the default) is the highest, and values above 2048 throw.
+- Priority: 0 (the default) means no priority; positive priorities are integers 1-2048, with 1 highest. Enqueue stages positive-priority jobs in the scheduled ZSet, even without a delay; scheduler promotion makes them available. Numeric priority orders promotion within a pass, not global execution. Promoted non-LIFO priority jobs use a FIFO list across passes; `lifo: true` routes to the LIFO list instead. Admission gates and concurrent workers can change start and completion order.
 - Keys are hash-tagged (`glide:{queueName}:*`), so cluster mode needs no extra setup.
 - `queue.add()` with a `jobId` that already exists returns `null` instead of adding a duplicate.
 

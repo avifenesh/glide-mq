@@ -106,7 +106,7 @@ Each job is stored as a hash at `glide:{queueName}:job:{id}` with these fields:
 
 ## FCALL glidemq_addJob
 
-Atomically creates a job hash and enqueues it to the stream (or scheduled ZSet if delayed/prioritized).
+Atomically creates a job hash and enqueues it to the scheduled ZSet if delayed/prioritized; otherwise to the LIFO list when `lifo` is set, or to the stream.
 
 ### Keys (4)
 
@@ -158,7 +158,9 @@ An optional 5th key, `glide:{queueName}:deps:{parentId}`, registers the job in a
 
 - If `delay > 0`: job goes to scheduled ZSet with score `priority * 2^42 + (timestamp + delay)`, state = `delayed`
 - If `priority > 0` and `delay == 0`: job goes to scheduled ZSet with score `priority * 2^42`, state = `prioritized`
+- Otherwise, if `lifo == 1`: job goes to the LIFO list via `RPUSH`, state = `waiting`
 - Otherwise: job goes to stream via `XADD`, state = `waiting`
+- Scheduled promotion routes to the LIFO list when `lifo` is set, otherwise to the priority list via `LPUSH` for positive priority, otherwise to the stream. List claims use `list-active` reservations and `list-active-ids` tracking, not stream PEL entries.
 - An `added` event is emitted on the events stream
 
 ### Example (redis-cli)
@@ -332,7 +334,7 @@ score = priority * 2^42 + timestamp_ms
 
 Where `2^42 = 4398046511104`.
 
-- Priority 1 is highest. Priority 0 means no priority: a priority-0 delayed job uses score `0 + (timestamp + delay)` and goes to the stream when promoted. Non-LIFO jobs with priority > 0 go to the priority list; jobs also setting `lifo` go to the LIFO list. When checking available sources, workers inspect the priority list before LIFO and the stream. This is a retrieval preference, not a guarantee of execution order.
+- Priority 1 is highest. Priority 0 means no priority: a priority-0 delayed job uses score `0 + (timestamp + delay)` and goes to the stream when promoted unless `lifo` is set, in which case it goes to the LIFO list. Non-LIFO jobs with priority > 0 go to the priority list; jobs also setting `lifo` go to the LIFO list. When checking available sources, workers inspect the priority list before LIFO and the stream. This is a retrieval preference, not a guarantee of execution order.
 - Priority 1 uses score `4398046511104 + timestamp_ms`.
 - Within the same priority, delayed jobs sort by due timestamp. Non-delayed jobs share one score, so ties sort by string job ID.
 - Non-delayed priority jobs use score `priority * 2^42 + 0` (timestamp = 0), making them immediately eligible for scheduler promotion, not immediately available to workers. Promotion is bounded to 1000 jobs per pass. The priority list is FIFO across passes; admission gates and worker concurrency can change actual execution order. See [Priority timing](USAGE.md#priority-timing).
