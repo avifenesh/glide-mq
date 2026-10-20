@@ -156,10 +156,10 @@ describeEachMode('Producer - deduplication', (CONNECTION) => {
 
   it('returns null for deduplicated job', async () => {
     const dedupId = 'dedup-' + Date.now();
-    const id1 = await producer.add('dedup-first', { a: 1 }, { deduplication: { id: dedupId, ttl: 5000 } });
+    const id1 = await producer.add('dedup-first', { a: 1 }, { deduplication: { id: dedupId } });
     expect(id1).not.toBeNull();
 
-    const id2 = await producer.add('dedup-second', { b: 2 }, { deduplication: { id: dedupId, ttl: 5000 } });
+    const id2 = await producer.add('dedup-second', { b: 2 }, { deduplication: { id: dedupId } });
     expect(id2).toBeNull();
   });
 });

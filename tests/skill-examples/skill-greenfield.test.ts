@@ -1095,7 +1095,7 @@ describe('Deduplication examples', () => {
       'task',
       { x: 1 },
       {
-        deduplication: { id: 'user-123', ttl: 60000 },
+        deduplication: { id: 'user-123', mode: 'throttle', ttl: 60000 },
       },
     );
     expect(job1).not.toBeNull();

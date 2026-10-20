@@ -37,29 +37,29 @@ const result = await queue.addAndWait(name, data, {
 
 ## JobOptions
 
-| Option | Type | Default | Notes |
-|--------|------|---------|-------|
-| `delay` | `number` (ms) | 0 | Run after delay |
-| `priority` | `number` | 0 | **LOWER = HIGHER** (0 is highest, max 2048) |
-| `attempts` | `number` | 1 | Total attempts (initial + retries) |
-| `backoff` | `{ type, delay, jitter? }` | - | `'fixed'`, `'exponential'`, or custom name |
-| `timeout` | `number` (ms) | - | Fail if processor exceeds this |
-| `ttl` | `number` (ms) | - | Fail as `'expired'` if not processed in time. Clock starts at creation. |
-| `jobId` | `string` | auto-increment | Custom ID. Max 256 chars. No `{}:` or control chars. Returns `null` on collision. |
-| `lifo` | `boolean` | false | Last-in-first-out. Cannot combine with `ordering.key`. |
-| `removeOnComplete` | `boolean \| { age, count }` | false | Auto-remove on success |
-| `removeOnFail` | `boolean \| number \| { age, count }` | false | Auto-remove on failure. Number = max count to keep. |
-| `deduplication` | `{ id, mode, ttl? }` | - | Modes: `'simple'`, `'throttle'`, `'debounce'`. Returns `null` when skipped. |
-| `ordering` | `{ key, concurrency?, rateLimit?, tokenBucket? }` | - | Per-key sequential/grouped processing |
-| `cost` | `number` | 1 | Token cost for token bucket rate limiting |
-| `lockDuration` | `number` (ms) | - | Override worker-level lockDuration for this job. Controls heartbeat frequency and stall threshold. |
-| `fallbacks` | `Array<{ model, provider?, metadata? }>` | - | Ordered fallback chain for model/provider failover |
+| Option             | Type                                                | Default        | Notes                                                                                                                                                                                                          |
+| ------------------ | --------------------------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `delay`            | `number` (ms)                                       | 0              | Run after delay                                                                                                                                                                                                |
+| `priority`         | `number`                                            | 0              | 0 means no priority; 1-2048 are prioritized, with 1 highest                                                                                                                                                    |
+| `attempts`         | `number`                                            | 1              | Total attempts (initial + retries)                                                                                                                                                                             |
+| `backoff`          | `{ type, delay, jitter? }`                          | -              | `'fixed'`, `'exponential'`, or custom name                                                                                                                                                                     |
+| `timeout`          | `number` (ms)                                       | -              | Fail if processor exceeds this                                                                                                                                                                                 |
+| `ttl`              | `number` (ms)                                       | -              | Fail as `'expired'` if not processed in time. Clock starts at creation.                                                                                                                                        |
+| `jobId`            | `string`                                            | auto-increment | Custom ID. Max 256 chars. No `{}:` or control chars. Returns `null` on collision.                                                                                                                              |
+| `lifo`             | `boolean`                                           | false          | Last-in-first-out. Cannot combine with `ordering.key`.                                                                                                                                                         |
+| `removeOnComplete` | `boolean \| { age, count }`                         | false          | Auto-remove on success                                                                                                                                                                                         |
+| `removeOnFail`     | `boolean \| number \| { age, count }`               | false          | Auto-remove on failure. Number = max count to keep.                                                                                                                                                            |
+| `deduplication`    | `{ id, mode? }` or `{ id, mode: 'throttle', ttl? }` | -              | Modes: `'simple'` (default), `'throttle'`, `'debounce'`. `ttl` is throttle-only (types reject it otherwise); debounce replaces a job only while it is `delayed` or `prioritized`. Returns `null` when skipped. |
+| `ordering`         | `{ key, concurrency?, rateLimit?, tokenBucket? }`   | -              | Per-key sequential/grouped processing                                                                                                                                                                          |
+| `cost`             | `number`                                            | 1              | Token cost for token bucket rate limiting                                                                                                                                                                      |
+| `lockDuration`     | `number` (ms)                                       | -              | Override worker-level lockDuration for this job. Controls heartbeat frequency and stall threshold.                                                                                                             |
+| `fallbacks`        | `Array<{ model, provider?, metadata? }>`            | -              | Ordered fallback chain for model/provider failover                                                                                                                                                             |
 
 > **Note:** Compression is not a per-job option. Set `compression: 'gzip'` at Queue level in the Queue constructor.
 
 ### Processing Order
 
-**priority > LIFO > FIFO**. Priority jobs first, then LIFO list, then FIFO stream.
+Available-source retrieval preference: **promoted priority list > LIFO > FIFO**. This is not a global execution-order guarantee: scheduler promotion, existing list entries, admission gates and concurrent workers affect when a job starts. See docs/USAGE.md Priority timing.
 
 ## Queue Management
 
@@ -143,8 +143,8 @@ const more = await queue.readStream(jobId, { lastId: entries.at(-1)?.id });
 // Long-polling (blocks until new entries or timeout)
 const live = await queue.readStream(jobId, {
   lastId: '0-0',
-  count: 50,        // max entries (default: 100)
-  block: 5000,      // XREAD BLOCK ms
+  count: 50, // max entries (default: 100)
+  block: 5000, // XREAD BLOCK ms
 });
 ```
 
@@ -231,7 +231,7 @@ See [references/ai-native.md](ai-native.md) and [references/search.md](search.md
 
 ## Gotchas
 
-- Priority: **0 is highest priority**. Lower number = higher priority. Max 2048.
+- Priority: **0 means no priority**. Values 1-2048 are prioritized, with 1 highest; promotion and admission determine actual execution timing.
 - `addAndWait()` rejects if dedup returns null. Does not support `removeOnComplete`/`removeOnFail`.
 - `queue.add()` returns `null` on custom jobId collision or deduplication skip.
 - `FlowProducer.add()` throws on duplicate jobId (flows cannot be partial).

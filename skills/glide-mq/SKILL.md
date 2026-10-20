@@ -44,18 +44,18 @@ worker.on('failed', (job, err) => console.error(`Failed: ${job.id}`, err.message
 
 Read the file that matches the task; each holds the options, defaults and edge cases for its area.
 
-| Area | File |
-| --- | --- |
-| Queues, adding jobs, retries, dedup, rate limits, job lookup | [references/queue.md](references/queue.md) |
-| Workers, concurrency, batch mode, stalled jobs, sandboxing | [references/worker.md](references/worker.md) |
-| Connection options, TLS, IAM, cluster, AZ affinity | [references/connection.md](references/connection.md) |
-| Parent-child flows, DAGs, `chain` / `group` / `chord` | [references/workflows.md](references/workflows.md) |
-| Fan-out with `Broadcast` / `BroadcastWorker` | [references/broadcast.md](references/broadcast.md) |
-| Cron and interval schedulers | [references/schedulers.md](references/schedulers.md) |
-| `QueueEvents`, metrics, OpenTelemetry | [references/observability.md](references/observability.md) |
-| LLM usage, token streaming, suspend/resume, budgets, fallbacks, token rate limits | [references/ai-native.md](references/ai-native.md) |
-| Vector search over jobs | [references/search.md](references/search.md) |
-| Serverless producers, HTTP proxy and SSE, in-memory testing | [references/serverless.md](references/serverless.md) |
+| Area                                                                              | File                                                       |
+| --------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Queues, adding jobs, retries, dedup, rate limits, job lookup                      | [references/queue.md](references/queue.md)                 |
+| Workers, concurrency, batch mode, stalled jobs, sandboxing                        | [references/worker.md](references/worker.md)               |
+| Connection options, TLS, IAM, cluster, AZ affinity                                | [references/connection.md](references/connection.md)       |
+| Parent-child flows, DAGs, `chain` / `group` / `chord`                             | [references/workflows.md](references/workflows.md)         |
+| Fan-out with `Broadcast` / `BroadcastWorker`                                      | [references/broadcast.md](references/broadcast.md)         |
+| Cron and interval schedulers                                                      | [references/schedulers.md](references/schedulers.md)       |
+| `QueueEvents`, metrics, OpenTelemetry                                             | [references/observability.md](references/observability.md) |
+| LLM usage, token streaming, suspend/resume, budgets, fallbacks, token rate limits | [references/ai-native.md](references/ai-native.md)         |
+| Vector search over jobs                                                           | [references/search.md](references/search.md)               |
+| Serverless producers, HTTP proxy and SSE, in-memory testing                       | [references/serverless.md](references/serverless.md)       |
 
 Framework adapters (Hono, Fastify, NestJS, Hapi) are documented at https://www.glidemq.dev/integrations/.
 
@@ -67,8 +67,8 @@ Framework adapters (Hono, Fastify, NestJS, Hapi) are documented at https://www.g
 // Delayed: run after 5 minutes
 await queue.add('reminder', data, { delay: 300_000 });
 
-// Priority: lower number = higher priority (default: 0)
-await queue.add('urgent', data, { priority: 0 });
+// Priority: 1-2048, with 1 highest; 0 (default) means no priority
+await queue.add('urgent', data, { priority: 1 });
 await queue.add('low-priority', data, { priority: 10 });
 
 // Retries with exponential backoff
@@ -163,7 +163,7 @@ await worker.run();
 - Requires Node.js 20+ and Valkey 7.0+ (or Redis 7.0+).
 - Connections are `{ addresses: [{ host, port }] }`, not `{ host, port }`; TLS is `useTLS: true`, passwords go in `credentials`, and cluster needs `clusterMode: true`. The BullMQ shape fails at connect time with a `ConnectionError`.
 - Delivery is at least once, so processors should be idempotent.
-- Priority: a lower number runs first, 0 (the default) is the highest, and values above 2048 throw.
+- Priority: 0 (the default) means no priority; positive priorities are integers 1-2048, with 1 highest. Enqueue stages positive-priority jobs in the scheduled ZSet, even without a delay; scheduler promotion makes them available. Numeric priority orders promotion within a pass, not global execution. Promoted non-LIFO priority jobs use a FIFO list across passes; `lifo: true` routes to the LIFO list instead. Admission gates and concurrent workers can change start and completion order.
 - Keys are hash-tagged (`glide:{queueName}:*`), so cluster mode needs no extra setup.
 - `queue.add()` with a `jobId` that already exists returns `null` instead of adding a duplicate.
 

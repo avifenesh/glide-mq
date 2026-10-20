@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-20
+
+### Fixed
+
+- **Terminal stalled failure ignored `removeOnFail`**: a job that stalled past `maxStalledCount` (stream or priority/LIFO list job) moved to the failed set and kept its hash and data whatever `removeOnFail` said. It now applies the same retention as a processor failure (`true`, count, `{ age, count }`), still emitting `failed`, recording metrics, advancing a `repeatAfterComplete` scheduler and releasing its ordering/group slot. Broadcast messages keep their hash for the other subscriptions, as before. `LIBRARY_VERSION` 135.
+- **Fractional retention count errored**: a count such as `removeOnComplete: 1.5` or `removeOnFail: 1.5` reached `ZRANGE` as a fractional index, and the complete or fail call errored after writing the terminal state. The count is now floored, in testing mode too.
+
+### Documentation
+
+- Prioritized jobs wait for scheduler promotion (`promotionInterval`) before workers can fetch them; numeric priority orders enqueuing within a promotion pass. List retrieval order is distinct from actual execution order when admission gates or concurrency apply. Corrected the architecture and usage docs, which said priority jobs promote immediately and always execute first.
+
+### Changed
+
+- **`deduplication.ttl` is typed as throttle-only.** `JobOptions['deduplication']` (and the `Producer` job options) is now the exported `DeduplicationOptions` union: `{ id; mode?: 'simple' | 'debounce'; ttl?: never }` or `{ id; mode: 'throttle'; ttl?: number }`. `ttl` was already ignored by `simple` (the default when `mode` is omitted) and `debounce`, so `{ mode: 'debounce', ttl }` type-checked and did nothing. It now fails to compile; `{ id, ttl }` without `mode: 'throttle'` does too. Runtime behavior is unchanged. Debounce replaces a tracked job only while it is `delayed` or `prioritized`. `npm run typecheck` also checks `tests/*.test-d.ts` through `tsconfig.types.json`.
+
 ## [0.18.0] - 2026-10-08
 
 ### Added

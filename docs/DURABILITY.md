@@ -100,7 +100,7 @@ glide-mq additionally re-ensures the function library when clients connect or re
 
 ## Worker Crash Behavior
 
-If a worker crashes mid-processing:
+If a worker crashes mid-processing a stream-backed job:
 
 1. the job has already been claimed into the consumer group's pending entries list
 2. it is **not** removed from Valkey just because the worker died

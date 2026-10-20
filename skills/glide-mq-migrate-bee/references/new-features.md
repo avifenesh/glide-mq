@@ -4,20 +4,20 @@ Everything Bee-Queue cannot do that glide-mq provides out of the box.
 
 ## Priority Queues
 
-Bee-Queue has no priority support. glide-mq uses numeric priority where lower = higher priority (0 is the highest, default).
+Bee-Queue has no priority support. glide-mq uses priorities 1-2048, where 1 is highest. The default 0 means no priority, not highest priority.
 
 ```typescript
-// High priority (processed first)
-await queue.add('urgent-alert', data, { priority: 0 });
+// High priority (ranked first within a promotion pass; not a global execution guarantee)
+await queue.add('urgent-alert', data, { priority: 1 });
 
 // Normal priority
 await queue.add('report', data, { priority: 5 });
 
-// Low priority (processed last)
+// Lower priority (ranked later within a promotion pass; not a global execution guarantee)
 await queue.add('cleanup', data, { priority: 20 });
 ```
 
-Processing order: priority > LIFO > FIFO.
+Available-source retrieval preference: promoted priority list > LIFO > FIFO. Promotion backlog, admission gates and concurrent workers can change start/completion order; see docs/USAGE.md Priority timing.
 
 ## Job Workflows (FlowProducer)
 
@@ -49,13 +49,21 @@ import { Broadcast, BroadcastWorker } from 'glide-mq';
 const broadcast = new Broadcast('events', { connection, maxMessages: 1000 });
 
 // Every subscriber gets the message
-const inventory = new BroadcastWorker('events', async (job) => {
-  await updateInventory(job.data);
-}, { connection, subscription: 'inventory-service' });
+const inventory = new BroadcastWorker(
+  'events',
+  async (job) => {
+    await updateInventory(job.data);
+  },
+  { connection, subscription: 'inventory-service' },
+);
 
-const email = new BroadcastWorker('events', async (job) => {
-  await sendNotification(job.data);
-}, { connection, subscription: 'email-service' });
+const email = new BroadcastWorker(
+  'events',
+  async (job) => {
+    await sendNotification(job.data);
+  },
+  { connection, subscription: 'email-service' },
+);
 
 await broadcast.publish('orders', { event: 'order.placed', orderId: 42 });
 ```
@@ -67,14 +75,18 @@ Process multiple jobs in a single handler call for I/O-bound operations.
 ```typescript
 import { Worker, BatchError } from 'glide-mq';
 
-const worker = new Worker('bulk-insert', async (jobs) => {
-  // jobs is Job[] when batch is enabled
-  const results = await db.insertMany(jobs.map(j => j.data));
-  return results; // must return R[] with length === jobs.length
-}, {
-  connection,
-  batch: { size: 50, timeout: 1000 },
-});
+const worker = new Worker(
+  'bulk-insert',
+  async (jobs) => {
+    // jobs is Job[] when batch is enabled
+    const results = await db.insertMany(jobs.map((j) => j.data));
+    return results; // must return R[] with length === jobs.length
+  },
+  {
+    connection,
+    batch: { size: 50, timeout: 1000 },
+  },
+);
 ```
 
 ## Deduplication
@@ -89,7 +101,7 @@ await queue.add('task', data, {
 
 // Throttle - reject duplicates within a time window
 await queue.add('task', data, {
-  deduplication: { id: 'user-123', ttl: 60000 },
+  deduplication: { id: 'user-123', mode: 'throttle', ttl: 60000 },
 });
 ```
 
@@ -99,18 +111,10 @@ Bee-Queue has no repeatable jobs. glide-mq supports cron patterns and fixed inte
 
 ```typescript
 // Cron - run every day at midnight
-await queue.upsertJobScheduler(
-  'daily-report',
-  { pattern: '0 0 * * *' },
-  { name: 'daily-report', data: {} },
-);
+await queue.upsertJobScheduler('daily-report', { pattern: '0 0 * * *' }, { name: 'daily-report', data: {} });
 
 // Interval - run every 5 minutes
-await queue.upsertJobScheduler(
-  'health-check',
-  { every: 300000 },
-  { name: 'health-check', data: {} },
-);
+await queue.upsertJobScheduler('health-check', { every: 300000 }, { name: 'health-check', data: {} });
 ```
 
 ## Rate Limiting
@@ -121,7 +125,7 @@ Global and per-group rate limits on workers.
 const worker = new Worker('api-calls', processor, {
   connection,
   limiter: {
-    max: 100,       // max 100 jobs
+    max: 100, // max 100 jobs
     duration: 60000, // per minute
   },
 });
@@ -169,9 +173,13 @@ await queue.add('process-order', data, { ordering: { key: 'customer-456' } });
 Wait for a worker result in the producer without polling.
 
 ```typescript
-const result = await queue.addAndWait('inference', { prompt: 'Hello' }, {
-  waitTimeout: 30000,
-});
+const result = await queue.addAndWait(
+  'inference',
+  { prompt: 'Hello' },
+  {
+    waitTimeout: 30000,
+  },
+);
 console.log(result); // processor return value
 ```
 
@@ -180,17 +188,21 @@ console.log(result); // processor return value
 Pause a job and resume it later without completing.
 
 ```typescript
-const worker = new Worker('drip-campaign', async (job) => {
-  if (job.data.step === 'send') {
-    await sendEmail(job.data);
-    return job.moveToDelayed(Date.now() + 86400000, 'check');
-  }
-  if (job.data.step === 'check') {
-    return await checkOpened(job.data) ? 'done' : job.moveToDelayed(Date.now() + 3600000, 'followup');
-  }
-  await sendFollowUp(job.data);
-  return 'done';
-}, { connection });
+const worker = new Worker(
+  'drip-campaign',
+  async (job) => {
+    if (job.data.step === 'send') {
+      await sendEmail(job.data);
+      return job.moveToDelayed(Date.now() + 86400000, 'check');
+    }
+    if (job.data.step === 'check') {
+      return (await checkOpened(job.data)) ? 'done' : job.moveToDelayed(Date.now() + 3600000, 'followup');
+    }
+    await sendFollowUp(job.data);
+    return 'done';
+  },
+  { connection },
+);
 ```
 
 ## UnrecoverableError
@@ -200,12 +212,16 @@ Skip all retries and fail permanently.
 ```typescript
 import { UnrecoverableError } from 'glide-mq';
 
-const worker = new Worker('tasks', async (job) => {
-  if (!job.data.requiredField) {
-    throw new UnrecoverableError('missing required field');
-  }
-  return processJob(job);
-}, { connection });
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    if (!job.data.requiredField) {
+      throw new UnrecoverableError('missing required field');
+    }
+    return processJob(job);
+  },
+  { connection },
+);
 ```
 
 ## Serverless Producer
@@ -394,7 +410,7 @@ Cap total tokens/cost across all jobs in a workflow flow.
 
 ```typescript
 await flow.add(flowTree, {
-  budget: { maxTotalTokens: 50_000, maxTotalCost: 0.50, costUnit: 'usd' },
+  budget: { maxTotalTokens: 50_000, maxTotalCost: 0.5, costUnit: 'usd' },
 });
 ```
 

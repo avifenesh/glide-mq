@@ -213,6 +213,16 @@ export interface BroadcastWorkerOptions extends WorkerOptions {
   subjects?: string[];
 }
 
+/**
+ * Deduplication options. `ttl` only applies to `mode: 'throttle'`, so only that
+ * variant accepts it. `simple` (the default when `mode` is omitted) skips while the
+ * job holding the id has not finished. `debounce` replaces a job that is still
+ * `delayed` or `prioritized`, by state rather than a time window.
+ */
+export type DeduplicationOptions =
+  | { id: string; mode?: 'simple' | 'debounce'; ttl?: never }
+  | { id: string; mode: 'throttle'; ttl?: number };
+
 /** Options for controlling individual job behavior (delay, priority, retry, etc.). */
 export interface JobOptions {
   /**
@@ -256,7 +266,7 @@ export interface JobOptions {
   lockDuration?: number;
   removeOnComplete?: boolean | number | { age: number; count: number };
   removeOnFail?: boolean | number | { age: number; count: number };
-  deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
+  deduplication?: DeduplicationOptions;
   parent?: { queue: string; id: string };
   /**
    * Multiple parent dependencies for DAG flows.

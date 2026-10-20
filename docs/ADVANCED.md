@@ -280,18 +280,18 @@ The template `opts` accept the same job options as `Queue.add` except `delay`, `
 
 ## LIFO Mode
 
-Set `lifo: true` in `JobOptions` to process jobs in last-in-first-out order. The most recently added job is picked up first.
+Set `lifo: true` in `JobOptions` to use last-in-first-out retrieval: among entries already available in the same LIFO list, the most recently pushed entry is popped first. This is not a queue-wide start or completion guarantee.
 
 ```typescript
 await queue.add('render', { frame: 100 }, { lifo: true });
 await queue.add('render', { frame: 101 }, { lifo: true });
 await queue.add('render', { frame: 102 }, { lifo: true });
-// Processing order: 102, 101, 100
+// List retrieval order if all three are available before polling: 102, 101, 100
 ```
 
 ### Ordering precedence
 
-Workers check sources in this order: **priority > LIFO > FIFO**. Priority jobs (those with `priority > 0`) are always fetched first. Among non-priority jobs, LIFO jobs are fetched before FIFO jobs sitting in the stream.
+Workers check sources in this order: **priority > LIFO > FIFO**. Promoted priority jobs (`priority > 0`, without `lifo`) are fetched first at the start of each polling pass; see [Priority timing](USAGE.md#priority-timing) for when promotion happens and when stream work can run first. Among non-priority jobs, LIFO jobs are fetched before FIFO jobs sitting in the stream.
 
 ### Constraints
 
@@ -299,8 +299,8 @@ Workers check sources in this order: **priority > LIFO > FIFO**. Priority jobs (
   ```
   Error: lifo and ordering.key cannot be used together
   ```
-- LIFO jobs are stored in a dedicated Valkey LIST (`glide:{queueName}:lifo`), separate from the main stream. This means LIFO and FIFO jobs in the same queue coexist — LIFO jobs are drained first.
-- Under `concurrency > 1`, multiple LIFO jobs may run in parallel; strict reverse ordering is only guaranteed with `concurrency: 1`.
+- LIFO jobs are stored in a dedicated Valkey LIST (`glide:{queueName}:lifo`), separate from the main stream. LIFO and FIFO jobs can coexist; workers check the available priority list, then LIFO, then the stream. A worker already in a blocking stream read can receive stream work before checking lists again.
+- Reverse retrieval order applies only to entries already available in the same LIFO list. Even `concurrency: 1` does not guarantee global reverse start or completion order: other workers, later promotion, blocking reads and admission gates can change which jobs run next. With higher concurrency, multiple LIFO jobs may also run in parallel.
 - Works with all job types: delayed jobs return to the LIFO list after their delay expires, and schedulers can produce LIFO jobs via the template `opts`.
 
 See also: [Adding jobs](USAGE.md#adding-jobs) for the full `JobOptions` reference.
@@ -578,11 +578,13 @@ const job = await queue.add(
 
 Prevent duplicate jobs from entering the queue using `deduplication.id`. Three modes are supported:
 
-| Mode       | Behaviour                                                                                                                    |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `simple`   | Skip the new job while the job holding the ID is not yet completed or failed. `ttl` is ignored.                              |
-| `throttle` | Skip the new job for `ttl` ms after the job that took the ID was added. Without `ttl`, nothing is skipped.                   |
-| `debounce` | Replace the job holding the ID if it is still `delayed` or `prioritized`; skip if it is waiting or active. `ttl` is ignored. |
+| Mode       | Behaviour                                                                                                                                                                    |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `simple`   | Skip the new job while the job holding the ID is not yet completed or failed. This is the default when `mode` is omitted.                                                    |
+| `throttle` | Skip the new job for `ttl` ms after the job that took the ID was added. Without `ttl`, nothing is skipped.                                                                   |
+| `debounce` | Replace the job holding the ID if it is still `delayed` or `prioritized`; skip if it is waiting or active. Replacement depends on that state, not on a time window or `ttl`. |
+
+`ttl` applies to `throttle` only. The types reject it for `simple`, `debounce` and an omitted `mode`, so `{ id, ttl }` needs `mode: 'throttle'`.
 
 ```typescript
 // Simple: skip while a job with this ID is queued or active; the ID frees once it completes or fails
@@ -634,7 +636,7 @@ await queue.setGlobalConcurrency(20);
 await queue.setGlobalConcurrency(0);
 ```
 
-Workers read the limit from queue metadata on each scheduler tick. Priority and LIFO jobs are popped with an atomic check (`glidemq_rpopAndReserve`). Stream jobs are gated twice: `glidemq_checkConcurrency` before `XREADGROUP` keeps a worker from reading when the queue is full, and `glidemq_moveToActive` enforces the cap at activation. A stream claim counts in the consumer group's pending list as soon as `XREADGROUP` returns it, so activation ranks the pending claims by entry id: the oldest `globalConcurrency - listActive` claims keep their slots, a newer claim gets `GLOBAL_FULL`. The worker keeps that claim in the pending list (so it keeps its place in the order) and retries the activation with a capped backoff (20 ms doubling to 250 ms, woken early by a completion in the same worker) until it is admitted, for at most half the shorter of `lockDuration` and `stalledInterval`; only after that bound, or in batch mode, is the entry handed back (`glidemq_deferActive`: XACK, re-added to the stream as waiting, which costs it its position). `close()` and `pause()` hand a held claim back at once. `completeAndFetchNext` does not claim the next stream job while pending claims plus list claims already fill the cap, so a held claim is not overtaken by a chain. Workers polling at the same time therefore never run more than `globalConcurrency` jobs and drain a burst in FIFO order. The rank check runs only when the pending count exceeds the free slots.
+Workers read the limit from queue metadata on each scheduler tick. Priority and LIFO jobs are popped with an atomic check (`glidemq_rpopAndReserve`). Stream jobs are gated twice: `glidemq_checkConcurrency` before `XREADGROUP` keeps a worker from reading when the queue is full, and `glidemq_moveToActive` enforces the cap at activation. A stream claim counts in the consumer group's pending list as soon as `XREADGROUP` returns it, so activation ranks the pending claims by entry id: the oldest `globalConcurrency - listActive` claims keep their slots, a newer claim gets `GLOBAL_FULL`. The worker keeps that claim in the pending list (so it keeps its place in the order) and retries the activation with a capped backoff (20 ms doubling to 250 ms, woken early by a completion in the same worker) until it is admitted, for at most half the shorter of `lockDuration` and `stalledInterval`; only after that bound, or in batch mode, is the entry handed back (`glidemq_deferActive`: XACK, re-added to the stream as waiting, which costs it its position). `close()` and `pause()` hand a held claim back at once. `completeAndFetchNext` does not claim the next stream job while pending claims plus list claims already fill the cap, so a held claim is not overtaken by a chain. Workers polling at the same time therefore never run more than `globalConcurrency` jobs. Ranking favors the oldest eligible stream pending claims competing for the available slots, not queue-wide FIFO execution: priority/LIFO sources, deferred and re-added claims, admission gates and parallel workers can change start and completion order. The rank check runs only when the pending count exceeds the free slots.
 
 ---
 

@@ -1979,22 +1979,28 @@ describe('TestWorker ordering and retention parity (T9)', () => {
     await queue.close();
   });
 
-  it('removeOnComplete: { age } removes completed jobs older than age seconds', async () => {
-    const queue = new TestQueue('roc-age');
-    let done = 0;
-    const worker = new TestWorker(queue, async () => 'ok');
-    worker.on('completed', () => done++);
-    const old = await queue.add('old', {});
-    await waitFor(() => done === 1, 2000, 1);
-    queue.jobs.get(old!.id)!.finishedOn = Date.now() - 10_000;
-    await queue.add('new', {}, { removeOnComplete: { age: 5, count: 0 } });
-    await waitFor(() => done === 2, 2000, 1);
-    expect(await queue.getJob(old!.id)).toBeNull();
-    expect((await queue.getJobs('completed')).map((j) => j.name)).toEqual(['new']);
-
-    await worker.close();
-    await queue.close();
-  });
+  it.each([{ age: 5, count: 0 }, { age: 5 }])(
+    'removeOnComplete: %j removes completed jobs older than age seconds',
+    async (retention) => {
+      const queue = new TestQueue('roc-age');
+      let done = 0;
+      const worker = new TestWorker(queue, async () => 'ok');
+      worker.on('completed', () => done++);
+      try {
+        const old = await queue.add('old', {});
+        await waitFor(() => done === 1, 2000, 1);
+        queue.jobs.get(old!.id)!.finishedOn = Date.now() - 10_000;
+        // Omitted count deliberately probes untyped input, not the public TypeScript contract.
+        await queue.add('new', {}, { removeOnComplete: retention as any });
+        await waitFor(() => done === 2, 2000, 1);
+        expect(await queue.getJob(old!.id)).toBeNull();
+        expect((await queue.getJobs('completed')).map((j) => j.name)).toEqual(['new']);
+      } finally {
+        await worker.close();
+        await queue.close();
+      }
+    },
+  );
 
   it('removeOnFail applies on terminal failure only', async () => {
     const queue = new TestQueue('rof');
@@ -2008,6 +2014,24 @@ describe('TestWorker ordering and retention parity (T9)', () => {
     await waitFor(() => terminal === 2, 2000, 5);
     expect(await queue.getJob(kept!.id)).not.toBeNull();
     expect(await queue.getJob(dropped!.id)).toBeNull();
+
+    await worker.close();
+    await queue.close();
+  });
+
+  it('removeOnFail floors a fractional count like the server functions', async () => {
+    const queue = new TestQueue('rof-fraction');
+    let terminal = 0;
+    queue.on('failed', () => terminal++);
+    const worker = new TestWorker(queue, async () => {
+      throw new Error('boom');
+    });
+    for (let i = 0; i < 2; i++) {
+      await queue.add(`j${i}`, {}, { removeOnFail: 1.5 });
+      await waitFor(() => terminal === i + 1, 2000, 1);
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    expect((await queue.getJobs('failed')).map((j) => j.name)).toEqual(['j1']);
 
     await worker.close();
     await queue.close();

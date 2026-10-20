@@ -252,7 +252,7 @@ await queue.replayDeadLetterJob(dead.id); // re-adds the original job and drops 
 Delayed and priority jobs follow the `glidemq_addJob` / `glidemq_promote` state machine:
 
 - `delay` parks the job in `delayed` until the timestamp passes, then it moves to `waiting` and the queue emits `promoted`. `job.promote()` releases it early, `job.changeDelay(ms)` reschedules it.
-- `priority > 0` without a delay parks the job in `prioritized`. It is counted under `delayed` by `getJobCounts()` and listed by `getJobs('delayed')`, exactly like the scheduled ZSet in production. An attached worker promotes it to `waiting` on its next pass (also while the queue is paused) and dispatches it before LIFO and FIFO jobs.
+- `priority > 0` without a delay parks the job in `prioritized`. It is counted under `delayed` by `getJobCounts()` and listed by `getJobs('delayed')`, exactly like the scheduled ZSet in production. An attached worker promotes it to `waiting` on its next pass (also while the queue is paused). Eligible promoted non-LIFO priority jobs are selected before LIFO and FIFO work; `lifo: true` takes precedence over numeric priority and routes the job to LIFO selection instead. This source preference does not guarantee global start or completion order in production.
 - `debounce` deduplication replaces a tracked job that is still `delayed` or `prioritized`.
 
 Timers are real, so keep delays small in unit tests.
@@ -354,7 +354,7 @@ expect(failed[0]?.failedReason).toMatch('bad input');
 
 - `simple` (default): skipped while the job that claimed the id still exists and is not `completed` or `failed`. Once it finishes, or is removed (for example by `removeOnComplete`), the id is free again.
 - `throttle`: skipped while less than `ttl` ms have passed since the id was claimed, whatever the job state. Without `ttl` nothing is throttled.
-- `debounce`: if the tracked job is `delayed`, it is removed (the queue emits `removed`) and the new job is added. Skipped while the tracked job is `waiting` or `active`.
+- `debounce`: if the tracked job is `delayed` or `prioritized`, it is removed (the queue emits `removed`) and the new job is added. Skipped while the tracked job is `waiting` or `active`. Replacement depends on that state, not on a time window; `ttl` is accepted only with `throttle`.
 
 Skipped adds return `null`.
 
@@ -492,7 +492,7 @@ Call job.suspend() inside the processor, then queue.signal() from outside. Use g
 - **Error classes come from `glide-mq/testing` too.** `UnrecoverableError`, `BatchError`, `SuspendError`, `DelayedError`, `GlideMQError` and the other error classes of `glide-mq` are re-exported, so a test that only uses `TestQueue` and `TestWorker` does not have to import the main entry (which loads the native client). They are the same classes, so `instanceof` works across both entries.
 - **Options are validated like production.** `TestQueue.add()` runs the same checks as `Queue.add()` (priority <= 2048, payload size, `ttl`, `lockDuration`, `cost`, `jobId`, ordering key, `lifo` with ordering) and throws the same errors. `job.updateData()` and `job.updateProgress()` persist to the stored job, so `queue.getJob()` sees the new values.
 - **Processing is synchronous-ish.** `TestWorker` processes jobs immediately when they are added via `queue.add()`. In most tests you can check state right after the `await queue.add(...)` call.
-- **Dispatch order matches the worker.** Jobs with `priority > 0` run first (lower number = higher priority, FIFO within a priority), then `lifo` jobs (newest first), then plain FIFO jobs. A `lifo` job with a priority is dispatched as LIFO, like production. `queue.getJobs('waiting')` lists jobs in that same order.
+- **In-memory source preference.** Eligible jobs with `priority > 0` are preferred, then `lifo` jobs, then plain FIFO jobs; a job also setting `lifo` is dispatched as LIFO. Testing mode does not reproduce Valkey promotion cadence or execution order across concurrent production workers and admission gates. See [Priority timing](USAGE.md#priority-timing) for production behavior.
 - **Retention is applied.** `removeOnComplete` / `removeOnFail` accept `true`, a count, or `{ age, count }` (age in seconds) and trim the completed / failed jobs exactly as the server functions do, before the `completed` / `failed` event fires. Jobs failed as `expired` by `ttl` are not removed, same as production.
 - **Schedulers match the tick.** `repeatAfterComplete` waits for the produced job to complete or fail terminally before scheduling the next run. A scheduler run never applies `deduplication`, `delay` or `jobId` from a stored template, like `Scheduler.runSchedulers`.
 - **Budget pauses park the job.** With `onExceeded: 'pause'` a job whose flow budget is exhausted moves to `delayed` for 24 hours, like `moveActiveToDelayed` in production.

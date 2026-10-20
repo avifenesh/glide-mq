@@ -132,7 +132,9 @@ export const LIBRARY_NAME = 'glidemq';
 //   when the bucket is full, and group setup (addJob, dedup, addFlow) seeds tbLastRefill
 //   from the server clock instead of the caller's, so a fast producer clock no longer drops the time
 //   since a consumption from the next refill.
-export const LIBRARY_VERSION = '134';
+// Version 135: terminal stalled failure (reclaimStalled, reclaimStalledListJobs) applies the job's
+//   removeOnFail retention like glidemq_fail; broadcast jobs keep their hash.
+export const LIBRARY_VERSION = '135';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -428,11 +430,12 @@ function encodeRetention(opt?: boolean | number | { age: number; count: number }
   if (opt === true) {
     return RETENTION_TRUE;
   }
+  // The Lua side passes the count to ZRANGE, which rejects a fractional index.
   if (typeof opt === 'number') {
-    return { mode: 'count', count: opt, age: 0 };
+    return { mode: 'count', count: Math.floor(opt), age: 0 };
   }
   if (opt && typeof opt === 'object') {
-    return { mode: 'age_count', count: opt.count ?? 0, age: opt.age ?? 0 };
+    return { mode: 'age_count', count: Math.floor(opt.count ?? 0), age: opt.age ?? 0 };
   }
   return RETENTION_NONE;
 }

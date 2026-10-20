@@ -45,7 +45,7 @@ await queue.add(
   { to: 'user@example.com' },
   {
     delay: 5_000, // run after 5 s
-    priority: 1, // 1 = highest, up to 2048; 0 (default) = no priority, runs after prioritized jobs
+    priority: 1, // 1 = highest, up to 2048; 0 (default) = no priority; see Priority timing below
     attempts: 3, // run at most 3 times total (initial + 2 retries)
     backoff: { type: 'exponential', delay: 1_000 },
     timeout: 30_000, // fail job if processor exceeds 30 s
@@ -63,13 +63,19 @@ await queue.addBulk([
 
 #### LIFO mode
 
-Add `lifo: true` so the newest jobs are processed first. LIFO jobs are stored in a dedicated Valkey LIST (RPUSH/RPOP) separate from the default FIFO stream.
+Add `lifo: true` to retrieve the newest entry already available in the same LIFO list first. LIFO jobs are stored in a dedicated Valkey LIST (RPUSH/RPOP) separate from the default FIFO stream. This does not guarantee global start or completion order, even with worker `concurrency: 1`; promotion timing, blocking stream reads, admission gates and other workers can change execution order.
 
 ```typescript
 await queue.add('urgent-report', data, { lifo: true });
 ```
 
-Processing order: **priority > LIFO > FIFO**. Priority jobs are always consumed first, then LIFO, then the normal FIFO stream. `lifo` cannot be combined with `ordering` keys — they are mutually exclusive.
+Workers check available sources in this order: **priority > LIFO > FIFO**. Promoted priority jobs without `lifo` are checked first at the start of a polling pass and during chained fetches; see [Priority timing](#priority-timing) for promotion and stream-wakeup qualifications. `lifo` cannot be combined with `ordering` keys - they are mutually exclusive.
+
+#### Priority timing
+
+A job with `priority > 0` and no `delay` is not available at add time. It waits in the scheduled ZSet until the next scheduler promotion tick (`promotionInterval`, default 5000 ms), which moves it to the priority list. A tick promotes at most 1000 jobs, so with more due jobs ranked ahead of it, a job can take several ticks. Idle workers stay in their blocking read (`blockTimeout`, default 5000 ms) meanwhile and check the priority list after it returns empty, so on an otherwise idle queue without preceding priority backlog or admission restrictions, a prioritized job can wait about one `promotionInterval` plus one `blockTimeout` before it starts. The scheduler can also wake earlier for the next due time; `promotionInterval` is its coarse polling ceiling. Lower `promotionInterval` (and `blockTimeout`) on the worker to shorten this. It is not a hard bound: after a stream job completes, its completion call checks the priority list before LIFO and the stream; a worker with a free slot can check the lists sooner. That check does not guarantee a particular priority job starts then: jobs already ahead in the list and ordering, concurrency or rate gates can delay it. A batch worker instead finishes the whole batch, including any `batch.timeout` wait, before its next poll. A priority job with a `delay` becomes eligible for promotion when the delay elapses; promotion backlog and admission gates can extend its wait. A job that also sets `lifo: true` is promoted onto the LIFO list instead and gets no priority ranking.
+
+For non-LIFO jobs, a promotion pass enqueues jobs in numeric priority order. The priority list is FIFO across passes: later promotions are placed behind entries remaining from earlier passes. This describes list retrieval order, not guaranteed start or completion order; admission gates and concurrent workers can change execution order.
 
 #### Job TTL
 

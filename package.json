@@ -1,6 +1,6 @@
 {
   "name": "glide-mq",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "High-performance message queue for Node.js with AI-native primitives - built on Valkey/Redis with Rust NAPI bindings",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,13 +22,13 @@
   "scripts": {
     "embed-lua": "node scripts/embed-lua.cjs",
     "prepare": "node scripts/embed-lua.cjs",
-    "typecheck": "node scripts/embed-lua.cjs && tsc --noEmit",
+    "typecheck": "node scripts/embed-lua.cjs && tsc --noEmit && tsc -p tsconfig.types.json",
     "build": "node scripts/embed-lua.cjs && tsc && node -e \"const fs=require('node:fs'); fs.copyFileSync('src/functions/glidemq.lua', 'dist/functions/glidemq.lua'); fs.copyFileSync('src/functions/glidemq.embedded.json', 'dist/functions/glidemq.embedded.json')\"",
     "build:lua-cov": "npm run build && node scripts/instrument-lua.cjs",
     "test": "node scripts/embed-lua.cjs && vitest run \"--exclude=tests/fuzzer/**\"",
     "test:coverage": "node scripts/embed-lua.cjs && vitest run --coverage \"--exclude=tests/fuzzer/**\"",
     "test:watch": "node scripts/embed-lua.cjs && vitest",
-    "lint": "eslint src/ tests/",
+    "lint": "eslint src/ tests/ && node scripts/check-priority-docs.cjs",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\"",
     "clean": "rm -rf dist",

@@ -574,30 +574,30 @@ The processor function signature is identical. The only change is the connection
 
 ### JobOptions
 
-| BullMQ field        | glide-mq field         | Status                                                             |
-| ------------------- | ---------------------- | ------------------------------------------------------------------ |
-| `delay`             | `delay`                | Full                                                               |
-| `priority`          | `priority`             | Changed - 1-2048, 1 highest; priority 0 jobs run after prioritized |
-| `attempts`          | `attempts`             | Full                                                               |
-| `backoff`           | `backoff`              | Full                                                               |
-| `timeout`           | `timeout`              | Full                                                               |
-| `removeOnComplete`  | `removeOnComplete`     | Changed - object form needs both `age` and `count`                 |
-| `removeOnFail`      | `removeOnFail`         | Changed - object form needs both `age` and `count`                 |
-| `deduplication`     | `deduplication`        | Changed (see [Deduplication](#deduplication))                      |
-| `parent`            | `parent`               | Full                                                               |
-| `jobId` (custom ID) | `jobId`                | Full                                                               |
-| `lifo`              | `lifo`                 | Same                                                               |
-| `repeat`            | -                      | Gap - use `queue.upsertJobScheduler()`                             |
-| `sizeLimit`         | -                      | 1 MB hard limit enforced internally (JSON string character length) |
-| -                   | `ordering.key`         | glide-mq only                                                      |
-| -                   | `ordering.concurrency` | glide-mq only                                                      |
-| -                   | `ordering.rateLimit`   | glide-mq only                                                      |
-| -                   | `ordering.tokenBucket` | glide-mq only                                                      |
-| -                   | `cost`                 | glide-mq only                                                      |
-| -                   | `ttl`                  | glide-mq only                                                      |
-| -                   | `lockDuration`         | glide-mq only                                                      |
-| -                   | `fallbacks`            | glide-mq only                                                      |
-| -                   | `parents`              | glide-mq only (DAG multi-parent)                                   |
+| BullMQ field        | glide-mq field         | Status                                                                                            |
+| ------------------- | ---------------------- | ------------------------------------------------------------------------------------------------- |
+| `delay`             | `delay`                | Full                                                                                              |
+| `priority`          | `priority`             | Changed - 1-2048, 1 highest; 0 means no priority; see [Priority timing](USAGE.md#priority-timing) |
+| `attempts`          | `attempts`             | Full                                                                                              |
+| `backoff`           | `backoff`              | Full                                                                                              |
+| `timeout`           | `timeout`              | Full                                                                                              |
+| `removeOnComplete`  | `removeOnComplete`     | Changed - object form needs both `age` and `count`                                                |
+| `removeOnFail`      | `removeOnFail`         | Changed - object form needs both `age` and `count`                                                |
+| `deduplication`     | `deduplication`        | Changed (see [Deduplication](#deduplication))                                                     |
+| `parent`            | `parent`               | Full                                                                                              |
+| `jobId` (custom ID) | `jobId`                | Full                                                                                              |
+| `lifo`              | `lifo`                 | Same                                                                                              |
+| `repeat`            | -                      | Gap - use `queue.upsertJobScheduler()`                                                            |
+| `sizeLimit`         | -                      | 1 MB hard limit enforced internally (JSON string character length)                                |
+| -                   | `ordering.key`         | glide-mq only                                                                                     |
+| -                   | `ordering.concurrency` | glide-mq only                                                                                     |
+| -                   | `ordering.rateLimit`   | glide-mq only                                                                                     |
+| -                   | `ordering.tokenBucket` | glide-mq only                                                                                     |
+| -                   | `cost`                 | glide-mq only                                                                                     |
+| -                   | `ttl`                  | glide-mq only                                                                                     |
+| -                   | `lockDuration`         | glide-mq only                                                                                     |
+| -                   | `fallbacks`            | glide-mq only                                                                                     |
+| -                   | `parents`              | glide-mq only (DAG multi-parent)                                                                  |
 
 ### QueueEvents events
 
@@ -765,16 +765,9 @@ const job = await queue.add('job', data, { jobId: 'my-deterministic-id' });
 // job is null if a job with that ID already exists
 ```
 
-**LIFO support** - Last-in-first-out ordering is supported via `lifo: true` option. Jobs are processed in reverse-chronological order (newest first). Priority and delayed jobs take precedence over LIFO. Cannot be combined with ordering keys (per-key sequencing).
+**LIFO support** - The `lifo: true` option uses reverse retrieval order among entries already available in the same LIFO list. Workers check the already-promoted non-LIFO priority list before LIFO and the stream; this is a retrieval preference, not a start or completion guarantee. Delayed jobs have no independent precedence: when promoted, they go to LIFO if flagged, otherwise to the positive-priority list, otherwise to the stream. LIFO cannot be combined with ordering keys (per-key sequencing).
 
-> **LIFO + `globalConcurrency` — crash limitation:** When `globalConcurrency` is set on a queue, LIFO and priority-list jobs are tracked via a `{queue}:list-active` counter in Valkey. If a worker process is killed hard (SIGKILL, OOM) while processing a list-backed job, the counter is not decremented. This permanently reduces effective global concurrency by one slot until it is manually reset:
->
-> ```
-> # Reset stuck list-active counter
-> valkey-cli DEL glide:{queueName}:list-active
-> ```
->
-> Stream-backed (FIFO) jobs are self-healing via stream PEL and `glidemq_reclaimStalled`. LIFO/priority jobs lack this self-healing because they have no PEL entry. A future enhancement will integrate `list-active` with stall detection.
+> **List-backed crash recovery:** LIFO and priority-list claims have no stream PEL entry. Healthy workers automatically recover stale claims with `glidemq_reclaimStalledListJobs`, re-queueing or failing them according to `maxStalledCount` and releasing their `list-active` reservation. The `list-active-ids` set tracks these claims; every 10th promotion tick also runs `glidemq_healListActive` to correct counter drift. Recovery is bounded, not instantaneous: until the ID set is seeded, or if older-library claims make it incomplete, reclaim falls back to a SCAN capped at 1000 steps per call starting at cursor 0, so jobs beyond that bound can remain unrecovered in a very large keyspace. Counter healing re-seeds with a resumable scan capped at 500 pages per call and can take several ticks. Neither reclaim path runs while the queue is paused. Do not routinely delete the counter: it accounts for live reservations. See [Worker crash behavior](DURABILITY.md#worker-crash-behavior) for the full recovery caveats.
 
 **`job.promote()` is now implemented** - call `job.promote()` to move a delayed job to waiting immediately. Throws if the job is not in the delayed state (#11).
 
@@ -986,7 +979,7 @@ await queue.add('job', data, {
 });
 ```
 
-Default mode is `'simple'`: the add is skipped while the job holding the ID is not yet completed or failed, and the ID frees once it finishes. Simple mode ignores `ttl`. To keep BullMQ's `{ id, ttl }` behavior (skip for `ttl` ms), set `mode: 'throttle'`. Debounce ignores `ttl` too and only replaces a job that is still `delayed` or `prioritized`, so give it a `delay`.
+Default mode is `'simple'`: the add is skipped while the job holding the ID is not yet completed or failed, and the ID frees once it finishes. `ttl` only applies to `mode: 'throttle'`, and the types reject it for `simple`, `debounce` and an omitted mode, so BullMQ's `{ id, ttl }` must become `{ id, ttl, mode: 'throttle' }` to keep skipping for `ttl` ms. Debounce only replaces a job that is still `delayed` or `prioritized`, so it needs a `delay` or `priority` to keep the job replaceable until it is promoted.
 
 ---
 
@@ -1066,7 +1059,7 @@ Rate-limited jobs are promoted by the scheduler loop (latency up to `promotionIn
 
 ### Priorities
 
-Lower number = higher priority, and 1 is the highest. The range is 1-2048 (BullMQ allows up to 2,097,151); larger or non-integer values throw. The difference is priority 0, the default: BullMQ runs jobs without a priority before prioritized jobs, glide-mq runs them after any waiting job with priority > 0.
+Lower number = higher priority, and 1 is the highest. The range is 1-2048 (BullMQ allows up to 2,097,151); larger or non-integer values throw. Priority 0, the default, means no priority. When glide-mq checks available sources, it prefers promoted priority-list entries over the stream. That is a retrieval preference, not a global start or completion order: promotion backlog, blocking reads, admission gates and worker concurrency can let stream work run sooner. See [Priority timing](USAGE.md#priority-timing).
 
 ```ts
 // Same call in both libraries
