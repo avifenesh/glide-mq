@@ -15,7 +15,7 @@ const rules = [
   ],
   // Flag only standalone deletion commands and affirmative legacy advice.
   [
-    /(?:^|[.;|>]\s*)\s*(?:Reset with:\s*|for LIFO\/priority jobs,\s*|(?:valkey-cli\s+)?)[\x60]?DEL\s+glide:\{queueName\}:list-active\b/i,
+    /(?:^|[.;|>]\s*)\s*(?:[-*+]\s+)?[\x60]?(?:Reset with:\s*|for LIFO\/priority jobs,\s*|(?:valkey-cli\s+)?)[\x60]?DEL\s+glide:\{queueName\}:list-active\b/i,
     'do not recommend deleting live list reservations',
   ],
   [
