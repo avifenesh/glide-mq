@@ -12,6 +12,7 @@ describe('priority documentation lint', () => {
     'Priority and delayed jobs take precedence over LIFO.',
     'Strict reverse ordering is only guaranteed with `concurrency: 1`.',
     'Reset with: `DEL glide:{queueName}:list-active`.',
+    'Stall detection recovers stream jobs; for LIFO/priority jobs, `DEL glide:{queueName}:list-active`.',
     'Non-delayed priority jobs use timestamp 0 so they promote immediately.',
     'Priority jobs are always consumed first.',
     'Priority 0 runs after prioritized jobs.',
@@ -41,6 +42,8 @@ describe('priority documentation lint', () => {
     'Already-promoted non-LIFO priority-list retrieval has preference; delay has no independent precedence.',
     'Even concurrency: 1 does not guarantee global reverse start or completion order.',
     'List claims recover automatically; do not routinely delete the counter because it includes live reservations.',
+    'Do not run `DEL glide:{queueName}:list-active` against live reservations.',
+    'Do not reset with: `DEL glide:{queueName}:list-active`.',
   ])('permits correct negated guidance: %s', (text) => {
     expect(findViolations(text)).toEqual([]);
   });

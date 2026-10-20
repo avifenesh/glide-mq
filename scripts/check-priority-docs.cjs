@@ -13,7 +13,11 @@ const rules = [
     /\bstrict reverse ordering is only guaranteed with\b/i,
     'single-worker concurrency does not guarantee global reverse execution order',
   ],
-  [/\bDEL\s+glide:\{queueName\}:list-active\b/i, 'do not recommend deleting live list reservations'],
+  // Flag only standalone deletion commands and affirmative legacy advice.
+  [
+    /(?:^|[.;|>]\s*)\s*(?:Reset with:\s*|for LIFO\/priority jobs,\s*|(?:valkey-cli\s+)?)[\x60]?DEL\s+glide:\{queueName\}:list-active\b/i,
+    'do not recommend deleting live list reservations',
+  ],
   [
     /\bnon-delayed priority jobs\b(?:\s+promote immediately\b|[^.\n]*\bso they promote immediately\b)/i,
     'priority jobs require scheduler promotion',
