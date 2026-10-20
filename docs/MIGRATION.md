@@ -1066,7 +1066,7 @@ Rate-limited jobs are promoted by the scheduler loop (latency up to `promotionIn
 
 ### Priorities
 
-Lower number = higher priority, and 1 is the highest. The range is 1-2048 (BullMQ allows up to 2,097,151); larger or non-integer values throw. The difference is priority 0, the default: BullMQ runs jobs without a priority before prioritized jobs, glide-mq runs them after any waiting job with priority > 0.
+Lower number = higher priority, and 1 is the highest. The range is 1-2048 (BullMQ allows up to 2,097,151); larger or non-integer values throw. Priority 0, the default, means no priority. When glide-mq checks available sources, it prefers promoted priority-list entries over the stream. That is a retrieval preference, not a global start or completion order: promotion backlog, blocking reads, admission gates and worker concurrency can let stream work run sooner. See [Priority timing](USAGE.md#priority-timing).
 
 ```ts
 // Same call in both libraries

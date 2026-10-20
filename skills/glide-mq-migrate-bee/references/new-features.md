@@ -13,7 +13,7 @@ await queue.add('urgent-alert', data, { priority: 1 });
 // Normal priority
 await queue.add('report', data, { priority: 5 });
 
-// Low priority (processed last)
+// Lower priority (ranked later within a promotion pass; not a global execution guarantee)
 await queue.add('cleanup', data, { priority: 20 });
 ```
 

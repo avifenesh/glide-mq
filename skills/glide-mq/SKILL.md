@@ -44,18 +44,18 @@ worker.on('failed', (job, err) => console.error(`Failed: ${job.id}`, err.message
 
 Read the file that matches the task; each holds the options, defaults and edge cases for its area.
 
-| Area | File |
-| --- | --- |
-| Queues, adding jobs, retries, dedup, rate limits, job lookup | [references/queue.md](references/queue.md) |
-| Workers, concurrency, batch mode, stalled jobs, sandboxing | [references/worker.md](references/worker.md) |
-| Connection options, TLS, IAM, cluster, AZ affinity | [references/connection.md](references/connection.md) |
-| Parent-child flows, DAGs, `chain` / `group` / `chord` | [references/workflows.md](references/workflows.md) |
-| Fan-out with `Broadcast` / `BroadcastWorker` | [references/broadcast.md](references/broadcast.md) |
-| Cron and interval schedulers | [references/schedulers.md](references/schedulers.md) |
-| `QueueEvents`, metrics, OpenTelemetry | [references/observability.md](references/observability.md) |
-| LLM usage, token streaming, suspend/resume, budgets, fallbacks, token rate limits | [references/ai-native.md](references/ai-native.md) |
-| Vector search over jobs | [references/search.md](references/search.md) |
-| Serverless producers, HTTP proxy and SSE, in-memory testing | [references/serverless.md](references/serverless.md) |
+| Area                                                                              | File                                                       |
+| --------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Queues, adding jobs, retries, dedup, rate limits, job lookup                      | [references/queue.md](references/queue.md)                 |
+| Workers, concurrency, batch mode, stalled jobs, sandboxing                        | [references/worker.md](references/worker.md)               |
+| Connection options, TLS, IAM, cluster, AZ affinity                                | [references/connection.md](references/connection.md)       |
+| Parent-child flows, DAGs, `chain` / `group` / `chord`                             | [references/workflows.md](references/workflows.md)         |
+| Fan-out with `Broadcast` / `BroadcastWorker`                                      | [references/broadcast.md](references/broadcast.md)         |
+| Cron and interval schedulers                                                      | [references/schedulers.md](references/schedulers.md)       |
+| `QueueEvents`, metrics, OpenTelemetry                                             | [references/observability.md](references/observability.md) |
+| LLM usage, token streaming, suspend/resume, budgets, fallbacks, token rate limits | [references/ai-native.md](references/ai-native.md)         |
+| Vector search over jobs                                                           | [references/search.md](references/search.md)               |
+| Serverless producers, HTTP proxy and SSE, in-memory testing                       | [references/serverless.md](references/serverless.md)       |
 
 Framework adapters (Hono, Fastify, NestJS, Hapi) are documented at https://www.glidemq.dev/integrations/.
 
@@ -67,8 +67,8 @@ Framework adapters (Hono, Fastify, NestJS, Hapi) are documented at https://www.g
 // Delayed: run after 5 minutes
 await queue.add('reminder', data, { delay: 300_000 });
 
-// Priority: lower number = higher priority (default: 0)
-await queue.add('urgent', data, { priority: 0 });
+// Priority: 1-2048, with 1 highest; 0 (default) means no priority
+await queue.add('urgent', data, { priority: 1 });
 await queue.add('low-priority', data, { priority: 10 });
 
 // Retries with exponential backoff

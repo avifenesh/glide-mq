@@ -4,14 +4,27 @@ const path = require('node:path');
 // Guard recurring incorrect claims, not every aspect of scheduling semantics.
 const rules = [
   [/\b0\s+(?:is|=)\s+(?:the\s+)?highest\b/i, '0 means no priority in glide-mq'],
-  [/\bnon-delayed priority jobs\b.*\bpromote immediately\b/i, 'priority jobs require scheduler promotion'],
+  [
+    /\bnon-delayed priority jobs\b(?:\s+promote immediately\b|[^.\n]*\bso they promote immediately\b)/i,
+    'priority jobs require scheduler promotion',
+  ],
   [
     /\bpriority jobs are always (?:consumed|processed|fetched) first\b/i,
     'source preference is not unconditional execution order',
   ],
-  [/\bruns? after (?:every )?prioritized(?: jobs)?\b/i, 'priority 0 has no global runs-after guarantee'],
+  [
+    /(?:\b0(?:\s+\(default\))?\s*=\s*no priority,\s*|\bpriority 0\s+|\b0 means no priority and\s+)runs? after (?:every )?prioritized(?: jobs)?\b/i,
+    'priority 0 has no global runs-after guarantee',
+  ],
   [/\bpriority job starts no later than\b/i, 'a fetch check does not guarantee a particular job starts'],
   [/\bhigh-priority job\b.*\bruns after\b/i, 'FIFO list order does not guarantee execution order'],
+  [/\blower number\s*=\s*higher priority\s*\(default:\s*0\)/i, 'identify 0 explicitly as no priority'],
+  [/\badd\(['"]urgent['"].*\bpriority:\s*0\b/i, 'use priority 1 for an urgent priority example'],
+  [/\blow priority\s*\(processed last\)/i, 'numeric priority does not guarantee last execution'],
+  [
+    /\bglide-mq runs them after any waiting job with priority > 0\b/i,
+    'available-source preference does not guarantee execution order',
+  ],
 ];
 
 function findViolations(text) {
