@@ -1990,7 +1990,8 @@ describe('TestWorker ordering and retention parity (T9)', () => {
         const old = await queue.add('old', {});
         await waitFor(() => done === 1, 2000, 1);
         queue.jobs.get(old!.id)!.finishedOn = Date.now() - 10_000;
-        await queue.add('new', {}, { removeOnComplete: retention });
+        // Omitted count deliberately probes untyped input, not the public TypeScript contract.
+        await queue.add('new', {}, { removeOnComplete: retention as any });
         await waitFor(() => done === 2, 2000, 1);
         expect(await queue.getJob(old!.id)).toBeNull();
         expect((await queue.getJobs('completed')).map((j) => j.name)).toEqual(['new']);
