@@ -137,7 +137,7 @@ redis.register_function('glidemq_complete', function(keys, args) ... end)
 ...
 ```
 
-### Functions (49 in 1 library, not 53 scripts)
+### Selected server functions (one library)
 
 | Function                          | Keys | Purpose                                                                                                                              |
 | --------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------ |

@@ -54,7 +54,7 @@ await queue.add('heavy-job', data, {
     key: 'tenant-123',
     tokenBucket: { capacity: 100, refillRate: 10 },
   },
-  cost: 25,  // this job consumes 25 tokens
+  cost: 25, // this job consumes 25 tokens
 });
 ```
 
@@ -108,12 +108,16 @@ await queue.revoke(jobId);
 The processor must cooperate via `job.abortSignal`:
 
 ```ts
-const worker = new Worker('q', async (job) => {
-  for (const chunk of data) {
-    if (job.abortSignal?.aborted) return;
-    await processChunk(chunk);
-  }
-}, { connection });
+const worker = new Worker(
+  'q',
+  async (job) => {
+    for (const chunk of data) {
+      if (job.abortSignal?.aborted) return;
+      await processChunk(chunk);
+    }
+  },
+  { connection },
+);
 ```
 
 ---
@@ -183,7 +187,7 @@ const worker = new TestWorker(queue, async (job) => {
 });
 
 await queue.add('send-email', { email: 'user@example.com' });
-await new Promise(r => setTimeout(r, 10));
+await new Promise((r) => setTimeout(r, 10));
 
 const jobs = await queue.getJobs('completed');
 ```
@@ -200,9 +204,13 @@ Pub/sub fan-out where every connected `BroadcastWorker` receives every message. 
 import { Broadcast, BroadcastWorker } from 'glide-mq';
 
 const broadcast = new Broadcast('notifications', { connection });
-const bw = new BroadcastWorker('notifications', async (message) => {
-  console.log('Received:', message);
-}, { connection, subscription: 'my-group' });
+const bw = new BroadcastWorker(
+  'notifications',
+  async (message) => {
+    console.log('Received:', message);
+  },
+  { connection, subscription: 'my-group' },
+);
 
 await broadcast.publish('alerts', { type: 'alert', text: 'Server restarting' });
 ```
@@ -214,14 +222,18 @@ await broadcast.publish('alerts', { type: 'alert', text: 'Server restarting' });
 Process multiple jobs in a single processor invocation:
 
 ```ts
-const worker = new Worker('q', async (jobs) => {
-  // jobs is an array when batch mode is enabled
-  const results = await bulkProcess(jobs.map(j => j.data));
-  return results; // per-job results array
-}, {
-  connection,
-  batch: { size: 50, timeout: 1000 },
-});
+const worker = new Worker(
+  'q',
+  async (jobs) => {
+    // jobs is an array when batch mode is enabled
+    const results = await bulkProcess(jobs.map((j) => j.data));
+    return results; // per-job results array
+  },
+  {
+    connection,
+    batch: { size: 50, timeout: 1000 },
+  },
+);
 ```
 
 ---
@@ -234,11 +246,14 @@ Arbitrary directed acyclic graphs where a job can depend on multiple parents (Bu
 import { FlowProducer, dag } from 'glide-mq';
 
 // Option 1: dag() helper - standalone, creates its own FlowProducer
-const jobs = await dag([
-  { name: 'fetch-a', queueName: 'tasks', data: { source: 'a' } },
-  { name: 'fetch-b', queueName: 'tasks', data: { source: 'b' } },
-  { name: 'aggregate', queueName: 'tasks', data: {}, deps: ['fetch-a', 'fetch-b'] },
-], connection);
+const jobs = await dag(
+  [
+    { name: 'fetch-a', queueName: 'tasks', data: { source: 'a' } },
+    { name: 'fetch-b', queueName: 'tasks', data: { source: 'b' } },
+    { name: 'aggregate', queueName: 'tasks', data: {}, deps: ['fetch-a', 'fetch-b'] },
+  ],
+  connection,
+);
 
 // Option 2: FlowProducer.addDAG() - when you manage the FlowProducer
 const flow = new FlowProducer({ connection });
@@ -264,23 +279,36 @@ import { chain, group, chord } from 'glide-mq';
 const connection = { addresses: [{ host: 'localhost', port: 6379 }] };
 
 // chain: sequential pipeline
-await chain('tasks', [
-  { name: 'step-1', data: {} },
-  { name: 'step-2', data: {} },
-  { name: 'step-3', data: {} },
-], connection);
+await chain(
+  'tasks',
+  [
+    { name: 'step-1', data: {} },
+    { name: 'step-2', data: {} },
+    { name: 'step-3', data: {} },
+  ],
+  connection,
+);
 
 // group: parallel fan-out, synthetic parent waits for all
-await group('tasks', [
-  { name: 'shard-1', data: {} },
-  { name: 'shard-2', data: {} },
-], connection);
+await group(
+  'tasks',
+  [
+    { name: 'shard-1', data: {} },
+    { name: 'shard-2', data: {} },
+  ],
+  connection,
+);
 
 // chord: group then callback
-await chord('tasks', [
-  { name: 'task-1', data: {} },
-  { name: 'task-2', data: {} },
-], { name: 'aggregate', data: {} }, connection);
+await chord(
+  'tasks',
+  [
+    { name: 'task-1', data: {} },
+    { name: 'task-2', data: {} },
+  ],
+  { name: 'aggregate', data: {} },
+  connection,
+);
 ```
 
 ---
@@ -290,22 +318,26 @@ await chord('tasks', [
 Multi-step state machines using `job.moveToDelayed()` with an optional step token:
 
 ```ts
-const worker = new Worker('q', async (job) => {
-  const step = job.data.__step ?? 'init';
+const worker = new Worker(
+  'q',
+  async (job) => {
+    const step = job.data.__step ?? 'init';
 
-  switch (step) {
-    case 'init':
-      await doInit(job.data);
-      await job.moveToDelayed(Date.now(), 'process');
-      return;
-    case 'process':
-      await doProcess(job.data);
-      await job.moveToDelayed(Date.now(), 'finalize');
-      return;
-    case 'finalize':
-      return doFinalize(job.data);
-  }
-}, { connection });
+    switch (step) {
+      case 'init':
+        await doInit(job.data);
+        await job.moveToDelayed(Date.now(), 'process');
+        return;
+      case 'process':
+        await doProcess(job.data);
+        await job.moveToDelayed(Date.now(), 'finalize');
+        return;
+      case 'finalize':
+        return doFinalize(job.data);
+    }
+  },
+  { connection },
+);
 ```
 
 BullMQ's `moveToDelayed` has no step parameter.
@@ -317,9 +349,13 @@ BullMQ's `moveToDelayed` has no step parameter.
 Synchronous RPC pattern - enqueue a job and wait for its result:
 
 ```ts
-const result = await queue.addAndWait('compute', { input: 42 }, {
-  waitTimeout: 30_000,
-});
+const result = await queue.addAndWait(
+  'compute',
+  { input: 42 },
+  {
+    waitTimeout: 30_000,
+  },
+);
 console.log(result); // the job's return value
 ```
 
@@ -349,7 +385,7 @@ Auto-expire jobs after a given duration:
 
 ```ts
 await queue.add('ephemeral', data, {
-  ttl: 60_000,  // job fails if not completed within 60 seconds
+  ttl: 60_000, // job fails if not completed within 60 seconds
 });
 ```
 
@@ -360,11 +396,7 @@ await queue.add('ephemeral', data, {
 Scheduler mode that enqueues the next job only after the previous one completes, guaranteeing no overlap:
 
 ```ts
-await queue.upsertJobScheduler(
-  'sequential-poll',
-  { repeatAfterComplete: 5000 },
-  { name: 'poll', data: {} },
-);
+await queue.upsertJobScheduler('sequential-poll', { repeatAfterComplete: 5000 }, { name: 'poll', data: {} });
 ```
 
 ---
@@ -414,7 +446,7 @@ Set queue-wide concurrency cap at worker startup (shorthand for `queue.setGlobal
 const worker = new Worker('q', processor, {
   connection,
   concurrency: 10,
-  globalConcurrency: 50,  // queue-wide cap across all workers
+  globalConcurrency: 50, // queue-wide cap across all workers
 });
 ```
 
@@ -465,18 +497,22 @@ The following features are purpose-built for LLM/AI orchestration pipelines. Non
 Track model, tokens, cost, and latency per job. Persisted to the job hash and emitted as a `'usage'` event.
 
 ```ts
-const worker = new Worker('inference', async (job) => {
-  const result = await callLLM(job.data);
-  await job.reportUsage({
-    model: 'gpt-5.4',
-    provider: 'openai',
-    tokens: { input: result.promptTokens, output: result.completionTokens },
-    costs: { total: 0.003 },
-    costUnit: 'usd',
-    latencyMs: 800,
-  });
-  return result.content;
-}, { connection });
+const worker = new Worker(
+  'inference',
+  async (job) => {
+    const result = await callLLM(job.data);
+    await job.reportUsage({
+      model: 'gpt-5.4',
+      provider: 'openai',
+      tokens: { input: result.promptTokens, output: result.completionTokens },
+      costs: { total: 0.003 },
+      costUnit: 'usd',
+      latencyMs: 800,
+    });
+    return result.content;
+  },
+  { connection },
+);
 ```
 
 ### Token Streaming (job.stream / queue.readStream)
@@ -485,12 +521,16 @@ Stream LLM output tokens in real-time via per-job Valkey Streams.
 
 ```ts
 // Worker side
-const worker = new Worker('chat', async (job) => {
-  for await (const chunk of llmStream) {
-    await job.stream({ token: chunk.text });
-  }
-  return { done: true };
-}, { connection });
+const worker = new Worker(
+  'chat',
+  async (job) => {
+    for await (const chunk of llmStream) {
+      await job.stream({ token: chunk.text });
+    }
+    return { done: true };
+  },
+  { connection },
+);
 
 // Consumer side
 const entries = await queue.readStream(jobId, { block: 5000 });
@@ -516,7 +556,7 @@ Cap total tokens and/or cost across all jobs in a flow.
 
 ```ts
 await flow.add(flowTree, {
-  budget: { maxTotalTokens: 50_000, maxTotalCost: 0.50, costUnit: 'usd', onExceeded: 'fail' },
+  budget: { maxTotalTokens: 50_000, maxTotalCost: 0.5, costUnit: 'usd', onExceeded: 'fail' },
 });
 
 const budget = await queue.getFlowBudget(parentJobId);
@@ -527,14 +567,18 @@ const budget = await queue.getFlowBudget(parentJobId);
 Ordered model/provider alternatives tried on retryable failure.
 
 ```ts
-await queue.add('inference', { prompt: '...' }, {
-  attempts: 4,
-  fallbacks: [
-    { model: 'gpt-5.4', provider: 'openai' },
-    { model: 'claude-sonnet-4-20250514', provider: 'anthropic' },
-    { model: 'llama-3-70b', provider: 'groq' },
-  ],
-});
+await queue.add(
+  'inference',
+  { prompt: '...' },
+  {
+    attempts: 4,
+    fallbacks: [
+      { model: 'gpt-5.4', provider: 'openai' },
+      { model: 'claude-sonnet-4-20250514', provider: 'anthropic' },
+      { model: 'llama-3-70b', provider: 'groq' },
+    ],
+  },
+);
 
 // Worker reads job.currentFallback for the active model/provider
 ```
@@ -546,8 +590,8 @@ Rate-limit by both requests and tokens per minute for LLM API compliance.
 ```ts
 const worker = new Worker('inference', processor, {
   connection,
-  limiter: { max: 60, duration: 60_000 },           // RPM
-  tokenLimiter: { maxTokens: 100_000, duration: 60_000 },  // TPM
+  limiter: { max: 60, duration: 60_000 }, // RPM
+  tokenLimiter: { maxTokens: 100_000, duration: 60_000 }, // TPM
 });
 
 // Report tokens in processor

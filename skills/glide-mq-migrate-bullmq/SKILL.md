@@ -7,7 +7,7 @@ description: >-
 license: Apache-2.0
 metadata:
   author: glide-mq
-  version: "0.18.0"
+  version: '0.18.0'
   tags: glide-mq, bullmq, migration, queue, valkey, redis
   sources: docs/MIGRATION.md
 ---
@@ -41,26 +41,26 @@ import { Queue, Worker, Job, QueueEvents, FlowProducer } from 'glide-mq';
 
 ## Breaking changes
 
-| Feature | BullMQ | glide-mq |
-|---------|--------|----------|
-| **Connection config** | `{ host, port }` | `{ addresses: [{ host, port }] }` |
-| **TLS** | `tls: {}` | `useTLS: true` |
-| **Password** | `password: 'secret'` | `credentials: { password: 'secret' }` |
-| **Cluster mode** | Implicit / `natMap` | `clusterMode: true` |
-| **`defaultJobOptions`** | On `QueueOptions` | Removed - wrap `queue.add()` with defaults |
-| **`queue.getJobs()`** | Accepts array of types | Single type per call |
-| **`queue.getJobCounts()`** | Variadic type list | Always returns all states |
-| **`settings.backoffStrategy`** | Single function | `backoffStrategies` named map on WorkerOptions |
-| **`worker.on('active')`** | Emits `(job, prev)` | Emits `(job, jobId)` |
-| **`job.waitUntilFinished()`** | `(queueEvents, ttl)`, resolves to the result | `(pollIntervalMs, timeoutMs)`, resolves to `'completed'` or `'failed'` |
-| **Sandboxed processor** | `useWorkerThreads: true` | `sandbox: { useWorkerThreads: true }` |
-| **`QueueScheduler`** | Required in v1, optional in v2+ | Does not exist - promotion runs inside Worker |
-| **`opts.repeat`** | On `queue.add()` | Removed - use `queue.upsertJobScheduler()` |
-| **FlowJob `data`** | Optional | Required |
-| **`retries-exhausted` event** | Separate QueueEvents event | Check `attemptsMade >= opts.attempts` in `'failed'` |
-| **BullMQ Pro `group.id`** | `group: { id }` (Pro license) | `ordering: { key }` (open source) |
-| **Group concurrency** | `group.limit.max` (Pro) | `ordering: { key, concurrency: N }` |
-| **Group rate limit** | `group.limit` (Pro) | `ordering: { key, rateLimit: { max, duration } }` |
+| Feature                        | BullMQ                                       | glide-mq                                                               |
+| ------------------------------ | -------------------------------------------- | ---------------------------------------------------------------------- |
+| **Connection config**          | `{ host, port }`                             | `{ addresses: [{ host, port }] }`                                      |
+| **TLS**                        | `tls: {}`                                    | `useTLS: true`                                                         |
+| **Password**                   | `password: 'secret'`                         | `credentials: { password: 'secret' }`                                  |
+| **Cluster mode**               | Implicit / `natMap`                          | `clusterMode: true`                                                    |
+| **`defaultJobOptions`**        | On `QueueOptions`                            | Removed - wrap `queue.add()` with defaults                             |
+| **`queue.getJobs()`**          | Accepts array of types                       | Single type per call                                                   |
+| **`queue.getJobCounts()`**     | Variadic type list                           | Always returns all states                                              |
+| **`settings.backoffStrategy`** | Single function                              | `backoffStrategies` named map on WorkerOptions                         |
+| **`worker.on('active')`**      | Emits `(job, prev)`                          | Emits `(job, jobId)`                                                   |
+| **`job.waitUntilFinished()`**  | `(queueEvents, ttl)`, resolves to the result | `(pollIntervalMs, timeoutMs)`, resolves to `'completed'` or `'failed'` |
+| **Sandboxed processor**        | `useWorkerThreads: true`                     | `sandbox: { useWorkerThreads: true }`                                  |
+| **`QueueScheduler`**           | Required in v1, optional in v2+              | Does not exist - promotion runs inside Worker                          |
+| **`opts.repeat`**              | On `queue.add()`                             | Removed - use `queue.upsertJobScheduler()`                             |
+| **FlowJob `data`**             | Optional                                     | Required                                                               |
+| **`retries-exhausted` event**  | Separate QueueEvents event                   | Check `attemptsMade >= opts.attempts` in `'failed'`                    |
+| **BullMQ Pro `group.id`**      | `group: { id }` (Pro license)                | `ordering: { key }` (open source)                                      |
+| **Group concurrency**          | `group.limit.max` (Pro)                      | `ordering: { key, concurrency: N }`                                    |
+| **Group rate limit**           | `group.limit` (Pro)                          | `ordering: { key, rateLimit: { max, duration } }`                      |
 
 ---
 
@@ -98,16 +98,24 @@ await queue.add('send-email', { to: 'user@example.com' });
 
 ```ts
 // BEFORE
-const worker = new Worker('tasks', async (job) => {
-  await sendEmail(job.data.to);
-}, { connection: { host: 'localhost', port: 6379 }, concurrency: 10 });
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    await sendEmail(job.data.to);
+  },
+  { connection: { host: 'localhost', port: 6379 }, concurrency: 10 },
+);
 ```
 
 ```ts
 // AFTER
-const worker = new Worker('tasks', async (job) => {
-  await sendEmail(job.data.to);
-}, { connection: { addresses: [{ host: 'localhost', port: 6379 }] }, concurrency: 10 });
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    await sendEmail(job.data.to);
+  },
+  { connection: { addresses: [{ host: 'localhost', port: 6379 }] }, concurrency: 10 },
+);
 ```
 
 ### 4. FlowProducer - identical API
@@ -118,7 +126,7 @@ const flow = new FlowProducer({ connection });
 await flow.add({
   name: 'parent',
   queueName: 'tasks',
-  data: { step: 'final' },       // NOTE: data is required in glide-mq
+  data: { step: 'final' }, // NOTE: data is required in glide-mq
   children: [
     { name: 'child-1', queueName: 'tasks', data: { step: '1' } },
     { name: 'child-2', queueName: 'tasks', data: { step: '2' } },
@@ -217,8 +225,7 @@ const queue = new Queue('tasks', {
 ```ts
 // AFTER - wrap add() with your defaults
 const DEFAULTS = { attempts: 3, backoff: { type: 'exponential', delay: 1000 } } as const;
-const add = (name: string, data: unknown, opts?: JobOptions) =>
-  queue.add(name, data, { ...DEFAULTS, ...opts });
+const add = (name: string, data: unknown, opts?: JobOptions) => queue.add(name, data, { ...DEFAULTS, ...opts });
 ```
 
 ### 11. getJobs with multiple types
@@ -230,10 +237,7 @@ const jobs = await queue.getJobs(['waiting', 'active'], 0, 99);
 
 ```ts
 // AFTER
-const [waiting, active] = await Promise.all([
-  queue.getJobs('waiting', 0, 99),
-  queue.getJobs('active', 0, 99),
-]);
+const [waiting, active] = await Promise.all([queue.getJobs('waiting', 0, 99), queue.getJobs('active', 0, 99)]);
 const jobs = [...waiting, ...active];
 ```
 
@@ -273,40 +277,40 @@ await queue.add('job', data, {
 
 ## What's new in glide-mq (not in BullMQ)
 
-| Feature | API | Description |
-|---------|-----|-------------|
-| Per-key ordering | `ordering: { key }` | Sequential execution per key across all workers |
-| Group concurrency | `ordering: { key, concurrency: N }` | Max N parallel jobs per key |
-| Group rate limit | `ordering: { key, rateLimit: { max, duration } }` | Per-key rate limiting |
-| Token bucket | `ordering: { key, tokenBucket }` + `opts.cost` | Weighted rate limiting per key |
-| Global rate limit | `queue.setGlobalRateLimit({ max, duration })` | Queue-wide cap across all workers |
-| Dead letter queue | `deadLetterQueue: { name, maxRetries }` | Native DLQ on QueueOptions |
-| Job revocation | `queue.revoke(jobId)` + `job.abortSignal` | Cancel in-flight jobs cooperatively |
-| Transparent compression | `compression: 'gzip'` on QueueOptions | 98% reduction on 15 KB payloads |
-| AZ-affinity routing | `readFrom: 'AZAffinity'` | Pin reads to local AZ replicas |
-| IAM auth | `credentials: { type: 'iam', ... }` | ElastiCache / MemoryDB native auth |
-| In-memory test mode | `TestQueue`, `TestWorker` from `glide-mq/testing` | No Valkey needed for tests |
-| Broadcast | `BroadcastWorker` | Pub/sub fan-out to all workers |
-| Batch processing | `batch: { size, timeout }` on WorkerOptions | Multiple jobs per processor call |
-| DAG workflows | `FlowProducer.addDAG()`, `dag()` helper | Jobs with multiple parents |
-| Workflow helpers | `chain()`, `group()`, `chord()` | Higher-level orchestration |
-| Step jobs | `job.moveToDelayed(ts, nextStep?)` | Multi-step state machines |
-| addAndWait | `queue.addAndWait(name, data, { waitTimeout })` | Request-reply pattern |
-| Pluggable serializers | `{ serialize, deserialize }` on options | MessagePack, Protobuf, etc. |
-| Job TTL | `opts.ttl` | Auto-expire jobs after N ms |
-| repeatAfterComplete | `upsertJobScheduler('name', { repeatAfterComplete: 5000 })` | No-overlap scheduling (ms delay after completion) |
-| LIFO mode | `lifo: true` | Last-in-first-out processing |
-| Job search | `queue.searchJobs({ state, name, data })` | Filter by state, exact name and shallow data fields |
-| excludeData | `queue.getJobs(type, start, end, { excludeData: true })` | Lightweight listings |
-| `globalConcurrency` | On WorkerOptions | Set queue-wide cap at worker startup |
-| **AI usage tracking** | `job.reportUsage({ model, tokens, costs, ... })` | Per-job LLM usage metadata |
-| **Token streaming** | `job.stream({ token })` / `queue.readStream(jobId)` | Real-time LLM output via per-job streams |
-| **Suspend/resume** | `job.suspend()` / `queue.signal(jobId, name, data)` | Human-in-the-loop approval |
-| **Flow budget** | `flow.add(tree, { budget: { maxTotalTokens } })` | Cap tokens/cost across a flow |
-| **Fallback chains** | `opts.fallbacks: [{ model, provider }]` | Ordered model/provider failover |
-| **Dual-axis rate limiting** | `tokenLimiter: { maxTokens, duration }` | RPM + TPM for LLM API compliance |
-| **Flow usage aggregation** | `queue.getFlowUsage(parentJobId)` | Aggregate tokens/cost across a flow |
-| **Vector search** | `queue.createJobIndex()` / `queue.vectorSearch()` | KNN similarity search over job hashes |
+| Feature                     | API                                                         | Description                                         |
+| --------------------------- | ----------------------------------------------------------- | --------------------------------------------------- |
+| Per-key ordering            | `ordering: { key }`                                         | Sequential execution per key across all workers     |
+| Group concurrency           | `ordering: { key, concurrency: N }`                         | Max N parallel jobs per key                         |
+| Group rate limit            | `ordering: { key, rateLimit: { max, duration } }`           | Per-key rate limiting                               |
+| Token bucket                | `ordering: { key, tokenBucket }` + `opts.cost`              | Weighted rate limiting per key                      |
+| Global rate limit           | `queue.setGlobalRateLimit({ max, duration })`               | Queue-wide cap across all workers                   |
+| Dead letter queue           | `deadLetterQueue: { name, maxRetries }`                     | Native DLQ on QueueOptions                          |
+| Job revocation              | `queue.revoke(jobId)` + `job.abortSignal`                   | Cancel in-flight jobs cooperatively                 |
+| Transparent compression     | `compression: 'gzip'` on QueueOptions                       | 98% reduction on 15 KB payloads                     |
+| AZ-affinity routing         | `readFrom: 'AZAffinity'`                                    | Pin reads to local AZ replicas                      |
+| IAM auth                    | `credentials: { type: 'iam', ... }`                         | ElastiCache / MemoryDB native auth                  |
+| In-memory test mode         | `TestQueue`, `TestWorker` from `glide-mq/testing`           | No Valkey needed for tests                          |
+| Broadcast                   | `BroadcastWorker`                                           | Pub/sub fan-out to all workers                      |
+| Batch processing            | `batch: { size, timeout }` on WorkerOptions                 | Multiple jobs per processor call                    |
+| DAG workflows               | `FlowProducer.addDAG()`, `dag()` helper                     | Jobs with multiple parents                          |
+| Workflow helpers            | `chain()`, `group()`, `chord()`                             | Higher-level orchestration                          |
+| Step jobs                   | `job.moveToDelayed(ts, nextStep?)`                          | Multi-step state machines                           |
+| addAndWait                  | `queue.addAndWait(name, data, { waitTimeout })`             | Request-reply pattern                               |
+| Pluggable serializers       | `{ serialize, deserialize }` on options                     | MessagePack, Protobuf, etc.                         |
+| Job TTL                     | `opts.ttl`                                                  | Auto-expire jobs after N ms                         |
+| repeatAfterComplete         | `upsertJobScheduler('name', { repeatAfterComplete: 5000 })` | No-overlap scheduling (ms delay after completion)   |
+| LIFO mode                   | `lifo: true`                                                | Last-in-first-out processing                        |
+| Job search                  | `queue.searchJobs({ state, name, data })`                   | Filter by state, exact name and shallow data fields |
+| excludeData                 | `queue.getJobs(type, start, end, { excludeData: true })`    | Lightweight listings                                |
+| `globalConcurrency`         | On WorkerOptions                                            | Set queue-wide cap at worker startup                |
+| **AI usage tracking**       | `job.reportUsage({ model, tokens, costs, ... })`            | Per-job LLM usage metadata                          |
+| **Token streaming**         | `job.stream({ token })` / `queue.readStream(jobId)`         | Real-time LLM output via per-job streams            |
+| **Suspend/resume**          | `job.suspend()` / `queue.signal(jobId, name, data)`         | Human-in-the-loop approval                          |
+| **Flow budget**             | `flow.add(tree, { budget: { maxTotalTokens } })`            | Cap tokens/cost across a flow                       |
+| **Fallback chains**         | `opts.fallbacks: [{ model, provider }]`                     | Ordered model/provider failover                     |
+| **Dual-axis rate limiting** | `tokenLimiter: { maxTokens, duration }`                     | RPM + TPM for LLM API compliance                    |
+| **Flow usage aggregation**  | `queue.getFlowUsage(parentJobId)`                           | Aggregate tokens/cost across a flow                 |
+| **Vector search**           | `queue.createJobIndex()` / `queue.vectorSearch()`           | KNN similarity search over job hashes               |
 
 See [references/new-features.md](references/new-features.md) for detailed documentation.
 
@@ -314,10 +318,10 @@ See [references/new-features.md](references/new-features.md) for detailed docume
 
 ## Current gaps
 
-| Missing feature | Workaround |
-|-----------------|------------|
-| QueueEvents `'waiting'`, `'active'`, `'delayed'`, `'drained'`, `'deduplicated'` events | Use worker-level events or poll `getJobCounts()` |
-| `failParentOnFailure` in FlowJob | Implement manually in the worker's `failed` handler |
+| Missing feature                                                                        | Workaround                                          |
+| -------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| QueueEvents `'waiting'`, `'active'`, `'delayed'`, `'drained'`, `'deduplicated'` events | Use worker-level events or poll `getJobCounts()`    |
+| `failParentOnFailure` in FlowJob                                                       | Implement manually in the worker's `failed` handler |
 
 ---
 
@@ -325,14 +329,14 @@ See [references/new-features.md](references/new-features.md) for detailed docume
 
 AWS ElastiCache Valkey 8.2 (r7g.large), TLS enabled, same-region EC2 client.
 
-| Concurrency | glide-mq | BullMQ | Delta |
-|:-----------:|----------:|--------:|:-----:|
-| c=1 | 2,479 j/s | 2,535 j/s | -2% |
-| c=5 | 10,754 j/s | 9,866 j/s | +9% |
-| c=10 | **18,218 j/s** | 13,541 j/s | **+35%** |
-| c=15 | **19,583 j/s** | 14,162 j/s | **+38%** |
-| c=20 | 19,408 j/s | 16,085 j/s | +21% |
-| c=50 | 19,768 j/s | 19,159 j/s | +3% |
+| Concurrency |       glide-mq |     BullMQ |  Delta   |
+| :---------: | -------------: | ---------: | :------: |
+|     c=1     |      2,479 j/s |  2,535 j/s |   -2%    |
+|     c=5     |     10,754 j/s |  9,866 j/s |   +9%    |
+|    c=10     | **18,218 j/s** | 13,541 j/s | **+35%** |
+|    c=15     | **19,583 j/s** | 14,162 j/s | **+38%** |
+|    c=20     |     19,408 j/s | 16,085 j/s |   +21%   |
+|    c=50     |     19,768 j/s | 19,159 j/s |   +3%    |
 
 Most production deployments run c=5 to c=20, where glide-mq's 1-RTT architecture pays off the most.
 
@@ -368,19 +372,19 @@ Most production deployments run c=5 to c=20, where glide-mq's 1-RTT architecture
 
 TypeScript catches most leftovers at compile time: `defaultJobOptions`, `settings.backoffStrategy`, `opts.repeat`, an array passed to `getJobs()`, and `QueueScheduler` are not part of glide-mq's types. In plain JavaScript they fail or are ignored at runtime, as below.
 
-| Symptom | Cause | Fix |
-|-------|-------|-----|
-| `ConnectionError: Failed to create standalone client: ...` on startup | BullMQ `{ host, port }` connection | `{ addresses: [{ host, port }] }` |
-| Queue-level defaults (attempts, backoff) silently not applied | `defaultJobOptions` is not a glide-mq option | Wrap `queue.add()` with a helper that spreads defaults |
-| Custom backoff ignored | `settings.backoffStrategy` | `backoffStrategies` map on WorkerOptions |
-| `TypeError` reading `length` from `getJobs()` | Array of types passed | One `getJobs()` call per type, then combine |
-| Import of `QueueScheduler` fails | glide-mq has no QueueScheduler | Remove it; the Worker promotes delayed jobs |
-| Repeatable job never repeats | `opts.repeat` on `queue.add()` | `queue.upsertJobScheduler()` |
-| `waitUntilFinished` times out or returns a state instead of a result | New `(pollMs, timeoutMs)` signature | Pass numbers; use `addAndWait()` for the return value |
-| Job stuck in `active` | Worker crashed mid-job | Healthy workers reclaim stream and list-backed claims automatically; list recovery releases reservations and counter healing runs every 10th promotion tick. Recovery waits while paused and bounded scan fallback can delay or miss claims in very large keyspaces. Do not routinely delete the counter; see [recovery caveats](references/new-features.md#lifo-mode) |
-| `retries-exhausted` listener never fires | No such event | Listen to `'failed'` and check `attemptsMade >= opts.attempts` |
-| `FlowProducer.add` throws `The "string" argument must be of type string ... Received undefined` | A FlowJob without `data` | Pass `data` on every node (use `{}` if empty) |
-| `queue.add()` returned `null` | A job with that `jobId` already exists | Expected: duplicates are skipped |
+| Symptom                                                                                         | Cause                                        | Fix                                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------------------------------------------------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ConnectionError: Failed to create standalone client: ...` on startup                           | BullMQ `{ host, port }` connection           | `{ addresses: [{ host, port }] }`                                                                                                                                                                                                                                                                                                                                      |
+| Queue-level defaults (attempts, backoff) silently not applied                                   | `defaultJobOptions` is not a glide-mq option | Wrap `queue.add()` with a helper that spreads defaults                                                                                                                                                                                                                                                                                                                 |
+| Custom backoff ignored                                                                          | `settings.backoffStrategy`                   | `backoffStrategies` map on WorkerOptions                                                                                                                                                                                                                                                                                                                               |
+| `TypeError` reading `length` from `getJobs()`                                                   | Array of types passed                        | One `getJobs()` call per type, then combine                                                                                                                                                                                                                                                                                                                            |
+| Import of `QueueScheduler` fails                                                                | glide-mq has no QueueScheduler               | Remove it; the Worker promotes delayed jobs                                                                                                                                                                                                                                                                                                                            |
+| Repeatable job never repeats                                                                    | `opts.repeat` on `queue.add()`               | `queue.upsertJobScheduler()`                                                                                                                                                                                                                                                                                                                                           |
+| `waitUntilFinished` times out or returns a state instead of a result                            | New `(pollMs, timeoutMs)` signature          | Pass numbers; use `addAndWait()` for the return value                                                                                                                                                                                                                                                                                                                  |
+| Job stuck in `active`                                                                           | Worker crashed mid-job                       | Healthy workers reclaim stream and list-backed claims automatically; list recovery releases reservations and counter healing runs every 10th promotion tick. Recovery waits while paused and bounded scan fallback can delay or miss claims in very large keyspaces. Do not routinely delete the counter; see [recovery caveats](references/new-features.md#lifo-mode) |
+| `retries-exhausted` listener never fires                                                        | No such event                                | Listen to `'failed'` and check `attemptsMade >= opts.attempts`                                                                                                                                                                                                                                                                                                         |
+| `FlowProducer.add` throws `The "string" argument must be of type string ... Received undefined` | A FlowJob without `data`                     | Pass `data` on every node (use `{}` if empty)                                                                                                                                                                                                                                                                                                                          |
+| `queue.add()` returned `null`                                                                   | A job with that `jobId` already exists       | Expected: duplicates are skipped                                                                                                                                                                                                                                                                                                                                       |
 
 ## Full Documentation
 
