@@ -1979,22 +1979,27 @@ describe('TestWorker ordering and retention parity (T9)', () => {
     await queue.close();
   });
 
-  it('removeOnComplete: { age } removes completed jobs older than age seconds', async () => {
-    const queue = new TestQueue('roc-age');
-    let done = 0;
-    const worker = new TestWorker(queue, async () => 'ok');
-    worker.on('completed', () => done++);
-    const old = await queue.add('old', {});
-    await waitFor(() => done === 1, 2000, 1);
-    queue.jobs.get(old!.id)!.finishedOn = Date.now() - 10_000;
-    await queue.add('new', {}, { removeOnComplete: { age: 5, count: 0 } });
-    await waitFor(() => done === 2, 2000, 1);
-    expect(await queue.getJob(old!.id)).toBeNull();
-    expect((await queue.getJobs('completed')).map((j) => j.name)).toEqual(['new']);
-
-    await worker.close();
-    await queue.close();
-  });
+  it.each([{ age: 5, count: 0 }, { age: 5 }])(
+    'removeOnComplete: %j removes completed jobs older than age seconds',
+    async (retention) => {
+      const queue = new TestQueue('roc-age');
+      let done = 0;
+      const worker = new TestWorker(queue, async () => 'ok');
+      worker.on('completed', () => done++);
+      try {
+        const old = await queue.add('old', {});
+        await waitFor(() => done === 1, 2000, 1);
+        queue.jobs.get(old!.id)!.finishedOn = Date.now() - 10_000;
+        await queue.add('new', {}, { removeOnComplete: retention });
+        await waitFor(() => done === 2, 2000, 1);
+        expect(await queue.getJob(old!.id)).toBeNull();
+        expect((await queue.getJobs('completed')).map((j) => j.name)).toEqual(['new']);
+      } finally {
+        await worker.close();
+        await queue.close();
+      }
+    },
+  );
 
   it('removeOnFail applies on terminal failure only', async () => {
     const queue = new TestQueue('rof');
