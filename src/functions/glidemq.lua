@@ -936,6 +936,62 @@ local function deleteIdleConsumers(streamKey, group, keep, idleMs)
   return deleted
 end
 
+-- Remove excess jobs from a sorted set in capped, stack-safe batches.
+-- UNLINKs job hashes (they can be MB-sized with data + opts) and removes
+-- from the set in chunks of 1000.
+local function removeExcessJobs(setKey, prefix, ids)
+  for i = 1, #ids do
+    redis.call('UNLINK', prefix .. 'job:' .. ids[i])
+  end
+  for i = 1, #ids, 1000 do
+    redis.call('ZREM', setKey, unpack(ids, i, math.min(i + 999, #ids)))
+  end
+end
+
+-- removeOnFail retention after a terminal failure. removeMode, removeCount and
+-- removeAge use the encodeRetention encoding in src/functions/index.ts. With
+-- 'true' the caller skipped the failed-set entry, so only the hash is deleted.
+local function applyFailRetention(failedKey, prefix, jobKey, removeMode, removeCount, removeAge, timestamp)
+  -- JobOptions allows a fractional count; ZRANGE rejects a fractional index.
+  removeCount = math.floor(removeCount)
+  if removeMode == 'true' then
+    redis.call('UNLINK', jobKey)
+  elseif removeMode == 'count' and removeCount > 0 then
+    local total = redis.call('ZCARD', failedKey)
+    if total > removeCount then
+      local excess = redis.call('ZRANGE', failedKey, 0, math.min(total - removeCount, 1000) - 1)
+      if #excess > 0 then removeExcessJobs(failedKey, prefix, excess) end
+    end
+  elseif removeMode == 'age_count' then
+    if removeAge > 0 then
+      local cutoff = timestamp - (removeAge * 1000)
+      local old = redis.call('ZRANGEBYSCORE', failedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
+      if #old > 0 then removeExcessJobs(failedKey, prefix, old) end
+    end
+    if removeCount > 0 then
+      local total = redis.call('ZCARD', failedKey)
+      if total > removeCount then
+        local excess = redis.call('ZRANGE', failedKey, 0, math.min(total - removeCount, 1000) - 1)
+        if #excess > 0 then removeExcessJobs(failedKey, prefix, excess) end
+      end
+    end
+  end
+end
+
+-- The job's stored removeOnFail option, in the encodeRetention encoding.
+local function extractRemoveOnFailFromOpts(optsJson)
+  if not optsJson or optsJson == '' then return '0', 0, 0 end
+  local ok, decoded = pcall(cjson.decode, optsJson)
+  if not ok or type(decoded) ~= 'table' then return '0', 0, 0 end
+  local opt = decoded['removeOnFail']
+  if opt == true then return 'true', 0, 0 end
+  if type(opt) == 'number' then return 'count', opt, 0 end
+  if type(opt) == 'table' then
+    return 'age_count', tonumber(opt['count']) or 0, tonumber(opt['age']) or 0
+  end
+  return '0', 0, 0
+end
+
 -- Apply stall logic to a job: increment stalledCount, fail if over max, else emit stalled event.
 -- Returns true if the job was moved to failed, false if only stalled.
 -- subKey: broadcast mode counts stalls per subscription in job:<id>:sub:<group>
@@ -958,13 +1014,22 @@ local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, ma
   end
   if stalledCount > maxStalledCount then
     local metricsKey = prefix .. 'metrics:failed'
-    local processedOn = tonumber(redis.call('HGET', jobKey, 'processedOn')) or timestamp
-    redis.call('ZADD', failedKey, timestamp, jobId)
-    redis.call('HSET', jobKey,
-      'state', 'failed',
-      'failedReason', 'job stalled more than maxStalledCount',
-      'finishedOn', tostring(timestamp)
-    )
+    local vals = redis.call('HMGET', jobKey, 'processedOn', 'opts')
+    local processedOn = tonumber(vals[1]) or timestamp
+    -- Same removeOnFail retention as glidemq_fail. Broadcast jobs persist for
+    -- every subscription, so they keep their hash.
+    local removeMode, removeCount, removeAge = '0', 0, 0
+    if not subKey then
+      removeMode, removeCount, removeAge = extractRemoveOnFailFromOpts(vals[2])
+    end
+    if removeMode ~= 'true' then
+      redis.call('ZADD', failedKey, timestamp, jobId)
+      redis.call('HSET', jobKey,
+        'state', 'failed',
+        'failedReason', 'job stalled more than maxStalledCount',
+        'finishedOn', tostring(timestamp)
+      )
+    end
     advanceRepeatAfterComplete(jobKey, prefix, timestamp)
     markOrderingDone(jobKey, jobId)
     releaseGroupSlotAndPromote(jobKey, jobId, timestamp)
@@ -972,22 +1037,13 @@ local function applyStalledLogic(jobKey, jobId, prefix, eventsKey, failedKey, ma
       'failedReason', 'job stalled more than maxStalledCount'
     })
     recordMetrics(metricsKey, timestamp, timestamp - processedOn)
+    if not subKey then
+      applyFailRetention(failedKey, prefix, jobKey, removeMode, removeCount, removeAge, timestamp)
+    end
     return true
   else
     emitEvent(eventsKey, 'stalled', jobId, nil)
     return false
-  end
-end
-
--- Remove excess jobs from a sorted set in capped, stack-safe batches.
--- UNLINKs job hashes (they can be MB-sized with data + opts) and removes
--- from the set in chunks of 1000.
-local function removeExcessJobs(setKey, prefix, ids)
-  for i = 1, #ids do
-    redis.call('UNLINK', prefix .. 'job:' .. ids[i])
-  end
-  for i = 1, #ids, 1000 do
-    redis.call('ZREM', setKey, unpack(ids, i, math.min(i + 999, #ids)))
   end
 end
 
@@ -2105,28 +2161,7 @@ local function failJobCore(keys, args, requeueOnly)
     local prefix = string.sub(jobKey, 1, #jobKey - #('job:' .. jobId))
     -- In broadcast mode, skip job hash deletion: the job must persist for all subscriptions
     if broadcastMode ~= '1' then
-      if removeNow then
-        redis.call('UNLINK', jobKey)
-      elseif removeMode == 'count' and removeCount > 0 then
-        local total = redis.call('ZCARD', failedKey)
-        if total > removeCount then
-          local excess = redis.call('ZRANGE', failedKey, 0, math.min(total - removeCount, 1000) - 1)
-          if #excess > 0 then removeExcessJobs(failedKey, prefix, excess) end
-        end
-      elseif removeMode == 'age_count' then
-        if removeAge > 0 then
-          local cutoff = timestamp - (removeAge * 1000)
-          local old = redis.call('ZRANGEBYSCORE', failedKey, '0', string.format('%.0f', cutoff), 'LIMIT', 0, 1000)
-          if #old > 0 then removeExcessJobs(failedKey, prefix, old) end
-        end
-        if removeCount > 0 then
-          local total = redis.call('ZCARD', failedKey)
-          if total > removeCount then
-            local excess = redis.call('ZRANGE', failedKey, 0, math.min(total - removeCount, 1000) - 1)
-            if #excess > 0 then removeExcessJobs(failedKey, prefix, excess) end
-          end
-        end
-      end
+      applyFailRetention(failedKey, prefix, jobKey, removeMode, removeCount, removeAge, timestamp)
     end
     if entryId == '' then decrListActive(prefix .. 'list-active', jobId) end
     return 'failed'

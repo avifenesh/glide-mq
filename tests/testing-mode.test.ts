@@ -2013,6 +2013,24 @@ describe('TestWorker ordering and retention parity (T9)', () => {
     await queue.close();
   });
 
+  it('removeOnFail floors a fractional count like the server functions', async () => {
+    const queue = new TestQueue('rof-fraction');
+    let terminal = 0;
+    queue.on('failed', () => terminal++);
+    const worker = new TestWorker(queue, async () => {
+      throw new Error('boom');
+    });
+    for (let i = 0; i < 2; i++) {
+      await queue.add(`j${i}`, {}, { removeOnFail: 1.5 });
+      await waitFor(() => terminal === i + 1, 2000, 1);
+      await new Promise((r) => setTimeout(r, 2));
+    }
+    expect((await queue.getJobs('failed')).map((j) => j.name)).toEqual(['j1']);
+
+    await worker.close();
+    await queue.close();
+  });
+
   it('batch mode applies removeOnComplete', async () => {
     const queue = new TestQueue('roc-batch');
     let done = 0;

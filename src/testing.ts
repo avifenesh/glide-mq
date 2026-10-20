@@ -2247,7 +2247,8 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       return;
     }
     const now = record.finishedOn ?? Date.now();
-    const count = typeof opt === 'number' ? opt : (opt.count ?? 0);
+    // Floored like the count encodeRetention passes to the server functions.
+    const count = Math.floor(typeof opt === 'number' ? opt : (opt.count ?? 0));
     const age = typeof opt === 'number' ? 0 : (opt.age ?? 0);
     const MAX_REMOVALS = 1000;
     // Sorted like the completed/failed ZSET: score finishedOn, ties by member (job id).
