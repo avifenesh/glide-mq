@@ -29,31 +29,31 @@ Returns the current library version as a string (e.g. `"127"`). The dummy key `{
 
 All keys share a hash tag `{queueName}` to ensure cluster slot co-location. Default prefix is `glide`.
 
-| Key                                 | Type       | Description                                                   |
-| ----------------------------------- | ---------- | ------------------------------------------------------------- |
-| `glide:{queueName}:id`              | String     | Auto-increment job ID counter                                 |
-| `glide:{queueName}:stream`          | Stream     | Ready jobs (primary queue)                                    |
-| `glide:{queueName}:scheduled`       | Sorted Set | Delayed + prioritized staging area                            |
-| `glide:{queueName}:completed`       | Sorted Set | Completed jobs (score = timestamp)                            |
-| `glide:{queueName}:failed`          | Sorted Set | Failed jobs (score = timestamp)                               |
-| `glide:{queueName}:events`          | Stream     | Lifecycle events (capped ~1000)                               |
-| `glide:{queueName}:meta`            | Hash       | Queue metadata (paused flag, concurrency, rate limit)         |
-| `glide:{queueName}:dedup`           | Hash       | Deduplication entries (field=dedup_id, value=jobId:timestamp) |
-| `glide:{queueName}:job:{id}`        | Hash       | Individual job data                                           |
-| `glide:{queueName}:log:{id}`        | List       | Per-job log entries                                           |
-| `glide:{queueName}:deps:{id}`       | Set        | Child job IDs for parent (flows)                              |
-| `glide:{queueName}:parents:{id}`    | Set        | Parent references for DAG multi-parent jobs                   |
-| `glide:{queueName}:ordering`        | Hash       | Per-key sequence counters                                     |
-| `glide:{queueName}:group:{key}`     | Hash       | Group state (concurrency, rate limit, token bucket)           |
-| `glide:{queueName}:groupq:{key}`    | Sorted Set | Ordered wait list for group-limited jobs (score = orderingSeq)|
-| `glide:{queueName}:ratelimited`     | Sorted Set | Rate-limited group promotion queue                            |
-| `glide:{queueName}:schedulers`      | Hash       | Job scheduler configs                                         |
-| `glide:{queueName}:lifo`            | List       | LIFO queue (jobs with lifo:true, consumed via RPOP)           |
-| `glide:{queueName}:jstream:{id}`    | Stream     | Per-job streaming channel                                     |
-| `glide:{queueName}:signals:{id}`    | List       | Signals delivered to a suspended job                          |
-| `glide:{queueName}:suspended`       | Sorted Set | Suspended jobs (score = timeout deadline)                     |
-| `glide:{queueName}:budget:{flowId}` | Hash       | Flow-level budget state                                       |
-| `glide:{queueName}:tpm`             | Hash       | Token-per-minute rate limiter state                           |
+| Key                                 | Type       | Description                                                    |
+| ----------------------------------- | ---------- | -------------------------------------------------------------- |
+| `glide:{queueName}:id`              | String     | Auto-increment job ID counter                                  |
+| `glide:{queueName}:stream`          | Stream     | Ready jobs (primary queue)                                     |
+| `glide:{queueName}:scheduled`       | Sorted Set | Delayed + prioritized staging area                             |
+| `glide:{queueName}:completed`       | Sorted Set | Completed jobs (score = timestamp)                             |
+| `glide:{queueName}:failed`          | Sorted Set | Failed jobs (score = timestamp)                                |
+| `glide:{queueName}:events`          | Stream     | Lifecycle events (capped ~1000)                                |
+| `glide:{queueName}:meta`            | Hash       | Queue metadata (paused flag, concurrency, rate limit)          |
+| `glide:{queueName}:dedup`           | Hash       | Deduplication entries (field=dedup_id, value=jobId:timestamp)  |
+| `glide:{queueName}:job:{id}`        | Hash       | Individual job data                                            |
+| `glide:{queueName}:log:{id}`        | List       | Per-job log entries                                            |
+| `glide:{queueName}:deps:{id}`       | Set        | Child job IDs for parent (flows)                               |
+| `glide:{queueName}:parents:{id}`    | Set        | Parent references for DAG multi-parent jobs                    |
+| `glide:{queueName}:ordering`        | Hash       | Per-key sequence counters                                      |
+| `glide:{queueName}:group:{key}`     | Hash       | Group state (concurrency, rate limit, token bucket)            |
+| `glide:{queueName}:groupq:{key}`    | Sorted Set | Ordered wait list for group-limited jobs (score = orderingSeq) |
+| `glide:{queueName}:ratelimited`     | Sorted Set | Rate-limited group promotion queue                             |
+| `glide:{queueName}:schedulers`      | Hash       | Job scheduler configs                                          |
+| `glide:{queueName}:lifo`            | List       | LIFO queue (jobs with lifo:true, consumed via RPOP)            |
+| `glide:{queueName}:jstream:{id}`    | Stream     | Per-job streaming channel                                      |
+| `glide:{queueName}:signals:{id}`    | List       | Signals delivered to a suspended job                           |
+| `glide:{queueName}:suspended`       | Sorted Set | Suspended jobs (score = timeout deadline)                      |
+| `glide:{queueName}:budget:{flowId}` | Hash       | Flow-level budget state                                        |
+| `glide:{queueName}:tpm`             | Hash       | Token-per-minute rate limiter state                            |
 
 ---
 
@@ -212,13 +212,13 @@ An optional 6th key, `glide:{queueName}:deps:{parentId}`, registers the job in a
 
 ### Args (23)
 
-| Position | Name                       | Type         | Description                                                    |
-| -------- | -------------------------- | ------------ | -------------------------------------------------------------- |
-| 1        | dedupId                    | string       | Deduplication identifier                                       |
-| 2        | ttlMs                      | string (int) | TTL for throttle mode in ms, `"0"` if not used                 |
-| 3        | mode                       | string       | `"simple"`, `"throttle"`, or `"debounce"`                      |
-| 4-22     | (same as addJob args 1-19) |              | glidemq_addJob args 1-19 (`jobName` through `parentQueue`)     |
-| 23       | skipEvents                 | string       | `"1"` to skip event emission (dedup takes no `schedulerName`)  |
+| Position | Name                       | Type         | Description                                                   |
+| -------- | -------------------------- | ------------ | ------------------------------------------------------------- |
+| 1        | dedupId                    | string       | Deduplication identifier                                      |
+| 2        | ttlMs                      | string (int) | TTL for throttle mode in ms, `"0"` if not used                |
+| 3        | mode                       | string       | `"simple"`, `"throttle"`, or `"debounce"`                     |
+| 4-22     | (same as addJob args 1-19) |              | glidemq_addJob args 1-19 (`jobName` through `parentQueue`)    |
+| 23       | skipEvents                 | string       | `"1"` to skip event emission (dedup takes no `schedulerName`) |
 
 ### Return Values
 
@@ -332,11 +332,10 @@ score = priority * 2^42 + timestamp_ms
 
 Where `2^42 = 4398046511104`.
 
-- Priority 1 is highest. Priority 0 means no priority: a priority-0 delayed job uses score `0 + (timestamp + delay)` and goes to the stream when promoted, while priority > 0 jobs go to the priority list, which workers read before the LIFO list and the stream.
-- Priority must be an integer from 0 to 2048. The client rejects anything else before the FCALL; the server function does not validate it.
+- Priority 1 is highest. Priority 0 means no priority: a priority-0 delayed job uses score `0 + (timestamp + delay)` and goes to the stream when promoted. Non-LIFO jobs with priority > 0 go to the priority list; jobs also setting `lifo` go to the LIFO list. When checking available sources, workers inspect the priority list before LIFO and the stream. This is a retrieval preference, not a guarantee of execution order.
 - Priority 1 uses score `4398046511104 + timestamp_ms`.
-- Within the same priority, FIFO by timestamp.
-- Non-delayed priority jobs use score `priority * 2^42 + 0` (timestamp = 0) so they promote immediately.
+- Within the same priority, delayed jobs sort by due timestamp. Non-delayed jobs share one score, so ties sort by string job ID.
+- Non-delayed priority jobs use score `priority * 2^42 + 0` (timestamp = 0), making them immediately eligible for scheduler promotion, not immediately available to workers. Promotion is bounded to 1000 jobs per pass. The priority list is FIFO across passes; admission gates and worker concurrency can change actual execution order. See [Priority timing](USAGE.md#priority-timing).
 - Priority must be an integer from 0 to 2048. `glidemq_addJob`, `glidemq_dedup` and `glidemq_addFlow` (parent or any child) reply with an `invalid priority` error for any other value and write nothing.
 
 ---
@@ -663,14 +662,14 @@ Atomically increments usage counters and checks budget limits.
 
 ### Args (6)
 
-| Position | Name          | Type          | Description                                                        |
-| -------- | ------------- | ------------- | ------------------------------------------------------------------ |
-| 1        | tokensJson    | string (JSON) | Per-category token counts (e.g. `{"input":100,"output":50}`)       |
-| 2        | costsJson     | string (JSON) | Per-category cost amounts (e.g. `{"total":0.003}`)                 |
-| 3        | weightedTotal | string (num)  | Pre-computed weighted token total for maxTotalTokens check         |
-| 4        | totalCost     | string (num)  | Pre-computed total cost for maxTotalCost check                     |
-| 5        | maxTokensJson | string (JSON) | Per-category token caps from budget (e.g. `{"input":5000}`)       |
-| 6        | maxCostsJson  | string (JSON) | Per-category cost caps from budget (e.g. `{"total":1.0}`)         |
+| Position | Name          | Type          | Description                                                  |
+| -------- | ------------- | ------------- | ------------------------------------------------------------ |
+| 1        | tokensJson    | string (JSON) | Per-category token counts (e.g. `{"input":100,"output":50}`) |
+| 2        | costsJson     | string (JSON) | Per-category cost amounts (e.g. `{"total":0.003}`)           |
+| 3        | weightedTotal | string (num)  | Pre-computed weighted token total for maxTotalTokens check   |
+| 4        | totalCost     | string (num)  | Pre-computed total cost for maxTotalCost check               |
+| 5        | maxTokensJson | string (JSON) | Per-category token caps from budget (e.g. `{"input":5000}`)  |
+| 6        | maxCostsJson  | string (JSON) | Per-category cost caps from budget (e.g. `{"total":1.0}`)    |
 
 Returns "no_budget", "ok", or "exceeded".
 

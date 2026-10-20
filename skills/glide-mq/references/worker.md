@@ -45,15 +45,16 @@ import { Worker, BatchError } from 'glide-mq';
 
 const worker = new Worker(
   'bulk-insert',
-  async (jobs) => {              // receives Job[] in batch mode
-    const results = await db.insertMany(jobs.map(j => j.data));
-    return results;              // must return R[] with length === jobs.length
+  async (jobs) => {
+    // receives Job[] in batch mode
+    const results = await db.insertMany(jobs.map((j) => j.data));
+    return results; // must return R[] with length === jobs.length
   },
   {
     connection,
     batch: {
-      size: 50,          // max jobs per batch (1-1000)
-      timeout: 1000,     // ms to wait for full batch (optional)
+      size: 50, // max jobs per batch (1-1000)
+      timeout: 1000, // ms to wait for full batch (optional)
     },
   },
 );
@@ -61,9 +62,9 @@ const worker = new Worker(
 // Partial failures - report per-job outcomes
 async (jobs) => {
   const results = await Promise.allSettled(jobs.map(processOne));
-  const mapped = results.map(r => r.status === 'fulfilled' ? r.value : r.reason);
-  if (mapped.some(r => r instanceof Error)) {
-    throw new BatchError(mapped);  // each job individually completed/failed
+  const mapped = results.map((r) => (r.status === 'fulfilled' ? r.value : r.reason));
+  if (mapped.some((r) => r instanceof Error)) {
+    throw new BatchError(mapped); // each job individually completed/failed
   }
   return mapped;
 };
@@ -71,16 +72,16 @@ async (jobs) => {
 
 ## Worker Events
 
-| Event | Arguments | Description |
-|-------|-----------|-------------|
-| `active` | `(job, jobId)` | Job started processing |
-| `completed` | `(job, result)` | Job finished successfully |
-| `failed` | `(job, err)` | Job threw or timed out |
-| `error` | `(err)` | Internal worker error (connection issues) |
-| `stalled` | `(jobId)` | Job exceeded lockDuration, re-queued |
-| `drained` | `()` | Queue transitioned from non-empty to empty |
-| `closing` | `()` | Worker beginning to close |
-| `closed` | `()` | Worker fully closed |
+| Event       | Arguments       | Description                                |
+| ----------- | --------------- | ------------------------------------------ |
+| `active`    | `(job, jobId)`  | Job started processing                     |
+| `completed` | `(job, result)` | Job finished successfully                  |
+| `failed`    | `(job, err)`    | Job threw or timed out                     |
+| `error`     | `(err)`         | Internal worker error (connection issues)  |
+| `stalled`   | `(jobId)`       | Job exceeded lockDuration, re-queued       |
+| `drained`   | `()`            | Queue transitioned from non-empty to empty |
+| `closing`   | `()`            | Worker beginning to close                  |
+| `closed`    | `()`            | Worker fully closed                        |
 
 ```typescript
 worker.on('completed', (job, result) => { ... });
@@ -98,7 +99,7 @@ worker.on('stalled', (jobId) => { ... });
 
 ## LIFO Mode
 
-Workers check sources in order: **priority > LIFO > FIFO**.
+Available-source retrieval preference is **promoted priority list > LIFO > FIFO**, not a global execution-order guarantee. Promotion backlog and admission gates can defer a job; see docs/USAGE.md Priority timing.
 Add jobs with `{ lifo: true }` to process newest first.
 LIFO uses a dedicated Valkey LIST separate from the FIFO stream.
 
@@ -112,12 +113,16 @@ const result = await queue.revoke(job.id);
 // 'not_found'  - job does not exist
 
 // Worker-side: check for revocation
-const worker = new Worker('tasks', async (job) => {
-  for (const chunk of dataset) {
-    if (job.abortSignal?.aborted) throw new Error('Revoked');
-    await processChunk(chunk);
-  }
-}, { connection });
+const worker = new Worker(
+  'tasks',
+  async (job) => {
+    for (const chunk of dataset) {
+      if (job.abortSignal?.aborted) throw new Error('Revoked');
+      await processChunk(chunk);
+    }
+  },
+  { connection },
+);
 ```
 
 `job.abortSignal` is a standard `AbortSignal` - pass to `fetch`, `axios`, etc.
@@ -125,39 +130,43 @@ const worker = new Worker('tasks', async (job) => {
 ## Pause / Resume / Close
 
 ```typescript
-await worker.pause();        // stop accepting new jobs (active finish)
-await worker.pause(true);    // force-stop immediately
+await worker.pause(); // stop accepting new jobs (active finish)
+await worker.pause(true); // force-stop immediately
 await worker.resume();
 
-await worker.close();        // graceful: waits for active jobs
-await worker.close(true);    // force-close immediately
+await worker.close(); // graceful: waits for active jobs
+await worker.close(true); // force-close immediately
 ```
 
 ## AI Usage & Token Tracking
 
 ```typescript
-const worker = new Worker('inference', async (job) => {
-  const result = await callLLM(job.data.prompt);
+const worker = new Worker(
+  'inference',
+  async (job) => {
+    const result = await callLLM(job.data.prompt);
 
-  // Report AI usage metadata (persisted to job hash, emits 'usage' event)
-  await job.reportUsage({
-    model: 'gpt-5.4',
-    provider: 'openai',
-    tokens: { input: result.promptTokens, output: result.completionTokens },
-    costs: { total: 0.003 },
-    costUnit: 'usd',
-    latencyMs: 800,
-  });
+    // Report AI usage metadata (persisted to job hash, emits 'usage' event)
+    await job.reportUsage({
+      model: 'gpt-5.4',
+      provider: 'openai',
+      tokens: { input: result.promptTokens, output: result.completionTokens },
+      costs: { total: 0.003 },
+      costUnit: 'usd',
+      latencyMs: 800,
+    });
 
-  // Or report just tokens for TPM rate limiting
-  await job.reportTokens(result.totalTokens);
+    // Or report just tokens for TPM rate limiting
+    await job.reportTokens(result.totalTokens);
 
-  return result.content;
-}, {
-  connection,
-  limiter: { max: 60, duration: 60_000 },        // RPM limit
-  tokenLimiter: { maxTokens: 100_000, duration: 60_000 },  // TPM limit
-});
+    return result.content;
+  },
+  {
+    connection,
+    limiter: { max: 60, duration: 60_000 }, // RPM limit
+    tokenLimiter: { maxTokens: 100_000, duration: 60_000 }, // TPM limit
+  },
+);
 ```
 
 Worker pauses fetching when either RPM limiter or TPM tokenLimiter is exceeded.
@@ -182,18 +191,22 @@ Consumers read via `queue.readStream(jobId, opts)`.
 ## Suspend / Resume (Human-in-the-Loop)
 
 ```typescript
-const worker = new Worker('review', async (job) => {
-  // On resume, signals are populated
-  if (job.signals.length > 0) {
-    const approval = job.signals.find(s => s.name === 'approve');
-    if (approval) return { approved: true };
-    return { rejected: true };
-  }
+const worker = new Worker(
+  'review',
+  async (job) => {
+    // On resume, signals are populated
+    if (job.signals.length > 0) {
+      const approval = job.signals.find((s) => s.name === 'approve');
+      if (approval) return { approved: true };
+      return { rejected: true };
+    }
 
-  // First run - suspend for human review
-  await job.suspend({ reason: 'Needs approval', timeout: 86_400_000 });
-  // throws SuspendError - no code after this executes
-}, { connection });
+    // First run - suspend for human review
+    await job.suspend({ reason: 'Needs approval', timeout: 86_400_000 });
+    // throws SuspendError - no code after this executes
+  },
+  { connection },
+);
 ```
 
 Resume externally via `queue.signal(jobId, 'approve', { ... })`.
@@ -201,12 +214,16 @@ Resume externally via `queue.signal(jobId, 'approve', { ... })`.
 ## Fallback Chains
 
 ```typescript
-const worker = new Worker('inference', async (job) => {
-  const fallback = job.currentFallback;
-  // undefined on first attempt, then fallbacks[0], fallbacks[1], etc.
-  const model = fallback?.model ?? 'gpt-5.4-nano';
-  return await callLLM(model, job.data.prompt);
-}, { connection });
+const worker = new Worker(
+  'inference',
+  async (job) => {
+    const fallback = job.currentFallback;
+    // undefined on first attempt, then fallbacks[0], fallbacks[1], etc.
+    const model = fallback?.model ?? 'gpt-5.4-nano';
+    return await callLLM(model, job.data.prompt);
+  },
+  { connection },
+);
 ```
 
 Set via `queue.add('inference', data, { fallbacks: [...], attempts: 4 })`.
@@ -227,15 +244,19 @@ throw new Error('discarded');
 ## Step Jobs (moveToDelayed)
 
 ```typescript
-const worker = new Worker('drip', async (job) => {
-  switch (job.data.step) {
-    case 'send':
-      await sendEmail(job.data);
-      return job.moveToDelayed(Date.now() + 86400_000, 'check');
-    case 'check':
-      return 'done';
-  }
-}, { connection });
+const worker = new Worker(
+  'drip',
+  async (job) => {
+    switch (job.data.step) {
+      case 'send':
+        await sendEmail(job.data);
+        return job.moveToDelayed(Date.now() + 86400_000, 'check');
+      case 'check':
+        return 'done';
+    }
+  },
+  { connection },
+);
 ```
 
 `moveToDelayed(timestampMs, nextStep?)` - pauses job until timestamp, optionally updates `job.data.step`.

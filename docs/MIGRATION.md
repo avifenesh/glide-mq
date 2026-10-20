@@ -574,30 +574,30 @@ The processor function signature is identical. The only change is the connection
 
 ### JobOptions
 
-| BullMQ field        | glide-mq field         | Status                                                             |
-| ------------------- | ---------------------- | ------------------------------------------------------------------ |
-| `delay`             | `delay`                | Full                                                               |
-| `priority`          | `priority`             | Changed - 1-2048, 1 highest; priority 0 jobs run after prioritized |
-| `attempts`          | `attempts`             | Full                                                               |
-| `backoff`           | `backoff`              | Full                                                               |
-| `timeout`           | `timeout`              | Full                                                               |
-| `removeOnComplete`  | `removeOnComplete`     | Changed - object form needs both `age` and `count`                 |
-| `removeOnFail`      | `removeOnFail`         | Changed - object form needs both `age` and `count`                 |
-| `deduplication`     | `deduplication`        | Changed (see [Deduplication](#deduplication))                      |
-| `parent`            | `parent`               | Full                                                               |
-| `jobId` (custom ID) | `jobId`                | Full                                                               |
-| `lifo`              | `lifo`                 | Same                                                               |
-| `repeat`            | -                      | Gap - use `queue.upsertJobScheduler()`                             |
-| `sizeLimit`         | -                      | 1 MB hard limit enforced internally (JSON string character length) |
-| -                   | `ordering.key`         | glide-mq only                                                      |
-| -                   | `ordering.concurrency` | glide-mq only                                                      |
-| -                   | `ordering.rateLimit`   | glide-mq only                                                      |
-| -                   | `ordering.tokenBucket` | glide-mq only                                                      |
-| -                   | `cost`                 | glide-mq only                                                      |
-| -                   | `ttl`                  | glide-mq only                                                      |
-| -                   | `lockDuration`         | glide-mq only                                                      |
-| -                   | `fallbacks`            | glide-mq only                                                      |
-| -                   | `parents`              | glide-mq only (DAG multi-parent)                                   |
+| BullMQ field        | glide-mq field         | Status                                                                                            |
+| ------------------- | ---------------------- | ------------------------------------------------------------------------------------------------- |
+| `delay`             | `delay`                | Full                                                                                              |
+| `priority`          | `priority`             | Changed - 1-2048, 1 highest; 0 means no priority; see [Priority timing](USAGE.md#priority-timing) |
+| `attempts`          | `attempts`             | Full                                                                                              |
+| `backoff`           | `backoff`              | Full                                                                                              |
+| `timeout`           | `timeout`              | Full                                                                                              |
+| `removeOnComplete`  | `removeOnComplete`     | Changed - object form needs both `age` and `count`                                                |
+| `removeOnFail`      | `removeOnFail`         | Changed - object form needs both `age` and `count`                                                |
+| `deduplication`     | `deduplication`        | Changed (see [Deduplication](#deduplication))                                                     |
+| `parent`            | `parent`               | Full                                                                                              |
+| `jobId` (custom ID) | `jobId`                | Full                                                                                              |
+| `lifo`              | `lifo`                 | Same                                                                                              |
+| `repeat`            | -                      | Gap - use `queue.upsertJobScheduler()`                                                            |
+| `sizeLimit`         | -                      | 1 MB hard limit enforced internally (JSON string character length)                                |
+| -                   | `ordering.key`         | glide-mq only                                                                                     |
+| -                   | `ordering.concurrency` | glide-mq only                                                                                     |
+| -                   | `ordering.rateLimit`   | glide-mq only                                                                                     |
+| -                   | `ordering.tokenBucket` | glide-mq only                                                                                     |
+| -                   | `cost`                 | glide-mq only                                                                                     |
+| -                   | `ttl`                  | glide-mq only                                                                                     |
+| -                   | `lockDuration`         | glide-mq only                                                                                     |
+| -                   | `fallbacks`            | glide-mq only                                                                                     |
+| -                   | `parents`              | glide-mq only (DAG multi-parent)                                                                  |
 
 ### QueueEvents events
 

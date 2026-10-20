@@ -59,6 +59,6 @@ See CHANGELOG `[Unreleased]` for the full list. Highlights by area:
 - streamChunk: thin wrapper over stream(), not new infrastructure.
 - Search 1.1+ options: forward-compatible types, graceful skip on older servers.
 - Plugins: AI endpoints under `/flows/:id/usage`, `/flows/:id/budget`, `/jobs/:id/stream`.
-- Priority: 0 means no priority and runs after every prioritized job; 1 is highest; integers 1-2048. This is the opposite of BullMQ and is marked Changed in MIGRATION.md.
+- Priority: 0 means no priority; 1 is highest; integers 1-2048. Numeric priorities order enqueuing within a scheduler promotion pass, not global execution order. This differs from BullMQ and is marked Changed in MIGRATION.md; see USAGE.md Priority timing for promotion, retrieval and admission qualifications.
 - Broadcast `maxMessages` is an exact hard cap, not a MINID-safe trim.
 - `Queue.getJobs('waiting')` follows worker dispatch order across priority, LIFO, and FIFO sources.
