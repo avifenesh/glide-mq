@@ -434,7 +434,7 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
     const id1 = await broadcast.publish(
       'message',
       { event: 'deduped' },
-      { deduplication: { id: 'unique-1', mode: 'simple', ttl: 5000 } },
+      { deduplication: { id: 'unique-1', mode: 'simple' } },
     );
     expect(id1).not.toBeNull();
 
@@ -444,7 +444,7 @@ describeEachMode('Broadcast with dedup integration', (CONNECTION) => {
     const id2 = await broadcast.publish(
       'message',
       { event: 'deduped' },
-      { deduplication: { id: 'unique-1', mode: 'simple', ttl: 5000 } },
+      { deduplication: { id: 'unique-1', mode: 'simple' } },
     );
     expect(id2).toBeNull();
 

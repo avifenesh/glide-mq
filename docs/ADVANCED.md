@@ -578,11 +578,13 @@ const job = await queue.add(
 
 Prevent duplicate jobs from entering the queue using `deduplication.id`. Three modes are supported:
 
-| Mode       | Behaviour                                                                                                                    |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `simple`   | Skip the new job while the job holding the ID is not yet completed or failed. `ttl` is ignored.                              |
-| `throttle` | Skip the new job for `ttl` ms after the job that took the ID was added. Without `ttl`, nothing is skipped.                   |
-| `debounce` | Replace the job holding the ID if it is still `delayed` or `prioritized`; skip if it is waiting or active. `ttl` is ignored. |
+| Mode       | Behaviour                                                                                                                                                  |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `simple`   | Skip the new job while the job holding the ID is not yet completed or failed. This is the default when `mode` is omitted.                                  |
+| `throttle` | Skip the new job for `ttl` ms after the job that took the ID was added. Without `ttl`, nothing is skipped.                                                 |
+| `debounce` | Replace the job holding the ID if it is still `delayed` or `prioritized`; skip if it is waiting or active. Replacement depends on that state, not on a time window or `ttl`. |
+
+`ttl` applies to `throttle` only. The types reject it for `simple`, `debounce` and an omitted `mode`, so `{ id, ttl }` needs `mode: 'throttle'`.
 
 ```typescript
 // Simple: skip while a job with this ID is queued or active; the ID frees once it completes or fails

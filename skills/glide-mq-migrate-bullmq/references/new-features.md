@@ -426,13 +426,18 @@ Beyond BullMQ's simple deduplication, glide-mq adds explicit modes:
 
 ```ts
 await queue.add('job', data, {
-  deduplication: {
-    id: 'my-dedup-key',
-    ttl: 60_000,
-    mode: 'simple',    // drop if exists (default)
-    // mode: 'throttle' - drop duplicates within window
-    // mode: 'debounce' - reset window on each add
-  },
+  deduplication: { id: 'my-dedup-key', mode: 'simple' }, // drop while the job exists (default)
+});
+
+// throttle: drop duplicates for `ttl` ms. `ttl` is accepted only here.
+await queue.add('job', data, {
+  deduplication: { id: 'my-dedup-key', mode: 'throttle', ttl: 60_000 },
+});
+
+// debounce: replace the job while it is still delayed (or prioritized); ttl does not apply.
+await queue.add('job', data, {
+  delay: 5_000,
+  deduplication: { id: 'my-dedup-key', mode: 'debounce' },
 });
 ```
 

@@ -354,7 +354,7 @@ expect(failed[0]?.failedReason).toMatch('bad input');
 
 - `simple` (default): skipped while the job that claimed the id still exists and is not `completed` or `failed`. Once it finishes, or is removed (for example by `removeOnComplete`), the id is free again.
 - `throttle`: skipped while less than `ttl` ms have passed since the id was claimed, whatever the job state. Without `ttl` nothing is throttled.
-- `debounce`: if the tracked job is `delayed`, it is removed (the queue emits `removed`) and the new job is added. Skipped while the tracked job is `waiting` or `active`.
+- `debounce`: if the tracked job is `delayed` or `prioritized`, it is removed (the queue emits `removed`) and the new job is added. Skipped while the tracked job is `waiting` or `active`. Replacement depends on that state, not on a time window; `ttl` is accepted only with `throttle`.
 
 Skipped adds return `null`.
 

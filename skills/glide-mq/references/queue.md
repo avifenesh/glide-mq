@@ -49,7 +49,7 @@ const result = await queue.addAndWait(name, data, {
 | `lifo` | `boolean` | false | Last-in-first-out. Cannot combine with `ordering.key`. |
 | `removeOnComplete` | `boolean \| { age, count }` | false | Auto-remove on success |
 | `removeOnFail` | `boolean \| number \| { age, count }` | false | Auto-remove on failure. Number = max count to keep. |
-| `deduplication` | `{ id, mode, ttl? }` | - | Modes: `'simple'`, `'throttle'`, `'debounce'`. Returns `null` when skipped. |
+| `deduplication` | `{ id, mode? }` or `{ id, mode: 'throttle', ttl? }` | - | Modes: `'simple'` (default), `'throttle'`, `'debounce'`. `ttl` is throttle-only (types reject it otherwise); debounce replaces a job only while it is `delayed` or `prioritized`. Returns `null` when skipped. |
 | `ordering` | `{ key, concurrency?, rateLimit?, tokenBucket? }` | - | Per-key sequential/grouped processing |
 | `cost` | `number` | 1 | Token cost for token bucket rate limiting |
 | `lockDuration` | `number` (ms) | - | Override worker-level lockDuration for this job. Controls heartbeat frequency and stall threshold. |

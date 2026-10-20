@@ -986,7 +986,7 @@ await queue.add('job', data, {
 });
 ```
 
-Default mode is `'simple'`: the add is skipped while the job holding the ID is not yet completed or failed, and the ID frees once it finishes. Simple mode ignores `ttl`. To keep BullMQ's `{ id, ttl }` behavior (skip for `ttl` ms), set `mode: 'throttle'`. Debounce ignores `ttl` too and only replaces a job that is still `delayed` or `prioritized`, so give it a `delay`.
+Default mode is `'simple'`: the add is skipped while the job holding the ID is not yet completed or failed, and the ID frees once it finishes. `ttl` only applies to `mode: 'throttle'`, and the types reject it for `simple`, `debounce` and an omitted mode, so BullMQ's `{ id, ttl }` must become `{ id, ttl, mode: 'throttle' }` to keep skipping for `ttl` ms. Debounce only replaces a job that is still `delayed` or `prioritized`, so it needs a `delay` or `priority` to keep the job replaceable until it is promoted.
 
 ---
 

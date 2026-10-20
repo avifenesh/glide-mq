@@ -6,7 +6,7 @@
  */
 import { Batch, ClusterBatch } from '@glidemq/speedkey';
 import type { GlideClient, GlideClusterClient } from '@glidemq/speedkey';
-import type { ConnectionOptions, JobOptions, Client, Serializer } from './types';
+import type { ConnectionOptions, DeduplicationOptions, JobOptions, Client, Serializer } from './types';
 import { JSON_SERIALIZER } from './types';
 import {
   buildKeys,
@@ -68,7 +68,7 @@ interface PreparedJob {
   customJobId: string;
   parentDepsKey: string;
   lifo: number;
-  deduplication?: { id: string; ttl?: number; mode?: 'simple' | 'throttle' | 'debounce' };
+  deduplication?: DeduplicationOptions;
 }
 
 export class Producer<D = any> {

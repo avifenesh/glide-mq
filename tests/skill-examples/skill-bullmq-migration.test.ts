@@ -575,7 +575,6 @@ describe('BullMQ new-features.md', () => {
       {
         deduplication: {
           id: 'my-dedup-key',
-          ttl: 60_000,
           mode: 'simple',
         },
       },
@@ -589,7 +588,6 @@ describe('BullMQ new-features.md', () => {
       {
         deduplication: {
           id: 'my-dedup-key',
-          ttl: 60_000,
           mode: 'simple',
         },
       },

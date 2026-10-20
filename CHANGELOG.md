@@ -17,6 +17,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Prioritized jobs wait for the next scheduler promotion tick (`promotionInterval`) before workers can fetch them, and ranked order holds only among jobs promoted in the same tick. Corrected the architecture and usage docs, which said they promote immediately and in order.
 
+### Changed
+
+- **`deduplication.ttl` is typed as throttle-only.** `JobOptions['deduplication']` (and the `Producer` job options) is now the exported `DeduplicationOptions` union: `{ id; mode?: 'simple' | 'debounce'; ttl?: never }` or `{ id; mode: 'throttle'; ttl?: number }`. `ttl` was already ignored by `simple` (the default when `mode` is omitted) and `debounce`, so `{ mode: 'debounce', ttl }` type-checked and did nothing. It now fails to compile; `{ id, ttl }` without `mode: 'throttle'` does too. Runtime behavior is unchanged. Debounce replaces a tracked job only while it is `delayed` or `prioritized`. `npm run typecheck` also checks `tests/*.test-d.ts` through `tsconfig.types.json`.
+
+
 ## [0.18.0] - 2026-10-08
 
 ### Added
