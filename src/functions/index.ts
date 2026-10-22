@@ -134,7 +134,8 @@ export const LIBRARY_NAME = 'glidemq';
 //   since a consumption from the next refill.
 // Version 135: terminal stalled failure (reclaimStalled, reclaimStalledListJobs) applies the job's
 //   removeOnFail retention like glidemq_fail; broadcast jobs keep their hash.
-export const LIBRARY_VERSION = '135';
+// Version 136: bounded scheduler inventory atomically checks HLEN before HGETALL.
+export const LIBRARY_VERSION = '136';
 
 // Consumer group name used by workers
 export const CONSUMER_GROUP = 'workers';
@@ -1750,6 +1751,45 @@ export async function casSchedulerEntry(
 ): Promise<boolean> {
   const result = await client.fcall('glidemq_casSchedulerEntry', [queueKeys.schedulers], [name, expected, value]);
   return Number(result) === 1;
+}
+
+/**
+ * Read scheduler entries atomically only when the hash stays within the caller's bound.
+ * The limit is validated by the public Queue API before it acquires a client.
+ */
+export async function getSchedulerEntriesBounded(
+  client: Client,
+  queueKeys: QueueKeys,
+  maxEntries: number,
+): Promise<{ count: number; fields: Array<{ name: string; value: string }> }> {
+  const raw = await client.fcall('glidemq_getSchedulersBounded', [queueKeys.schedulers], [String(maxEntries)]);
+  if (!Array.isArray(raw) || raw.length < 2) {
+    throw new Error('glidemq_getSchedulersBounded returned an invalid response');
+  }
+  const status = String(raw[0]);
+  const count = Number(raw[1]);
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error('glidemq_getSchedulersBounded returned an invalid count');
+  }
+  if (status === 'over_limit') {
+    throw new RangeError(`Scheduler inventory contains ${count} entries, exceeding maxEntries (${maxEntries})`);
+  }
+  if (status !== 'ok') {
+    throw new Error('glidemq_getSchedulersBounded returned an unknown status');
+  }
+  if (count === 0 && raw.length === 2) return { count, fields: [] };
+  if (!Array.isArray(raw[2])) {
+    throw new Error('glidemq_getSchedulersBounded returned an invalid field list');
+  }
+  const rawFields = raw[2];
+  if (rawFields.length !== count * 2) {
+    throw new Error('glidemq_getSchedulersBounded returned an inconsistent field count');
+  }
+  const fields: Array<{ name: string; value: string }> = [];
+  for (let i = 0; i < rawFields.length; i += 2) {
+    fields.push({ name: String(rawFields[i]), value: String(rawFields[i + 1]) });
+  }
+  return { count, fields };
 }
 
 /**

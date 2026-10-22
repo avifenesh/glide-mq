@@ -973,8 +973,29 @@ describe('TestQueue.getJobScheduler', () => {
       expect(item.entry.nextRun).toBeGreaterThan(0);
     }
 
+    await expect(queue.getRepeatableJobsBounded(1)).rejects.toThrow(
+      'Scheduler inventory contains 2 entries, exceeding maxEntries (1)',
+    );
+    const bounded = await queue.getRepeatableJobsBounded(2);
+    expect(bounded).toHaveLength(2);
+    await expect(queue.getRepeatableJobsBounded(Number.NaN)).rejects.toThrow(
+      'maxEntries must be a positive safe integer',
+    );
+
     await queue.removeJobScheduler('a');
     await queue.removeJobScheduler('b');
+  });
+
+  it('getRepeatableJobsBounded accepts fractional nextRun values written by upsertJobScheduler', async () => {
+    queue = new TestQueue('sched-bounded-fractional');
+    const startDate = Date.now() + 10_000.5;
+    await queue.upsertJobScheduler('fractional', { every: 100, startDate });
+
+    const bounded = await queue.getRepeatableJobsBounded(1);
+    expect(bounded).toHaveLength(1);
+    expect(bounded[0].entry.nextRun).toBe(startDate);
+
+    await queue.removeJobScheduler('fractional');
   });
 
   // --- Timezone support (#74) ---
