@@ -153,6 +153,7 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     let serializeCalls = 0;
     const localQueue = new Queue(queueName, {
       connection: CONNECTION,
+      compression: 'gzip',
       serializer: {
         serialize(data: unknown) {
           serializeCalls++;
@@ -171,51 +172,84 @@ describeEachMode('Job schedulers', (CONNECTION) => {
       expect(serializeCalls).toBe(1);
 
       const fractionalStartDate = Date.now() + 10_000.5;
-      await localQueue.upsertJobScheduler('bounded-fractional', { every: 1000, startDate: fractionalStartDate });
-      const fractionalInventory = await localQueue.getRepeatableJobsBounded(2);
+      const fractionalEndDate = fractionalStartDate + 2000.5;
+      await localQueue.upsertJobScheduler('bounded-fractional', {
+        pattern: '',
+        every: 1000,
+        tz: '',
+        startDate: fractionalStartDate,
+        endDate: fractionalEndDate,
+      });
+      await localQueue.upsertJobScheduler(
+        'bounded-cron',
+        { pattern: '*/5 * * * *', tz: 'UTC' },
+        { name: 'bounded-cron-job' },
+      );
+      const fractionalInventory = await localQueue.getRepeatableJobsBounded(3);
       expect(fractionalInventory.find(({ name }) => name === 'bounded-fractional')?.entry.nextRun).toBe(
         fractionalStartDate,
       );
-      const bounded = await localQueue.getRepeatableJobsBounded(2);
-      expect(bounded).toHaveLength(2);
+      const bounded = await localQueue.getRepeatableJobsBounded(3);
+      expect(bounded).toHaveLength(3);
       expect(bounded.find(({ name }) => name === 'bounded-a')).toEqual({
         name: 'bounded-a',
         entry: expect.objectContaining({ every: 1000, template: { name: 'bounded-job', data: { value: 1 } } }),
       });
+      expect(bounded.find(({ name }) => name === 'bounded-cron')?.entry).toEqual(
+        expect.objectContaining({ pattern: '*/5 * * * *', tz: 'UTC', compression: 'gzip' }),
+      );
+      expect(bounded.find(({ name }) => name === 'bounded-fractional')?.entry).toEqual(
+        expect.objectContaining({
+          pattern: '',
+          every: 1000,
+          tz: '',
+          startDate: fractionalStartDate,
+          endDate: fractionalEndDate,
+          nextRun: fractionalStartDate,
+          compression: 'gzip',
+        }),
+      );
       expect(serializeCalls).toBe(1);
 
       const racStartDate = Date.now() + 10_000.5;
       await localQueue.upsertJobScheduler('bounded-rac', { repeatAfterComplete: 500, startDate: racStartDate });
       expect(
-        (await localQueue.getRepeatableJobsBounded(3)).find(({ name }) => name === 'bounded-rac')?.entry.nextRun,
+        (await localQueue.getRepeatableJobsBounded(4)).find(({ name }) => name === 'bounded-rac')?.entry.nextRun,
       ).toBe(racStartDate);
       const inFlight = JSON.parse(String(await cleanupClient.hget(keys.schedulers, 'bounded-rac')));
       inFlight.nextRun = 0;
       inFlight.inflightJobId = 'current-job';
       await cleanupClient.hset(keys.schedulers, { 'bounded-rac': JSON.stringify(inFlight) });
-      const includingInFlight = await localQueue.getRepeatableJobsBounded(3);
+      const includingInFlight = await localQueue.getRepeatableJobsBounded(4);
       expect(includingInFlight.find(({ name }) => name === 'bounded-rac')?.entry.nextRun).toBe(0);
 
       await localQueue.upsertJobScheduler('bounded-b', { every: 2000 });
-      await expect(localQueue.getRepeatableJobsBounded(3)).rejects.toThrow(
-        'Scheduler inventory contains 4 entries, exceeding maxEntries (3)',
+      await expect(localQueue.getRepeatableJobsBounded(4)).rejects.toThrow(
+        'Scheduler inventory contains 5 entries, exceeding maxEntries (4)',
       );
 
       await cleanupClient.hset(keys.schedulers, { 'bounded-b': 'not-json' });
-      await expect(localQueue.getRepeatableJobsBounded(4)).rejects.toThrow(
+      await expect(localQueue.getRepeatableJobsBounded(5)).rejects.toThrow(
         'Malformed scheduler entry "bounded-b": value is not valid JSON',
       );
 
       await cleanupClient.hset(keys.schedulers, { 'bounded-b': JSON.stringify({ every: 2000 }) });
-      await expect(localQueue.getRepeatableJobsBounded(4)).rejects.toThrow(
+      await expect(localQueue.getRepeatableJobsBounded(5)).rejects.toThrow(
         'Malformed scheduler entry "bounded-b": nextRun must be a non-negative finite number',
       );
 
       await cleanupClient.hset(keys.schedulers, {
         'bounded-b': JSON.stringify({ every: 2000, nextRun: Date.now(), template: { opts: { jobId: 'fixed' } } }),
       });
-      await expect(localQueue.getRepeatableJobsBounded(4)).rejects.toThrow(
+      await expect(localQueue.getRepeatableJobsBounded(5)).rejects.toThrow(
         'Malformed scheduler entry "bounded-b": template options are invalid: jobId is not supported',
+      );
+
+      await cleanupClient.hset(keys.schedulers, {
+        'bounded-b': JSON.stringify({ pattern: 'not a cron pattern', nextRun: Date.now() }),
+      });
+      await expect(localQueue.getRepeatableJobsBounded(5)).rejects.toThrow(
+        'Malformed scheduler entry "bounded-b": pattern must be a valid cron pattern',
       );
     } finally {
       await localQueue.close();

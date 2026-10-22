@@ -989,11 +989,21 @@ describe('TestQueue.getJobScheduler', () => {
   it('getRepeatableJobsBounded accepts fractional nextRun values written by upsertJobScheduler', async () => {
     queue = new TestQueue('sched-bounded-fractional');
     const startDate = Date.now() + 10_000.5;
-    await queue.upsertJobScheduler('fractional', { every: 100, startDate });
+    const endDate = startDate + 1000.5;
+    await queue.upsertJobScheduler('fractional', { pattern: '', every: 100, tz: '', startDate, endDate });
 
     const bounded = await queue.getRepeatableJobsBounded(1);
     expect(bounded).toHaveLength(1);
-    expect(bounded[0].entry.nextRun).toBe(startDate);
+    expect(bounded[0].entry).toEqual(
+      expect.objectContaining({
+        pattern: '',
+        every: 100,
+        tz: '',
+        startDate,
+        endDate,
+        nextRun: startDate,
+      }),
+    );
 
     await queue.removeJobScheduler('fractional');
   });

@@ -214,17 +214,24 @@ export function validateStoredSchedulerEntry(name: string, value: unknown): asse
     if (!allowedFields.has(field)) fail(`unexpected field ${field}`);
   }
 
-  const hasPattern = entry.pattern !== undefined;
-  const hasEvery = entry.every !== undefined;
-  const hasRepeatAfterComplete = entry.repeatAfterComplete !== undefined;
+  if (entry.pattern !== undefined && typeof entry.pattern !== 'string') fail('pattern must be a string');
+  const hasPattern = Boolean(entry.pattern);
+  const hasEvery = Boolean(entry.every);
+  const hasRepeatAfterComplete = Boolean(entry.repeatAfterComplete);
   if (Number(hasPattern) + Number(hasEvery) + Number(hasRepeatAfterComplete) !== 1) {
     fail('exactly one schedule mode is required');
   }
-  if (hasPattern && (typeof entry.pattern !== 'string' || entry.pattern.length === 0)) {
-    fail('pattern must be a non-empty string');
+  if (hasPattern) {
+    try {
+      parseCronPattern(entry.pattern as string);
+    } catch {
+      fail('pattern must be a valid cron pattern');
+    }
   }
-  if (hasEvery && !isValidSchedulerEvery(entry.every)) fail('every must be a positive safe integer');
-  if (hasRepeatAfterComplete && !isValidSchedulerEvery(entry.repeatAfterComplete)) {
+  if (entry.every !== undefined && !isValidSchedulerEvery(entry.every)) {
+    fail('every must be a positive safe integer');
+  }
+  if (entry.repeatAfterComplete !== undefined && !isValidSchedulerEvery(entry.repeatAfterComplete)) {
     fail('repeatAfterComplete must be a positive safe integer');
   }
   if (
@@ -239,10 +246,12 @@ export function validateStoredSchedulerEntry(name: string, value: unknown): asse
   if (entry.tz !== undefined) {
     const timezone = entry.tz;
     if (typeof timezone !== 'string') fail('tz must be a string');
-    try {
-      validateTimezone(timezone as string);
-    } catch {
-      fail('tz must be a valid IANA timezone');
+    if (timezone !== '') {
+      try {
+        validateTimezone(timezone as string);
+      } catch {
+        fail('tz must be a valid IANA timezone');
+      }
     }
   }
   for (const field of ['startDate', 'endDate', 'lastRun'] as const) {
@@ -261,9 +270,9 @@ export function validateStoredSchedulerEntry(name: string, value: unknown): asse
   }
   if (
     entry.iterationCount !== undefined &&
-    (!Number.isSafeInteger(entry.iterationCount) || (entry.iterationCount as number) < 0)
+    (!Number.isInteger(entry.iterationCount) || (entry.iterationCount as number) < 0)
   ) {
-    fail('iterationCount must be a non-negative safe integer');
+    fail('iterationCount must be a non-negative integer');
   }
   if (entry.compression !== undefined && entry.compression !== 'gzip') fail('compression is unsupported');
   if (entry.inflightJobId !== undefined && typeof entry.inflightJobId !== 'string') {
