@@ -1,9 +1,11 @@
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const { test } = require('node:test');
-const { checkSkillLinks } = require('./check-skill-links.cjs');
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { test } from 'vitest';
+import checker from './check-skill-links.cjs';
+
+const { checkSkillLinks } = checker;
 
 test('checks each standalone skill, retaining local sibling and reference links', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'glide-mq-skill-links-'));
