@@ -17,7 +17,7 @@ await queue.add('report', data, { priority: 5 });
 await queue.add('cleanup', data, { priority: 20 });
 ```
 
-Available-source retrieval preference: promoted priority list > LIFO > FIFO. Promotion backlog, admission gates and concurrent workers can change start/completion order; see docs/USAGE.md Priority timing.
+Available-source retrieval preference: promoted priority list > LIFO > FIFO. Promotion backlog, admission gates and concurrent workers can change start/completion order; see [Priority timing](https://github.com/avifenesh/glide-mq/blob/main/docs/USAGE.md#priority-timing).
 
 ## Job Workflows (FlowProducer)
 

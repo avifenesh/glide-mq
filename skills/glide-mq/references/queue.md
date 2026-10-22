@@ -59,7 +59,7 @@ const result = await queue.addAndWait(name, data, {
 
 ### Processing Order
 
-Available-source retrieval preference: **promoted priority list > LIFO > FIFO**. This is not a global execution-order guarantee: scheduler promotion, existing list entries, admission gates and concurrent workers affect when a job starts. See docs/USAGE.md Priority timing.
+Available-source retrieval preference: **promoted priority list > LIFO > FIFO**. This is not a global execution-order guarantee: scheduler promotion, existing list entries, admission gates and concurrent workers affect when a job starts. See [Priority timing](https://github.com/avifenesh/glide-mq/blob/main/docs/USAGE.md#priority-timing).
 
 ## Queue Management
 

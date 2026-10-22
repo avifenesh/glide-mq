@@ -99,7 +99,7 @@ worker.on('stalled', (jobId) => { ... });
 
 ## LIFO Mode
 
-Available-source retrieval preference is **promoted priority list > LIFO > FIFO**, not a global execution-order guarantee. Promotion backlog and admission gates can defer a job; see docs/USAGE.md Priority timing.
+Available-source retrieval preference is **promoted priority list > LIFO > FIFO**, not a global execution-order guarantee. Promotion backlog and admission gates can defer a job; see [Priority timing](https://github.com/avifenesh/glide-mq/blob/main/docs/USAGE.md#priority-timing).
 Add jobs with `{ lifo: true }` to process newest first.
 LIFO uses a dedicated Valkey LIST separate from the FIFO stream.
 

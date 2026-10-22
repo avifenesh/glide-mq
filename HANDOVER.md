@@ -2,6 +2,8 @@
 
 ## Current State
 
+- **Standalone skill links**: repository-only durability and priority-timing references use public GitHub documentation URLs. `npm run lint:skills` checks local links within each independently installed skill and runs its portability regression.
+
 - **Testing skill reference**: delayed adds and `moveToDelayed` are documented consistently as timer-backed in-memory behavior. The testing backend does not reproduce Valkey persistence or crash recovery.
 
 - **0.15.6 released 2026-09-30** (#310): the patch release of the 2026-09-29 audit series (#295 to #309, about 90 verified findings, one PR per lane, failing-first tests, self-review comment, revuto verdict, green CI).
