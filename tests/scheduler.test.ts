@@ -257,6 +257,68 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     }
   }, 15000);
 
+  it('getRepeatableJobsBounded accepts nullable optional fields written by upsertJobScheduler', async () => {
+    const queueName = `${Q}-bounded-null-fields`;
+    const localQueue = new Queue(queueName, { connection: CONNECTION });
+    const keys = buildKeys(queueName);
+
+    try {
+      await localQueue.upsertJobScheduler(
+        'nullable-schedule',
+        { pattern: '0 * * * *', every: null, repeatAfterComplete: null, tz: null, limit: null } as any,
+        null as any,
+      );
+      await localQueue.upsertJobScheduler('nullable-pattern', { pattern: null, every: 1000 } as any);
+      await localQueue.upsertJobScheduler('nullable-template-fields', { every: 1000 }, {
+        name: null,
+        opts: null,
+      } as any);
+      await cleanupClient.hset(keys.schedulers, {
+        'nullable-preserved-state': JSON.stringify({
+          every: 1000,
+          iterationCount: null,
+          lastRun: null,
+          nextRun: Date.now() + 10_000,
+          inflightJobId: null,
+        }),
+      });
+      await localQueue.upsertJobScheduler('nullable-preserved-state', { every: 1000 });
+      await localQueue.upsertJobScheduler('nullable-date-inputs', {
+        every: 1000,
+        startDate: null,
+        endDate: null,
+      } as any);
+
+      const nullableSchedule = JSON.parse(String(await cleanupClient.hget(keys.schedulers, 'nullable-schedule')));
+      expect(nullableSchedule.every).toBeNull();
+
+      const inventory = await localQueue.getRepeatableJobsBounded(5);
+      expect(inventory.find(({ name }) => name === 'nullable-schedule')?.entry).toEqual(
+        expect.objectContaining({
+          pattern: '0 * * * *',
+          every: null,
+          repeatAfterComplete: null,
+          tz: null,
+          limit: null,
+          template: null,
+        }),
+      );
+      expect(inventory.find(({ name }) => name === 'nullable-template-fields')?.entry.template).toEqual({
+        name: null,
+        opts: null,
+      });
+      expect(inventory.find(({ name }) => name === 'nullable-pattern')?.entry.pattern).toBeNull();
+      expect(inventory.find(({ name }) => name === 'nullable-preserved-state')?.entry).toEqual(
+        expect.objectContaining({ iterationCount: 0, lastRun: null, inflightJobId: null }),
+      );
+      expect(inventory.find(({ name }) => name === 'nullable-date-inputs')?.entry).not.toHaveProperty('startDate');
+      expect(inventory.find(({ name }) => name === 'nullable-date-inputs')?.entry).not.toHaveProperty('endDate');
+    } finally {
+      await localQueue.close();
+      await flushQueue(cleanupClient, queueName);
+    }
+  }, 15000);
+
   it('validates getRepeatableJobsBounded limits before acquiring a client', async () => {
     let calls = 0;
     const localQueue = new Queue(`${Q}-invalid-bounded-limit`, {
@@ -269,6 +331,91 @@ describeEachMode('Job schedulers', (CONNECTION) => {
     );
     expect(calls).toBe(0);
   });
+
+  it('rejects malformed replies from the bounded scheduler read function', async () => {
+    let response: unknown;
+    let functionLoadCalls = 0;
+    const localQueue = new Queue(`${Q}-bounded-reply-validation`, {
+      client: {
+        fcall: async (name: string) => {
+          if (name === 'glidemq_version') throw new Error('Function not loaded');
+          return response;
+        },
+        functionLoad: async () => {
+          functionLoadCalls += 1;
+        },
+      } as any,
+    });
+    const malformedReplies: Array<[unknown, string]> = [
+      [null, 'returned an invalid response'],
+      [['ok', Number.NaN], 'returned an invalid count'],
+      [['over_limit', 2], 'exceeding maxEntries (1)'],
+      [['unknown', 0], 'returned an unknown status'],
+      [['ok', 1], 'returned an invalid field list'],
+      [['ok', 1, []], 'returned an inconsistent field count'],
+      [['ok', 1, ['bad-json', 'not-json']], 'Malformed scheduler entry "bad-json": value is not valid JSON'],
+    ];
+
+    for (const [reply, error] of malformedReplies) {
+      response = reply;
+      await expect(localQueue.getRepeatableJobsBounded(1)).rejects.toThrow(error);
+    }
+    expect(functionLoadCalls).toBe(1);
+  });
+
+  it('rejects malformed scheduler inventory entries without returning a partial result', async () => {
+    const queueName = `${Q}-malformed-bounded-inventory`;
+    const localQueue = new Queue(queueName, { connection: CONNECTION });
+    const keys = buildKeys(queueName);
+    const now = Date.now();
+    const malformedEntries: Array<[string, unknown, string]> = [
+      ['not-object', [], 'entry must be an object'],
+      ['unexpected-field', { every: 1000, nextRun: now, other: true }, 'unexpected field other'],
+      ['no-mode', { nextRun: now }, 'exactly one schedule mode is required'],
+      ['pattern-type', { pattern: 1, nextRun: now }, 'pattern must be a string'],
+      ['every-type', { every: '1000', nextRun: now }, 'every must be a positive safe integer'],
+      [
+        'repeat-type',
+        { repeatAfterComplete: '1000', nextRun: now },
+        'repeatAfterComplete must be a positive safe integer',
+      ],
+      ['bad-next-run', { every: 1000, nextRun: -1 }, 'nextRun must be a non-negative finite number'],
+      ['zero-next-run', { every: 1000, nextRun: 0 }, 'nextRun may be zero only for a repeatAfterComplete scheduler'],
+      ['bad-timezone', { pattern: '0 * * * *', tz: 'Not/AZone', nextRun: now }, 'tz must be a valid IANA timezone'],
+      ['bad-start-date', { every: 1000, startDate: 'bad', nextRun: now }, 'startDate must be a finite number'],
+      ['bad-last-run', { every: 1000, lastRun: 'bad', nextRun: now }, 'lastRun must be a finite number'],
+      [
+        'reversed-window',
+        { every: 1000, startDate: 20, endDate: 10, nextRun: now },
+        'startDate must be less than or equal to endDate',
+      ],
+      ['bad-limit', { every: 1000, limit: 0, nextRun: now }, 'limit must be a positive integer'],
+      ['bad-count', { every: 1000, iterationCount: -1, nextRun: now }, 'iterationCount must be a non-negative integer'],
+      ['bad-compression', { every: 1000, compression: 'br', nextRun: now }, 'compression is unsupported'],
+      ['bad-inflight-id', { every: 1000, inflightJobId: 1, nextRun: now }, 'inflightJobId must be a string'],
+      ['bad-template', { every: 1000, template: [], nextRun: now }, 'template must be an object'],
+      [
+        'template-extra-field',
+        { every: 1000, template: { other: true }, nextRun: now },
+        'template has an unexpected field',
+      ],
+      ['template-name-type', { every: 1000, template: { name: 1 }, nextRun: now }, 'template.name must be a string'],
+      ['template-opts-type', { every: 1000, template: { opts: [] }, nextRun: now }, 'template.opts must be an object'],
+    ];
+
+    try {
+      for (const [name, entry, reason] of malformedEntries) {
+        await cleanupClient.hset(keys.schedulers, { [name]: JSON.stringify(entry) });
+        await expect(localQueue.getRepeatableJobsBounded(1)).rejects.toThrow(
+          `Malformed scheduler entry "${name}": ${reason}`,
+        );
+        await cleanupClient.hdel(keys.schedulers, name);
+      }
+    } finally {
+      await localQueue.close();
+      await flushQueue(cleanupClient, queueName);
+    }
+  }, 15000);
 
   it('getJobScheduler returns scheduler with cron pattern', async () => {
     await queue.upsertJobScheduler('cron-lookup', { pattern: '*/10 * * * *' });

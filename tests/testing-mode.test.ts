@@ -1008,6 +1008,38 @@ describe('TestQueue.getJobScheduler', () => {
     await queue.removeJobScheduler('fractional');
   });
 
+  it('getRepeatableJobsBounded accepts nullable optional fields written by upsertJobScheduler', async () => {
+    queue = new TestQueue('sched-bounded-null-fields');
+    await queue.upsertJobScheduler(
+      'nullable-schedule',
+      { pattern: '0 * * * *', every: null, repeatAfterComplete: null, tz: null, limit: null } as any,
+      null as any,
+    );
+    await queue.upsertJobScheduler('nullable-template-fields', { every: 1000 }, { name: null, opts: null } as any);
+    await queue.upsertJobScheduler('nullable-pattern', { pattern: null, every: 100 } as any);
+
+    const inventory = await queue.getRepeatableJobsBounded(3);
+    expect(inventory.find(({ name }) => name === 'nullable-schedule')?.entry).toEqual(
+      expect.objectContaining({
+        pattern: '0 * * * *',
+        every: null,
+        repeatAfterComplete: null,
+        tz: null,
+        limit: null,
+        template: null,
+      }),
+    );
+    expect(inventory.find(({ name }) => name === 'nullable-template-fields')?.entry.template).toEqual({
+      name: null,
+      opts: null,
+    });
+    expect(inventory.find(({ name }) => name === 'nullable-pattern')?.entry.pattern).toBeNull();
+
+    await queue.removeJobScheduler('nullable-schedule');
+    await queue.removeJobScheduler('nullable-template-fields');
+    await queue.removeJobScheduler('nullable-pattern');
+  });
+
   // --- Timezone support (#74) ---
 
   it('upsertJobScheduler stores tz for cron scheduler', async () => {

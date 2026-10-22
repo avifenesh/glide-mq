@@ -214,7 +214,7 @@ export function validateStoredSchedulerEntry(name: string, value: unknown): asse
     if (!allowedFields.has(field)) fail(`unexpected field ${field}`);
   }
 
-  if (entry.pattern !== undefined && typeof entry.pattern !== 'string') fail('pattern must be a string');
+  if (entry.pattern != null && typeof entry.pattern !== 'string') fail('pattern must be a string');
   const hasPattern = Boolean(entry.pattern);
   const hasEvery = Boolean(entry.every);
   const hasRepeatAfterComplete = Boolean(entry.repeatAfterComplete);
@@ -228,10 +228,10 @@ export function validateStoredSchedulerEntry(name: string, value: unknown): asse
       fail('pattern must be a valid cron pattern');
     }
   }
-  if (entry.every !== undefined && !isValidSchedulerEvery(entry.every)) {
+  if (entry.every != null && !isValidSchedulerEvery(entry.every)) {
     fail('every must be a positive safe integer');
   }
-  if (entry.repeatAfterComplete !== undefined && !isValidSchedulerEvery(entry.repeatAfterComplete)) {
+  if (entry.repeatAfterComplete != null && !isValidSchedulerEvery(entry.repeatAfterComplete)) {
     fail('repeatAfterComplete must be a positive safe integer');
   }
   if (
@@ -243,7 +243,7 @@ export function validateStoredSchedulerEntry(name: string, value: unknown): asse
   if (entry.nextRun === 0 && !hasRepeatAfterComplete) {
     fail('nextRun may be zero only for a repeatAfterComplete scheduler');
   }
-  if (entry.tz !== undefined) {
+  if (entry.tz != null) {
     const timezone = entry.tz;
     if (typeof timezone !== 'string') fail('tz must be a string');
     if (timezone !== '') {
@@ -256,29 +256,29 @@ export function validateStoredSchedulerEntry(name: string, value: unknown): asse
   }
   for (const field of ['startDate', 'endDate', 'lastRun'] as const) {
     const fieldValue = entry[field];
-    if (fieldValue !== undefined && (typeof fieldValue !== 'number' || !Number.isFinite(fieldValue))) {
+    if (fieldValue != null && (typeof fieldValue !== 'number' || !Number.isFinite(fieldValue))) {
       fail(`${field} must be a finite number`);
     }
   }
-  const startDate = entry.startDate as number | undefined;
-  const endDate = entry.endDate as number | undefined;
-  if (startDate !== undefined && endDate !== undefined && startDate > endDate) {
+  const startDate = entry.startDate as number | null | undefined;
+  const endDate = entry.endDate as number | null | undefined;
+  if (startDate != null && endDate != null && startDate > endDate) {
     fail('startDate must be less than or equal to endDate');
   }
-  if (entry.limit !== undefined && (!Number.isInteger(entry.limit) || (entry.limit as number) <= 0)) {
+  if (entry.limit != null && (!Number.isInteger(entry.limit) || (entry.limit as number) <= 0)) {
     fail('limit must be a positive integer');
   }
   if (
-    entry.iterationCount !== undefined &&
+    entry.iterationCount != null &&
     (!Number.isInteger(entry.iterationCount) || (entry.iterationCount as number) < 0)
   ) {
     fail('iterationCount must be a non-negative integer');
   }
   if (entry.compression !== undefined && entry.compression !== 'gzip') fail('compression is unsupported');
-  if (entry.inflightJobId !== undefined && typeof entry.inflightJobId !== 'string') {
+  if (entry.inflightJobId != null && typeof entry.inflightJobId !== 'string') {
     fail('inflightJobId must be a string');
   }
-  if (entry.template !== undefined) validateStoredSchedulerTemplate(entry.template, fail);
+  if (entry.template != null) validateStoredSchedulerTemplate(entry.template, fail);
 }
 
 function validateStoredSchedulerTemplate(value: unknown, fail: (reason: string) => never): void {
@@ -287,8 +287,8 @@ function validateStoredSchedulerTemplate(value: unknown, fail: (reason: string) 
   if (Object.keys(template).some((field) => !['name', 'data', 'opts'].includes(field))) {
     fail('template has an unexpected field');
   }
-  if (template.name !== undefined && typeof template.name !== 'string') fail('template.name must be a string');
-  if (template.opts !== undefined && !isPlainRecord(template.opts)) fail('template.opts must be an object');
+  if (template.name != null && typeof template.name !== 'string') fail('template.name must be a string');
+  if (template.opts != null && !isPlainRecord(template.opts)) fail('template.opts must be an object');
   try {
     validateSchedulerTemplateOptions(template.opts as JobOptions | undefined);
   } catch (error) {
