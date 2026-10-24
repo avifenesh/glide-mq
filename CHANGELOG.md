@@ -8,9 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-24
+
+### Added
+
+- Add `Queue.getRepeatableJobsBounded(maxEntries)` and its `TestQueue` equivalent. The caller supplies a positive safe-integer limit. The Valkey count and read are atomic; oversized inventories and malformed stored entries reject the call without returning a partial inventory. The existing `getRepeatableJobs()` is unchanged. Server function library version 136. (#346)
+
+### Fixed
+
+- Make documentation links in independently installed AI agent skills resolve without the repository docs directory. Add the standalone-skill link checker and its regression to lint. (#345)
+
 ### Security
 
 - Patch the development and example dependency graph with Vitest/coverage-v8 4.1.12, body-parser 2.4.0, undici 6.29.1 and Zod 4.6.7. Runtime dependencies are unchanged. CI and npm publication now audit development dependencies too, including low-severity findings.
+
+### Changed
+
+- Update the development-only Vite dependency from 8.3.1 to 8.3.5. (#344)
 
 ## [0.19.0] - 2026-10-20
 
