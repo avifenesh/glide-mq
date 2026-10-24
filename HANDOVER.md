@@ -2,7 +2,7 @@
 
 ## Current State
 
-- **Standalone skill links**: repository-only durability and priority-timing references use public GitHub documentation URLs. `npm run lint:skills` checks local links within each independently installed skill and runs its portability regression.
+- **Standalone skills**: repository-only durability and priority-timing references use public GitHub documentation URLs. The scheduler reference covers the 0.20.0 bounded inventory API and its fail-closed contract. `npm run lint:skills` checks local links within each independently installed skill and runs its portability regression.
 
 - **Testing skill reference**: delayed adds and `moveToDelayed` are documented consistently as timer-backed in-memory behavior. The testing backend does not reproduce Valkey persistence or crash recovery.
 - **Bounded scheduler inventory (#346, merged)**: `Queue.getRepeatableJobsBounded(maxEntries)` and its `TestQueue` equivalent require a positive safe-integer cap, reject malformed stored entries, and return no partial inventory when the cap is exceeded. The existing `getRepeatableJobs()` remains unchanged. The scheduler and testing-mode owners passed 336/336 cases across standalone and cluster on the current nullable-writer-compatible source. API completeness, queue surface, and library-source owners passed 71 checks on the earlier public-API-identical source epoch. A local coverage run covered all 103 executable TypeScript lines added by the PR; the Lua coverage flag remains a hosted CI gate.

@@ -90,8 +90,18 @@ await queue.upsertJobScheduler(
 
 ## Management
 
+Since 0.20.0, `Queue` and `TestQueue` provide `getRepeatableJobsBounded(maxEntries)`.
+The caller must supply a positive safe-integer cap. Valkey checks the count and
+reads the entries atomically. Oversized inventories or malformed persisted entries
+reject the whole call without returning a partial inventory. Treat a rejection,
+including a missing server function during a rolling upgrade, as an error; do not
+fall back to the unbounded `getRepeatableJobs()` API.
+
 ```typescript
-// List all schedulers
+// Bounded inventory using the caller's cap (0.20.0+)
+const bounded = await queue.getRepeatableJobsBounded(maxEntries);
+
+// Unbounded inventory
 const schedulers = await queue.getRepeatableJobs();
 // Returns stored bounds + iterationCount
 
