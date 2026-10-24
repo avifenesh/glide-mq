@@ -3745,6 +3745,24 @@ redis.register_function('glidemq_casSchedulerEntry', function(keys, args)
   return 1
 end)
 
+-- Return the complete scheduler hash only when it fits the requested bound.
+-- The HLEN check and HGETALL share one FCALL, so an insert cannot make the
+-- result exceed the caller's limit between the check and read.
+-- KEYS: [schedulerHash]; ARGS: [maxEntries]
+-- Reply: {'over_limit', count} or {'ok', count, {field, value, ...}}.
+redis.register_function('glidemq_getSchedulersBounded', function(keys, args)
+  local maxEntries = tonumber(args[1])
+  if not maxEntries or maxEntries < 1 or maxEntries ~= math.floor(maxEntries) or maxEntries > 9007199254740991 then
+    return redis.error_reply('maxEntries must be a positive safe integer')
+  end
+  local count = redis.call('HLEN', keys[1])
+  if count > maxEntries then
+    return {'over_limit', tostring(count)}
+  end
+  if count == 0 then return {'ok', '0'} end
+  return {'ok', tostring(count), redis.call('HGETALL', keys[1])}
+end)
+
 -- Mode switch to repeatAfterComplete while the job the old mode fired is
 -- still running: park the entry (nextRun 0) so that job's completion starts
 -- the chain. Check and write happen in one step, so a completion that landed

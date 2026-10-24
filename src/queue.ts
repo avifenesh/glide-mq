@@ -64,6 +64,8 @@ import {
   validateJobDataSize,
   validateJobOptions,
   validateJobPriority,
+  validateSchedulerInventoryLimit,
+  validateStoredSchedulerEntry,
   floorUsageBucket,
   usageQueuesKey,
   USAGE_BUCKET_MS,
@@ -97,6 +99,7 @@ import {
   sweepSuspended,
   getActiveListJobIds,
   casSchedulerEntry,
+  getSchedulerEntriesBounded,
   registerChildDep,
   updateFlowBudget,
 } from './functions/index';
@@ -2177,6 +2180,27 @@ export class Queue<D = any, R = any> extends EventEmitter {
       }
     }
     return result;
+  }
+
+  /**
+   * Get all registered job schedulers when their count does not exceed maxEntries.
+   * Unlike getRepeatableJobs(), this bounded inventory fails closed on excess or
+   * malformed persisted entries and checks the count/read atomically in Valkey.
+   */
+  async getRepeatableJobsBounded(maxEntries: number): Promise<{ name: string; entry: SchedulerEntry }[]> {
+    validateSchedulerInventoryLimit(maxEntries);
+    const client = await this.getClient();
+    const { fields } = await getSchedulerEntriesBounded(client, this.keys, maxEntries);
+    return fields.map(({ name, value }) => {
+      let entry: unknown;
+      try {
+        entry = JSON.parse(value);
+      } catch {
+        throw new Error(`Malformed scheduler entry "${name}": value is not valid JSON`);
+      }
+      validateStoredSchedulerEntry(name, entry);
+      return { name, entry };
+    });
   }
 
   /**

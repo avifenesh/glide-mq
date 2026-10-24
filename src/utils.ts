@@ -139,6 +139,22 @@ function validateSchedulerTemplateOpts(opts: JobOptions): void {
   }
 }
 
+function validateSchedulerTemplateOptions(opts: JobOptions | undefined): void {
+  if (!opts) return;
+  if (opts.jobId != null) {
+    throw new Error(
+      'jobId is not supported: every run gets a generated id, a fixed id would drop each run after the first as a duplicate',
+    );
+  }
+  // The tick never applies these, so reject them instead of silently dropping them.
+  for (const field of ['delay', 'deduplication', 'parent'] as const) {
+    if (opts[field] != null) {
+      throw new Error(`${field} is not supported: scheduler runs do not apply it`);
+    }
+  }
+  validateSchedulerTemplateOpts(opts);
+}
+
 /** Serialize a scheduler template's data the way the tick stores it, enforcing the size limit. */
 function serializeSchedulerTemplateData(template: JobTemplate, serializer: Serializer): string {
   const data = template.data !== undefined ? serializer.serialize(template.data) : '{}';
@@ -154,18 +170,7 @@ export function validateSchedulerTemplate(template: JobTemplate | undefined, ser
   if (!template) return;
   const opts = template.opts as JobOptions | undefined;
   try {
-    if (opts?.jobId != null) {
-      throw new Error(
-        'jobId is not supported: every run gets a generated id, a fixed id would drop each run after the first as a duplicate',
-      );
-    }
-    // The tick never applies these, so reject them instead of silently dropping them.
-    for (const field of ['delay', 'deduplication', 'parent'] as const) {
-      if (opts?.[field] != null) {
-        throw new Error(`${field} is not supported: scheduler runs do not apply it`);
-      }
-    }
-    if (opts) validateSchedulerTemplateOpts(opts);
+    validateSchedulerTemplateOptions(opts);
     serializeSchedulerTemplateData(template, serializer);
   } catch (err) {
     throw new Error(`Scheduler template: ${err instanceof Error ? err.message : String(err)}`);
@@ -180,6 +185,126 @@ export function validateSchedulerTemplate(template: JobTemplate | undefined, ser
 export function prepareSchedulerTemplateData(template: JobTemplate, serializer: Serializer): string {
   if (template.opts) validateSchedulerTemplateOpts({ ...(template.opts as JobOptions), jobId: undefined });
   return serializeSchedulerTemplateData(template, serializer);
+}
+
+/** Validate a persisted scheduler entry without serializing or otherwise changing template data. */
+export function validateStoredSchedulerEntry(name: string, value: unknown): asserts value is SchedulerEntry {
+  const fail = (reason: string): never => {
+    throw new Error(`Malformed scheduler entry "${name}": ${reason}`);
+  };
+  if (!isPlainRecord(value)) fail('entry must be an object');
+
+  const entry = value as Record<string, unknown>;
+  const allowedFields = new Set([
+    'pattern',
+    'every',
+    'repeatAfterComplete',
+    'tz',
+    'startDate',
+    'endDate',
+    'limit',
+    'iterationCount',
+    'template',
+    'compression',
+    'lastRun',
+    'nextRun',
+    'inflightJobId',
+  ]);
+  for (const field of Object.keys(entry)) {
+    if (!allowedFields.has(field)) fail(`unexpected field ${field}`);
+  }
+
+  if (entry.pattern != null && typeof entry.pattern !== 'string') fail('pattern must be a string');
+  const hasPattern = Boolean(entry.pattern);
+  const hasEvery = Boolean(entry.every);
+  const hasRepeatAfterComplete = Boolean(entry.repeatAfterComplete);
+  if (Number(hasPattern) + Number(hasEvery) + Number(hasRepeatAfterComplete) !== 1) {
+    fail('exactly one schedule mode is required');
+  }
+  if (hasPattern) {
+    try {
+      parseCronPattern(entry.pattern as string);
+    } catch {
+      fail('pattern must be a valid cron pattern');
+    }
+  }
+  if (entry.every != null && !isValidSchedulerEvery(entry.every)) {
+    fail('every must be a positive safe integer');
+  }
+  if (entry.repeatAfterComplete != null && !isValidSchedulerEvery(entry.repeatAfterComplete)) {
+    fail('repeatAfterComplete must be a positive safe integer');
+  }
+  if (
+    entry.nextRun !== 0 &&
+    (typeof entry.nextRun !== 'number' || !Number.isFinite(entry.nextRun) || entry.nextRun < 0)
+  ) {
+    fail('nextRun must be a non-negative finite number');
+  }
+  if (entry.nextRun === 0 && !hasRepeatAfterComplete) {
+    fail('nextRun may be zero only for a repeatAfterComplete scheduler');
+  }
+  if (entry.tz != null) {
+    const timezone = entry.tz;
+    if (typeof timezone !== 'string') fail('tz must be a string');
+    if (timezone !== '') {
+      try {
+        validateTimezone(timezone as string);
+      } catch {
+        fail('tz must be a valid IANA timezone');
+      }
+    }
+  }
+  for (const field of ['startDate', 'endDate', 'lastRun'] as const) {
+    const fieldValue = entry[field];
+    if (fieldValue != null && (typeof fieldValue !== 'number' || !Number.isFinite(fieldValue))) {
+      fail(`${field} must be a finite number`);
+    }
+  }
+  const startDate = entry.startDate as number | null | undefined;
+  const endDate = entry.endDate as number | null | undefined;
+  if (startDate != null && endDate != null && startDate > endDate) {
+    fail('startDate must be less than or equal to endDate');
+  }
+  if (entry.limit != null && (!Number.isInteger(entry.limit) || (entry.limit as number) <= 0)) {
+    fail('limit must be a positive integer');
+  }
+  if (
+    entry.iterationCount != null &&
+    (!Number.isInteger(entry.iterationCount) || (entry.iterationCount as number) < 0)
+  ) {
+    fail('iterationCount must be a non-negative integer');
+  }
+  if (entry.compression !== undefined && entry.compression !== 'gzip') fail('compression is unsupported');
+  if (entry.inflightJobId != null && typeof entry.inflightJobId !== 'string') {
+    fail('inflightJobId must be a string');
+  }
+  if (entry.template != null) validateStoredSchedulerTemplate(entry.template, fail);
+}
+
+function validateStoredSchedulerTemplate(value: unknown, fail: (reason: string) => never): void {
+  if (!isPlainRecord(value)) fail('template must be an object');
+  const template = value as Record<string, unknown>;
+  if (Object.keys(template).some((field) => !['name', 'data', 'opts'].includes(field))) {
+    fail('template has an unexpected field');
+  }
+  if (template.name != null && typeof template.name !== 'string') fail('template.name must be a string');
+  if (template.opts != null && !isPlainRecord(template.opts)) fail('template.opts must be an object');
+  try {
+    validateSchedulerTemplateOptions(template.opts as JobOptions | undefined);
+  } catch (error) {
+    fail(`template options are invalid: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.getPrototypeOf(value) === Object.prototype;
+}
+
+export function validateSchedulerInventoryLimit(maxEntries: number): void {
+  if (!Number.isSafeInteger(maxEntries) || maxEntries <= 0) {
+    throw new RangeError('maxEntries must be a positive safe integer');
+  }
 }
 
 /**
