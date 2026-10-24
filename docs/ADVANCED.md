@@ -188,9 +188,14 @@ await queue.upsertJobScheduler(
 // List all registered schedulers
 const schedulers = await queue.getRepeatableJobs();
 
+// For an inventory that must have an explicit size bound:
+const boundedSchedulers = await queue.getRepeatableJobsBounded(500);
+
 // Remove a scheduler (does not cancel jobs already in flight)
 await queue.removeJobScheduler('cleanup');
 ```
+
+`getRepeatableJobsBounded(maxEntries)` requires a positive safe-integer bound. Valkey checks the hash size and reads it in one atomic function call; if the inventory exceeds the bound, or any stored entry is malformed, the method throws without returning a partial list. It does not invoke the Queue's custom serializer while reading stored templates.
 
 ### Cron syntax
 

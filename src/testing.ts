@@ -65,6 +65,7 @@ import {
   validateJobDataSize,
   validateJobOptions,
   validateJobPriority,
+  validateSchedulerInventoryLimit,
 } from './utils';
 
 // The same classes `glide-mq` exports, so a test can throw and match them without importing the
@@ -1759,6 +1760,17 @@ export class TestQueue<D = any, R = any> extends EventEmitter {
       name,
       entry: JSON.parse(JSON.stringify(entry)),
     }));
+  }
+
+  /** Get scheduler entries only when the in-memory inventory fits the required bound. */
+  async getRepeatableJobsBounded(maxEntries: number): Promise<{ name: string; entry: SchedulerEntry }[]> {
+    validateSchedulerInventoryLimit(maxEntries);
+    if (this.schedulers.size > maxEntries) {
+      throw new RangeError(
+        `Scheduler inventory contains ${this.schedulers.size} entries, exceeding maxEntries (${maxEntries})`,
+      );
+    }
+    return this.getRepeatableJobs();
   }
 
   /**

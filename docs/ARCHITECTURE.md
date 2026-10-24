@@ -291,6 +291,7 @@ class Queue<D = any, R = any> extends EventEmitter {
   upsertJobScheduler(name: string, schedule: ScheduleOpts, template?: JobTemplate): Promise<void>;
   getJobScheduler(name: string): Promise<SchedulerEntry | null>;
   getRepeatableJobs(): Promise<{ name: string; entry: SchedulerEntry }[]>;
+  getRepeatableJobsBounded(maxEntries: number): Promise<{ name: string; entry: SchedulerEntry }[]>;
   removeJobScheduler(name: string): Promise<void>;
 
   // AI primitives

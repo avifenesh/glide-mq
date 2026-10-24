@@ -973,8 +973,71 @@ describe('TestQueue.getJobScheduler', () => {
       expect(item.entry.nextRun).toBeGreaterThan(0);
     }
 
+    await expect(queue.getRepeatableJobsBounded(1)).rejects.toThrow(
+      'Scheduler inventory contains 2 entries, exceeding maxEntries (1)',
+    );
+    const bounded = await queue.getRepeatableJobsBounded(2);
+    expect(bounded).toHaveLength(2);
+    await expect(queue.getRepeatableJobsBounded(Number.NaN)).rejects.toThrow(
+      'maxEntries must be a positive safe integer',
+    );
+
     await queue.removeJobScheduler('a');
     await queue.removeJobScheduler('b');
+  });
+
+  it('getRepeatableJobsBounded accepts fractional nextRun values written by upsertJobScheduler', async () => {
+    queue = new TestQueue('sched-bounded-fractional');
+    const startDate = Date.now() + 10_000.5;
+    const endDate = startDate + 1000.5;
+    await queue.upsertJobScheduler('fractional', { pattern: '', every: 100, tz: '', startDate, endDate });
+
+    const bounded = await queue.getRepeatableJobsBounded(1);
+    expect(bounded).toHaveLength(1);
+    expect(bounded[0].entry).toEqual(
+      expect.objectContaining({
+        pattern: '',
+        every: 100,
+        tz: '',
+        startDate,
+        endDate,
+        nextRun: startDate,
+      }),
+    );
+
+    await queue.removeJobScheduler('fractional');
+  });
+
+  it('getRepeatableJobsBounded accepts nullable optional fields written by upsertJobScheduler', async () => {
+    queue = new TestQueue('sched-bounded-null-fields');
+    await queue.upsertJobScheduler(
+      'nullable-schedule',
+      { pattern: '0 * * * *', every: null, repeatAfterComplete: null, tz: null, limit: null } as any,
+      null as any,
+    );
+    await queue.upsertJobScheduler('nullable-template-fields', { every: 1000 }, { name: null, opts: null } as any);
+    await queue.upsertJobScheduler('nullable-pattern', { pattern: null, every: 100 } as any);
+
+    const inventory = await queue.getRepeatableJobsBounded(3);
+    expect(inventory.find(({ name }) => name === 'nullable-schedule')?.entry).toEqual(
+      expect.objectContaining({
+        pattern: '0 * * * *',
+        every: null,
+        repeatAfterComplete: null,
+        tz: null,
+        limit: null,
+        template: null,
+      }),
+    );
+    expect(inventory.find(({ name }) => name === 'nullable-template-fields')?.entry.template).toEqual({
+      name: null,
+      opts: null,
+    });
+    expect(inventory.find(({ name }) => name === 'nullable-pattern')?.entry.pattern).toBeNull();
+
+    await queue.removeJobScheduler('nullable-schedule');
+    await queue.removeJobScheduler('nullable-template-fields');
+    await queue.removeJobScheduler('nullable-pattern');
   });
 
   // --- Timezone support (#74) ---
