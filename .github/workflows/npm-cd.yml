@@ -34,6 +34,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Audit runtime and development dependencies
+        run: npm audit --include=dev --audit-level=low
+
       - name: Lint
         run: npm run lint
 

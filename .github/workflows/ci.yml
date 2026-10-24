@@ -16,10 +16,10 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci --omit=dev
+      - run: npm ci
 
-      - name: Runtime dependency audit
-        run: npm audit --omit=dev --audit-level=moderate
+      - name: Audit runtime and development dependencies
+        run: npm audit --include=dev --audit-level=low
 
   quality:
     runs-on: ubuntu-latest
