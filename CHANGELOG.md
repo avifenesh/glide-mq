@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- Patch the development and example dependency graph with Vitest/coverage-v8 4.1.12, body-parser 2.4.0, undici 6.29.1 and Zod 4.6.7. Runtime dependencies are unchanged. CI and npm publication now audit development dependencies too, including low-severity findings.
+
 ## [0.19.0] - 2026-10-20
 
 ### Fixed
