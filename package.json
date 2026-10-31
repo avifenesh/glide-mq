@@ -117,5 +117,8 @@
     "token-streaming",
     "model-failover",
     "orchestration"
-  ]
+  ],
+  "overrides": {
+    "minimatch": "^11.0.1"
+  }
 }
