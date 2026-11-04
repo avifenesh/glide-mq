@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Type-check and build with the TypeScript 7.0 native compiler (`typescript@7.0.2`, installed as `@typescript/native`). TypeScript 7.0 ships no compiler API, so `typescript` now resolves to `@typescript/typescript6` for typescript-eslint, which moves to `^8.58.0`, the first range that accepts TypeScript 6.0. The emitted JavaScript and declaration files are unchanged. Development-only; runtime dependencies are unchanged.
+
 ## [0.20.0] - 2026-10-24
 
 ### Added
