@@ -33,6 +33,11 @@ jobs:
 
       - run: npm ci
 
+      # @typescript/native (7.x) and the 6.0 API package's @typescript/old both
+      # ship a tsc bin. Fail if the link ever resolves to 6.x.
+      - name: Check the tsc version
+        run: npx tsc --version | grep '^Version 7\.'
+
       - name: Typecheck
         run: npm run typecheck
 
